@@ -12,7 +12,7 @@
 
 ## 入れる
 
-試用版。版はマニフェスト（`.claude-plugin/plugin.json` など 3 つ）にだけ書く。下の入れ方は 0.7.0 で実測した（2026-10-18）。
+版はマニフェスト（`.claude-plugin/plugin.json` など 3 つ）にだけ書く。下の入れ方は 0.7.0 で実測した（2026-10-18）。
 
 - **Claude Code:** `claude plugin marketplace add B16B1RD/bb-writ` → `claude plugin install bb-writ@bb-writ`。何も入っていない設定からこの手順で入り、スキルが呼べることを確かめた。手元の作業ツリーを試すときは `claude plugin marketplace add <このリポジトリ>`（作業ツリーを直接読むので、編集は次のセッションか `/reload-plugins` で効く）。
 - **Codex:** `codex plugin marketplace add B16B1RD/bb-writ` → `codex plugin add bb-writ@bb-writ`。何も入っていない設定から入ることを確かめた（0.3.0）。Codex は版ごとの写しを置くので、版を上げたら `codex plugin remove bb-writ@bb-writ` → `add`。
