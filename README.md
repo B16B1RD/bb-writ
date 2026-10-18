@@ -67,6 +67,8 @@ codex plugin add bb-writ@bb-writ
 
 ## 使い始める
 
+依頼文の書き方（どこまで任せるか、Issue からドラフト PR・マージまでの進め方、`unknowns` との使い分け）は [はじめての bb-writ](docs/getting-started.md) にある。
+
 作業するリポジトリで CLI を開き、入口のスキルを明示して頼む。たとえば README を調べるだけなら、次のように入力する。
 
 Claude Code:
