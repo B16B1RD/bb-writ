@@ -1,6 +1,7 @@
 """配布の形: マニフェストの名前と版がそろう。スキルの名前は置き場と同じで、使う場面を description に書く。"""
 
 import json
+import re
 import unittest
 from pathlib import Path
 
@@ -16,6 +17,13 @@ class TestManifests(unittest.TestCase):
         self.assertEqual(entry["source"], ".")
         self.assertEqual({claude["name"], root["name"], entry["name"]}, {"bb-writ"})
         self.assertEqual({claude["version"], root["version"], entry["version"]}, {claude["version"]})  # 出すときは 3 か所を一緒に上げる
+
+    def test_changelog_starts_with_the_current_version(self):
+        """版を上げた commit で CHANGELOG.md にも節を足す（Release の本文はその節から作る）。"""
+        claude = json.loads((ROOT / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8"))
+        text = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
+        newest = next(line for line in text.splitlines() if line.startswith("## "))
+        self.assertRegex(newest, rf"^## {re.escape(claude['version'])} - \d{{4}}-\d{{2}}-\d{{2}}$")
 
 
 class TestSkills(unittest.TestCase):

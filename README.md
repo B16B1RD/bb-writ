@@ -42,6 +42,8 @@ codex plugin add bb-writ@bb-writ
 
 インストールに使った CLI で実行する。marketplace の情報を先に更新し、プラグインを更新する。
 
+版ごとに変わったことは [`CHANGELOG.md`](CHANGELOG.md) にある。新しい版が出たときに知らせを受けるには、GitHub のリポジトリで「Watch」→「Custom」→「Releases」を選ぶ。
+
 ### Claude Code
 
 ```sh
