@@ -1,0 +1,239 @@
+<!--
+unknowns スキル: プロトタイプ用フィードバック収集レイヤー（レビューモード）
+
+■ 組み込み手順
+1. プロトタイプ内の「反応してほしい単位」ごとに、囲むコンテナへ data-fb="ブロック名" を付ける
+   （ブロック名はそのままフィードバックMarkdownの見出しになる。7±3個が目安）
+2. ページ末尾に「全体コメント」用の data-fb ブロックを1つ足す（全体の長さ・トーン等の受け皿）
+3. このファイルの <style>〜</style>、バナー、固定バー＋出力パネルのマークアップ、<script>〜</script> を
+   プロトタイプHTMLにコピーする（バナーは <body> 先頭、バー/パネルは末尾）
+4. ページ本体の下端に padding-bottom: 120px 程度を確保する（固定バーとの重なり防止）
+
+■ 設計上の注意
+- このレイヤーは自己完結（外部依存なし・独自CSS変数のみ）。プロトタイプ側の配色を汚染しない。
+  トーンを合わせたい場合は :root の --fbm-* を上書きする
+- Artifact は CSP で外部送信不可。フィードバックは「まとめる → コピー → チャットに貼り付け」で受け渡す。
+  この旨はバナーに明記済み（勝手に届くと誤解させない）
+- レビューモード付きはあくまで「反応をもらうための版」。成果物としてそのまま人に共有する
+  クリーン版が必要な場合は、別ファイル・別 Artifact URL で管理する
+-->
+
+<style>
+  :root {
+    --fbm-bg: #fffdf8;
+    --fbm-ink: #201c15;
+    --fbm-muted: #6f6656;
+    --fbm-line: #ddd2ba;
+    --fbm-accent: #c8552c;
+    --fbm-accent-soft: #f3ddce;
+    --fbm-ok: #3c7a4e;
+    --fbm-ok-soft: #e2efe4;
+    --fbm-bar-bg: #1c1710;
+    --fbm-bar-ink: #f1ead9;
+    --fbm-bar-muted: #bcae94;
+    --fbm-bar-accent: #e8875a;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --fbm-bg: #211b14; --fbm-ink: #f1ead9; --fbm-muted: #b3a68d; --fbm-line: #4d4030;
+      --fbm-accent: #e8875a; --fbm-accent-soft: #362212; --fbm-ok: #7fbf90; --fbm-ok-soft: #1e2f22;
+      --fbm-bar-bg: #362212; --fbm-bar-ink: #f7ead9; --fbm-bar-muted: #cdb797; --fbm-bar-accent: #f0a67c;
+    }
+  }
+  :root[data-theme="dark"] {
+    --fbm-bg: #211b14; --fbm-ink: #f1ead9; --fbm-muted: #b3a68d; --fbm-line: #4d4030;
+    --fbm-accent: #e8875a; --fbm-accent-soft: #362212; --fbm-ok: #7fbf90; --fbm-ok-soft: #1e2f22;
+    --fbm-bar-bg: #362212; --fbm-bar-ink: #f7ead9; --fbm-bar-muted: #cdb797; --fbm-bar-accent: #f0a67c;
+  }
+  :root[data-theme="light"] {
+    --fbm-bg: #fffdf8; --fbm-ink: #201c15; --fbm-muted: #6f6656; --fbm-line: #ddd2ba;
+    --fbm-accent: #c8552c; --fbm-accent-soft: #f3ddce; --fbm-ok: #3c7a4e; --fbm-ok-soft: #e2efe4;
+    --fbm-bar-bg: #1c1710; --fbm-bar-ink: #f1ead9; --fbm-bar-muted: #bcae94; --fbm-bar-accent: #e8875a;
+  }
+
+  .fbm-banner {
+    background: var(--fbm-bar-bg); color: var(--fbm-bar-ink);
+    border-radius: 10px; padding: 14px 18px; margin: 0 auto 32px;
+    max-width: 680px;
+    font-size: 13px; line-height: 1.7;
+    font-family: -apple-system, BlinkMacSystemFont, "Hiragino Sans", "Segoe UI", sans-serif;
+  }
+  .fbm-banner strong { color: var(--fbm-bar-accent); }
+
+  .fbm {
+    margin-top: 22px; padding: 12px 14px;
+    background: var(--fbm-bg); border: 1.5px dashed var(--fbm-accent);
+    border-radius: 10px;
+    font-family: -apple-system, BlinkMacSystemFont, "Hiragino Sans", "Segoe UI", sans-serif;
+  }
+  .fbm-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .fbm-title { font-size: 12px; font-weight: 700; color: var(--fbm-accent); letter-spacing: 0.04em; }
+  .fbm-btn {
+    font: inherit; font-size: 12.5px; cursor: pointer;
+    border: 1.5px solid var(--fbm-line); background: transparent; color: var(--fbm-muted);
+    border-radius: 999px; padding: 3px 14px;
+  }
+  .fbm-btn:hover { border-color: var(--fbm-muted); }
+  .fbm-btn:focus-visible { outline: 2px solid var(--fbm-accent); outline-offset: 2px; }
+  .fbm-btn.on-good { background: var(--fbm-ok-soft); border-color: var(--fbm-ok); color: var(--fbm-ok); font-weight: 700; }
+  .fbm-btn.on-fix { background: var(--fbm-accent-soft); border-color: var(--fbm-accent); color: var(--fbm-accent); font-weight: 700; }
+  .fbm textarea {
+    display: block; width: 100%; box-sizing: border-box; margin-top: 10px; min-height: 40px;
+    font: inherit; font-size: 13px; line-height: 1.6;
+    color: var(--fbm-ink); background: transparent;
+    border: 1px solid var(--fbm-line); border-radius: 6px; padding: 8px 10px;
+    resize: vertical;
+  }
+  .fbm textarea:focus-visible { outline: 2px solid var(--fbm-accent); outline-offset: 1px; }
+
+  .fbm-bar {
+    position: fixed; left: 0; right: 0; bottom: 0; z-index: 50;
+    background: var(--fbm-bar-bg); color: var(--fbm-bar-ink);
+    padding: 12px 18px;
+    display: flex; align-items: center; justify-content: center; gap: 14px; flex-wrap: wrap;
+    box-shadow: 0 -2px 12px rgba(0,0,0,0.18);
+    font-family: -apple-system, BlinkMacSystemFont, "Hiragino Sans", "Segoe UI", sans-serif;
+  }
+  .fbm-bar .fbm-count { font-size: 12.5px; color: var(--fbm-bar-muted); }
+  .fbm-bar button {
+    font: inherit; font-size: 14px; font-weight: 700; cursor: pointer;
+    background: var(--fbm-bar-accent); color: #1c1710;
+    border: none; border-radius: 999px; padding: 8px 22px;
+  }
+  .fbm-bar button:focus-visible { outline: 2px solid var(--fbm-bar-ink); outline-offset: 2px; }
+
+  .fbm-out {
+    position: fixed; inset: auto 0 0 0; z-index: 60;
+    background: var(--fbm-bg); border-top: 2px solid var(--fbm-accent);
+    padding: 18px 22px 22px; max-height: 70vh; overflow-y: auto;
+    display: none;
+    font-family: -apple-system, BlinkMacSystemFont, "Hiragino Sans", "Segoe UI", sans-serif;
+  }
+  .fbm-out.open { display: block; }
+  .fbm-out-inner { max-width: 680px; margin: 0 auto; }
+  .fbm-out h2 { font-size: 17px; margin: 0 0 6px; color: var(--fbm-ink); }
+  .fbm-out p.fbm-hint { font-size: 12.5px; color: var(--fbm-muted); margin: 0 0 10px; }
+  .fbm-out textarea {
+    display: block; width: 100%; box-sizing: border-box; min-height: 200px;
+    font-family: ui-monospace, "SF Mono", Consolas, monospace; font-size: 12px; line-height: 1.6;
+    color: var(--fbm-ink); background: transparent;
+    border: 1px solid var(--fbm-line); border-radius: 6px; padding: 10px 12px;
+  }
+  .fbm-out-actions { display: flex; gap: 10px; margin-top: 10px; }
+  .fbm-out-actions button {
+    font: inherit; font-size: 13px; font-weight: 700; cursor: pointer;
+    border-radius: 999px; padding: 6px 18px; border: 1.5px solid var(--fbm-line);
+  }
+  .fbm-out-actions .fbm-primary { background: var(--fbm-accent); border-color: var(--fbm-accent); color: #fffdf8; }
+  .fbm-out-actions .fbm-ghost { background: transparent; color: var(--fbm-muted); }
+</style>
+
+<!-- バナー: <body> 先頭（ページコンテナ内の最初）に置く。{テーマ} は差し替える -->
+<div class="fbm-banner">
+  <strong>レビューモード</strong> — これは「{テーマ}」のプロトタイプ（使い捨て）です。各ブロック末尾の点線枠で「👍 このまま / 🔧 要調整」を選び、必要ならコメントを書いてください。最後に画面下の「フィードバックをまとめる」を押すと、チャットに貼り付けられるテキストが生成されます（このページから自動送信はされません）。
+</div>
+
+<!-- 固定バー + 出力パネル: ページ末尾に置く -->
+<div class="fbm-bar">
+  <span class="fbm-count" id="fbmCount">フィードバック 0 件</span>
+  <button type="button" id="fbmCompile">フィードバックをまとめる</button>
+</div>
+
+<div class="fbm-out" id="fbmOut">
+  <div class="fbm-out-inner">
+    <h2>フィードバックまとめ</h2>
+    <p class="fbm-hint">「コピー」を押して、チャットにそのまま貼り付けてください。</p>
+    <textarea id="fbmText" readonly></textarea>
+    <div class="fbm-out-actions">
+      <button type="button" class="fbm-primary" id="fbmCopy">コピー</button>
+      <button type="button" class="fbm-ghost" id="fbmClose">閉じる</button>
+    </div>
+  </div>
+</div>
+
+<script>
+(function () {
+  var blocks = document.querySelectorAll('[data-fb]');
+  var state = [];
+
+  blocks.forEach(function (block) {
+    var entry = { name: block.getAttribute('data-fb'), verdict: null, comment: '' };
+    state.push(entry);
+
+    var fb = document.createElement('div');
+    fb.className = 'fbm';
+    fb.innerHTML =
+      '<div class="fbm-head">' +
+        '<span class="fbm-title">このブロックへのフィードバック</span>' +
+        '<button type="button" class="fbm-btn" data-v="good">👍 このまま</button>' +
+        '<button type="button" class="fbm-btn" data-v="fix">🔧 要調整</button>' +
+      '</div>' +
+      '<textarea placeholder="コメント（任意）" rows="2"></textarea>';
+
+    var btnGood = fb.querySelector('[data-v="good"]');
+    var btnFix = fb.querySelector('[data-v="fix"]');
+    var ta = fb.querySelector('textarea');
+
+    function setVerdict(v) {
+      entry.verdict = (entry.verdict === v) ? null : v;
+      btnGood.classList.toggle('on-good', entry.verdict === 'good');
+      btnFix.classList.toggle('on-fix', entry.verdict === 'fix');
+      updateCount();
+    }
+    btnGood.addEventListener('click', function () { setVerdict('good'); });
+    btnFix.addEventListener('click', function () { setVerdict('fix'); });
+    ta.addEventListener('input', function () { entry.comment = ta.value; updateCount(); });
+
+    block.appendChild(fb);
+  });
+
+  var countEl = document.getElementById('fbmCount');
+  function updateCount() {
+    var n = state.filter(function (e) { return e.verdict || e.comment.trim(); }).length;
+    countEl.textContent = 'フィードバック ' + n + ' 件';
+  }
+
+  var out = document.getElementById('fbmOut');
+  var text = document.getElementById('fbmText');
+
+  document.getElementById('fbmCompile').addEventListener('click', function () {
+    var lines = ['# プロトタイプへのフィードバック', ''];
+    var any = false;
+    state.forEach(function (e) {
+      if (!e.verdict && !e.comment.trim()) return;
+      any = true;
+      var mark = e.verdict === 'good' ? '👍 このまま' : e.verdict === 'fix' ? '🔧 要調整' : '（評価なし）';
+      lines.push('## ' + e.name);
+      lines.push('- 評価: ' + mark);
+      if (e.comment.trim()) lines.push('- コメント: ' + e.comment.trim());
+      lines.push('');
+    });
+    if (!any) lines.push('（まだフィードバックが入力されていません）');
+    text.value = lines.join('\n');
+    out.classList.add('open');
+    text.scrollTop = 0;
+  });
+
+  document.getElementById('fbmCopy').addEventListener('click', function () {
+    text.select();
+    function flashCopied() {
+      var btn = document.getElementById('fbmCopy');
+      var orig = btn.textContent;
+      btn.textContent = 'コピーしました ✓';
+      setTimeout(function () { btn.textContent = orig; }, 1600);
+    }
+    function fallbackCopy() {
+      try { document.execCommand('copy'); flashCopied(); } catch (e) {}
+    }
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text.value).then(flashCopied).catch(fallbackCopy);
+    } else {
+      fallbackCopy();
+    }
+  });
+
+  document.getElementById('fbmClose').addEventListener('click', function () {
+    out.classList.remove('open');
+  });
+})();
+</script>

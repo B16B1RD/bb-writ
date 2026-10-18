@@ -1,0 +1,9 @@
+{
+  "name": "bb-writ",
+  "version": "0.7.0",
+  "description": "cc-rite-workflow（rite）の後継。旧来の固定工程を見直し、rite の知見と pstack を参考に、Claude Code・Codex・Grok Build 向けのスキルとして作り直した。普通の依頼を受け、リポジトリを読み、課題に合う手引きと原則を選び、実物で確かめた成果と根拠を返す",
+  "license": "MIT",
+  "author": {
+    "name": "B16B1RD"
+  }
+}

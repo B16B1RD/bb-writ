@@ -1,0 +1,238 @@
+"""担当の貸し出しと外部操作の記録（scripts/work.py）: 二重書き込みの拒否、旧担当の停止、結果が分からない操作の照合。"""
+
+import json
+import os
+import subprocess
+import sys
+import tempfile
+import time
+import unittest
+from pathlib import Path
+
+WORK = Path(__file__).resolve().parents[1] / "scripts" / "work.py"
+
+
+class TestWork(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self.tmp.name) / "wt"
+        self.dir.mkdir()
+        self.env = {**os.environ, "BB_WRIT_STATE_DIR": str(Path(self.tmp.name) / "state")}
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def w(self, *args):
+        p = subprocess.run([sys.executable, str(WORK), *args[:1], *args[1:], "--dir", str(self.dir)] if args[0] != "op" else
+                           [sys.executable, str(WORK), "op", args[1], "--dir", str(self.dir), *args[2:]], env=self.env, capture_output=True, text=True)
+        return p.returncode, json.loads(p.stdout)
+
+    def test_second_claim_is_refused_while_first_is_live(self):
+        rc, a = self.w("claim", "--holder", "A")
+        self.assertEqual(rc, 0)
+        rc, b = self.w("claim", "--holder", "B")
+        self.assertEqual((rc, b["holder"]), (3, "A"))
+
+    def test_expired_lease_can_be_taken_over_and_old_holder_is_stopped(self):
+        rc, a = self.w("claim", "--holder", "A", "--lease", "0")  # すぐに期限切れ
+        rc, b = self.w("claim", "--holder", "B")
+        self.assertEqual((rc, b["previous"]["holder"]), (0, "A"))
+        rc, r = self.w("renew", "--token", a["token"])  # 旧担当は止まる
+        self.assertEqual(rc, 3)
+        rc, r = self.w("op", "begin", "--token", a["token"], "--key", "push", "--what", "git push")
+        self.assertEqual(rc, 3)
+        self.assertEqual(self.w("renew", "--token", b["token"])[0], 0)
+
+    def test_unknown_result_op_is_pending_and_not_restarted(self):
+        rc, a = self.w("claim", "--holder", "A", "--lease", "0.02")  # 1.2 秒
+        self.assertEqual(self.w("op", "begin", "--token", a["token"], "--key", "pr-create:feat/x", "--what", "gh pr create")[0], 0)
+        time.sleep(1.5)  # A は結果を記録せずに止まった
+        rc, b = self.w("claim", "--holder", "B")
+        self.assertEqual([o["key"] for o in b["pending_ops"]], ["pr-create:feat/x"])
+        rc, again = self.w("op", "begin", "--token", b["token"], "--key", "pr-create:feat/x", "--what", "gh pr create")
+        self.assertEqual(rc, 4)  # やり直さず、照合を求める
+        rc, done = self.w("op", "done", "--token", b["token"], "--key", "pr-create:feat/x", "--result", "既存の PR #3 を確認")
+        self.assertEqual((rc, done["op"]["state"]), (0, "done"))
+        self.assertEqual(self.w("op", "pending")[1]["pending_ops"], [])
+
+    def test_claim_hands_the_note_to_the_next_holder(self):
+        rc, a = self.w("claim", "--holder", "A", "--lease", "0.02")
+        self.assertFalse(a["note"]["filled"])
+        self.assertTrue(Path(a["note"]["evidence_dir"]).is_dir())  # 証拠の置き場（/tmp に置かせない）
+        Path(a["note"]["path"]).write_text("# 作業の記録\n\n- 目的: digits を足す\n", encoding="utf-8")
+        time.sleep(1.5)
+        rc, b = self.w("claim", "--holder", "B")
+        self.assertIn("digits を足す", b["note"]["body"])
+
+    def test_release_frees_the_place(self):
+        rc, a = self.w("claim", "--holder", "A")
+        self.assertEqual(self.w("release", "--token", a["token"])[0], 0)
+        self.assertEqual(self.w("claim", "--holder", "B")[0], 0)
+
+
+FAKE_GH = """#!/usr/bin/env python3
+# 置き場所でアカウントを切り替える gh のラッパーと同じく、カレントディレクトリでアカウントを選ぶ偽物。FAKE_GH_MAP は「接頭辞=login:権限」を ; で並べ、最後の項目は既定。
+import os, sys
+cwd = os.getcwd()
+login, perm = os.environ["FAKE_GH_DEFAULT"].split(":")
+for item in os.environ.get("FAKE_GH_MAP", "").split(";"):
+    if item and cwd.startswith(item.split("=")[0]):
+        login, perm = item.split("=")[1].split(":")
+if sys.argv[1:3] == ["api", "user"]:
+    print(login)
+elif sys.argv[1:3] == ["repo", "view"]:
+    # 引数なしは gh の既定のリポジトリ。gh repo fork の後は upstream（FAKE_GH_UPSTREAM はそこでの権限）
+    if not sys.argv[3].startswith("http") and os.environ.get("FAKE_GH_UPSTREAM"):
+        print("parent/demo " + os.environ["FAKE_GH_UPSTREAM"]); sys.exit(0)
+    if perm == "NONE":
+        print("GraphQL: Could not resolve to a Repository", file=sys.stderr); sys.exit(1)
+    print("B16B1RD/demo " + perm)
+"""
+
+
+class TestAccountCheck(unittest.TestCase):
+    """外部操作は元の checkout から。食い違い・権限不足は op begin が拒否する（置き場所でアカウントが変わる環境の実測、2026-10-17）。"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        t = Path(self.tmp.name).resolve()  # macOS の /var は /private/var への symlink。gh が見るカレントディレクトリは実体のパス
+        self.repo, self.wt, self.bin = t / "personal" / "demo", t / "elsewhere" / "wt", t / "bin"
+        self.bin.mkdir()
+        (self.bin / "gh").write_text(FAKE_GH.replace("/usr/bin/env python3", sys.executable))
+        (self.bin / "gh").chmod(0o755)
+        g = lambda *a, cwd=None: subprocess.run(["git", *a], cwd=cwd, check=True, capture_output=True)
+        self.repo.mkdir(parents=True)
+        g("init", "-q", "-b", "main", cwd=self.repo)
+        g("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "init", cwd=self.repo)
+        g("remote", "add", "origin", "https://github.com/B16B1RD/demo.git", cwd=self.repo)
+        g("worktree", "add", "-q", "-b", "feat", str(self.wt), cwd=self.repo)
+        self.env = {**os.environ, "BB_WRIT_STATE_DIR": str(t / "state"), "PATH": f"{self.bin}:{os.environ['PATH']}",
+                    "FAKE_GH_MAP": f"{t / 'personal'}=B16B1RD:ADMIN", "FAKE_GH_DEFAULT": "work-account:NONE"}
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def w(self, *args):
+        p = subprocess.run([sys.executable, str(WORK), *args], env=self.env, capture_output=True, text=True)
+        return p.returncode, json.loads(p.stdout)
+
+    def claim(self):
+        return self.w("claim", "--dir", str(self.wt), "--holder", "A")[1]["token"]
+
+    def begin(self, tok, key, *frm):
+        return self.w("op", "begin", "--dir", str(self.wt), "--token", tok, "--key", key, "--what", "x", *frm)
+
+    def test_push_from_worktree_with_another_account_is_refused(self):
+        tok = self.claim()
+        rc, r = self.begin(tok, "push:feat", "--from", str(self.wt))
+        self.assertEqual(rc, 5)
+        self.assertIn(str(self.repo), r["reason"])  # 元の checkout から実行するよう示す
+        self.assertEqual(self.w("op", "pending", "--dir", str(self.wt))[1]["pending_ops"], [])  # 記録されない
+
+    def test_another_account_that_can_also_write_is_refused(self):
+        """両方のアカウントが書けるリポジトリでは、黙って別の名前で push・PR が出る。食い違いだけで止める。"""
+        self.env["FAKE_GH_DEFAULT"] = "work-account:WRITE"
+        tok = self.claim()
+        rc, r = self.begin(tok, "pr:feat", "--from", str(self.wt))
+        self.assertEqual(rc, 5)
+        self.assertIn("食い違う", r["reason"])
+
+    def test_push_from_the_checkout_is_allowed_and_records_the_account(self):
+        tok = self.claim()
+        head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=self.wt, check=True, capture_output=True, text=True).stdout.strip()
+        rc, r = self.begin(tok, "push:feat", "--from", str(self.repo), "--verified", head)
+        self.assertEqual((rc, r["op"]["account"]), (0, "B16B1RD"))
+
+    def test_checkout_account_without_write_is_refused_for_push_merge_release(self):
+        self.env["FAKE_GH_MAP"] = f"{Path(self.tmp.name).resolve() / 'personal'}=work-account:READ"
+        tok = self.claim()
+        for key in ("push:feat", "merge:pr-1", "release:v1"):
+            rc, r = self.begin(tok, key, "--from", str(self.repo))
+            self.assertEqual(rc, 5, key)
+            self.assertIn("READ", r["reason"])
+
+    def test_comment_issue_pr_need_no_write(self):
+        """GitHub では書き込み権限が無くてもコメント・Issue・fork からの PR ができる（公開リポジトリへの寄与）。"""
+        self.env["FAKE_GH_MAP"] = f"{Path(self.tmp.name).resolve() / 'personal'}=work-account:READ"
+        tok = self.claim()
+        head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=self.wt, check=True, capture_output=True, text=True).stdout.strip()
+        for key in ("comment:issue-1", "issue:new", "pr:feat"):
+            rc, r = self.begin(tok, key, "--from", str(self.repo), "--verified", head)
+            self.assertEqual((rc, r["op"]["account"]), (0, "work-account"), key)
+
+    def test_comment_where_the_repository_is_not_visible_is_refused(self):
+        tok = self.claim()
+        self.env["FAKE_GH_MAP"] = f"{Path(self.tmp.name).resolve() / 'personal'}=work-account:NONE"
+        rc, r = self.begin(tok, "comment:issue-1", "--from", str(self.repo))
+        self.assertEqual(rc, 5)
+
+    def test_same_account_with_write_is_allowed_from_the_worktree(self):
+        self.env["FAKE_GH_DEFAULT"] = "B16B1RD:WRITE"
+        tok = self.claim()
+        self.assertEqual(self.begin(tok, "comment:pr-1", "--from", str(self.wt))[0], 0)
+
+    def test_push_to_own_fork_is_allowed_when_upstream_is_the_default(self):
+        """gh repo fork の構成（origin が自分の fork、upstream が既定で読むだけ）。push は origin の権限で見る。"""
+        self.env["FAKE_GH_UPSTREAM"] = "READ"
+        tok = self.claim()
+        head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=self.wt, check=True, capture_output=True, text=True).stdout.strip()
+        rc, r = self.begin(tok, "push:feat", "--from", str(self.repo), "--verified", head)
+        self.assertEqual((rc, r["op"]["account"]), (0, "B16B1RD"))
+        self.assertEqual(self.begin(tok, "comment:issue-1", "--from", str(self.repo))[0], 0)
+        rc, r = self.begin(tok, "merge:pr-1", "--from", str(self.repo), "--verified", head)
+        self.assertEqual(rc, 5)  # マージは upstream に書けない
+        self.assertIn("parent/demo", json.dumps(r, ensure_ascii=False))
+
+    def test_external_op_needs_from(self):
+        tok = self.claim()
+        rc, r = self.begin(tok, "push:feat")
+        self.assertEqual(rc, 2)
+        self.assertIn(str(self.repo), r["reason"])
+
+    def test_non_github_origin_skips_the_check_and_says_so(self):
+        subprocess.run(["git", "remote", "set-url", "origin", "https://gitlab.example/x/y.git"], cwd=self.repo, check=True)
+        rc, r = self.w("check", "--dir", str(self.wt), "--from", str(self.wt))
+        self.assertEqual(rc, 0)
+        self.assertIn("飛ばした", r["skipped"])
+
+    def test_internal_ops_need_no_account(self):
+        tok = self.claim()
+        self.assertEqual(self.begin(tok, "note:x")[0], 0)
+
+
+class TestVerifiedCommit(unittest.TestCase):
+    """公開する操作は、検証した commit が作業場所の HEAD と同じときだけ通す（plan-v3 6.2。検証の後に変わった成果物を出さない）。"""
+
+    setUp, tearDown, w, claim, begin = (TestAccountCheck.setUp, TestAccountCheck.tearDown, TestAccountCheck.w,
+                                        TestAccountCheck.claim, TestAccountCheck.begin)
+
+    def head(self):
+        return subprocess.run(["git", "rev-parse", "HEAD"], cwd=self.wt, check=True, capture_output=True, text=True).stdout.strip()
+
+    def test_publish_needs_the_verified_commit(self):
+        tok = self.claim()
+        rc, r = self.begin(tok, "push:feat", "--from", str(self.repo))
+        self.assertEqual(rc, 2)
+        self.assertIn(self.head(), r["reason"])  # 今の HEAD を示す
+
+    def test_publish_after_the_tree_changed_is_refused(self):
+        verified = self.head()
+        subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "after"], cwd=self.wt, check=True)
+        tok = self.claim()
+        rc, r = self.begin(tok, "pr:feat", "--from", str(self.repo), "--verified", verified)
+        self.assertEqual(rc, 6)
+        self.assertIn(self.head(), r["reason"])
+        self.assertEqual(self.w("op", "pending", "--dir", str(self.wt))[1]["pending_ops"], [])  # 記録されない
+
+    def test_publish_of_the_verified_commit_is_allowed_and_recorded(self):
+        tok = self.claim()
+        rc, r = self.begin(tok, "push:feat", "--from", str(self.repo), "--verified", self.head()[:10])  # 短い SHA も受ける
+        self.assertEqual((rc, r["op"]["verified"]), (0, self.head()))
+
+    def test_comment_needs_no_verified_commit(self):
+        tok = self.claim()
+        self.assertEqual(self.begin(tok, "comment:pr-1", "--from", str(self.repo))[0], 0)
+
+
+if __name__ == "__main__":
+    unittest.main()
