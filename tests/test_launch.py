@@ -49,7 +49,9 @@ FAKE_GROK = textwrap.dedent(r'''
     if mode == "signedout":
         print(json.dumps({"type": "error", "message": "Not signed in."})); sys.exit(1)
     if mode == "nosandbox":
-        print("warning: sandbox profile could not be applied; continuing without enforcement", file=sys.stderr)
+        print("warning: sandbox could not be applied: landlock unavailable", file=sys.stderr)  # 1.0.63 の実物の文言
+    if mode == "leadernote":
+        print("note: sandbox profile 'x' was requested, so leader mode is off", file=sys.stderr)
     print(json.dumps({"text": os.environ["FAKE_TEXT"], "stopReason": "end_turn", "sessionId": "g-1",
                       "modelUsage": {"grok-4.7-build": {}}, "total_cost_usd": 0.02, "num_turns": 3}))
 ''').lstrip()
@@ -84,10 +86,10 @@ class TestLaunch(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def run_launch(self, host, mode="good", extra=(), path=None, cwd=None):
+    def run_launch(self, host, mode="good", extra=(), path=None, cwd=None, env_extra=None):
         env = {**os.environ, "PATH": path if path is not None else f"{self.bin}:/usr/bin:/bin", "BB_WRIT_CONFIG_DIR": str(self.cfg),
                "BB_WRIT_STATE_DIR": str(self.state), "FAKE_MODE": mode, "FAKE_ARGS": str(self.args_file),
-               "FAKE_TEXT": GOOD.encode().decode("unicode_escape")}
+               "FAKE_TEXT": GOOD.encode().decode("unicode_escape"), **(env_extra or {})}
         p = subprocess.run([sys.executable, str(LAUNCH), "--host", host, "--cwd", str(cwd or self.cwd), "--prompt-file", str(self.prompt), *extra],
                            env=env, capture_output=True, text=True)
         return p.returncode, json.loads(p.stdout)
@@ -129,37 +131,68 @@ class TestLaunch(unittest.TestCase):
         argv = json.loads(self.args_file.read_text())
         return argv[:-1], json.loads(argv[-1][len("ENV="):])
 
-    def test_grok_ok_is_read_only_and_isolated(self):
-        rc, rec = self.run_launch("grok", cwd=self.grok_target())
-        self.assertEqual((rc, rec["status"], rec["session"], rec["model_effective"]), (0, "ok", "g-1", ["grok-4.7-build"]), rec)
-        argv, env = self.grok_argv()
-        self.assertEqual(argv[argv.index("--sandbox") + 1], "read-only")
-        self.assertEqual(env["GROK_HOME"], str(self.cfg / "grok-auth"))
-        self.assertEqual(env["GROK_CLAUDE_AGENTS_ENABLED"], "false")  # 利用者の CLAUDE.md を子に読ませない
-        self.assertEqual(env["GROK_CLAUDE_SKILLS_ENABLED"], "false")
-
-    def test_grok_read_only_refuses_target_under_tmp(self):
-        rc, rec = self.run_launch("grok", cwd=Path("/tmp"))
-        self.assertEqual(rec["status"], "unavailable")
-        self.assertIn("読み取り専用にできない", rec["problems"][0])
-        self.assertFalse(self.args_file.exists())  # 起動しない
-
-    def test_grok_write_grants_state_and_git_dirs(self):
-        subprocess.run(["git", "init", "-q", str(self.cwd)], check=True)
-        for _ in range(2):
-            rc, rec = self.run_launch("grok", extra=["--write"])
-            self.assertEqual(rec["status"], "ok", rec)
-        argv, _ = self.grok_argv()
+    def grok_profile_of(self, argv):
         name = argv[argv.index("--sandbox") + 1]
         toml = (self.cfg / "grok-auth" / "sandbox.toml").read_text()
-        self.assertEqual(toml.count(f"[profiles.{name}]"), 1)  # 同じ書き込み先なら profile を重ねない
-        self.assertIn(json.dumps(str(self.state.resolve())), toml)
-        self.assertIn(json.dumps(str((self.cwd / ".git").resolve())), toml)
+        self.assertEqual(toml.count(f"[profiles.{name}]"), 1, toml)
+        return toml.split(f"[profiles.{name}]\n", 1)[1].split("\n[", 1)[0]
 
-    def test_grok_sandbox_warning_is_failed(self):
+    def test_grok_ok_is_read_only_and_isolated(self):
+        rc, rec = self.run_launch("grok", cwd=self.grok_target(),
+                                  env_extra={"GROK_AGENT": "1", "XAI_API_KEY": "k", "GROK_SANDBOX": "off", "RUST_LOG": "debug"})
+        self.assertEqual((rc, rec["status"], rec["session"], rec["model_effective"]), (0, "ok", "g-1", ["grok-4.7-build"]), rec)
+        argv, env = self.grok_argv()
+        # 組み込みの read-only は適用できないと強制せずに続くので、適用できなければ起動を拒む独自の profile で渡す
+        self.assertIn('extends = "read-only"', self.grok_profile_of(argv))
+        compat = {f"GROK_{v}_{c}_ENABLED" for v in ("CLAUDE", "CURSOR") for c in ("AGENTS", "SKILLS", "RULES", "HOOKS", "MCPS")}
+        self.assertEqual(env, {"GROK_HOME": str(self.cfg / "grok-auth"), "GROK_MEMORY": "0", **{k: "false" for k in compat}})
+
+    def test_grok_parent_api_key_is_not_passed(self):
+        self.run_launch("grok", cwd=self.grok_target(), env_extra={"XAI_API_KEY": "k"})
+        self.assertNotIn('"XAI_API_KEY"', self.args_file.read_text())
+
+    def test_grok_read_only_refuses_targets_overlapping_writable_places(self):
+        target = self.grok_target()
+        for cwd, cfg in ((Path("/tmp"), None), (Path(tempfile.mkdtemp(dir="/var/tmp")), None), (self.cwd, None),  # self.cwd は /tmp の下
+                         (Path("/"), None), (target, target / "cfg")):  # 対象が専用ログイン（read-only でも書ける）を含む
+            if cfg:
+                (cfg / "grok-auth").mkdir(parents=True)
+                (cfg / "grok-auth" / "auth.json").write_text("{}")
+            rc, rec = self.run_launch("grok", cwd=cwd, env_extra={"BB_WRIT_CONFIG_DIR": str(cfg)} if cfg else None)
+            self.assertEqual(rec["status"], "unavailable", cwd)
+            self.assertIn("読み取り専用にできない", rec["problems"][0])
+        self.assertFalse(self.args_file.exists())  # 起動しない
+
+    def test_grok_write_grants_state_and_worktree_git_dir(self):
+        repo = self.cwd / "repo"
+        subprocess.run(["git", "init", "-q", str(repo)], check=True)
+        subprocess.run(["git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "-q", "--allow-empty", "-m", "i"], check=True)
+        wt = self.cwd / "wt"
+        subprocess.run(["git", "-C", str(repo), "worktree", "add", "-q", str(wt)], check=True)
+        (wt / "a.txt").write_text("x\n")  # 偽の子の報告が指す証拠
+        rc, rec = self.run_launch("grok", extra=["--write"], cwd=wt)
+        self.assertEqual(rec["status"], "ok", rec)
+        profile = self.grok_profile_of(self.grok_argv()[0])
+        self.assertIn('extends = "workspace"', profile)
+        self.assertIn(json.dumps(str(self.state.resolve())), profile)
+        self.assertIn(json.dumps(str((repo / ".git").resolve())), profile)  # worktree の外にある共通ディレクトリ
+
+    def test_grok_parallel_writes_add_one_profile(self):
+        env = {**os.environ, "PATH": f"{self.bin}:/usr/bin:/bin", "BB_WRIT_CONFIG_DIR": str(self.cfg), "BB_WRIT_STATE_DIR": str(self.state),
+               "FAKE_ARGS": str(self.args_file), "FAKE_TEXT": GOOD.encode().decode("unicode_escape")}
+        procs = [subprocess.Popen([sys.executable, str(LAUNCH), "--host", "grok", "--cwd", str(self.cwd), "--prompt-file", str(self.prompt), "--write"],
+                                  env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE) for _ in range(8)]
+        for pr in procs:
+            pr.communicate()
+        toml = (self.cfg / "grok-auth" / "sandbox.toml").read_text()
+        self.assertEqual(toml.count("[profiles."), 1, toml)
+
+    def test_grok_warning_is_failed_but_note_is_not(self):
         rc, rec = self.run_launch("grok", "nosandbox", cwd=self.grok_target())
         self.assertEqual((rc, rec["status"]), (2, "failed"))
         self.assertTrue(any("could not be applied" in x for x in rec["problems"]), rec)
+        rc, rec = self.run_launch("grok", "leadernote", cwd=self.grok_target())
+        self.assertEqual(rec["status"], "ok", rec)
 
     def test_grok_error_message_is_kept(self):
         rc, rec = self.run_launch("grok", "signedout", cwd=self.grok_target())

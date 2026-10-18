@@ -11,6 +11,7 @@ JSON が返ったことを成功にしない: 結論が空、証拠が無い、�
 """
 from __future__ import annotations  # macOS の Command Line Tools の python3（3.9）でも型注釈で落ちないように
 import argparse
+import fcntl
 import hashlib
 import json
 import os
@@ -19,6 +20,7 @@ import shutil
 import secrets
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -43,23 +45,37 @@ def state_dir() -> Path:
 
 # Grok は ~/.claude・~/.cursor の指示・スキル・hook・MCP も読む。子に利用者の個人設定を渡さない（1.0.63 で、切らないと子が利用者の呼び名を使った）
 GROK_COMPAT_OFF = {f"GROK_{v}_{c}_ENABLED": "false" for v in ("CLAUDE", "CURSOR") for c in ("AGENTS", "SKILLS", "RULES", "HOOKS", "MCPS")}
-# Grok の read-only の sandbox でも書ける場所（公式文書 18-sandbox）。対象がこの下にあると読み取り専用にならない
-GROK_RO_WRITABLE = ("/tmp", "/var/tmp")
+# sandbox を適用できないときの警告（1.0.63 の実物の文言は "warning: sandbox could not be applied: …"）。独自の profile は適用できなければ起動を拒むが、警告の行は念のため結果を捨てる理由にする
+GROK_WARNING = re.compile(r"^\s*warning\b", re.I)
 
 
-def grok_profile(home: Path, cwd: Path) -> str:
-    """書く委任の sandbox: 作業場所に加え、状態ディレクトリと Git の共通ディレクトリ（worktree の commit が書く）に書ける profile を
-    $GROK_HOME/sandbox.toml に足して、その名前を返す。名前は書ける場所から決まるので、並行する起動が同じ内容を重ねるだけになる。"""
-    rw = [state_dir()]
-    git = subprocess.run(["git", "-C", str(cwd), "rev-parse", "--path-format=absolute", "--git-common-dir"], capture_output=True, text=True)
-    if git.returncode == 0:
-        rw.append(Path(git.stdout.strip()))
-    rw = [str(p.resolve()) for p in rw]
-    name = "bbwrit-" + hashlib.sha256("\n".join(rw).encode()).hexdigest()[:12]
-    f = home / "sandbox.toml"
-    if f"[profiles.{name}]" not in (f.read_text(encoding="utf-8") if f.is_file() else ""):
-        with open(f, "a", encoding="utf-8") as out:
-            out.write(f'\n[profiles.{name}]\nextends = "workspace"\nread_write = {json.dumps(rw)}\n')
+def grok_ro_writable(home: Path) -> list[Path]:
+    """Grok の read-only の sandbox でも書ける場所（公式文書 18-sandbox と、実物の sessions/sandbox-events.jsonl の read_write_paths）。"""
+    roots = [Path("/tmp"), Path("/var/tmp"), Path(tempfile.gettempdir()), home]  # gettempdir は macOS の一時ディレクトリ
+    return sorted({p.resolve() for p in roots})
+
+
+def grok_git_dir(cwd: Path) -> tuple[Path | None, str | None]:
+    """worktree の commit が書く Git の共通ディレクトリ。Git の外なら None。"""
+    g = subprocess.run(["git", "-C", str(cwd), "rev-parse", "--git-common-dir"], capture_output=True, text=True)
+    if g.returncode == 0:
+        return (cwd / g.stdout.strip()).resolve(), None
+    if "not a git repository" in g.stderr:
+        return None, None
+    return None, f"Git の共通ディレクトリを取れない（git rev-parse: {g.stderr.strip()[:200]}）"
+
+
+def grok_profile(home: Path, extends: str, read_write: list[Path]) -> str:
+    """独自の sandbox の profile を $GROK_HOME/sandbox.toml に足して名前を返す。組み込みの profile は適用できないと警告して強制せずに続くが、
+    独自の profile は起動を拒む（公式文書 18-sandbox）ので、読み取り専用も独自の profile にする。名前は中身から決め、並行する起動は排他して重ねない。"""
+    rw = [str(p.resolve()) for p in read_write]
+    body = f'extends = "{extends}"\nread_write = {json.dumps(rw)}\n'
+    name = "bbwrit-" + hashlib.sha256(body.encode()).hexdigest()[:12]
+    with open(home / "sandbox.toml", "a+", encoding="utf-8") as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        f.seek(0)
+        if f"[profiles.{name}]" not in f.read():
+            f.write(f"\n[profiles.{name}]\n{body}")
     return name
 
 
@@ -88,13 +104,22 @@ def command(a, prompt: str) -> tuple[list[str], dict, str | None]:
         home = cfg / "grok-auth"
         if not (home / "auth.json").is_file():
             return [], env, f"専用ログインが無い: {home}/auth.json（GROK_HOME={home} grok login）"
-        if not a.write:
-            for d in GROK_RO_WRITABLE:
-                if a.cwd == Path(d).resolve() or Path(d).resolve() in a.cwd.parents:
-                    return [], env, f"対象が {d} の下にある。Grok の read-only の sandbox はそこへの書き込みを止めないので、読み取り専用にできない"
+        if a.write:
+            git_dir, why = grok_git_dir(a.cwd)
+            if why:
+                return [], env, why
+            state_dir().mkdir(parents=True, exist_ok=True)
+            profile = grok_profile(home, "workspace", [state_dir()] + ([git_dir] if git_dir else []))
+        else:
+            for d in grok_ro_writable(home):
+                if a.cwd == d or d in a.cwd.parents or a.cwd in d.parents:
+                    return [], env, f"対象と {d} が重なる。Grok の read-only の sandbox はそこへの書き込みを止めないので、読み取り専用にできない"
+            profile = grok_profile(home, "read-only", [])
+        # 親の GROK_*（GROK_AGENT・GROK_SANDBOX・GROK_CONFIG など）と API キーを渡さない。API キーがあるとログインの代わりに別料金の API へ落ちる
+        env = {k: v for k, v in env.items() if not k.startswith("GROK_") and k not in ("XAI_API_KEY", "RUST_LOG")}
         env.update(GROK_HOME=str(home), GROK_MEMORY="0", **GROK_COMPAT_OFF)
         cmd = ["grok", "-p", prompt, "--output-format", "json", "-m", a.model, "--effort", a.effort, "--cwd", str(a.cwd),
-               "--sandbox", grok_profile(home, a.cwd) if a.write else "read-only", "--always-approve",
+               "--sandbox", profile, "--always-approve",
                "--no-leader", "--no-auto-update", "--no-subagents", "--disable-web-search", "--disallowed-tools", "x_search"]
         return cmd, env, None
     if not shutil.which("codex"):
@@ -156,9 +181,11 @@ def parse_grok(out: str) -> dict:
         d = json.loads(out.strip() or "{}")
     except json.JSONDecodeError:
         d = {}
+    if not isinstance(d, dict):
+        d = {}
     error = d.get("type") == "error"
     return {"text": "" if error else d.get("text") or "", "session": d.get("sessionId"), "is_error": error,
-            "errors": [str(d.get("message"))[:300]] if error else [],
+            "errors": [str(d.get("message") or "")[:300]] if error else [],
             "model_effective": sorted((d.get("modelUsage") or {}).keys()) or None,  # effort は結果に出ない
             "usage": {"cost_usd": d.get("total_cost_usd"), "turns": d.get("num_turns")}}
 
@@ -223,13 +250,13 @@ def main() -> int:
             (out_dir / "stdout.jsonl").write_text(p.stdout, encoding="utf-8")
             (out_dir / "stderr.log").write_text(p.stderr, encoding="utf-8")
             got = {"claude": parse_claude, "codex": parse_codex, "grok": parse_grok}[a.host](p.stdout)
-            # Grok は sandbox を適用できないと警告して強制せずに続ける（公式文書 18-sandbox）。権限の約束が崩れたので結果を使わない
-            unsafe = [l for l in p.stderr.splitlines() if a.host == "grok" and re.search(r"sandbox|warn", l, re.I)][-5:]
+            # 警告の行（sandbox の適用失敗、効かなかった引数）があれば、権限の約束どおりに動いたか分からないので結果を使わない
+            unsafe = [l for l in p.stderr.splitlines() if a.host == "grok" and GROK_WARNING.search(l)][-5:]
             rec.update(exit_code=p.returncode, session=got["session"], model_effective=got["model_effective"], usage=got["usage"])
             if QUOTA.search(p.stderr[-4000:] + " ".join(got["errors"])):
                 rec.update(status="quota", problems=["利用枠の上限に当たった（別料金の API へは切り替えない）"])
             elif unsafe:
-                rec.update(status="failed", problems=["sandbox か引数の警告が出た（権限の約束どおりに動いたか分からない）"] + unsafe)
+                rec.update(status="failed", problems=["Grok が警告を出した（権限の約束どおりに動いたか分からない）"] + unsafe)
             elif p.returncode != 0 or got.get("is_error") or not got["text"]:
                 tail = [l for l in p.stderr.strip().splitlines() if "injected env" not in l and "Reading additional input" not in l][-5:]
                 rec.update(status="failed", problems=[f"終了コード {p.returncode}"] + got["errors"] + tail)
