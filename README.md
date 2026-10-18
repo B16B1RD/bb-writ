@@ -2,9 +2,21 @@
 
 Claude Code・Codex 向けのスキルのプラグイン。入口のスキルが「直して」「作って」「調べて」といった普通の依頼を受け、リポジトリを読んで実装・修正・調査までやり遂げ、実物で動作を確かめた結果を根拠とともに返す。Issue の書式に整えたり、対象のリポジトリを登録したりする準備は要らない。
 
+## 前提
+
+基本機能に要るもの。基本機能は、`delegate`・`interrogate` で別系統の CLI（使っていないほうの Claude Code か Codex）を起動する場合を除く、すべての使い方。
+
+- OS：Linux・macOS・WSL2。Windows のネイティブ環境（PowerShell など）は対象外。入口がファイルに書く前に実行する `scripts/work.py` が、Unix にしか無い `fcntl` を使うので動かない。読むだけの使い方も、ネイティブ環境では確かめていない。Windows では、WSL2 の中に CLI を入れて、その中で起動する。
+- CLI：Claude Code か Codex のどちらか 1 つ。
+- Python：3.9 以上を `python3` で起動できること。標準ライブラリだけを使うので、パッケージは要らない。macOS では、Command Line Tools に付く `python3`（3.9）で足りる。
+- git：macOS では、Command Line Tools に付く `git` で足りる。
+- GitHub CLI（`gh`、ログイン済み）：Issue・PR を名指しして頼むときと、push・PR などの外部操作の前にアカウントと書き込み権限を確かめるときに使う。gh が無いと、名指しした Issue・PR の本文を読めず、GitHub への外部操作はこの確かめで止まる。Issue・PR を名指しせずに、リポジトリを読む・手元で直すだけなら要らない。
+
+もう一方の CLI・dotenvx・bb-writ 専用のログインは、任意機能（[任意機能の準備](#任意機能の準備)）だけで使う。
+
 ## インストール
 
-使う CLI（Claude Code または Codex）をインストールしてから、その CLI の手順を実行する。基本機能には、もう一方の CLI も、bb-writ 専用のログイン（任意機能で別系統の CLI を起動するときに使う）も要らない。
+使う CLI（Claude Code または Codex）をインストールしてから、その CLI の手順を実行する。
 
 ### Claude Code
 
@@ -78,7 +90,14 @@ Claude Code は、普通の依頼文だけでは入口を使わない。入口�
 
 ## 任意機能の準備
 
-`delegate` や `interrogate` で別系統の CLI を起動する場合は、両方の CLI と、起動される側の bb-writ 専用ログインを用意する。準備と呼び出し方は [`delegate` の手引き](skills/delegate/SKILL.md) にある。
+`delegate` や `interrogate` で別系統の CLI を起動する場合は、[前提](#前提)に加えて次を用意する。
+
+- Claude Code と Codex の両方。
+- 起動される CLI の bb-writ 専用ログイン。Codex で `interrogate` を使うときは、同じ Codex の審査役も別プロセスの Codex として起動するので、両方のログインが要る。
+  - Claude Code：`claude setup-token` で得たトークンを、`~/.config/bb-writ/.env` の `CLAUDE_CODE_OAUTH_TOKEN` に [dotenvx](https://dotenvx.com/) で暗号化して置く（鍵の `.env.keys` も同じ場所）。起動するときも dotenvx がトークンを子の環境にだけ渡すので、dotenvx を入れておく。
+  - Codex：`CODEX_HOME=~/.config/bb-writ/codex-home codex login`。
+
+呼び出し方は [`delegate` の手引き](skills/delegate/SKILL.md) にある。
 
 Grok Build は root の `plugin.json` を読む形にしてあるが、インストール・更新の動作は確認していない。
 

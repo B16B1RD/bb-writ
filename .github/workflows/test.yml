@@ -1,4 +1,4 @@
-# 補助スクリプト（scripts/）と配布の形の試験を Linux と macOS で回す。秘密の値は使わない（偽物の CLI の試験だけ）。
+# 補助スクリプト（scripts/）と配布の形の試験を Linux と macOS で回す。3.9 は README に書いた下限（macOS の Command Line Tools の python3）。秘密の値は使わない（偽物の CLI の試験だけ）。
 name: test
 on:
   push:
@@ -12,12 +12,13 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-24.04, macos-15]
+        python: ["3.9", "3.11"]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: ${{ matrix.python }}
       - name: 単体試験
         run: python3 -B -m unittest discover -s tests -t . -v
