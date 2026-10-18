@@ -34,6 +34,7 @@ bb-writ は、CLI ハーネス（Claude Code・Codex。Grok Build も同じ SKIL
 ## commit
 
 - main に直接 commit する。Conventional Commits。
+- commit のメッセージは、件名も本文も日本語で書く（`feat`・`docs` などの type は英語のまま）。
 
 ## 守ること
 
