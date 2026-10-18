@@ -24,6 +24,7 @@ import tempfile
 import time
 from pathlib import Path
 
+sys.dont_write_bytecode = True  # work.py の import で、プラグインの置き場に __pycache__ を作らない
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from work import root as work_record  # noqa: E402  作業場所ごとの記録の置き場（担当・記録・証拠）
 

@@ -121,6 +121,11 @@ class TestLaunch(unittest.TestCase):
                            env=env, capture_output=True, text=True)
         return p.returncode, json.loads(p.stdout)
 
+    def test_launch_leaves_no_bytecode_in_the_plugin(self):
+        subprocess.run(["rm", "-rf", str(ROOT / "scripts" / "__pycache__")], check=True)
+        self.run_launch("codex")  # 試験の外と同じく -B なしで起動する
+        self.assertFalse((ROOT / "scripts" / "__pycache__").exists())
+
     def test_codex_ok_is_read_only_by_default(self):
         rc, rec = self.run_launch("codex")
         self.assertEqual((rc, rec["status"]), (0, "ok"), rec)
