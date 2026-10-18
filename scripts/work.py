@@ -175,6 +175,25 @@ def out(obj, code=0):
     return code
 
 
+MAX_LEASE_MIN = 24 * 60
+
+
+def alive(lease, now):
+    """期限内の担当か。書く子は作業場所の記録に書けるので、上限を超える期限や壊れた値の担当は切れたものとみなす
+    （期限を遠い将来にされると、親が担当を取り直せなくなる）。"""
+    try:
+        return bool(lease) and now < float(lease['expires_at']) <= now + MAX_LEASE_MIN * 60
+    except (KeyError, TypeError, ValueError):
+        return False
+
+
+def lease_minutes(v):
+    m = float(v)
+    if not 0 <= m <= MAX_LEASE_MIN:
+        raise argparse.ArgumentTypeError(f'担当の期限は 0 以上 {MAX_LEASE_MIN} 分以下')
+    return m
+
+
 def check_token(lease, token):
     if not lease or lease.get("token") != token:
         return "この token の担当ではない（引き継がれたか、解放された）。作業を止め、status で今の担当を確かめる"
@@ -184,12 +203,12 @@ def check_token(lease, token):
 def claim_at(r, d, holder, minutes):
     now = time.time()
     old = read(r / 'lease.json')
-    if old and old['expires_at'] > now:
+    if alive(old, now):
         return {'ok': False, 'reason': '生きた担当がいる。二重に書かない',
                 'holder': old['holder'], 'expires_in_s': round(old['expires_at'] - now)}, 3
     new = {'token': secrets.token_hex(8), 'holder': holder, 'dir': str(d.resolve()),
            'claimed_at': now, 'expires_at': now + minutes * 60,
-           'previous': old and {'holder': old['holder'], 'expired_at': old['expires_at']}}
+           'previous': old and {'holder': old.get('holder'), 'expired_at': old.get('expires_at')}}
     write(r / 'lease.json', new)
     return {'ok': True, 'token': new['token'], 'previous': new['previous'],
             'pending_ops': pending(r), 'note': note(r)}, 0
@@ -209,7 +228,7 @@ def clean(d, ignored=False):
 
 def current_lease(r, token):
     lease = read(r / 'lease.json')
-    if lease and lease['expires_at'] <= time.time():
+    if not alive(lease, time.time()):
         lease = None
     why = check_token(lease, token)
     if why:
@@ -369,7 +388,7 @@ def integrate(a):
         if dest.resolve() != repo.resolve():
             raise ValueError('ローカル統合先は元の checkout に限る。対象側の PR 経路などで統合する')
         target_lease = read(rr / 'lease.json')
-        if target_lease and target_lease['expires_at'] > time.time():
+        if alive(target_lease, time.time()):
             raise ValueError('統合先の checkout に生きた担当がいる。書き換えず待つ')
         if git(a.dir, 'symbolic-ref', '--quiet', 'HEAD') != 'refs/heads/' + task['branch']:
             raise ValueError('タスクのブランチが変更されている')
@@ -416,7 +435,7 @@ def main() -> int:
         s.add_argument('--dir', type=Path, required=True)
         if name in ('start', 'resume'):
             s.add_argument('--holder', required=True)
-            s.add_argument('--lease', type=float, default=20)
+            s.add_argument('--lease', type=lease_minutes, default=20)
         if name == 'start':
             s.add_argument('--base')
             s.add_argument('--target')
@@ -436,7 +455,7 @@ def main() -> int:
         if name in ("renew", "release"):
             s.add_argument("--token", required=True)
         if name in ("claim", "renew"):
-            s.add_argument("--lease", type=float, default=20, help="分")
+            s.add_argument("--lease", type=lease_minutes, default=20, help="分")
         if name == "claim":
             s.add_argument("--holder", default=os.environ.get("USER", "?"))
     o = sub.add_parser("op")
@@ -466,7 +485,7 @@ def main() -> int:
     with locked(r):
         now = time.time()
         lease = read(r / "lease.json")
-        live = lease if lease and lease["expires_at"] > now else None
+        live = lease if alive(lease, now) else None
         if a.cmd == "status":
             return out({"dir": str(a.dir.resolve()), "holder": live and live["holder"], "expires_in_s": live and round(live["expires_at"] - now),
                         "stale": bool(lease and not live), "pending_ops": pending(r), "note": note(r)})

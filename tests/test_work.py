@@ -27,11 +27,27 @@ class TestWork(unittest.TestCase):
                            [sys.executable, str(WORK), "op", args[1], "--dir", str(self.dir), *args[2:]], env=self.env, capture_output=True, text=True)
         return p.returncode, json.loads(p.stdout)
 
+    def expire(self):
+        record = next((Path(self.tmp.name) / "state" / "work").glob("wt-*")) / "lease.json"
+        record.write_text(json.dumps({**json.loads(record.read_text()), "expires_at": time.time() - 1}))
+
     def test_second_claim_is_refused_while_first_is_live(self):
         rc, a = self.w("claim", "--holder", "A")
         self.assertEqual(rc, 0)
         rc, b = self.w("claim", "--holder", "B")
         self.assertEqual((rc, b["holder"]), (3, "A"))
+
+    def test_rewritten_lease_does_not_lock_out_the_next_holder(self):
+        # 書く子は作業場所の記録に書けるので、期限を遠い将来にした担当や壊れた担当で、親の取り直しを止められない
+        rc, a = self.w("claim", "--holder", "child")
+        record = next((Path(self.tmp.name) / "state" / "work").glob("wt-*")) / "lease.json"
+        for forged in ({**json.loads(record.read_text()), "expires_at": time.time() + 10 * 365 * 86400}, {"holder": "child", "expires_at": "x"}):
+            record.write_text(json.dumps(forged))
+            rc, b = self.w("claim", "--holder", "parent")
+            self.assertEqual(rc, 0, b)
+        p = subprocess.run([sys.executable, str(WORK), "claim", "--dir", str(self.dir), "--holder", "x", "--lease", "100000"],
+                           env=self.env, capture_output=True, text=True)
+        self.assertNotEqual(p.returncode, 0)  # 上限を超える期限は受け付けない
 
     def test_expired_lease_can_be_taken_over_and_old_holder_is_stopped(self):
         rc, a = self.w("claim", "--holder", "A", "--lease", "0")  # すぐに期限切れ
@@ -44,9 +60,9 @@ class TestWork(unittest.TestCase):
         self.assertEqual(self.w("renew", "--token", b["token"])[0], 0)
 
     def test_unknown_result_op_is_pending_and_not_restarted(self):
-        rc, a = self.w("claim", "--holder", "A", "--lease", "0.02")  # 1.2 秒
+        rc, a = self.w("claim", "--holder", "A")
         self.assertEqual(self.w("op", "begin", "--token", a["token"], "--key", "pr-create:feat/x", "--what", "gh pr create")[0], 0)
-        time.sleep(1.5)  # A は結果を記録せずに止まった
+        self.expire()  # A は結果を記録せずに止まり、期限が切れた（sleep で待つと、遅い機械で揺れた）
         rc, b = self.w("claim", "--holder", "B")
         self.assertEqual([o["key"] for o in b["pending_ops"]], ["pr-create:feat/x"])
         rc, again = self.w("op", "begin", "--token", b["token"], "--key", "pr-create:feat/x", "--what", "gh pr create")
@@ -56,11 +72,11 @@ class TestWork(unittest.TestCase):
         self.assertEqual(self.w("op", "pending")[1]["pending_ops"], [])
 
     def test_claim_hands_the_note_to_the_next_holder(self):
-        rc, a = self.w("claim", "--holder", "A", "--lease", "0.02")
+        rc, a = self.w("claim", "--holder", "A")
         self.assertFalse(a["note"]["filled"])
         self.assertTrue(Path(a["note"]["evidence_dir"]).is_dir())  # 証拠の置き場（/tmp に置かせない）
         Path(a["note"]["path"]).write_text("# 作業の記録\n\n- 目的: digits を足す\n", encoding="utf-8")
-        time.sleep(1.5)
+        self.expire()
         rc, b = self.w("claim", "--holder", "B")
         self.assertIn("digits を足す", b["note"]["body"])
 
