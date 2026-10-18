@@ -218,6 +218,17 @@ class TestLaunch(unittest.TestCase):
             rc, rec = self.run_launch("claude", mode, extra=["--write"], cwd=wt)
             self.assertEqual(rec["status"], "failed", (mode, rec))
             self.assertIn("git を動かす前に", rec["problems"][0])
+            if mode == "tamper-main":  # 動いた ref の前後の値と、戻すコマンドを示す
+                self.assertTrue(any(x.startswith("refs/heads/main: ") and "update-ref refs/heads/main " in x for x in rec["problems"]), rec)
+
+    def test_codex_write_in_worktree_gets_only_commit_dirs(self):
+        repo, wt = self.worktree("cx")
+        self.run_launch("codex", extra=["--write"], cwd=wt)
+        argv = json.loads(self.args_file.read_text())
+        dirs = [argv[i + 1] for i, x in enumerate(argv) if x == "--add-dir"]
+        common = (repo / ".git").resolve()
+        self.assertEqual(sorted(dirs), sorted([self.record_of(wt), str(common / "objects"), str(common / "refs" / "heads" / "bb-writ"),
+                                               str(common / "logs" / "refs" / "heads" / "bb-writ"), str(common / "worktrees" / "cx-wt")]))
 
     def test_claude_read_only_in_worktree_denies_the_common_git_dir(self):
         repo, wt = self.worktree()

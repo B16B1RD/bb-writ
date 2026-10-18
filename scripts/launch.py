@@ -99,7 +99,7 @@ def worktree_dirs(cwd: Path) -> tuple[Path | None, Path | None, str | None]:
     return None, None, f"Git の管理ディレクトリを取れない（git rev-parse: {g.stderr.strip()[:200]}）"
 
 
-def grok_commit_dirs(own: Path, common: Path) -> list[Path]:
+def commit_dirs(own: Path, common: Path) -> list[Path]:
     """worktree で commit するのに要る、共通ディレクトリの中の場所。共通ディレクトリの直下・config・hooks と、
     他のブランチの ref は渡さない（書けると、利用者が次に git を動かしたとき sandbox の外でコードが動くか、統合先が動く）。"""
     head = (own / "HEAD").read_text(encoding="utf-8").strip()
@@ -125,13 +125,20 @@ def git_snapshot(own: Path, common: Path, cwd: Path) -> dict:
             "head": (own / "HEAD").read_text(encoding="utf-8").strip()}
 
 
-def git_changes(before: dict, after: dict) -> list[str]:
-    """子が変えてよいのは、起動時に checkout していたブランチの ref と、その作業場所の HEAD・index だけ。"""
+def git_changes(before: dict, after: dict, common: Path) -> list[str]:
+    """子が変えてよいのは、起動時に checkout していたブランチの ref と、その作業場所の HEAD・index だけ。
+    ref は前後の値と戻すコマンドを添える（自動では戻さない。子の実行中に親や別のタスクが正当に動かしたかもしれない）。"""
     mine = before["head"][len("ref: "):] if before["head"].startswith("ref: ") else None
-    refs = sorted(r for r in set(before["refs"]) | set(after["refs"]) if r != mine and before["refs"].get(r) != after["refs"].get(r))
-    files = sorted(f for f in set(before["files"]) | set(after["files"]) if before["files"].get(f) != after["files"].get(f))
-    head = ["HEAD"] if after["head"] != before["head"] else []
-    return refs + files + head
+    out = []
+    for r in sorted(set(before["refs"]) | set(after["refs"])):
+        old, new = before["refs"].get(r), after["refs"].get(r)
+        if r != mine and old != new:
+            undo = f"git --git-dir {common} update-ref {r} {old}" if old else f"git --git-dir {common} update-ref -d {r}"
+            out.append(f"{r}: {old or '(無し)'} → {new or '(削除)'}（戻すなら: {undo}）")
+    out += sorted(f for f in set(before["files"]) | set(after["files"]) if before["files"].get(f) != after["files"].get(f))
+    if after["head"] != before["head"]:
+        out.append(f"HEAD: {before['head']} → {after['head']}")
+    return out
 
 
 def grok_home(login: Path, extends: str, read_write: list[Path]) -> tuple[Path, str]:
@@ -198,7 +205,7 @@ def command(a, prompt: str) -> tuple[list[str], dict, str | None]:
             own, common, why = worktree_dirs(a.cwd)
             if why:
                 return [], env, why
-            home, profile = grok_home(login, "workspace", [work_record(a.cwd), *(grok_commit_dirs(own, common) if own else [])])
+            home, profile = grok_home(login, "workspace", [work_record(a.cwd), *(commit_dirs(own, common) if own else [])])
         else:
             # 起動ごとの home は状態ディレクトリの下にできるので、それと重なる対象も止める
             for d in grok_ro_writable(state_dir() / "grok-homes"):
@@ -218,8 +225,15 @@ def command(a, prompt: str) -> tuple[list[str], dict, str | None]:
     if not (home / "auth.json").is_file():
         return [], env, f"専用ログインが無い: {home}/auth.json（CODEX_HOME={home} codex login）"
     env["CODEX_HOME"] = str(home)
-    mode = ["--approve-for-me", "-c", "sandbox_workspace_write.network_access=true",
-            "--add-dir", str(work_record(a.cwd))] if a.write else ["-s", "read-only"]
+    mode = ["-s", "read-only"]
+    if a.write:
+        # 作業記録と、worktree で commit するのに要る共通ディレクトリの中の場所だけを渡す（管理ディレクトリが無いと index.lock を作れなかった。0.163.0）
+        own, common, why = worktree_dirs(a.cwd)
+        if why:
+            return [], env, why
+        mode = ["--approve-for-me", "-c", "sandbox_workspace_write.network_access=true"]
+        for d in [work_record(a.cwd), *(commit_dirs(own, common) if own else [])]:
+            mode += ["--add-dir", str(d)]
     cmd = ["codex", "exec", "--json", "-m", a.model, "-c", f'model_reasoning_effort="{a.effort}"',
            "--skip-git-repo-check", "-C", str(a.cwd), *mode, prompt]
     return cmd, env, None
@@ -391,7 +405,7 @@ def main() -> int:
                 for f, h in snapshot[2]["files"].items():
                     if h is None and Path(f).is_file() and not Path(f).is_symlink() and Path(f).stat().st_size == 0:
                         Path(f).unlink()
-                changed = git_changes(snapshot[2], git_snapshot(*snapshot[:2], a.cwd))
+                changed = git_changes(snapshot[2], git_snapshot(*snapshot[:2], a.cwd), snapshot[1])
                 if changed:
                     rec.update(status="failed", problems=["子が、自分のブランチ以外の Git の管理情報を変えた。この作業場所で git を動かす前に、"
                                                           "下の場所を確かめる（偽の設定が sandbox の外で動きうる）"] + changed[:20])
