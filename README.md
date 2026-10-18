@@ -38,6 +38,14 @@ codex plugin add bb-writ@bb-writ
 
 インストール後は、新しい CLI セッションを開いて使う。
 
+## 並行して開発する
+
+Claude Code を複数起動する場合も、Claude Code と Codex を組み合わせる場合も、それぞれに別のタスクを依頼できる。Git に書くタスクは bb-writ が専用の worktree・ブランチを作り、同じ checkout を同時に編集しない。読むだけの調査には作らない。
+
+ローカルに統合するときは、最新の統合先を取り込んで検証し、反映を直列にする。検証後に統合先が進んだら、最新の組み合わせで検証し直す。途中のタスクは作業場所と記録を残して再開できる。PR が必須の対象では、そのリポジトリの統合方法に従う。
+
+手動で作業場所を調べるなら `python3 <プラグインの置き場>/scripts/work.py task list --dir <元の checkout>`。準備・再開・統合・片付けの詳細は [`playbook-parallel`](skills/playbook-parallel/SKILL.md)。worktree で必要な依存の準備と、DB・ポートなどの分離には対象の開発手順を使う。
+
 ## 更新
 
 インストールに使った CLI で実行する。marketplace の情報を先に更新し、プラグインを更新する。

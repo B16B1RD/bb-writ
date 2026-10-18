@@ -23,13 +23,14 @@ description: 子に委任するとき、別系統の CLI（Claude Code・Codex�
 python3 <launch.py> --host codex|claude --cwd <対象> --prompt-file <依頼文> [--model M] [--effort E] [--write]
 ```
 
+- 書く委任では両 CLI に状態ディレクトリへのアクセスを渡す。元の checkout の Git メタデータなど、ホスト側の承認が必要な操作はその承認に従う。
 - 既定は読み取り専用（Codex は `-s read-only`、Claude Code は `--permission-mode dontAsk` で Read・Grep・Glob と git の読み取りだけを許す）。変更を任せるときだけ `--write`。
 - 子に、最後に結論・証拠・不明点の JSON を書かせる。標準出力の 1 行の JSON の `status` が `ok` のときだけ報告を使う。`invalid-report`・`failed`・`quota`・`unavailable` は理由（`problems`）を記録して扱う。JSON が返ったことを成功にしない。
 - 実効のモデル・effort を記録する（Claude Code は結果の `modelUsage`、Codex は記録の `turn_context`）。記録は `~/.local/state/bb-writ/delegations/` と `delegations.jsonl`。
 
 ## 担当の貸し出しと外部操作の記録
 
-`scripts/work.py`（launcher と同じ置き場）。子に書く仕事を任せるときは、親が担当を持ったままにせず、子に `claim` させる（同じ作業場所に親と子が同時に書かない）。使い方は入口 `bb-writ` の「離席・中断・訂正」。
+`scripts/work.py`（launcher と同じ置き場）。子に書く仕事を任せるときは、親が担当を持ったままにせず、子に `claim` させる（同じ作業場所に親と子が同時に書かない）。別タスクを並行させる子は `playbook-parallel` で専用 worktree を確保する。同じタスクの引き継ぎは `task resume`。CLI 名や担当の表示名が同じでも、タスクと token で区別する。使い方は入口 `bb-writ` の「離席・中断・訂正」。
 
 外部操作（push・PR・コメントなど）は元の checkout から実行し、`op begin --from <元の checkout>` で確かめる。成果物を出す操作は `--verified <検証した commit>` も付ける。子に頼むときも同じ。`work.py check --dir <作業場所> --from <実行する場所>` で、そこで使われる GitHub のアカウントと書き込み権限を事前に見られる。子の起動に `GH_CONFIG_DIR` や `GH_TOKEN` を足してアカウントを決めない（利用者の環境の切り替えを上書きし、別の名前で外に出る）。
 
