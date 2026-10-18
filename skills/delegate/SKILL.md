@@ -24,7 +24,8 @@ python3 <launch.py> --host codex|claude|grok --cwd <対象> --prompt-file <依�
 ```
 
 - 書く委任では両 CLI に状態ディレクトリへのアクセスを渡す。元の checkout の Git メタデータなど、ホスト側の承認が必要な操作はその承認に従う。
-- 既定は読み取り専用（Codex は `-s read-only`、Claude Code は `--permission-mode dontAsk` で Read・Grep・Glob と git の読み取りだけを許す、Grok Build は `--sandbox read-only`）。変更を任せるときだけ `--write`。
+- 既定は読み取り専用（Codex は `-s read-only`、Claude Code は下の sandbox、Grok Build は `--sandbox read-only`）。変更を任せるときだけ `--write`。
+- 読み取り専用の Claude Code は、コマンドの許可規則でなく OS の sandbox で守る。`--restricted --tools Read,Grep,Glob,Bash --permission-mode dontAsk` に、`--settings` で Bash の sandbox（対象への書き込みも拒否、認証情報の置き場の読み取りを拒否、ネットワークの宛先なし、起動できなければ子を起動しない）を渡す。許可規則の `Bash(git diff:*)` だけでは、`git log --output=<任意のパス>` で対象の外や `.git/hooks` に書け、対象の `.claude/settings.json` の SessionStart hook も動いた（2026-10-19、2.1.302）。`--restricted` は対象の `.claude` の設定を読まず、Read を対象の中に閉じる。その下では `--allowedTools` が効かないので、許可は `--settings` に書く。対象の CLAUDE.md は自動では読まれないので、launcher は子に AGENTS.md・CLAUDE.md を資料として読ませる。Linux・WSL2 の sandbox は `bwrap` と `socat` が要る。sandbox の書き込み拒否は絶対パスで書く（`"."` は対象を指さなかった。同日）。実機の確認は `python3 -B tests/verify_sandbox_live.py --out <新しい証拠ディレクトリ>`。
 - 子に、最後に結論・証拠・不明点の JSON を書かせる。標準出力の 1 行の JSON の `status` が `ok` のときだけ報告を使う。`invalid-report`・`failed`・`quota`・`unavailable` は理由（`problems`）を記録して扱う。JSON が返ったことを成功にしない。
 - 実効のモデル・effort を記録する（Claude Code と Grok Build は結果の `modelUsage`、Codex は記録の `turn_context`）。Grok Build の結果に effort は出ないので「不明」とする。記録は `~/.local/state/bb-writ/delegations/` と `delegations.jsonl`。
 

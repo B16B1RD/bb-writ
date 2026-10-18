@@ -109,7 +109,17 @@ class TestLaunch(unittest.TestCase):
         self.assertEqual(rec["model_effective"], ["claude-sonnet-5-5"])
         argv = json.loads(self.args_file.read_text())
         self.assertEqual(argv[argv.index("--permission-mode") + 1], "dontAsk")
-        self.assertNotIn("Edit", argv)
+        # 対象の .claude の hook・許可規則を読まない。書けるツールを渡さない
+        self.assertIn("--restricted", argv)
+        self.assertEqual(argv[argv.index("--tools") + 1], "Read,Grep,Glob,Bash")
+        # git の --output などの書き込みは OS の sandbox で止め、sandbox が無ければ起動しない。専用ログインの置き場は読ませない
+        sandbox = json.loads(argv[argv.index("--settings") + 1])["sandbox"]
+        self.assertEqual((sandbox["enabled"], sandbox["allowUnsandboxedCommands"], sandbox["failIfUnavailable"]), (True, False, True))
+        fs = sandbox["filesystem"]
+        self.assertEqual(fs["denyWrite"], [str(self.cwd.resolve())])
+        for secret in (".config", ".ssh", ".claude", ".codex", ".grok"):  # gh のトークン・dotenvx の鍵・各 CLI のログイン
+            self.assertIn(str(Path.home() / secret), fs["denyRead"])
+        self.assertIn("AGENTS.md・CLAUDE.md", argv[argv.index("-p") + 1])  # 自動で読まれない対象の指示を、資料として読ませる
 
     def test_write_changes_permissions(self):
         self.run_launch("codex", extra=["--write"])
