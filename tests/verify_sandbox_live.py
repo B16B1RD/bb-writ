@@ -157,7 +157,7 @@ def grok_applied(home):
 def grok_parallel_read_only(out):
     """F4: 読み取り専用の Grok の子を 2 つ同時に起動する。子が自分の GROK_HOME を書き換えても、専用ログインと次の起動に残らない。"""
     login = CFG / 'grok-auth'
-    before = {n: digest(login / n) for n in ('auth.json', 'sandbox.toml', 'config.toml')}
+    before = {n: digest(login / n) for n in ('sandbox.toml', 'config.toml')}  # auth.json は Grok 自身がトークンの更新で書き換える（下で形を見る）
     target = out / 'target'
     git(out, 'init', '-q', str(target))
     (target / 'a.txt').write_text('x\n')
@@ -179,6 +179,7 @@ def grok_parallel_read_only(out):
         'own_profile_enforced': all(a and a[-1]['profile'] == 'bbwrit' and a[-1]['enforced'] for a in applied),
         'no_write_in_target': not (target / 'written.txt').exists(),
         'login_unchanged': before == {n: digest(login / n) for n in before},
+        'login_auth_intact': json.loads((login / 'auth.json').read_text()) is not None and all((h / 'auth.json').is_symlink() for h in homes),
     }
     return checks, recs[0]
 
