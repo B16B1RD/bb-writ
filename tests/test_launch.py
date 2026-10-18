@@ -96,7 +96,12 @@ class TestLaunch(unittest.TestCase):
 
     def test_write_changes_permissions(self):
         self.run_launch("codex", extra=["--write"])
-        self.assertIn("--approve-for-me", json.loads(self.args_file.read_text()))
+        argv = json.loads(self.args_file.read_text())
+        self.assertIn("--approve-for-me", argv)
+        self.assertEqual(argv[argv.index('--add-dir') + 1], str(self.state))
+        self.run_launch('claude', extra=['--write'])
+        argv = json.loads(self.args_file.read_text())
+        self.assertEqual(argv[argv.index('--add-dir') + 1], str(self.state))
 
     def test_crash_is_failed(self):
         rc, rec = self.run_launch("codex", "crash")
@@ -136,6 +141,24 @@ class TestLaunch(unittest.TestCase):
         rc, rec = self.run_launch("claude")
         self.assertEqual(rec["status"], "unavailable")
         self.assertIn("専用ログインが無い", rec["problems"][0])
+
+    def test_multiple_launches_keep_separate_evidence(self):
+        _, a = self.run_launch('codex')
+        _, b = self.run_launch('codex')
+        self.assertNotEqual(a['out'], b['out'])
+        self.assertTrue((Path(a['out']) / 'record.json').exists())
+        self.assertTrue((Path(b['out']) / 'record.json').exists())
+
+    def test_explicit_output_directory_is_not_overwritten(self):
+        out = self.state / 'existing'
+        self.run_launch('codex', extra=['--out', str(out)])
+        record = (out / 'record.json').read_text()
+        env = {**os.environ, 'BB_WRIT_STATE_DIR': str(self.state)}
+        p = subprocess.run([sys.executable, str(LAUNCH), '--host', 'codex', '--cwd', str(self.cwd),
+                            '--prompt-file', str(self.prompt), '--out', str(out)],
+                           env=env, capture_output=True, text=True)
+        self.assertNotEqual(p.returncode, 0)
+        self.assertEqual((out / 'record.json').read_text(), record)
 
 
 if __name__ == "__main__":

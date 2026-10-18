@@ -15,6 +15,7 @@ import json
 import os
 import re
 import shutil
+import secrets
 import subprocess
 import sys
 import time
@@ -51,7 +52,7 @@ def command(a, prompt: str) -> tuple[list[str], dict, str | None]:
         if not env_file.is_file() or not keys.is_file():
             return [], env, f"専用ログインが無い: {env_file} と {keys.name}（claude setup-token の結果を dotenvx で保存する）"
         env["CLAUDE_CONFIG_DIR"] = str(cfg / "claude-home")
-        perm = ["--permission-mode", "auto"] if a.write else [
+        perm = ["--permission-mode", "auto", "--add-dir", str(state_dir())] if a.write else [
             "--permission-mode", "dontAsk", "--allowedTools", "Read", "Grep", "Glob",
             "Bash(git log:*)", "Bash(git diff:*)", "Bash(git show:*)", "Bash(git status:*)", "Bash(ls:*)"]
         cmd = ["dotenvx", "run", "-q", "-f", str(env_file), "-fk", str(keys), "--",
@@ -64,7 +65,8 @@ def command(a, prompt: str) -> tuple[list[str], dict, str | None]:
     if not (home / "auth.json").is_file():
         return [], env, f"専用ログインが無い: {home}/auth.json（CODEX_HOME={home} codex login）"
     env["CODEX_HOME"] = str(home)
-    mode = ["--approve-for-me", "-c", "sandbox_workspace_write.network_access=true"] if a.write else ["-s", "read-only"]
+    mode = ["--approve-for-me", "-c", "sandbox_workspace_write.network_access=true",
+            "--add-dir", str(state_dir())] if a.write else ["-s", "read-only"]
     cmd = ["codex", "exec", "--json", "-m", a.model, "-c", f'model_reasoning_effort="{a.effort}"',
            "--skip-git-repo-check", "-C", str(a.cwd), *mode, prompt]
     return cmd, env, None
@@ -156,8 +158,8 @@ def main() -> int:
     a.model = a.model or DEFAULTS[a.host][0]
     a.effort = a.effort or DEFAULTS[a.host][1]
     a.cwd = a.cwd.resolve()
-    out_dir = a.out or state_dir() / "delegations" / time.strftime("%Y%m%d-%H%M%S")
-    out_dir.mkdir(parents=True, exist_ok=True)
+    out_dir = a.out or state_dir() / "delegations" / (time.strftime("%Y%m%d-%H%M%S") + '-' + secrets.token_hex(8))
+    out_dir.mkdir(parents=True, exist_ok=False)
     rec = {"host": a.host, "cwd": str(a.cwd), "model_requested": a.model, "effort_requested": a.effort,
            "write": a.write, "out": str(out_dir)}
 
