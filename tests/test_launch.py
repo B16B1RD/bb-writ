@@ -232,7 +232,7 @@ class TestLaunch(unittest.TestCase):
         rw = json.loads(profile.split("read_write = ", 1)[1])
         common = (repo / ".git").resolve()
         # commit に要る場所だけ。共通ディレクトリの直下・config・hooks と、state 全体は渡さない
-        self.assertEqual(sorted(rw), sorted([self.record_of(wt), str(common / "objects"), str(common / "refs"), str(common / "logs"),
+        self.assertEqual(sorted(rw), sorted([str(Path(self.record_of(wt)).resolve()), str(common / "objects"), str(common / "refs"), str(common / "logs"),
                                              str(common / "worktrees" / "wt")]))
 
     def test_grok_parallel_launches_have_separate_homes(self):
