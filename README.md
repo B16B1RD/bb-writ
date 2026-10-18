@@ -4,7 +4,7 @@ bb-writ（読み方：ビービー・リット）は、Claude Code・Codex 向�
 
 紹介動画（35 秒）。中盤は、実際の Claude Code のセッションで和暦の不具合を直す様子を早送りしたもの。
 
-https://github.com/user-attachments/assets/e51075e2-5b3b-4ca1-abb6-fef079d504f1
+https://github.com/user-attachments/assets/dd9c669e-0d1e-4645-a631-ea70809b345a
 
 ## 前提
 
