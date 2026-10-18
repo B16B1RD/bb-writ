@@ -2,15 +2,76 @@
 
 Claude Code・Codex 向けのスキルのプラグイン。「直して」「作って」「調べて」といった普通の依頼を受け、リポジトリを読んで実装・修正・調査までやり遂げ、実物で動作を確かめた結果を根拠とともに返す。Issue の整形も、対象のリポジトリの登録も要らない。
 
-## 入れる
+## インストール
 
-下の入れ方は 0.7.0 で実測した（2026-10-18）。
+使う CLI（Claude Code または Codex）をインストールしてから、その CLI の手順を実行する。基本機能には、もう一方の CLI や bb-writ 専用のログインは要らない。
 
-- **Claude Code:** `claude plugin marketplace add B16B1RD/bb-writ` → `claude plugin install bb-writ@bb-writ`。何も入っていない設定からこの手順で入り、スキルが呼べることを確かめた。手元の作業ツリーを試すときは `claude plugin marketplace add <このリポジトリ>`（作業ツリーを直接読むので、編集は次のセッションか `/reload-plugins` で効く）。
-- **Codex:** `codex plugin marketplace add B16B1RD/bb-writ` → `codex plugin add bb-writ@bb-writ`。何も入っていない設定から入ることを確かめた（0.3.0）。Codex は版ごとの写しを置くので、版を上げたら `codex plugin remove bb-writ@bb-writ` → `add`。
-- **入口の案内（Claude Code）:** 普通の依頼文だけでは入口が使われないので、CLAUDE.md に 1 行「技術的な仕事は、まず bb-writ:bb-writ スキルを使って始める」を置くか、`/bb-writ:bb-writ <依頼>` と明示する。Codex は普通の依頼文で入口を使う。hook は使わない。
-- **Grok Build:** root の `plugin.json` を読む形にしてあるが、未確認。
-- **別系統の CLI を使う機能:** `delegate` や `interrogate` の別系統の審査役は、`scripts/launch.py` でもう一方の CLI を起動する。両方の CLI を入れておき、起動される側には普段のログインとは別の、bb-writ 専用のログインを用意する（準備は `skills/delegate/SKILL.md`）。この機能を使わなければ、専用ログインは要らない。
+### Claude Code
+
+```sh
+claude plugin marketplace add B16B1RD/bb-writ
+claude plugin install bb-writ@bb-writ
+```
+
+### Codex
+
+```sh
+codex plugin marketplace add B16B1RD/bb-writ
+codex plugin add bb-writ@bb-writ
+```
+
+インストール後は、新しい CLI セッションを開いて使う。
+
+## 更新
+
+インストールに使った CLI で実行する。marketplace の情報を先に更新し、プラグインを更新する。
+
+### Claude Code
+
+```sh
+claude plugin marketplace update bb-writ
+claude plugin update bb-writ@bb-writ
+```
+
+更新後は Claude Code を再起動する。
+
+### Codex
+
+Codex は版ごとの写しを置くので、marketplace の更新後に削除・再追加する。
+
+```sh
+codex plugin marketplace upgrade bb-writ
+codex plugin remove bb-writ@bb-writ
+codex plugin add bb-writ@bb-writ
+```
+
+更新後は、新しい Codex セッションを開く。
+
+## 使い始める
+
+作業するリポジトリで CLI を開き、入口のスキルを明示して頼む。たとえば README を調べるだけなら、次のように入力する。
+
+Claude Code:
+
+```text
+/bb-writ:bb-writ README を読み、このプロジェクトの使い方を説明して。ファイルは変更しないで。
+```
+
+Codex:
+
+```text
+$bb-writ:bb-writ README を読み、このプロジェクトの使い方を説明して。ファイルは変更しないで。
+```
+
+Claude Code で普通の依頼文から入口を使わせるには、対象の `CLAUDE.md` に「技術的な仕事は、まず bb-writ:bb-writ スキルを使って始める」と書く。Codex は依頼に応じて入口を使う。hook は要らない。
+
+## 任意機能の準備
+
+`delegate` や `interrogate` で別系統の CLI を起動する場合は、両方の CLI と、起動される側の bb-writ 専用ログインを用意する。準備と呼び出し方は [`delegate` の手引き](skills/delegate/SKILL.md) にある。
+
+手元の作業ツリーを Claude Code で試す場合は、配布版の代わりに `claude plugin marketplace add <このリポジトリのパス>` で登録する。作業ツリーへの編集は次のセッションか `/reload-plugins` で反映する。
+
+Grok Build は root の `plugin.json` を読む形にしてあるが、インストール・更新の動作は確認していない。
 
 ## 使う
 
