@@ -9,6 +9,14 @@
   work.py op done    --dir <作業場所> --token <t> --key <操作の鍵> --result <結果>
   work.py op pending --dir <作業場所>                                 → 始めたが終わりの記録が無い操作
   work.py check   --dir <作業場所> --from <外部操作を実行する場所>      → そこで使われる GitHub のアカウントと、push 先の origin への書き込み権限（書けなければ 5）
+  work.py task start --dir <checkout> --holder <誰か> [--base <commit等>] [--target <ブランチ>] → 専用 worktree と担当を作る
+  work.py task list --dir <checkout>                               → タスク、担当、未完了の統合
+  work.py task resume --dir <checkout> --task <識別子> --holder <誰か> → 作業場所を保持して担当を取得
+  work.py integrate --dir <worktree> --token <t> --expected <統合先commit> --verified <検証済みcommit> → 排他・照合して fast-forward
+  work.py task cleanup --dir <worktree> --token <t> --saved <別のブランチかタグ> → 保存先と差分を照合して片付け
+
+task と integrate の照合拒否は終了コード 6、担当の拒否は 3。統合のロックは期限では奪わず、子の Git にも渡す。
+統合の記録はリポジトリ共通。中断後は前回の候補を含む統合先から完了を復元するか、新しく検証した候補で再開する。
 
 公開する操作（鍵の種類が push・pr・merge・release）の op begin には --verified <検証した commit> が要る。作業場所の HEAD と違えば拒否する（6）。
 検証の後に成果物が変わったら、証拠を取り直してから出す（plan-v3 6.2）。merge は、GitHub 側でも gh pr merge --match-head-commit <同じ commit> で止める。
@@ -30,6 +38,7 @@ import fcntl
 import hashlib
 import json
 import os
+import re
 import secrets
 import subprocess
 import sys
@@ -50,7 +59,7 @@ def root(d: Path) -> Path:
 def locked(r: Path):
     with open(r / ".mutex", "w") as m:
         fcntl.flock(m, fcntl.LOCK_EX)
-        yield
+        yield m.fileno()
 
 
 def read(p: Path):
@@ -172,9 +181,245 @@ def check_token(lease, token):
     return None
 
 
+def claim_at(r, d, holder, minutes):
+    now = time.time()
+    old = read(r / 'lease.json')
+    if old and old['expires_at'] > now:
+        return {'ok': False, 'reason': '生きた担当がいる。二重に書かない',
+                'holder': old['holder'], 'expires_in_s': round(old['expires_at'] - now)}, 3
+    new = {'token': secrets.token_hex(8), 'holder': holder, 'dir': str(d.resolve()),
+           'claimed_at': now, 'expires_at': now + minutes * 60,
+           'previous': old and {'holder': old['holder'], 'expired_at': old['expires_at']}}
+    write(r / 'lease.json', new)
+    return {'ok': True, 'token': new['token'], 'previous': new['previous'],
+            'pending_ops': pending(r), 'note': note(r)}, 0
+
+
+def git(d, *args, fds=()):
+    p = subprocess.run(['git', '-C', str(d), *args], stdin=subprocess.DEVNULL,
+                       capture_output=True, text=True, pass_fds=fds)
+    if p.returncode:
+        raise ValueError(p.stderr.strip() or p.stdout.strip() or 'git が失敗した')
+    return p.stdout.strip()
+
+
+def clean(d, ignored=False):
+    return not git(d, 'status', '--porcelain', '--untracked-files=all', *(['--ignored=matching'] if ignored else []))
+
+
+def current_lease(r, token):
+    lease = read(r / 'lease.json')
+    if lease and lease['expires_at'] <= time.time():
+        lease = None
+    why = check_token(lease, token)
+    if why:
+        raise PermissionError(why)
+    return lease
+
+
+def tasks_at(repo):
+    r = root(repo) / 'tasks'
+    r.mkdir(exist_ok=True)
+    return r
+
+
+def task_at(d):
+    task = read(root(d) / 'task.json')
+    if not task or Path(task['dir']).resolve() != d.resolve():
+        raise ValueError('この場所は task start で作った作業場所ではない')
+    return task
+
+
+def worktrees(repo):
+    # -z は空白・改行を含むパスも分割しない。
+    result, entry = [], {}
+    for field in git(repo, 'worktree', 'list', '--porcelain', '-z').split('\0'):
+        if not field:
+            if entry:
+                result.append(entry)
+                entry = {}
+        else:
+            k, _, v = field.partition(' ')
+            entry[k] = v
+    return result
+
+
+def task_command(a):
+    repo = checkout_of(a.dir)
+    rr = root(repo)
+    with locked(rr) as rf:
+        registry = tasks_at(repo)
+        if a.action == 'list':
+            tasks = []
+            for p in sorted(registry.glob('*.json')):
+                task = read(p)
+                lease = read(root(Path(task['dir'])) / 'lease.json')
+                tasks.append({**task, 'lease': {k: v for k, v in lease.items() if k != 'token'} if lease else None})
+            return out({'ok': True, 'tasks': tasks, 'integration': read(rr / 'integration.json')})
+        if a.action == 'start':
+            source_task = read(root(a.dir) / 'task.json')
+            target = a.target or (source_task or {}).get('target') or git(a.dir, 'symbolic-ref', '--quiet', '--short', 'HEAD')
+            git(repo, 'show-ref', '--verify', 'refs/heads/' + target)
+            base = git(repo, 'rev-parse', '--verify', (a.base or 'refs/heads/' + target) + '^{commit}')
+            ident = secrets.token_hex(8)
+            state = rr.parent.parent
+            dest = state / 'worktrees' / rr.name / ident
+            task = {'task': ident, 'dir': str(dest), 'branch': 'bb-writ/' + ident,
+                    'base': base, 'target': target, 'checkout': str(repo)}
+            # 作成の途中で止まっても、一覧から作業場所とブランチを追える。
+            write(registry / (ident + '.json'), task)
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                git(repo, 'worktree', 'add', '-b', task['branch'], str(dest), base, fds=(rf,))
+            except (ValueError, OSError):
+                # 終了済みの作成が何も残さなかった場合だけ記録を取り消す。
+                # プロセス中断や、ブランチ・ファイルの一部が残る失敗は記録を保持する。
+                if not dest.exists() and not commit_of(repo, 'refs/heads/' + task['branch']) and not any(
+                        Path(w['worktree']).resolve() == dest.resolve() for w in worktrees(repo)):
+                    (registry / (ident + '.json')).unlink()
+                raise
+            wr = root(dest)
+            with locked(wr):
+                write(wr / 'task.json', task)
+                res, code = claim_at(wr, dest, a.holder, a.lease)
+            return out({**task, **res}, code)
+        if a.action == 'resume':
+            if not re.fullmatch('[a-f0-9]{16}', a.task):
+                raise ValueError('task list の task 識別子を指定する')
+            task = read(registry / (a.task + '.json'))
+            if not task:
+                raise ValueError('そのタスクの記録が無い')
+            dest = Path(task['dir'])
+            cleanup = task.get('cleanup')
+            if cleanup and not dest.exists() and not commit_of(repo, 'refs/heads/' + task['branch']):
+                git(repo, 'merge-base', '--is-ancestor', cleanup['commit'], cleanup['saved'])
+                wr = root(dest)
+                with locked(wr):
+                    (wr / 'lease.json').unlink(missing_ok=True)
+                    (registry / (task['task'] + '.json')).unlink()
+                return out({'ok': True, 'completed': True, **cleanup, 'note': note(wr)})
+            trees = worktrees(repo)
+            registered = any(Path(w['worktree']).resolve() == dest.resolve() for w in trees)
+            if not dest.exists() and not registered:
+                if any(w.get('branch') == 'refs/heads/' + task['branch'] or
+                       Path(w['worktree']).resolve() == dest.resolve() for w in trees):
+                    raise ValueError('別の場所か不完全な worktree 登録が残る。先に実物を照合する')
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                branch = commit_of(repo, 'refs/heads/' + task['branch'])
+                git(repo, 'worktree', 'add', *([] if branch else ['-b', task['branch']]),
+                    str(dest), task['branch'] if branch else task['base'], fds=(rf,))
+                registered = True
+            if not dest.is_dir() or not registered:
+                raise ValueError('作業場所の作成が未完了か、登録と実物が異なる。記録と git worktree list を照合する')
+            actual_branch = next(w.get('branch') for w in worktrees(repo) if Path(w['worktree']).resolve() == dest.resolve())
+            git(dest, 'rev-parse', '--verify', 'HEAD')
+            wr = root(dest)
+            with locked(wr):
+                write(wr / 'task.json', task)
+                res, code = claim_at(wr, dest, a.holder, a.lease)
+            return out({**task, **res, 'worktree_branch': actual_branch}, code)
+        task = task_at(a.dir)
+        wr = root(a.dir)
+        with locked(wr) as wf:
+            current_lease(wr, a.token)
+            if git(a.dir, 'symbolic-ref', '--quiet', 'HEAD') != 'refs/heads/' + task['branch']:
+                raise ValueError('タスクのブランチが変更されている。元のブランチに戻して保存先を照合する')
+            journal = read(rr / 'integration.json')
+            if not clean(a.dir, ignored=True) or pending(wr) or (journal and journal['dir'] == str(a.dir.resolve())):
+                raise ValueError('未保存の変更・未完了の操作がある。作業場所を保持する')
+            # 同じブランチ自身の名前を保存先として使うと、削除後に変更を失う。
+            ref = git(repo, 'rev-parse', '--symbolic-full-name', a.saved)
+            if not ref.startswith(('refs/heads/', 'refs/tags/')) or ref == 'refs/heads/' + task['branch']:
+                raise ValueError('保存先には、このタスク以外のブランチかタグを指定する')
+            head = git(a.dir, 'rev-parse', 'HEAD')
+            git(repo, 'merge-base', '--is-ancestor', head, ref)
+            write(registry / (task['task'] + '.json'), {**task, 'cleanup': {'saved': ref, 'commit': head}})
+            git(repo, 'worktree', 'remove', str(a.dir.resolve()), fds=(rf, wf))
+            git(repo, 'branch', '-D', task['branch'], fds=(rf, wf))
+            (wr / 'lease.json').unlink()
+            (registry / (task['task'] + '.json')).unlink()
+            return out({'ok': True, 'saved': ref, 'commit': head, 'note': note(wr)})
+
+
+def integrate(a):
+    repo = checkout_of(a.dir)
+    rr, wr = root(repo), root(a.dir)
+    if rr == wr:
+        raise ValueError('統合は task start で作った作業場所から実行する')
+    # 全コマンドで repository → worktree の順に取り、検証後の反映を直列にする。
+    # 子の git に fd を渡す。親だけが停止しても、git の終了まで排他を保持する。
+    with locked(rr) as rf, locked(wr) as wf:
+        current_lease(wr, a.token)
+        task = task_at(a.dir)
+        ref = 'refs/heads/' + task['target']
+        candidates = [w for w in worktrees(repo) if w.get('branch') == ref]
+        if len(candidates) != 1:
+            raise ValueError('統合先ブランチを checkout した作業場所が 1 つ必要')
+        dest = Path(candidates[0]['worktree'])
+        if dest.resolve() != repo.resolve():
+            raise ValueError('ローカル統合先は元の checkout に限る。対象側の PR 経路などで統合する')
+        target_lease = read(rr / 'lease.json')
+        if target_lease and target_lease['expires_at'] > time.time():
+            raise ValueError('統合先の checkout に生きた担当がいる。書き換えず待つ')
+        if git(a.dir, 'symbolic-ref', '--quiet', 'HEAD') != 'refs/heads/' + task['branch']:
+            raise ValueError('タスクのブランチが変更されている')
+        journal_file = rr / 'integration.json'
+        journal = read(journal_file)
+        head, target = git(a.dir, 'rev-parse', 'HEAD'), git(repo, 'rev-parse', ref)
+        if journal:
+            if journal['dir'] != str(a.dir.resolve()):
+                raise ValueError('別タスクの統合が未完了。task list から担当と作業場所を調べ、先に照合する')
+            # 反映直後の中断だけは Git の実物から完了を復元できる。
+            if a.verified == journal['verified'] and a.expected == journal['expected'] and clean(dest) and subprocess.run(['git', '-C', str(repo), 'merge-base', '--is-ancestor', journal['verified'], target],
+                                              capture_output=True).returncode == 0:
+                journal_file.unlink()
+                return out({'ok': True, 'recovered': True, 'commit': journal['verified'], 'target_commit': target})
+            if not clean(dest):
+                raise ValueError('前回の統合が未完了。統合先の HEAD・差分を照合し、変更を保存してから再開する')
+            # 統合先が別の版に変わった場合、前回の候補も保存した新版の検証が必要。
+            git(repo, 'merge-base', '--is-ancestor', journal['verified'], head)
+        if head != a.verified or target != a.expected:
+            raise ValueError('検証した commit または統合先が変わった。最新の統合先を取り込み、再検証する')
+        if not clean(a.dir) or not clean(dest):
+            raise ValueError('作業場所か統合先に未 commit の変更がある。変更は保持する')
+        git(repo, 'merge-base', '--is-ancestor', target, head)
+        write(journal_file, {'dir': str(a.dir.resolve()), 'expected': target, 'verified': head, 'target': ref})
+        try:
+            git(dest, 'merge', '--ff-only', '--no-overwrite-ignore', head, fds=(rf, wf))
+        except (ValueError, OSError):
+            if git(repo, 'rev-parse', ref) == target and clean(dest):
+                journal_file.unlink()
+            raise
+        if git(repo, 'rev-parse', ref) != head or not clean(dest):
+            raise ValueError('統合後の実物が検証した commit と一致しない。記録と差分を照合する')
+        journal_file.unlink()
+        return out({'ok': True, 'commit': head, 'target': ref})
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     sub = ap.add_subparsers(dest="cmd", required=True)
+    t = sub.add_parser('task')
+    ts = t.add_subparsers(dest='action', required=True)
+    for name in ('start', 'resume', 'list', 'cleanup'):
+        s = ts.add_parser(name)
+        s.add_argument('--dir', type=Path, required=True)
+        if name in ('start', 'resume'):
+            s.add_argument('--holder', required=True)
+            s.add_argument('--lease', type=float, default=20)
+        if name == 'start':
+            s.add_argument('--base')
+            s.add_argument('--target')
+        if name == 'resume':
+            s.add_argument('--task', required=True)
+        if name == 'cleanup':
+            s.add_argument('--token', required=True)
+            s.add_argument('--saved', required=True)
+    i = sub.add_parser('integrate')
+    i.add_argument('--dir', type=Path, required=True)
+    i.add_argument('--token', required=True)
+    i.add_argument('--expected', required=True, help='検証時の統合先の完全な commit ID')
+    i.add_argument('--verified', required=True, help='検証した作業場所の完全な commit ID')
     for name in ("claim", "renew", "release", "status"):
         s = sub.add_parser(name)
         s.add_argument("--dir", type=Path, required=True)
@@ -197,25 +442,27 @@ def main() -> int:
     c.add_argument("--dir", type=Path, required=True)
     c.add_argument("--from", dest="frm", type=Path, required=True)
     a = ap.parse_args()
+    if a.cmd in ('task', 'integrate'):
+        try:
+            return task_command(a) if a.cmd == 'task' else integrate(a)
+        except PermissionError as e:
+            return out({'ok': False, 'reason': str(e)}, 3)
+        except (ValueError, OSError) as e:
+            return out({'ok': False, 'reason': str(e)}, 6)
     if a.cmd == "check":
         res, code = check(a.dir, a.frm)
         return out(res, code)
     r = root(a.dir)
-    now = time.time()
     with locked(r):
+        now = time.time()
         lease = read(r / "lease.json")
         live = lease if lease and lease["expires_at"] > now else None
         if a.cmd == "status":
             return out({"dir": str(a.dir.resolve()), "holder": live and live["holder"], "expires_in_s": live and round(live["expires_at"] - now),
                         "stale": bool(lease and not live), "pending_ops": pending(r), "note": note(r)})
         if a.cmd == "claim":
-            if live:
-                return out({"ok": False, "reason": "生きた担当がいる。二重に書かない", "holder": live["holder"],
-                            "expires_in_s": round(live["expires_at"] - now)}, 3)
-            new = {"token": secrets.token_hex(8), "holder": a.holder, "dir": str(a.dir.resolve()), "claimed_at": now,
-                   "expires_at": now + a.lease * 60, "previous": lease and {"holder": lease["holder"], "expired_at": lease["expires_at"]}}
-            write(r / "lease.json", new)
-            return out({"ok": True, "token": new["token"], "previous": new["previous"], "pending_ops": pending(r), "note": note(r)})
+            res, code = claim_at(r, a.dir, a.holder, a.lease)
+            return out(res, code)
         if a.cmd in ("renew", "release"):
             why = check_token(live, a.token)
             if why:
