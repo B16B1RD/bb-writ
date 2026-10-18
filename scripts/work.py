@@ -224,7 +224,9 @@ def tasks_at(repo):
 
 
 def task_at(d):
-    task = read(root(d) / 'task.json')
+    # 作業場所の記録の task.json は書く子が書き換えうるので、識別子だけを使い、中身は親だけが書くタスクの一覧から読む。
+    ident = str((read(root(d) / 'task.json') or {}).get('task'))
+    task = read(tasks_at(checkout_of(d)) / (ident + '.json')) if re.fullmatch('[a-f0-9]{16}', ident) else None
     if not task or Path(task['dir']).resolve() != d.resolve():
         raise ValueError('この場所は task start で作った作業場所ではない')
     return task
@@ -295,7 +297,7 @@ def task_command(a):
                 raise ValueError('そのタスクの記録が無い')
             # 記録は書き換えられうるので、行き先・ブランチ・基点を task 識別子から決まる値と照合してから git に渡す。
             dest = task_dir(rr, a.task)
-            if (task.get('task'), task.get('dir'), task.get('branch')) != (a.task, str(dest), 'bb-writ/' + a.task) or \
+            if (task.get('task'), Path(str(task.get('dir'))).resolve(), task.get('branch')) != (a.task, dest.resolve(), 'bb-writ/' + a.task) or \
                     not re.fullmatch('[0-9a-f]{40}|[0-9a-f]{64}', str(task.get('base'))):
                 raise ValueError('タスクの記録が task start の作った値と合わない。記録を照合する')
             cleanup = task.get('cleanup')

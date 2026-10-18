@@ -124,6 +124,23 @@ class TestParallel(unittest.TestCase):
         record.write_text(json.dumps(original))
         self.assertEqual(self.w('task', 'resume', '--dir', self.repo, '--task', a['task'], '--holder', 'Codex')['dir'], a['dir'])
 
+    def test_rewritten_task_json_in_the_work_record_is_not_trusted(self):
+        # 書く子は作業場所の記録に書けるので、そこの task.json の task・target を書き換えても、統合と片付けは親の一覧に従う
+        a = self.start()
+        head = self.change(a, 'feature')
+        self.git(self.repo, 'branch', 'other')
+        record = Path(self.w('status', '--dir', a['dir'])['note']['path']).parent / 'task.json'
+        original = json.loads(record.read_text())
+        record.write_text(json.dumps({**original, 'target': 'other'}))
+        main = self.git(self.repo, 'rev-parse', 'main')
+        self.integrate(a, main, head)
+        self.assertEqual(self.git(self.repo, 'rev-parse', 'main'), head)
+        self.assertEqual(self.git(self.repo, 'rev-parse', 'other'), main)
+        outside = Path(self.tmp.name) / 'evil'
+        record.write_text(json.dumps({**original, 'task': str(outside)}))
+        self.w('task', 'cleanup', '--dir', a['dir'], '--token', a['token'], '--saved', 'main', code=6)
+        self.assertFalse(Path(str(outside) + '.json').exists())
+
     def test_failed_start_without_artifacts_does_not_leave_a_task(self):
         real_git = shutil.which('git')
         bin_dir = Path(self.tmp.name) / 'bin'

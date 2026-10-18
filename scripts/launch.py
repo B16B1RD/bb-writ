@@ -11,10 +11,12 @@ JSON が返ったことを成功にしない: 結論が空、証拠が無い、�
 """
 from __future__ import annotations  # macOS の Command Line Tools の python3（3.9）でも型注釈で落ちないように
 import argparse
+import hashlib
 import json
 import os
 import re
 import shutil
+import signal
 import secrets
 import subprocess
 import sys
@@ -55,6 +57,19 @@ GROK_COMPAT_OFF = {f"GROK_{v}_{c}_ENABLED": "false" for v in ("CLAUDE", "CURSOR"
 GROK_WARNING = re.compile(r"^\s*warning\b", re.I)
 
 
+def secret_env(env: dict) -> dict:
+    """子の Bash から消す環境変数。子の Bash は Claude Code の環境を継承し、dotenvx が復号したトークンもそこにある。
+    CLAUDE_CODE_SUBPROCESS_ENV_SCRUB は使わない（許可の方針を default に戻し、対象に空の .env・package.json などを残した。2.1.302）。"""
+    names = {"CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY", "GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "XAI_API_KEY", "OPENAI_API_KEY"}
+    names |= {k for k in env if re.search(r"TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|(^|_)KEY($|_)|API_?KEY", k, re.I)}
+    return {"envVars": [{"name": n, "mode": "deny"} for n in sorted(names)]}
+
+
+def secret_reads(cfg: Path) -> dict:
+    """子の Bash に読ませない認証情報の置き場（専用ログインの置き場は ~/.config の外にも置ける）。Git の設定だけは読ませる。"""
+    return {"denyRead": [str(Path.home() / p) for p in SECRET_PLACES] + [str(cfg)], "allowRead": [str(Path.home() / ".config" / "git")]}
+
+
 def grok_ro_writable(home: Path) -> list[Path]:
     """Grok の read-only の sandbox でも書ける場所（公式文書 18-sandbox と、実物の sessions/sandbox-events.jsonl の read_write_paths）。"""
     roots = [Path("/tmp"), Path("/var/tmp"), Path(tempfile.gettempdir()), home]  # gettempdir は macOS の一時ディレクトリ
@@ -71,22 +86,57 @@ def grok_git_dir(cwd: Path) -> tuple[Path | None, str | None]:
     return None, f"Git の共通ディレクトリを取れない（git rev-parse: {g.stderr.strip()[:200]}）"
 
 
-def grok_commit_dirs(cwd: Path) -> tuple[list[Path], str | None]:
-    """worktree で commit するのに要る、共通ディレクトリの中の場所。共通ディレクトリの直下・config・hooks は渡さない
-    （書けると、利用者が次に git を動かしたとき sandbox の外でコードが動く）。worktree でなければ空。"""
-    common, why = grok_git_dir(cwd)
-    if why or not common:
-        return [], why
-    own = subprocess.run(["git", "-C", str(cwd), "rev-parse", "--git-dir"], capture_output=True, text=True)
-    own_dir = (cwd / own.stdout.strip()).resolve()
-    if own.returncode or own_dir == common:
-        return [], None if not own.returncode else f"Git の作業場所の管理ディレクトリを取れない（git rev-parse: {own.stderr.strip()[:200]}）"
-    return [common / "objects", common / "refs", common / "logs", own_dir], None
+def worktree_dirs(cwd: Path) -> tuple[Path | None, Path | None, str | None]:
+    """(その作業場所の管理ディレクトリ, 共通ディレクトリ, 理由)。Git の外なら (None, None, None)。"""
+    g = subprocess.run(["git", "-C", str(cwd), "rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir"],
+                       capture_output=True, text=True)
+    if g.returncode == 0:
+        own, common = g.stdout.split()
+        return Path(own).resolve(), Path(common).resolve(), None
+    if "not a git repository" in g.stderr:
+        return None, None, None
+    return None, None, f"Git の管理ディレクトリを取れない（git rev-parse: {g.stderr.strip()[:200]}）"
+
+
+def grok_commit_dirs(own: Path, common: Path) -> list[Path]:
+    """worktree で commit するのに要る、共通ディレクトリの中の場所。共通ディレクトリの直下・config・hooks と、
+    他のブランチの ref は渡さない（書けると、利用者が次に git を動かしたとき sandbox の外でコードが動くか、統合先が動く）。"""
+    head = (own / "HEAD").read_text(encoding="utf-8").strip()
+    dirs = [common / "objects", own]
+    if head.startswith("ref: refs/heads/"):
+        parent = Path(head[len("ref: "):]).parent  # refs/heads/bb-writ。ref の lock はこのディレクトリに作られる
+        dirs += [common / parent, common / "logs" / parent]
+    for d in dirs:
+        d.mkdir(parents=True, exist_ok=True)
+    return dirs
+
+
+def git_snapshot(own: Path, common: Path, cwd: Path) -> dict:
+    """書く子の前後で比べる Git の管理情報。子の書いた .git ファイルを読まないよう、共通ディレクトリを明示して読む。"""
+    refs = subprocess.run(["git", "--git-dir", str(common), "for-each-ref", "--format=%(refname) %(objectname)"],
+                          capture_output=True, text=True, check=True).stdout.splitlines()
+    files = [cwd / ".git", own / "commondir", own / "gitdir", own / "config.worktree", common / "config",
+             common / "objects" / "info" / "alternates"]
+    for d in (common / "hooks", common / "info"):
+        files += sorted(f for f in d.rglob("*") if f.is_file()) if d.is_dir() else []
+    return {"refs": dict(r.split(" ", 1) for r in refs if " " in r),
+            "files": {str(f): hashlib.sha256(f.read_bytes()).hexdigest() if f.is_file() else None for f in files},
+            "head": (own / "HEAD").read_text(encoding="utf-8").strip()}
+
+
+def git_changes(before: dict, after: dict) -> list[str]:
+    """子が変えてよいのは、起動時に checkout していたブランチの ref と、その作業場所の HEAD・index だけ。"""
+    mine = before["head"][len("ref: "):] if before["head"].startswith("ref: ") else None
+    refs = sorted(r for r in set(before["refs"]) | set(after["refs"]) if r != mine and before["refs"].get(r) != after["refs"].get(r))
+    files = sorted(f for f in set(before["files"]) | set(after["files"]) if before["files"].get(f) != after["files"].get(f))
+    head = ["HEAD"] if after["head"] != before["head"] else []
+    return refs + files + head
 
 
 def grok_home(login: Path, extends: str, read_write: list[Path]) -> tuple[Path, str]:
     """起動ごとの GROK_HOME を作り、(場所, profile 名) を返す。Grok の sandbox は read-only でも GROK_HOME に書けるので、
-    sandbox.toml・config.toml・hooks・trusted_folders.toml を後の子と共有しない。共有するのはログインの auth.json だけ。
+    sandbox.toml・config.toml・hooks・trusted_folders.toml を後の子と共有しない。共有するのはログインの auth.json（symlink）だけ。
+    子が置き換えうるので、home の auth.json を専用ログインへ書き戻すことはしない。
     組み込みの profile は適用できないと警告して強制せずに続くが、独自の profile は起動を拒む（公式文書 18-sandbox）ので、読み取り専用も独自の profile にする。"""
     base = state_dir() / "grok-homes"
     base.mkdir(parents=True, exist_ok=True)
@@ -95,19 +145,6 @@ def grok_home(login: Path, extends: str, read_write: list[Path]) -> tuple[Path, 
     rw = [str(p.resolve()) for p in read_write]
     (home / "sandbox.toml").write_text(f'[profiles.bbwrit]\nextends = "{extends}"\nread_write = {json.dumps(rw)}\n', encoding="utf-8")
     return home, "bbwrit"
-
-
-def grok_keep_login(home: Path, login: Path) -> str | None:
-    """Grok が auth.json を symlink から通常のファイルに置き換えていたら（トークンの更新など）、専用ログインへ書き戻す。"""
-    auth = home / "auth.json"
-    if auth.is_symlink() or not auth.is_file():
-        return None
-    tmp = login / f".auth.json.{secrets.token_hex(4)}"
-    shutil.copy2(auth, tmp)
-    os.replace(tmp, login / "auth.json")
-    auth.unlink()
-    auth.symlink_to(login / "auth.json")
-    return "Grok が auth.json を置き換えたので、専用ログインに書き戻した"
 
 
 def command(a, prompt: str) -> tuple[list[str], dict, str | None]:
@@ -128,18 +165,23 @@ def command(a, prompt: str) -> tuple[list[str], dict, str | None]:
             # ネットワークは、これまでどおり出られるようにする（sandbox の既定は宛先なしで、依存の取得もできなくなる）
             perm = ["--permission-mode", "auto", "--restricted", "--tools", "Read,Grep,Glob,Edit,Write,Bash,Skill,WebSearch,WebFetch", "--add-dir", str(work_record(a.cwd))]
             settings = {"sandbox": {"enabled": True, "allowUnsandboxedCommands": False, "failIfUnavailable": True,
-                                    "network": {"allowedDomains": ["*"]}}}
+                                    "network": {"allowedDomains": ["*"]}, "filesystem": secret_reads(cfg), "credentials": secret_env(env)}}
         else:
             # 読み取り専用は、コマンドの許可規則でなく OS の sandbox で守る（git log/diff/show は --output で書けた。2.1.302 で実測）。
             # 書き込みは対象を含めて拒否し、ネットワークは許可した宛先が無いので出られない。読みは認証情報の置き場を拒否する
             # （ホーム全体を拒否して対象だけ戻すと、bwrap が対象の中の保護ファイルを作れずに起動しなかった。同日）。
             # --restricted は対象の .claude の設定（hook・許可規則）を読まず、ファイル系のツールを対象の中に閉じる。その下では
             # --allowedTools が効かないので、許可は --settings に書く。sandbox を起動できなければ子を起動しない（failIfUnavailable）
+            # linked worktree では、sandbox が共有の .git とその周り（元のリポジトリの親まで書けた。同日）への書き込みを
+            # 自動で許すので、ホーム・共通ディレクトリ・対象と共通ディレクトリの共通の親も拒否する
+            git_dir, why = grok_git_dir(a.cwd)
+            if why:
+                return [], env, why
+            deny = [str(a.cwd), str(Path.home())] + ([str(git_dir), os.path.commonpath([a.cwd, git_dir])] if git_dir else [])
             perm = ["--permission-mode", "dontAsk", "--restricted", "--tools", "Read,Grep,Glob,Bash,Skill"]
             settings = {"permissions": {"allow": ["Read", "Grep", "Glob", "Bash", "Skill"]},
                         "sandbox": {"enabled": True, "allowUnsandboxedCommands": False, "failIfUnavailable": True,
-                                    "filesystem": {"denyWrite": [str(a.cwd)], "denyRead": [str(Path.home() / p) for p in SECRET_PLACES],
-                                                   "allowRead": [str(Path.home() / ".config" / "git")]}}}
+                                    "filesystem": {"denyWrite": sorted(set(deny)), **secret_reads(cfg)}, "credentials": secret_env(env)}}
         cmd = ["dotenvx", "run", "-q", "-f", str(env_file), "-fk", str(keys), "--",
                "claude", "-p", prompt, "--output-format", "json", "--model", a.model, "--effort", a.effort,
                "--permission-prompts", "none", *perm, "--settings", json.dumps(settings),
@@ -152,10 +194,10 @@ def command(a, prompt: str) -> tuple[list[str], dict, str | None]:
         if not (login / "auth.json").is_file():
             return [], env, f"専用ログインが無い: {login}/auth.json（GROK_HOME={login} grok login）"
         if a.write:
-            git_dirs, why = grok_commit_dirs(a.cwd)
+            own, common, why = worktree_dirs(a.cwd)
             if why:
                 return [], env, why
-            home, profile = grok_home(login, "workspace", [work_record(a.cwd), *git_dirs])
+            home, profile = grok_home(login, "workspace", [work_record(a.cwd), *(grok_commit_dirs(own, common) if own else [])])
         else:
             # 起動ごとの home は状態ディレクトリの下にできるので、それと重なる対象も止める
             for d in grok_ro_writable(state_dir() / "grok-homes"):
@@ -287,7 +329,16 @@ def main() -> int:
     rec = {"host": a.host, "cwd": str(a.cwd), "model_requested": a.model, "effort_requested": a.effort,
            "write": a.write, "out": str(out_dir)}
 
-    cmd, env, why = command(a, a.prompt_file.read_text(encoding="utf-8") + CONTRACT)
+    snapshot = None
+    if a.write:
+        own, common, why = worktree_dirs(a.cwd)
+        if not why and own and own == common:
+            # 元の checkout（とその下・submodule）の記録の置き場にはタスクの一覧があり、Grok の子には .git 全体が渡る
+            why = "書く子は task start の作業場所（worktree）で起動する。元の checkout とその下では起動しない"
+        if not why and own:
+            snapshot = (own, common, git_snapshot(own, common, a.cwd))
+    if not (a.write and why):
+        cmd, env, why = command(a, a.prompt_file.read_text(encoding="utf-8") + CONTRACT)
     if a.host == "grok" and not why:
         rec["grok_home"] = env["GROK_HOME"]  # 再開（grok -r）はこの home で
     t0 = time.time()
@@ -302,7 +353,17 @@ def main() -> int:
             for top in {a.cwd, *([git_dir.parent] if git_dir and git_dir.name == ".git" else [])}:
                 made += [d for d in (top / ".claude", top / ".claude" / ".cc-writes") if not d.exists()]
         try:
-            p = subprocess.run(cmd, cwd=a.cwd, env=env, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=a.timeout)
+            # 子が残した背景のプロセスが、終了後の照合の後に書き換えないよう、プロセスグループごと止める
+            child = subprocess.Popen(cmd, cwd=a.cwd, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                     text=True, start_new_session=True)
+            try:
+                stdout, stderr = child.communicate(timeout=a.timeout)
+            finally:
+                try:
+                    os.killpg(child.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+            p = subprocess.CompletedProcess(cmd, child.wait(), stdout, stderr)
             (out_dir / "stdout.jsonl").write_text(p.stdout, encoding="utf-8")
             (out_dir / "stderr.log").write_text(p.stderr, encoding="utf-8")
             got = {"claude": parse_claude, "codex": parse_codex, "grok": parse_grok}[a.host](p.stdout)
@@ -323,10 +384,16 @@ def main() -> int:
         except subprocess.TimeoutExpired:
             rec.update(status="failed", problems=[f"{a.timeout} 秒で終わらなかった"])
         finally:
-            if "grok_home" in rec:
-                note = grok_keep_login(Path(rec["grok_home"]), config_dir() / "grok-auth")
-                if note:
-                    rec["notes"] = [note]
+            if snapshot:
+                # Claude Code の sandbox は、worktree の管理ディレクトリに保護のための空の config.worktree を作る（2.1.302）。
+                # 起動前に無く空のままのファイルは、中身が無く git の動きを変えないので、消してから照合する
+                for f, h in snapshot[2]["files"].items():
+                    if h is None and Path(f).is_file() and not Path(f).is_symlink() and Path(f).stat().st_size == 0:
+                        Path(f).unlink()
+                changed = git_changes(snapshot[2], git_snapshot(*snapshot[:2], a.cwd))
+                if changed:
+                    rec.update(status="failed", problems=["子が、自分のブランチ以外の Git の管理情報を変えた。この作業場所で git を動かす前に、"
+                                                          "下の場所を確かめる（偽の設定が sandbox の外で動きうる）"] + changed[:20])
             for d in reversed(made):
                 if d.is_dir() and not d.is_symlink() and not any(d.iterdir()):
                     d.rmdir()

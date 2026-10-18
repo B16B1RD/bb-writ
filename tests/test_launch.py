@@ -36,7 +36,23 @@ FAKE_CLAUDE = textwrap.dedent(r'''
     #!/usr/bin/env python3
     import json, os, sys
     open(os.environ["FAKE_ARGS"], "w").write(json.dumps(sys.argv[1:]))
+    open(os.environ["FAKE_ARGS"] + ".scrub", "w").write(os.environ.get("CLAUDE_CODE_SUBPROCESS_ENV_SCRUB", ""))
     os.makedirs(".claude/.cc-writes", exist_ok=True)  # 2.1.302 の --restricted が対象に作る空のディレクトリ
+    import subprocess
+    mode = os.environ.get("FAKE_MODE")
+    git = ["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid"]
+    common = lambda: subprocess.run(["git", "rev-parse", "--path-format=absolute", "--git-common-dir"], capture_output=True, text=True).stdout.strip()
+    if mode == "own-commit":  # 自分のブランチに commit するのは正当。sandbox が作る空の config.worktree も残る
+        gd = subprocess.run(["git", "rev-parse", "--path-format=absolute", "--git-dir"], capture_output=True, text=True).stdout.strip()
+        open(os.path.join(gd, "config.worktree"), "w").close()
+        open("b.txt", "w").write("b"); subprocess.run(git + ["add", "b.txt"]); subprocess.run(git + ["commit", "-qm", "b"])
+    if mode == "tamper-main":  # 統合先を動かす
+        evil = subprocess.run(git + ["commit-tree", "-m", "x", "HEAD^{tree}"], capture_output=True, text=True).stdout.strip()
+        subprocess.run(git + ["update-ref", "refs/heads/main", evil])
+    if mode == "tamper-config":  # 親の git で動く設定を足す
+        open(os.path.join(common(), "config"), "a").write("[core]\n\tfsmonitor = touch /tmp/pwned\n")
+    if mode == "tamper-gitfile":  # 作業場所の .git を偽のディレクトリへ向け直す
+        open(".git", "w").write("gitdir: /tmp/fake-git\n")
     if os.environ.get("FAKE_MODE") == "wrote":
         open(".claude/.cc-writes/x", "w").write("x")
     if os.environ.get("FAKE_MODE") == "checkout":  # worktree の子は、元の checkout にも作る
@@ -128,7 +144,7 @@ class TestLaunch(unittest.TestCase):
         sandbox = json.loads(argv[argv.index("--settings") + 1])["sandbox"]
         self.assertEqual((sandbox["enabled"], sandbox["allowUnsandboxedCommands"], sandbox["failIfUnavailable"]), (True, False, True))
         fs = sandbox["filesystem"]
-        self.assertEqual(fs["denyWrite"], [str(self.cwd.resolve())])
+        self.assertTrue({str(self.cwd.resolve()), str(Path.home())} <= set(fs["denyWrite"]))
         for secret in (".config", ".ssh", ".claude", ".codex", ".grok"):  # gh のトークン・dotenvx の鍵・各 CLI のログイン
             self.assertIn(str(Path.home() / secret), fs["denyRead"])
         self.assertIn("AGENTS.md・CLAUDE.md", argv[argv.index("-p") + 1])  # 自動で読まれない対象の指示を、資料として読ませる
@@ -153,6 +169,7 @@ class TestLaunch(unittest.TestCase):
         sandbox = json.loads(argv[argv.index("--settings") + 1])["sandbox"]
         self.assertEqual((sandbox["enabled"], sandbox["allowUnsandboxedCommands"], sandbox["failIfUnavailable"]), (True, False, True))
         self.assertEqual(sandbox["network"], {"allowedDomains": ["*"]})  # 書く子は依存の取得などで外へ出られる
+        self.assertIn(str(self.cfg), sandbox["filesystem"]["denyRead"])  # 専用ログインと鍵は読ませない
 
     def test_claude_leaves_no_empty_cc_writes_in_target(self):
         self.run_launch("claude")
@@ -169,6 +186,44 @@ class TestLaunch(unittest.TestCase):
         (wt / "a.txt").write_text("x\n")
         self.run_launch("claude", "checkout", extra=["--write"], cwd=wt)
         self.assertEqual([p.name for p in (repo, wt) if (p / ".claude").exists()], [])
+
+    def worktree(self, name="r"):
+        repo, wt = self.cwd / name, self.cwd / (name + "-wt")
+        subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
+        subprocess.run(["git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "-q", "--allow-empty", "-m", "i"], check=True)
+        subprocess.run(["git", "-C", str(repo), "worktree", "add", "-q", "-b", "bb-writ/t1", str(wt)], check=True)
+        (wt / "a.txt").write_text("x\n")
+        return repo, wt
+
+    def test_write_refuses_the_original_checkout(self):
+        repo, wt = self.worktree()
+        for cwd in (repo, repo / "sub"):
+            cwd.mkdir(exist_ok=True)
+            rc, rec = self.run_launch("claude", extra=["--write"], cwd=cwd)
+            self.assertEqual(rec["status"], "unavailable", rec)
+        self.assertFalse(self.args_file.exists())  # 起動しない
+
+    def test_write_child_may_commit_only_to_its_own_branch(self):
+        _, wt = self.worktree("own")
+        rc, rec = self.run_launch("claude", "own-commit", extra=["--write"], cwd=wt)
+        self.assertEqual(rec["status"], "ok", rec)
+        self.assertEqual(list((self.cwd / "own" / ".git" / "worktrees").glob("*/config.worktree")), [])
+        for mode in ("tamper-main", "tamper-config", "tamper-gitfile"):  # 統合先の ref、親の git で動く設定、作業場所の .git
+            _, wt = self.worktree(mode)
+            rc, rec = self.run_launch("claude", mode, extra=["--write"], cwd=wt)
+            self.assertEqual(rec["status"], "failed", (mode, rec))
+            self.assertIn("git を動かす前に", rec["problems"][0])
+
+    def test_claude_read_only_in_worktree_denies_the_common_git_dir(self):
+        repo, wt = self.worktree()
+        self.run_launch("claude", cwd=wt, env_extra={"MY_SERVICE_TOKEN": "x"})
+        argv = json.loads(self.args_file.read_text())
+        sandbox = json.loads(argv[argv.index("--settings") + 1])["sandbox"]
+        self.assertIn(str((repo / ".git").resolve()), sandbox["filesystem"]["denyWrite"])  # sandbox は共有の .git を自動で許すので
+        denied = {e["name"] for e in sandbox["credentials"]["envVars"] if e["mode"] == "deny"}
+        self.assertTrue({"CLAUDE_CODE_OAUTH_TOKEN", "GH_TOKEN", "MY_SERVICE_TOKEN"} <= denied)  # 子の Bash から認証情報の環境変数を消す
+        self.assertIn(str(Path.home()), sandbox["filesystem"]["denyWrite"])
+        self.assertEqual(Path(str(self.args_file) + ".scrub").read_text(), "")  # SCRUB は許可の方針を default に戻すので使わない
 
     def grok_target(self):
         """Grok の read-only は /tmp に書けるので、読み取り専用の試験の対象は /tmp の外に置く。"""
@@ -223,7 +278,7 @@ class TestLaunch(unittest.TestCase):
         subprocess.run(["git", "init", "-q", str(repo)], check=True)
         subprocess.run(["git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "-q", "--allow-empty", "-m", "i"], check=True)
         wt = self.cwd / "wt"
-        subprocess.run(["git", "-C", str(repo), "worktree", "add", "-q", str(wt)], check=True)
+        subprocess.run(["git", "-C", str(repo), "worktree", "add", "-q", "-b", "bb-writ/t1", str(wt)], check=True)
         (wt / "a.txt").write_text("x\n")  # 偽の子の報告が指す証拠
         rc, rec = self.run_launch("grok", extra=["--write"], cwd=wt)
         self.assertEqual(rec["status"], "ok", rec)
@@ -232,8 +287,8 @@ class TestLaunch(unittest.TestCase):
         rw = json.loads(profile.split("read_write = ", 1)[1])
         common = (repo / ".git").resolve()
         # commit に要る場所だけ。共通ディレクトリの直下・config・hooks と、state 全体は渡さない
-        self.assertEqual(sorted(rw), sorted([str(Path(self.record_of(wt)).resolve()), str(common / "objects"), str(common / "refs"), str(common / "logs"),
-                                             str(common / "worktrees" / "wt")]))
+        self.assertEqual(sorted(rw), sorted([str(Path(self.record_of(wt)).resolve()), str(common / "objects"), str(common / "refs" / "heads" / "bb-writ"),
+                                             str(common / "logs" / "refs" / "heads" / "bb-writ"), str(common / "worktrees" / "wt")]))
 
     def test_grok_parallel_launches_have_separate_homes(self):
         env = {**os.environ, "PATH": f"{self.bin}:/usr/bin:/bin", "BB_WRIT_CONFIG_DIR": str(self.cfg), "BB_WRIT_STATE_DIR": str(self.state),
@@ -244,11 +299,11 @@ class TestLaunch(unittest.TestCase):
         self.assertEqual(len(homes), 8)
         self.assertFalse((self.cfg / "grok-auth" / "sandbox.toml").exists())
 
-    def test_grok_replaced_auth_is_written_back_to_the_login(self):
+    def test_grok_auth_replaced_in_the_home_is_not_written_back(self):
+        # 子は自分の home に書けるので、そこで置き換わった auth.json（別のアカウントかもしれない）を専用ログインへ昇格させない
         rc, rec = self.run_launch("grok", "refresh", cwd=self.grok_target())
         self.assertEqual(rec["status"], "ok", rec)
-        self.assertEqual((self.cfg / "grok-auth" / "auth.json").read_text(), '{"refreshed": true}')
-        self.assertTrue((Path(rec["grok_home"]) / "auth.json").is_symlink())
+        self.assertEqual((self.cfg / "grok-auth" / "auth.json").read_text(), "{}")
 
     def test_grok_warning_is_failed_but_note_is_not(self):
         rc, rec = self.run_launch("grok", "nosandbox", cwd=self.grok_target())
