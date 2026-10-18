@@ -166,6 +166,9 @@ def command(a, prompt: str) -> tuple[list[str], dict, str | None]:
                 return [], env, f"{tool} が PATH に無い"
         if not env_file.is_file() or not keys.is_file():
             return [], env, f"専用ログインが無い: {env_file} と {keys.name}（claude setup-token の結果を dotenvx で保存する）"
+        # 親の Claude Code の環境（CLAUDE_CODE_PLUGIN_DIRS の利用者の mod、CLAUDE_EFFORT など。mod は sandbox の外で動く）と API の鍵・接続先を渡さない。
+        # 鍵があると専用ログインの代わりに別料金の API へ落ちうる。専用ログインのトークンは dotenvx が子の環境にだけ入れる
+        env = {k: v for k, v in env.items() if not k.startswith(("CLAUDE", "ANTHROPIC_"))}
         env["CLAUDE_CONFIG_DIR"] = str(cfg / "claude-home")
         if a.write:
             # 書く子に渡すのは、対象（作業場所）とその記録だけ。タスクの一覧・統合の記録・他の worktree は親だけが書く。

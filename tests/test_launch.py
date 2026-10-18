@@ -37,6 +37,7 @@ FAKE_CLAUDE = textwrap.dedent(r'''
     import json, os, sys
     open(os.environ["FAKE_ARGS"], "w").write(json.dumps(sys.argv[1:]))
     open(os.environ["FAKE_ARGS"] + ".scrub", "w").write(os.environ.get("CLAUDE_CODE_SUBPROCESS_ENV_SCRUB", ""))
+    open(os.environ["FAKE_ARGS"] + ".env", "w").write(json.dumps(sorted(k for k in os.environ if k.startswith(("CLAUDE", "ANTHROPIC_")))))
     os.makedirs(".claude/.cc-writes", exist_ok=True)  # 2.1.302 の --restricted が対象に作る空のディレクトリ
     import subprocess
     mode = os.environ.get("FAKE_MODE")
@@ -159,6 +160,11 @@ class TestLaunch(unittest.TestCase):
         env = {**os.environ, "BB_WRIT_STATE_DIR": str(self.state)}
         p = subprocess.run([sys.executable, str(ROOT / "scripts" / "work.py"), "status", "--dir", str(d)], env=env, capture_output=True, text=True)
         return str(Path(json.loads(p.stdout)["note"]["path"]).parent)
+
+    def test_claude_child_gets_no_parent_claude_env(self):
+        # 親の CLAUDE_CODE_PLUGIN_DIRS（利用者の mod）や API の鍵を子に渡さない。渡すのは専用の設定ディレクトリだけ
+        self.run_launch("claude", env_extra={"CLAUDE_CODE_PLUGIN_DIRS": "~/.claude/mods/x", "CLAUDECODE": "1", "CLAUDE_EFFORT": "max", "ANTHROPIC_API_KEY": "k"})
+        self.assertEqual(json.loads(Path(str(self.args_file) + ".env").read_text()), ["CLAUDE_CONFIG_DIR"])
 
     def test_write_grants_only_the_work_record(self):
         # 書く子に state 全体（タスクの一覧・統合の記録・他の worktree）を渡さない
