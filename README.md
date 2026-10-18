@@ -75,7 +75,7 @@ Grok Build は root の `plugin.json` を読む形にしてあるが、インス
 
 ## 使う
 
-技術的な依頼をそのまま頼む。入口のスキル `bb-writ` が、依頼を言い直し、最初に手引きを呼び、リポジトリを読み、必要な原則だけを読んで進め、「何を実行し、どの結果を見て、依頼を満たすと判断したか」を返す。
+入口のスキル `bb-writ` が呼ばれると、依頼を言い直し、最初に手引きを呼び、リポジトリを読み、必要な原則だけを読んで進め、「何を実行し、どの結果を見て、依頼を満たすと判断したか」を返す。
 
 - 手引き: `playbook-investigation`・`playbook-bug`・`playbook-feature`・`playbook-docs-skill`・`playbook-session-pickup`（続きを引き受ける）・`playbook-pause-safely`（安全に止める）・`playbook-eval`（目隠しで比べる）。
 - 委任と審査: `delegate`（別系統の CLI の起動。`scripts/launch.py`）、`interrogate`（2 系統の審査役）。
