@@ -23,7 +23,7 @@ description: 子に委任するとき、別系統の CLI（Claude Code・Codex�
 python3 <launch.py> --host codex|claude|grok --cwd <対象> --prompt-file <依頼文> [--model M] [--effort E] [--write]
 ```
 
-- 書く委任では両 CLI に状態ディレクトリへのアクセスを渡す。元の checkout の Git メタデータなど、ホスト側の承認が必要な操作はその承認に従う。
+- 書く委任で子に渡すのは、対象（作業場所）と、その作業場所の記録（`work.py` の `claim`・`status` が返す `note.path` の置き場）だけ。タスクの一覧・統合の記録・他の worktree は親だけが書く（子が書けると、親が信用する記録を書き換えられる）。Claude Code の書く子は `--restricted` と Bash の sandbox で同じ範囲に閉じ、ネットワークは許す。元の checkout の Git メタデータなど、ホスト側の承認が必要な操作はその承認に従う。
 - 既定は読み取り専用（Codex は `-s read-only`、Claude Code は下の sandbox、Grok Build は `--sandbox read-only`）。変更を任せるときだけ `--write`。
 - 読み取り専用の Claude Code は、コマンドの許可規則でなく OS の sandbox で守る。`--restricted --tools Read,Grep,Glob,Bash --permission-mode dontAsk` に、`--settings` で Bash の sandbox（対象への書き込みも拒否、認証情報の置き場の読み取りを拒否、ネットワークの宛先なし、起動できなければ子を起動しない）を渡す。許可規則の `Bash(git diff:*)` だけでは、`git log --output=<任意のパス>` で対象の外や `.git/hooks` に書け、対象の `.claude/settings.json` の SessionStart hook も動いた（2026-10-19、2.1.302）。`--restricted` は対象の `.claude` の設定を読まず、Read を対象の中に閉じる。その下では `--allowedTools` が効かないので、許可は `--settings` に書く。対象の CLAUDE.md は自動では読まれないので、launcher は子に AGENTS.md・CLAUDE.md を資料として読ませる。Linux・WSL2 の sandbox は `bwrap` と `socat` が要る。sandbox の書き込み拒否は絶対パスで書く（`"."` は対象を指さなかった。同日）。実機の確認は `python3 -B tests/verify_sandbox_live.py --out <新しい証拠ディレクトリ>`。
 - 子に、最後に結論・証拠・不明点の JSON を書かせる。標準出力の 1 行の JSON の `status` が `ok` のときだけ報告を使う。`invalid-report`・`failed`・`quota`・`unavailable` は理由（`problems`）を記録して扱う。JSON が返ったことを成功にしない。
@@ -31,9 +31,9 @@ python3 <launch.py> --host codex|claude|grok --cwd <対象> --prompt-file <依�
 
 ## 担当の貸し出しと外部操作の記録
 
-`scripts/work.py`（launcher と同じ置き場）。子に書く仕事を任せるときは、親が担当を持ったままにせず、子に `claim` させる（同じ作業場所に親と子が同時に書かない）。別タスクを並行させる子は `playbook-parallel` で専用 worktree を確保する。同じタスクの引き継ぎは `task resume`。CLI 名や担当の表示名が同じでも、タスクと token で区別する。使い方は入口 `bb-writ` の「離席・中断・訂正」。
+`scripts/work.py`（launcher と同じ置き場）。子に書く仕事を任せるときは、親が担当を持ったままにせず、子に `claim` させる（同じ作業場所に親と子が同時に書かない）。別タスクを子に任せるときは、親が `playbook-parallel` の `task start` で専用 worktree を作って `release` し、子はその worktree を `--cwd` にして起動し、そこで `claim` する（元の checkout で起動すると、その記録の置き場にタスクの一覧が含まれる）。`task start`・`task resume`・`integrate`・`task cleanup` は親が行う（子はタスクの一覧と統合の記録に書けない）。子が終わったら、親が同じ worktree で `claim` し直して確かめ、統合する。CLI 名や担当の表示名が同じでも、タスクと token で区別する。使い方は入口 `bb-writ` の「離席・中断・訂正」。
 
-外部操作（push・PR・コメントなど）は元の checkout から実行し、`op begin --from <元の checkout>` で確かめる。成果物を出す操作は `--verified <検証した commit>` も付ける。子に頼むときも同じ。`work.py check --dir <作業場所> --from <実行する場所>` で、そこで使われる GitHub のアカウントと書き込み権限を事前に見られる。子の起動に `GH_CONFIG_DIR` や `GH_TOKEN` を足してアカウントを決めない（利用者の環境の切り替えを上書きし、別の名前で外に出る）。
+外部操作（push・PR・コメントなど）は元の checkout から実行し、`op begin --from <元の checkout>` で確かめる。成果物を出す操作は `--verified <検証した commit>` も付ける。外部操作は親が行い、子には頼まない（子の付与は作業場所の中だけ）。`work.py check --dir <作業場所> --from <実行する場所>` で、そこで使われる GitHub のアカウントと書き込み権限を事前に見られる。子の起動に `GH_CONFIG_DIR` や `GH_TOKEN` を足してアカウントを決めない（利用者の環境の切り替えを上書きし、別の名前で外に出る）。
 
 ## Claude Code
 
@@ -60,5 +60,5 @@ python3 <launch.py> --host codex|claude|grok --cwd <対象> --prompt-file <依�
 - **権限:** 守りは sandbox で、承認は `--always-approve`。組み込みの profile は適用できないと警告して強制せずに続くが、独自の profile は起動を拒む（公式文書 18-sandbox）。そのため launcher は読み取り専用も `extends = "read-only"` の独自の profile にし、`$GROK_HOME/sandbox.toml` に排他して足す。stderr に `warning` の行があれば `failed` にする（適用失敗の文言は `warning: sandbox could not be applied: …`）。適用の記録は `$GROK_HOME/sessions/sandbox-events.jsonl` の `ProfileApplied`（`enforced`・`read_write_paths`）。
   - 読み取り専用は `/tmp` の外への書き込みを、シェルでも write ツールでも Permission denied で止めた（2026-10-18）。read-only でも `/tmp`・`/var/tmp`・一時ディレクトリ・`$GROK_HOME` には書けるので、launcher はそれと重なる対象（下にある、または含む）を読み取り専用では起動しない。
   - 塞げない所: 読み取り専用の子も `$GROK_HOME` の `auth.json`（専用ログイン）は書ける。`deny` に入れると Grok 自身が読めず「Not signed in」で起動しない（同日）。Linux の Landlock はファイルの mode・時刻・拡張属性の変更を止めない（公式文書）。
-  - `--write` は、状態ディレクトリと Git の共通ディレクトリ（`git rev-parse --git-common-dir`）に書ける `extends = "workspace"` の profile。共通ディレクトリを外すと、worktree の commit が `index.lock` を作れずに失敗した（同日）。workspace の profile は子プロセスのネットワークを止めない。
+  - `--write` は、作業場所の記録と Git の共通ディレクトリ（`git rev-parse --git-common-dir`）に書ける `extends = "workspace"` の profile。共通ディレクトリを外すと、worktree の commit が `index.lock` を作れずに失敗した（同日）。workspace の profile は子プロセスのネットワークを止めない。
 - **再開:** `grok -r <sessionId>`（同じ `GROK_HOME` で）。sandbox の profile はセッションに保存され、再開時に違う `--sandbox` を渡すと拒否される（公式文書 18-sandbox。再開は未計測）。

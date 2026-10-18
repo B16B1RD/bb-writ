@@ -230,6 +230,11 @@ def task_at(d):
     return task
 
 
+def task_dir(rr, ident):
+    """タスクの作業場所。状態ディレクトリの worktrees/ の下に、リポジトリと task 識別子から決まる。"""
+    return rr.parent.parent / 'worktrees' / rr.name / ident
+
+
 def worktrees(repo):
     # -z は空白・改行を含むパスも分割しない。
     result, entry = [], {}
@@ -262,15 +267,14 @@ def task_command(a):
             git(repo, 'show-ref', '--verify', 'refs/heads/' + target)
             base = git(repo, 'rev-parse', '--verify', (a.base or 'refs/heads/' + target) + '^{commit}')
             ident = secrets.token_hex(8)
-            state = rr.parent.parent
-            dest = state / 'worktrees' / rr.name / ident
+            dest = task_dir(rr, ident)
             task = {'task': ident, 'dir': str(dest), 'branch': 'bb-writ/' + ident,
                     'base': base, 'target': target, 'checkout': str(repo)}
             # 作成の途中で止まっても、一覧から作業場所とブランチを追える。
             write(registry / (ident + '.json'), task)
             dest.parent.mkdir(parents=True, exist_ok=True)
             try:
-                git(repo, 'worktree', 'add', '-b', task['branch'], str(dest), base, fds=(rf,))
+                git(repo, 'worktree', 'add', '-b', task['branch'], '--', str(dest), base, fds=(rf,))
             except (ValueError, OSError):
                 # 終了済みの作成が何も残さなかった場合だけ記録を取り消す。
                 # プロセス中断や、ブランチ・ファイルの一部が残る失敗は記録を保持する。
@@ -289,7 +293,11 @@ def task_command(a):
             task = read(registry / (a.task + '.json'))
             if not task:
                 raise ValueError('そのタスクの記録が無い')
-            dest = Path(task['dir'])
+            # 記録は書き換えられうるので、行き先・ブランチ・基点を task 識別子から決まる値と照合してから git に渡す。
+            dest = task_dir(rr, a.task)
+            if (task.get('task'), task.get('dir'), task.get('branch')) != (a.task, str(dest), 'bb-writ/' + a.task) or \
+                    not re.fullmatch('[0-9a-f]{40}|[0-9a-f]{64}', str(task.get('base'))):
+                raise ValueError('タスクの記録が task start の作った値と合わない。記録を照合する')
             cleanup = task.get('cleanup')
             if cleanup and not dest.exists() and not commit_of(repo, 'refs/heads/' + task['branch']):
                 git(repo, 'merge-base', '--is-ancestor', cleanup['commit'], cleanup['saved'])
@@ -307,7 +315,7 @@ def task_command(a):
                 dest.parent.mkdir(parents=True, exist_ok=True)
                 branch = commit_of(repo, 'refs/heads/' + task['branch'])
                 git(repo, 'worktree', 'add', *([] if branch else ['-b', task['branch']]),
-                    str(dest), task['branch'] if branch else task['base'], fds=(rf,))
+                    '--', str(dest), task['branch'] if branch else task['base'], fds=(rf,))
                 registered = True
             if not dest.is_dir() or not registered:
                 raise ValueError('作業場所の作成が未完了か、登録と実物が異なる。記録と git worktree list を照合する')

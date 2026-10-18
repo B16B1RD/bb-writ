@@ -107,6 +107,23 @@ class TestParallel(unittest.TestCase):
         self.assertEqual(self.git(b['dir'], 'rev-parse', 'HEAD'), head)
         self.assertEqual((Path(b['dir']) / 'saved-on-branch').read_text(), 'saved-on-branch\n')
 
+    def test_resume_refuses_a_rewritten_record(self):
+        # 記録の dir・branch・base を書き換えても、そのまま git に渡さない（行き先は state の外、ブランチは別、-B のオプション注入）
+        a = self.start()
+        self.w('release', '--dir', a['dir'], '--token', a['token'])
+        self.git(self.repo, 'worktree', 'remove', a['dir'])
+        self.git(self.repo, 'branch', 'victim')
+        record = next(Path(self.env['BB_WRIT_STATE_DIR'], 'work').glob('repo-*')) / 'tasks' / (a['task'] + '.json')
+        outside = Path(self.tmp.name) / 'outside' / 'plugin'
+        original = json.loads(record.read_text())
+        for tampered in ({'dir': str(outside)}, {'dir': '-Bvictim'}, {'branch': 'victim'}, {'base': 'HEAD'}):
+            record.write_text(json.dumps({**original, **tampered}))
+            self.w('task', 'resume', '--dir', self.repo, '--task', a['task'], '--holder', 'Codex', code=6)
+        self.assertFalse(outside.parent.exists())
+        self.assertEqual(self.git(self.repo, 'worktree', 'list', '--porcelain').count('worktree '), 1)
+        record.write_text(json.dumps(original))
+        self.assertEqual(self.w('task', 'resume', '--dir', self.repo, '--task', a['task'], '--holder', 'Codex')['dir'], a['dir'])
+
     def test_failed_start_without_artifacts_does_not_leave_a_task(self):
         real_git = shutil.which('git')
         bin_dir = Path(self.tmp.name) / 'bin'

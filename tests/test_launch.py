@@ -36,6 +36,13 @@ FAKE_CLAUDE = textwrap.dedent(r'''
     #!/usr/bin/env python3
     import json, os, sys
     open(os.environ["FAKE_ARGS"], "w").write(json.dumps(sys.argv[1:]))
+    os.makedirs(".claude/.cc-writes", exist_ok=True)  # 2.1.302 の --restricted が対象に作る空のディレクトリ
+    if os.environ.get("FAKE_MODE") == "wrote":
+        open(".claude/.cc-writes/x", "w").write("x")
+    if os.environ.get("FAKE_MODE") == "checkout":  # worktree の子は、元の checkout にも作る
+        import subprocess
+        common = subprocess.run(["git", "rev-parse", "--path-format=absolute", "--git-common-dir"], capture_output=True, text=True).stdout.strip()
+        os.makedirs(os.path.join(os.path.dirname(common), ".claude", ".cc-writes"), exist_ok=True)
     print(json.dumps({"type": "result", "result": os.environ["FAKE_TEXT"], "session_id": "s-1", "is_error": False,
                       "modelUsage": {"claude-sonnet-5-5": {}}, "total_cost_usd": 0.01, "num_turns": 2}))
 ''').lstrip()
@@ -111,7 +118,8 @@ class TestLaunch(unittest.TestCase):
         self.assertEqual(argv[argv.index("--permission-mode") + 1], "dontAsk")
         # 対象の .claude の hook・許可規則を読まない。書けるツールを渡さない
         self.assertIn("--restricted", argv)
-        self.assertEqual(argv[argv.index("--tools") + 1], "Read,Grep,Glob,Bash")
+        self.assertEqual(argv[argv.index("--tools") + 1], "Read,Grep,Glob,Bash,Skill")
+        self.assertEqual(argv[argv.index("--plugin-dir") + 1], str(ROOT))  # --restricted でも bb-writ のスキルが届く
         # git の --output などの書き込みは OS の sandbox で止め、sandbox が無ければ起動しない。専用ログインの置き場は読ませない
         sandbox = json.loads(argv[argv.index("--settings") + 1])["sandbox"]
         self.assertEqual((sandbox["enabled"], sandbox["allowUnsandboxedCommands"], sandbox["failIfUnavailable"]), (True, False, True))
@@ -121,14 +129,42 @@ class TestLaunch(unittest.TestCase):
             self.assertIn(str(Path.home() / secret), fs["denyRead"])
         self.assertIn("AGENTS.md・CLAUDE.md", argv[argv.index("-p") + 1])  # 自動で読まれない対象の指示を、資料として読ませる
 
-    def test_write_changes_permissions(self):
+    def record_of(self, d):
+        """子が work.py claim・status で受け取る、その作業場所の記録の置き場。"""
+        env = {**os.environ, "BB_WRIT_STATE_DIR": str(self.state)}
+        p = subprocess.run([sys.executable, str(ROOT / "scripts" / "work.py"), "status", "--dir", str(d)], env=env, capture_output=True, text=True)
+        return str(Path(json.loads(p.stdout)["note"]["path"]).parent)
+
+    def test_write_grants_only_the_work_record(self):
+        # 書く子に state 全体（タスクの一覧・統合の記録・他の worktree）を渡さない
         self.run_launch("codex", extra=["--write"])
         argv = json.loads(self.args_file.read_text())
         self.assertIn("--approve-for-me", argv)
-        self.assertEqual(argv[argv.index('--add-dir') + 1], str(self.state))
+        self.assertEqual(argv[argv.index('--add-dir') + 1], self.record_of(self.cwd))
         self.run_launch('claude', extra=['--write'])
         argv = json.loads(self.args_file.read_text())
-        self.assertEqual(argv[argv.index('--add-dir') + 1], str(self.state))
+        self.assertEqual(argv[argv.index('--add-dir') + 1], self.record_of(self.cwd))
+        self.assertEqual(argv[argv.index("--permission-mode") + 1], "auto")
+        self.assertIn("--restricted", argv)
+        sandbox = json.loads(argv[argv.index("--settings") + 1])["sandbox"]
+        self.assertEqual((sandbox["enabled"], sandbox["allowUnsandboxedCommands"], sandbox["failIfUnavailable"]), (True, False, True))
+        self.assertEqual(sandbox["network"], {"allowedDomains": ["*"]})  # 書く子は依存の取得などで外へ出られる
+
+    def test_claude_leaves_no_empty_cc_writes_in_target(self):
+        self.run_launch("claude")
+        self.assertFalse((self.cwd / ".claude").exists())  # この起動で新しくできた空のディレクトリは消す
+        (self.cwd / ".claude").mkdir()
+        self.run_launch("claude", "wrote")
+        self.assertTrue((self.cwd / ".claude" / ".cc-writes" / "x").exists())  # 中身があれば消さない
+
+    def test_claude_in_worktree_leaves_no_empty_cc_writes_in_checkout(self):
+        repo, wt = self.cwd / "repo", self.cwd / "wt"
+        subprocess.run(["git", "init", "-q", str(repo)], check=True)
+        subprocess.run(["git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "-q", "--allow-empty", "-m", "i"], check=True)
+        subprocess.run(["git", "-C", str(repo), "worktree", "add", "-q", str(wt)], check=True)
+        (wt / "a.txt").write_text("x\n")
+        self.run_launch("claude", "checkout", extra=["--write"], cwd=wt)
+        self.assertEqual([p.name for p in (repo, wt) if (p / ".claude").exists()], [])
 
     def grok_target(self):
         """Grok の read-only は /tmp に書けるので、読み取り専用の試験の対象は /tmp の外に置く。"""
@@ -186,7 +222,8 @@ class TestLaunch(unittest.TestCase):
         self.assertEqual(rec["status"], "ok", rec)
         profile = self.grok_profile_of(self.grok_argv()[0])
         self.assertIn('extends = "workspace"', profile)
-        self.assertIn(json.dumps(str(self.state.resolve())), profile)
+        self.assertIn(json.dumps(self.record_of(wt)), profile)
+        self.assertNotIn(json.dumps(str(self.state.resolve())), profile)
         self.assertIn(json.dumps(str((repo / ".git").resolve())), profile)  # worktree の外にある共通ディレクトリ
 
     def test_grok_parallel_writes_add_one_profile(self):

@@ -24,6 +24,9 @@ import tempfile
 import time
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from work import root as work_record  # noqa: E402  作業場所ごとの記録の置き場（担当・記録・証拠）
+
 DEFAULTS = {"claude": ("sonnet", "medium"), "codex": ("gpt-6-sol", "medium"), "grok": ("grok-4.7", "medium")}
 QUOTA = re.compile(r"usage limit|rate limit|quota|exceeded your|too many requests|429|limit reached|out of credits", re.I)
 CONTRACT = """
@@ -96,21 +99,27 @@ def command(a, prompt: str) -> tuple[list[str], dict, str | None]:
             return [], env, f"専用ログインが無い: {env_file} と {keys.name}（claude setup-token の結果を dotenvx で保存する）"
         env["CLAUDE_CONFIG_DIR"] = str(cfg / "claude-home")
         if a.write:
-            perm, settings = ["--permission-mode", "auto", "--add-dir", str(state_dir())], {}
+            # 書く子に渡すのは、対象（作業場所）とその記録だけ。タスクの一覧・統合の記録・他の worktree は親だけが書く。
+            # Bash は sandbox で同じ範囲に閉じ、--restricted でファイル系のツールも同じ範囲に閉じる（対象の .claude の設定も読まない）。
+            # ネットワークは、これまでどおり出られるようにする（sandbox の既定は宛先なしで、依存の取得もできなくなる）
+            perm = ["--permission-mode", "auto", "--restricted", "--tools", "Read,Grep,Glob,Edit,Write,Bash,Skill,WebSearch,WebFetch", "--add-dir", str(work_record(a.cwd))]
+            settings = {"sandbox": {"enabled": True, "allowUnsandboxedCommands": False, "failIfUnavailable": True,
+                                    "network": {"allowedDomains": ["*"]}}}
         else:
             # 読み取り専用は、コマンドの許可規則でなく OS の sandbox で守る（git log/diff/show は --output で書けた。2.1.302 で実測）。
             # 書き込みは対象を含めて拒否し、ネットワークは許可した宛先が無いので出られない。読みは認証情報の置き場を拒否する
             # （ホーム全体を拒否して対象だけ戻すと、bwrap が対象の中の保護ファイルを作れずに起動しなかった。同日）。
             # --restricted は対象の .claude の設定（hook・許可規則）を読まず、ファイル系のツールを対象の中に閉じる。その下では
             # --allowedTools が効かないので、許可は --settings に書く。sandbox を起動できなければ子を起動しない（failIfUnavailable）
-            perm = ["--permission-mode", "dontAsk", "--restricted", "--tools", "Read,Grep,Glob,Bash"]
-            settings = {"permissions": {"allow": ["Read", "Grep", "Glob", "Bash"]},
+            perm = ["--permission-mode", "dontAsk", "--restricted", "--tools", "Read,Grep,Glob,Bash,Skill"]
+            settings = {"permissions": {"allow": ["Read", "Grep", "Glob", "Bash", "Skill"]},
                         "sandbox": {"enabled": True, "allowUnsandboxedCommands": False, "failIfUnavailable": True,
                                     "filesystem": {"denyWrite": [str(a.cwd)], "denyRead": [str(Path.home() / p) for p in SECRET_PLACES],
                                                    "allowRead": [str(Path.home() / ".config" / "git")]}}}
         cmd = ["dotenvx", "run", "-q", "-f", str(env_file), "-fk", str(keys), "--",
                "claude", "-p", prompt, "--output-format", "json", "--model", a.model, "--effort", a.effort,
-               "--permission-prompts", "none", *perm, *(["--settings", json.dumps(settings)] if settings else [])]
+               "--permission-prompts", "none", *perm, "--settings", json.dumps(settings),
+               "--plugin-dir", str(Path(__file__).resolve().parents[1])]  # --restricted は専用ログインに入れたプラグインを読まないので、この bb-writ を渡す
         return cmd, env, None
     if a.host == "grok":
         if not shutil.which("grok"):
@@ -122,8 +131,7 @@ def command(a, prompt: str) -> tuple[list[str], dict, str | None]:
             git_dir, why = grok_git_dir(a.cwd)
             if why:
                 return [], env, why
-            state_dir().mkdir(parents=True, exist_ok=True)
-            profile = grok_profile(home, "workspace", [state_dir()] + ([git_dir] if git_dir else []))
+            profile = grok_profile(home, "workspace", [work_record(a.cwd)] + ([git_dir] if git_dir else []))
         else:
             for d in grok_ro_writable(home):
                 if a.cwd == d or d in a.cwd.parents or a.cwd in d.parents:
@@ -143,7 +151,7 @@ def command(a, prompt: str) -> tuple[list[str], dict, str | None]:
         return [], env, f"専用ログインが無い: {home}/auth.json（CODEX_HOME={home} codex login）"
     env["CODEX_HOME"] = str(home)
     mode = ["--approve-for-me", "-c", "sandbox_workspace_write.network_access=true",
-            "--add-dir", str(state_dir())] if a.write else ["-s", "read-only"]
+            "--add-dir", str(work_record(a.cwd))] if a.write else ["-s", "read-only"]
     cmd = ["codex", "exec", "--json", "-m", a.model, "-c", f'model_reasoning_effort="{a.effort}"',
            "--skip-git-repo-check", "-C", str(a.cwd), *mode, prompt]
     return cmd, env, None
@@ -259,6 +267,13 @@ def main() -> int:
     if why:
         rec.update(status="unavailable", problems=[why])
     else:
+        # --restricted の Claude Code は、対象と（worktree なら）元の checkout に空の .claude/.cc-writes を作る（2.1.302）。
+        # 残すと task cleanup が未保存の変更とみなすので、この起動で新しくでき、空のままのものだけを後で消す
+        made = []
+        if a.host == "claude":
+            git_dir, _ = grok_git_dir(a.cwd)
+            for top in {a.cwd, *([git_dir.parent] if git_dir and git_dir.name == ".git" else [])}:
+                made += [d for d in (top / ".claude", top / ".claude" / ".cc-writes") if not d.exists()]
         try:
             p = subprocess.run(cmd, cwd=a.cwd, env=env, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=a.timeout)
             (out_dir / "stdout.jsonl").write_text(p.stdout, encoding="utf-8")
@@ -280,6 +295,10 @@ def main() -> int:
                 (out_dir / "report.md").write_text(got["text"], encoding="utf-8")
         except subprocess.TimeoutExpired:
             rec.update(status="failed", problems=[f"{a.timeout} 秒で終わらなかった"])
+        finally:
+            for d in reversed(made):
+                if d.is_dir() and not d.is_symlink() and not any(d.iterdir()):
+                    d.rmdir()
     rec["duration_s"] = round(time.time() - t0, 1)
     (out_dir / "record.json").write_text(json.dumps(rec, ensure_ascii=False, indent=1), encoding="utf-8")
     with open(state_dir() / "delegations.jsonl", "a", encoding="utf-8") as f:

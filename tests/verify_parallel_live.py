@@ -83,10 +83,19 @@ work.py は {ROOT}/scripts/work.py。元の checkout は {repo}。
         cmd, child_env, why = launcher.command(a, prompt)
         if why:
             raise RuntimeError(why)
+        # このセッションは子ではなく利用者の親セッションの代わり（自分で task start・commit する）なので、子に掛ける制限
+        # （作業場所の記録だけの付与、Claude Code の --restricted と sandbox）を外し、状態ディレクトリ全体を渡す。
+        cmd[cmd.index('--add-dir') + 1] = str(evidence / 'state')
+        for flag in ('--restricted',):
+            if flag in cmd:
+                cmd.remove(flag)
+        for flag in ('--tools', '--settings'):
+            if flag in cmd:
+                del cmd[cmd.index(flag):cmd.index(flag) + 2]
         child_env['BB_WRIT_STATE_DIR'] = str(evidence / 'state')
         if host == 'claude':
             cmd[cmd.index('--output-format') + 1] = 'stream-json'
-            cmd.extend(['--verbose', '--plugin-dir', str(ROOT), '--max-turns', '35'])
+            cmd.extend(['--verbose', '--max-turns', '35'])
         p = subprocess.Popen(cmd, cwd=repo, env=child_env, stdin=subprocess.DEVNULL,
                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True)
         try:
@@ -160,7 +169,7 @@ work.py は {ROOT}/scripts/work.py。元の checkout は {repo}。
             raise RuntimeError(why)
         child_env['BB_WRIT_STATE_DIR'] = str(evidence / 'state')
         cmd[cmd.index('--output-format') + 1] = 'stream-json'
-        cmd.extend(['--verbose', '--plugin-dir', str(ROOT), '--max-turns', '8', '--allowedTools', 'Skill', 'Read'])
+        cmd.extend(['--verbose', '--max-turns', '8'])
         p = subprocess.run(cmd, cwd=repo, env=child_env, stdin=subprocess.DEVNULL,
                            capture_output=True, text=True, timeout=180)
         (evidence / 'read-only.jsonl').write_text(p.stdout)
