@@ -12,10 +12,10 @@
 
 ## 入れる
 
-試用版。版はマニフェスト（`.claude-plugin/plugin.json` など 3 つ）にだけ書く。下の入れ方は 0.3.0 で実測した（2026-10-17）。
+試用版。版はマニフェスト（`.claude-plugin/plugin.json` など 3 つ）にだけ書く。下の入れ方は 0.7.0 で実測した（2026-10-18）。
 
 - **Claude Code:** `claude plugin marketplace add B16B1RD/bb-writ` → `claude plugin install bb-writ@bb-writ`。何も入っていない設定からこの手順で入り、スキルが呼べることを確かめた。手元の作業ツリーを試すときは `claude plugin marketplace add <このリポジトリ>`（作業ツリーを直接読むので、編集は次のセッションか `/reload-plugins` で効く）。
-- **Codex:** `codex plugin marketplace add B16B1RD/bb-writ` → `codex plugin add bb-writ@bb-writ`。何も入っていない設定から入ることを確かめた（git の認証ヘルパー経由）。Codex は版ごとの写しを置くので、版を上げたら `codex plugin remove bb-writ@bb-writ` → `add`。
+- **Codex:** `codex plugin marketplace add B16B1RD/bb-writ` → `codex plugin add bb-writ@bb-writ`。何も入っていない設定から入ることを確かめた（0.3.0）。Codex は版ごとの写しを置くので、版を上げたら `codex plugin remove bb-writ@bb-writ` → `add`。
 - **入口の案内（Claude Code）:** 普通の依頼文だけでは入口が使われないので、CLAUDE.md に 1 行「技術的な仕事は、まず bb-writ:bb-writ スキルを使って始める」を置くか、`/bb-writ:bb-writ <依頼>` と明示する。Codex は普通の依頼文で入口を使う。hook は使わない。
 - **Grok Build:** root の `plugin.json` を読む形にしてあるが、未確認。
 - **別系統の子・担当の貸し出し:** `scripts/launch.py` と `scripts/work.py` は bb-writ 専用のログインを使う（`skills/delegate/SKILL.md`）。
