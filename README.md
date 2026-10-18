@@ -146,6 +146,7 @@ Claude Code は、普通の依頼文だけでは入口を使わない。入口�
   - Claude Code：`claude setup-token` で得たトークンを、`~/.config/bb-writ/.env` の `CLAUDE_CODE_OAUTH_TOKEN` に [dotenvx](https://dotenvx.com/) で暗号化して置く（鍵の `.env.keys` も同じ場所）。起動するときも dotenvx がトークンを子の環境にだけ渡すので、dotenvx を入れておく。
   - Codex：`CODEX_HOME=~/.config/bb-writ/codex-home codex login`。
   - Grok Build：`GROK_HOME=~/.config/bb-writ/grok-auth grok login`。
+- Linux・WSL2 で Claude Code を子として起動するなら、`bwrap`（bubblewrap）と `socat`。子は OS の sandbox の中で動き、sandbox を起動できなければ起動しない。
 
 呼び出し方は [`delegate` の手引き](skills/delegate/SKILL.md) にある。
 
