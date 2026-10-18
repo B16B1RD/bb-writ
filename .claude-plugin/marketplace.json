@@ -1,6 +1,6 @@
 {
   "name": "bb-writ",
-  "description": "bb-writ（cc-rite-workflow の後継。rite の知見と pstack を参考に CLI ハーネス向けに作り直したスキル）を配る marketplace",
+  "description": "bb-writ を配る marketplace",
   "owner": {
     "name": "B16B1RD"
   },
@@ -8,8 +8,8 @@
     {
       "name": "bb-writ",
       "source": ".",
-      "description": "cc-rite-workflow（rite）の後継。旧来の固定工程を見直し、rite の知見と pstack を参考に、Claude Code・Codex・Grok Build 向けのスキルとして作り直した。普通の依頼を受け、リポジトリを読み、課題に合う手引きと原則を選び、実物で確かめた成果と根拠を返す",
-      "version": "0.7.0",
+      "description": "Claude Code・Codex 向けのスキルのプラグイン。「直して」「作って」「調べて」といった普通の依頼を受け、リポジトリを読んで実装・修正・調査までやり遂げ、実物で動作を確かめた結果を根拠とともに返す。",
+      "version": "0.7.1",
       "author": {
         "name": "B16B1RD"
       }

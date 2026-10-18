@@ -1,6 +1,6 @@
 # bb-writ の開発の取り決め
 
-bb-writ は rite（cc-rite-workflow）の後継。rite の固定工程を見直し、rite の知見と pstack を参考に、CLI ハーネス（Claude Code・Codex。Grok Build も同じ正本を読む）向けのスキルのプラグインとして作り直している。pstack をもとにした部分の出典は `THIRD_PARTY_NOTICES.md`、概要と入れ方は `README.md`。オーナー専用の取り決め（手元の環境・試験用のリポジトリ・push の方法）は、gitignore した `CLAUDE.local.md` にある（無ければ、この文書だけに従う）。
+bb-writ は、CLI ハーネス（Claude Code・Codex。Grok Build も同じ SKILL.md を読む）向けのスキルのプラグイン。概要・入れ方・生い立ち・ライセンスは `README.md`。オーナー専用の取り決め（手元の環境・試験用のリポジトリ・push の方法）は、gitignore した `CLAUDE.local.md` にある（無ければ、この文書だけに従う）。
 
 ## 話し方と名前
 
