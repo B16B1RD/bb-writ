@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""別系統の CLI（Claude Code・Codex）を bb-writ 専用のログインで起動し、報告を回収して検査する（plan-v3 4.2 の launcher）。
+"""別系統の CLI（Claude Code・Codex・Grok Build）を bb-writ 専用のログインで起動し、報告を回収して検査する（plan-v3 4.2 の launcher）。
 
 使い方:
-  python3 launch.py --host codex|claude --cwd <対象> --prompt-file <依頼> [--model M] [--effort E] [--write] [--out <dir>]
+  python3 launch.py --host codex|claude|grok --cwd <対象> --prompt-file <依頼> [--model M] [--effort E] [--write] [--out <dir>]
 
 標準出力に 1 行の JSON を出す。status は ok / invalid-report / failed / quota / unavailable。ok のときだけ終了コード 0。
 子には、最後に ```json {"conclusion": ..., "evidence": [{"what": ..., "where": ...}], "unknowns": [...]} ``` を書かせる。
@@ -11,6 +11,7 @@ JSON が返ったことを成功にしない: 結論が空、証拠が無い、�
 """
 from __future__ import annotations  # macOS の Command Line Tools の python3（3.9）でも型注釈で落ちないように
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -21,7 +22,7 @@ import sys
 import time
 from pathlib import Path
 
-DEFAULTS = {"claude": ("sonnet", "medium"), "codex": ("gpt-6-sol", "medium")}
+DEFAULTS = {"claude": ("sonnet", "medium"), "codex": ("gpt-6-sol", "medium"), "grok": ("grok-4.7", "medium")}
 QUOTA = re.compile(r"usage limit|rate limit|quota|exceeded your|too many requests|429|limit reached|out of credits", re.I)
 CONTRACT = """
 
@@ -38,6 +39,28 @@ def config_dir() -> Path:
 
 def state_dir() -> Path:
     return Path(os.environ.get("BB_WRIT_STATE_DIR", Path.home() / ".local" / "state" / "bb-writ"))
+
+
+# Grok は ~/.claude・~/.cursor の指示・スキル・hook・MCP も読む。子に利用者の個人設定を渡さない（1.0.63 で、切らないと子が利用者の呼び名を使った）
+GROK_COMPAT_OFF = {f"GROK_{v}_{c}_ENABLED": "false" for v in ("CLAUDE", "CURSOR") for c in ("AGENTS", "SKILLS", "RULES", "HOOKS", "MCPS")}
+# Grok の read-only の sandbox でも書ける場所（公式文書 18-sandbox）。対象がこの下にあると読み取り専用にならない
+GROK_RO_WRITABLE = ("/tmp", "/var/tmp")
+
+
+def grok_profile(home: Path, cwd: Path) -> str:
+    """書く委任の sandbox: 作業場所に加え、状態ディレクトリと Git の共通ディレクトリ（worktree の commit が書く）に書ける profile を
+    $GROK_HOME/sandbox.toml に足して、その名前を返す。名前は書ける場所から決まるので、並行する起動が同じ内容を重ねるだけになる。"""
+    rw = [state_dir()]
+    git = subprocess.run(["git", "-C", str(cwd), "rev-parse", "--path-format=absolute", "--git-common-dir"], capture_output=True, text=True)
+    if git.returncode == 0:
+        rw.append(Path(git.stdout.strip()))
+    rw = [str(p.resolve()) for p in rw]
+    name = "bbwrit-" + hashlib.sha256("\n".join(rw).encode()).hexdigest()[:12]
+    f = home / "sandbox.toml"
+    if f"[profiles.{name}]" not in (f.read_text(encoding="utf-8") if f.is_file() else ""):
+        with open(f, "a", encoding="utf-8") as out:
+            out.write(f'\n[profiles.{name}]\nextends = "workspace"\nread_write = {json.dumps(rw)}\n')
+    return name
 
 
 def command(a, prompt: str) -> tuple[list[str], dict, str | None]:
@@ -58,6 +81,21 @@ def command(a, prompt: str) -> tuple[list[str], dict, str | None]:
         cmd = ["dotenvx", "run", "-q", "-f", str(env_file), "-fk", str(keys), "--",
                "claude", "-p", prompt, "--output-format", "json", "--model", a.model, "--effort", a.effort,
                "--permission-prompts", "none", *perm]
+        return cmd, env, None
+    if a.host == "grok":
+        if not shutil.which("grok"):
+            return [], env, "grok が PATH に無い"
+        home = cfg / "grok-auth"
+        if not (home / "auth.json").is_file():
+            return [], env, f"専用ログインが無い: {home}/auth.json（GROK_HOME={home} grok login）"
+        if not a.write:
+            for d in GROK_RO_WRITABLE:
+                if a.cwd == Path(d).resolve() or Path(d).resolve() in a.cwd.parents:
+                    return [], env, f"対象が {d} の下にある。Grok の read-only の sandbox はそこへの書き込みを止めないので、読み取り専用にできない"
+        env.update(GROK_HOME=str(home), GROK_MEMORY="0", **GROK_COMPAT_OFF)
+        cmd = ["grok", "-p", prompt, "--output-format", "json", "-m", a.model, "--effort", a.effort, "--cwd", str(a.cwd),
+               "--sandbox", grok_profile(home, a.cwd) if a.write else "read-only", "--always-approve",
+               "--no-leader", "--no-auto-update", "--no-subagents", "--disable-web-search", "--disallowed-tools", "x_search"]
         return cmd, env, None
     if not shutil.which("codex"):
         return [], env, "codex が PATH に無い"
@@ -113,6 +151,18 @@ def parse_codex(out: str) -> dict:
     return {"text": text, "session": session, "model_effective": eff, "usage": usage, "errors": errors}
 
 
+def parse_grok(out: str) -> dict:
+    try:
+        d = json.loads(out.strip() or "{}")
+    except json.JSONDecodeError:
+        d = {}
+    error = d.get("type") == "error"
+    return {"text": "" if error else d.get("text") or "", "session": d.get("sessionId"), "is_error": error,
+            "errors": [str(d.get("message"))[:300]] if error else [],
+            "model_effective": sorted((d.get("modelUsage") or {}).keys()) or None,  # effort は結果に出ない
+            "usage": {"cost_usd": d.get("total_cost_usd"), "turns": d.get("num_turns")}}
+
+
 def check_report(text: str, cwd: Path) -> tuple[dict | None, list[str]]:
     i = text.rfind("```json")
     if i < 0:
@@ -146,7 +196,7 @@ def check_report(text: str, cwd: Path) -> tuple[dict | None, list[str]]:
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--host", choices=("claude", "codex"), required=True)
+    ap.add_argument("--host", choices=("claude", "codex", "grok"), required=True)
     ap.add_argument("--cwd", type=Path, required=True)
     ap.add_argument("--prompt-file", type=Path, required=True)
     ap.add_argument("--model")
@@ -172,10 +222,14 @@ def main() -> int:
             p = subprocess.run(cmd, cwd=a.cwd, env=env, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=a.timeout)
             (out_dir / "stdout.jsonl").write_text(p.stdout, encoding="utf-8")
             (out_dir / "stderr.log").write_text(p.stderr, encoding="utf-8")
-            got = parse_claude(p.stdout) if a.host == "claude" else parse_codex(p.stdout)
+            got = {"claude": parse_claude, "codex": parse_codex, "grok": parse_grok}[a.host](p.stdout)
+            # Grok は sandbox を適用できないと警告して強制せずに続ける（公式文書 18-sandbox）。権限の約束が崩れたので結果を使わない
+            unsafe = [l for l in p.stderr.splitlines() if a.host == "grok" and re.search(r"sandbox|warn", l, re.I)][-5:]
             rec.update(exit_code=p.returncode, session=got["session"], model_effective=got["model_effective"], usage=got["usage"])
             if QUOTA.search(p.stderr[-4000:] + " ".join(got["errors"])):
                 rec.update(status="quota", problems=["利用枠の上限に当たった（別料金の API へは切り替えない）"])
+            elif unsafe:
+                rec.update(status="failed", problems=["sandbox か引数の警告が出た（権限の約束どおりに動いたか分からない）"] + unsafe)
             elif p.returncode != 0 or got.get("is_error") or not got["text"]:
                 tail = [l for l in p.stderr.strip().splitlines() if "injected env" not in l and "Reading additional input" not in l][-5:]
                 rec.update(status="failed", problems=[f"終了コード {p.returncode}"] + got["errors"] + tail)
