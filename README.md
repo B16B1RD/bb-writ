@@ -1,10 +1,10 @@
 # bb-writ
 
-Claude Code・Codex 向けのスキルのプラグイン。「直して」「作って」「調べて」といった普通の依頼を受け、リポジトリを読んで実装・修正・調査までやり遂げ、実物で動作を確かめた結果を根拠とともに返す。Issue の整形も、対象のリポジトリの登録も要らない。
+Claude Code・Codex 向けのスキルのプラグイン。入口のスキルが「直して」「作って」「調べて」といった普通の依頼を受け、リポジトリを読んで実装・修正・調査までやり遂げ、実物で動作を確かめた結果を根拠とともに返す。Issue の書式に整えたり、対象のリポジトリを登録したりする準備は要らない。
 
 ## インストール
 
-使う CLI（Claude Code または Codex）をインストールしてから、その CLI の手順を実行する。基本機能には、もう一方の CLI や bb-writ 専用のログインは要らない。
+使う CLI（Claude Code または Codex）をインストールしてから、その CLI の手順を実行する。基本機能には、もう一方の CLI も、bb-writ 専用のログイン（任意機能で別系統の CLI を起動するときに使う）も要らない。
 
 ### Claude Code
 
@@ -63,47 +63,43 @@ Codex:
 $bb-writ:bb-writ README を読み、このプロジェクトの使い方を説明して。ファイルは変更しないで。
 ```
 
-Claude Code で普通の依頼文から入口を使わせるには、対象の `CLAUDE.md` に「技術的な仕事は、まず bb-writ:bb-writ スキルを使って始める」と書く。Codex は依頼に応じて入口を使う。hook は要らない。
+Claude Code は、普通の依頼文だけでは入口を使わない。入口の名前を付けずに使わせるには、作業するリポジトリの `CLAUDE.md` に「技術的な仕事は、まず bb-writ:bb-writ スキルを使って始める」と書く。Codex は、入口の名前を付けない普通の依頼でも入口を最初に読んだ（試験での観測）。どちらの CLI でも hook の設定は要らない。
+
+## 仕組みと含まれるスキル
+
+入口のスキル `bb-writ` が呼ばれると、依頼を言い直し、最初に手引きを呼び、リポジトリを読み、必要な原則だけを読んで進め、「何を実行し、どの結果を見て、依頼を満たすと判断したか」を返す。
+
+- 手引き：`playbook-investigation`（読んで答える）・`playbook-bug`（不具合を直す）・`playbook-feature`（振る舞いを足す・変える）・`playbook-docs-skill`（文書・スキルを直す）・`playbook-session-pickup`（続きを引き受ける）・`playbook-pause-safely`（安全に止める）・`playbook-eval`（スキルや設定の変種を同じ依頼で走らせ、目隠しで比べる）。
+- 委任と審査：`delegate`（別系統の CLI の起動）、`interrogate`（2 系統の審査役）。
+- 検証：`create-verification-skill`（対象のリポジトリに検証スキルを作って 1 回通す）。
+- 学び：`reflect`（振り返って行き先へ送る）、`correct`（繰り返す誤りを起こせなくする）。
+- 探索：`unknowns`（実装前に、盲点の洗い出しや案の比較をする）。
+- 原則：1 本ずつ別のスキル `principle-*`（18 本）。入口の「原則の索引」から、仕事の局面に当たるものだけを呼ぶ。
 
 ## 任意機能の準備
 
 `delegate` や `interrogate` で別系統の CLI を起動する場合は、両方の CLI と、起動される側の bb-writ 専用ログインを用意する。準備と呼び出し方は [`delegate` の手引き](skills/delegate/SKILL.md) にある。
 
-手元の作業ツリーを Claude Code で試す場合は、配布版の代わりに `claude plugin marketplace add <このリポジトリのパス>` で登録する。作業ツリーへの編集は次のセッションか `/reload-plugins` で反映する。
-
 Grok Build は root の `plugin.json` を読む形にしてあるが、インストール・更新の動作は確認していない。
 
-## 使う
+## 開発
 
-入口のスキル `bb-writ` が呼ばれると、依頼を言い直し、最初に手引きを呼び、リポジトリを読み、必要な原則だけを読んで進め、「何を実行し、どの結果を見て、依頼を満たすと判断したか」を返す。
+この節は、bb-writ 自体を直す人向け。
 
-- 手引き: `playbook-investigation`・`playbook-bug`・`playbook-feature`・`playbook-docs-skill`・`playbook-session-pickup`（続きを引き受ける）・`playbook-pause-safely`（安全に止める）・`playbook-eval`（目隠しで比べる）。
-- 委任と審査: `delegate`（別系統の CLI の起動。`scripts/launch.py`）、`interrogate`（2 系統の審査役）。
-- 検証: `create-verification-skill`（対象のリポジトリに検証スキルを作って 1 回通す）。
-- 学び: `reflect`（振り返って行き先へ送る）、`correct`（繰り返す誤りを起こせなくする）。
-- 原則は 1 本ずつ別のスキル `principle-*`（18 本）。入口の「原則の索引」から、仕事の局面に当たるものだけを呼ぶ。
-
-## 中身
-
-- `skills/bb-writ/`: 入口（言い直し、手引きの選び方、原則の索引、検証の形、片付け、返答の形）。
-- `skills/playbook-*/`: 手引き 7 本。`skills/delegate/`・`skills/interrogate/`・`skills/create-verification-skill/`・`skills/reflect/`・`skills/correct/`。
-- `skills/principle-*/`: 原則 18 本。`skills/unknowns/`: 実装前の探索セッション。
-- `scripts/launch.py`（別系統の CLI の起動と報告の検査）、`scripts/work.py`（担当の貸し出しと外部操作の記録）。標準ライブラリのみ。
-- すべて SKILL.md の本文で届く形にしてある。Claude Code 2.1.302 は、プラグイン内の別ファイルの Read に作業ディレクトリ外として承認を求める（2026-10-17 に実測）。
-- 試験: `python3 -B -m unittest discover -s tests -t .`
-
-## 守ること
-
-- トークン・認証情報を画面・ログ・会話に出さない。ワーカーは bb-writ 専用のログインを使う（`skills/delegate/SKILL.md`）。
-- 対象を増やすたびに bb-writ 自身を直さない。対象に固有のことは、対象のリポジトリの中で解く。
+- 手元の作業ツリーを Claude Code で試すには、配布版の代わりに `claude plugin marketplace add <このリポジトリのパス>` で登録する。作業ツリーへの編集は、次のセッションか `/reload-plugins` で反映する。
+- 置き場：スキルは `skills/<名前>/SKILL.md`（上の一覧と同じ名前）。補助スクリプトは `scripts/launch.py`（別系統の CLI の起動と報告の検査）と `scripts/work.py`（担当の貸し出しと外部操作の記録）で、標準ライブラリだけを使う。
+- 必要な内容は、すべて SKILL.md の本文に入れる。プラグイン内の別ファイルを読ませると、Claude Code が承認を求めるため。
+- 試験：`python3 -B -m unittest discover -s tests -t .`
+- トークン・認証情報を画面・ログ・会話に出さない。ワーカーは bb-writ 専用のログインを使う（[`delegate` の手引き](skills/delegate/SKILL.md)）。
+- 対象のリポジトリを増やすたびに bb-writ 自身を直さない。対象に固有のことは、対象のリポジトリの中で解く。
 
 ## 生い立ち
 
 bb-writ は [cc-rite-workflow](https://github.com/B16B1RD/cc-rite-workflow)（rite）の後継。rite は Issue を起点に、仕様・実装・レビュー・PR を固定の工程で回していた。作者は rite を使い続けるうちに、生成 AI で作る時代に旧来の工程をなぞることに疑問を持ち、開発の進め方そのものを見直した。その際、poteto（Lauren Tan）の [pstack](https://github.com/cursor/plugins/tree/main/pstack) の考え方に共感し、rite で得た知見と pstack を参考に、CLI ハーネスで動くスキルのプラグインとして作り直した。
 
-- **rite から:** 子への委任の範囲と実効設定の記録、専用ログイン、根拠に基づく報告、中断・訂正・外部操作（push・PR・マージ）の記録と照合。Issue の書式・固定の工程・対象の登録は捨てた。
-- **pstack から:** 原則 18 本のうち 12 本（CLI ハーネス向けに日本語で書き直した。残る 6 本は作者の原則）、入口が依頼を読んで手引きを選ぶ形、`correct`・`create-verification-skill`・`interrogate`・`reflect` の考え方。出典と著作権表示は [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md)。
-- **pstack と違うところ:** Grok Bot と Cursor のクラウドを前提にしない。別系統のモデルによる判断、作業の継続、権限を、Claude Code・Codex の正式な実行・再開・プラグインの機能と薄い補助コードで成り立たせる。
+- **rite から**：子への委任の範囲と実効設定の記録、専用ログイン、根拠に基づく報告、中断・訂正・外部操作（push・PR・マージ）の記録と照合。Issue の書式・固定の工程・対象の登録は捨てた。
+- **pstack から**：原則のうち 12 本（CLI ハーネス向けに日本語で書き直した。残る 6 本は作者の原則）、入口が依頼を読んで手引きを選ぶ形、`correct`・`create-verification-skill`・`interrogate`・`reflect` の考え方。出典と著作権表示は [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md)。
+- **pstack と違うところ**：pstack の一部の機能が使う Grok Bot（webhook で起動するボット）と、Cursor 専用の機能（bugbot・automations など）を前提にしない。別系統のモデルによる判断、作業の継続、権限を、Claude Code・Codex の正式な実行・再開・プラグインの機能と薄い補助コードで成り立たせる。
 
 ## ライセンス
 
