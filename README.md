@@ -39,8 +39,10 @@ codex plugin add bb-writ@bb-writ
 ### Grok Build
 
 ```sh
-grok plugin install B16B1RD/bb-writ
+grok plugin install B16B1RD/bb-writ --trust
 ```
+
+`--trust` は、プラグインを信頼して有効にすることの確認で、付けないと Grok Build は導入せずに止まる。bb-writ が有効にするのはスキルだけで、hook と MCP サーバーは含まない。
 
 Grok Build は Claude Code のプラグインも読む（Claude 互換の既定の設定）。Claude Code に bb-writ を入れてあれば、Grok Build に入れなくても使える。両方に入れた場合は、Grok Build に入れたほうが使われる。
 
@@ -93,7 +95,7 @@ grok plugin update
 
 ```sh
 grok plugin uninstall bb-writ
-grok plugin install <ディレクトリ>
+grok plugin install <ディレクトリ> --trust
 ```
 
 更新後は、新しい Grok Build セッションを開く。

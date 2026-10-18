@@ -4,6 +4,14 @@ bb-writ を使う人に向けて、版ごとに変わったことを書く。新
 
 commit ごとの細かい変更は、各版の末尾の「commit の一覧」（前の版のタグとの比較）で見られる。
 
+## 0.9.1 - 2026-10-18
+
+### 直したこと
+
+- README と `delegate` の Grok Build の導入手順に、必要な `--trust` が抜けていた。書いてあるとおりに `grok plugin install B16B1RD/bb-writ` を実行すると、Grok Build が確認を求めて止まっていた。正しい手順は `grok plugin install B16B1RD/bb-writ --trust`。手元のディレクトリから入れ直す手順も同じ。
+
+commit の一覧：https://github.com/B16B1RD/bb-writ/compare/bb-writ--v0.9.0...bb-writ--v0.9.1
+
 ## 0.9.0 - 2026-10-18
 
 ### 変えたこと
