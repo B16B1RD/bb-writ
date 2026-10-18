@@ -1,6 +1,6 @@
 # bb-writ
 
-bb-writ（読み方：ビービー・リット）は、Claude Code・Codex 向けのスキルのプラグイン。入口のスキルが「直して」「作って」「調べて」といった普通の依頼を受け、リポジトリを読んで実装・修正・調査までやり遂げ、実物で動作を確かめた結果を根拠とともに返す。Issue の書式に整えたり、対象のリポジトリを登録したりする準備は要らない。
+bb-writ（読み方：ビービー・リット）は、Claude Code・Codex・Grok Build 向けのスキルのプラグイン。入口のスキルが「直して」「作って」「調べて」といった普通の依頼を受け、リポジトリを読んで実装・修正・調査までやり遂げ、実物で動作を確かめた結果を根拠とともに返す。Issue の書式に整えたり、対象のリポジトリを登録したりする準備は要らない。
 
 紹介動画（35 秒）。中盤は、実際の Claude Code のセッションで和暦の不具合を直す様子を早送りしたもの。
 
@@ -8,10 +8,10 @@ https://github.com/user-attachments/assets/dd9c669e-0d1e-4645-a631-ea70809b345a
 
 ## 前提
 
-基本機能に要るもの。基本機能は、`delegate`・`interrogate` で別系統の CLI（使っていないほうの Claude Code か Codex）を起動する場合を除く、すべての使い方。
+基本機能に要るもの。基本機能は、`delegate`・`interrogate` で別系統の CLI（使っている CLI 以外の Claude Code・Codex・Grok Build）を起動する場合を除く、すべての使い方。
 
 - OS：Linux・macOS・WSL2。Windows のネイティブ環境（PowerShell など）は対象外。入口がファイルに書く前に実行する `scripts/work.py` が、Unix にしか無い `fcntl` を使うので動かない。読むだけの使い方も、ネイティブ環境では確かめていない。Windows では、WSL2 の中に CLI を入れて、その中で起動する。
-- CLI：Claude Code か Codex のどちらか 1 つ。
+- CLI：Claude Code・Codex・Grok Build のどれか 1 つ。
 - Python：3.9 以上を `python3` で起動できること。標準ライブラリだけを使うので、パッケージは要らない。macOS では、Command Line Tools に付く `python3`（3.9）で足りる。
 - git：macOS では、Command Line Tools に付く `git` で足りる。
 - GitHub CLI（`gh`、ログイン済み）：Issue・PR を名指しして頼むときと、push・PR などの外部操作の前にアカウントと書き込み権限を確かめるときに使う。gh が無いと、名指しした Issue・PR の本文を読めず、GitHub への外部操作はこの確かめで止まる。Issue・PR を名指しせずに、リポジトリを読む・手元で直すだけなら要らない。
@@ -20,7 +20,7 @@ https://github.com/user-attachments/assets/dd9c669e-0d1e-4645-a631-ea70809b345a
 
 ## インストール
 
-使う CLI（Claude Code または Codex）をインストールしてから、その CLI の手順を実行する。
+使う CLI（Claude Code・Codex・Grok Build のどれか）をインストールしてから、その CLI の手順を実行する。
 
 ### Claude Code
 
@@ -35,6 +35,14 @@ claude plugin install bb-writ@bb-writ
 codex plugin marketplace add B16B1RD/bb-writ
 codex plugin add bb-writ@bb-writ
 ```
+
+### Grok Build
+
+```sh
+grok plugin install B16B1RD/bb-writ
+```
+
+Grok Build は Claude Code のプラグインも読む（Claude 互換の既定の設定）。Claude Code に bb-writ を入れてあれば、Grok Build に入れなくても使える。両方に入れた場合は、Grok Build に入れたほうが使われる。
 
 インストール後は、新しい CLI セッションを開いて使う。
 
@@ -73,6 +81,23 @@ codex plugin add bb-writ@bb-writ
 
 更新後は、新しい Codex セッションを開く。
 
+### Grok Build
+
+GitHub から入れた場合、`update` は既定のブランチの最新の commit を取り込む（リリースのタグではない）。
+
+```sh
+grok plugin update
+```
+
+手元のディレクトリから入れた場合は写しが置かれ、`update` は「already live」と表示しても変更を取り込まない。削除して入れ直す（削除はプラグインの名前で指定する）。
+
+```sh
+grok plugin uninstall bb-writ
+grok plugin install <ディレクトリ>
+```
+
+更新後は、新しい Grok Build セッションを開く。
+
 ## 使い始める
 
 依頼文の書き方（どこまで任せるか、Issue からドラフト PR・マージまでの進め方、`unknowns` との使い分け）は [はじめての bb-writ](docs/getting-started.md) にある。
@@ -91,7 +116,13 @@ Codex:
 $bb-writ:bb-writ README を読み、このプロジェクトの使い方を説明して。ファイルは変更しないで。
 ```
 
-Claude Code は、普通の依頼文だけでは入口を使わない。入口の名前を付けずに使わせるには、作業するリポジトリの `CLAUDE.md` に「技術的な仕事は、まず bb-writ:bb-writ スキルを使って始める」と書く。Codex は、入口の名前を付けない普通の依頼でも入口を最初に読んだ（試験での観測）。どちらの CLI でも hook の設定は要らない。
+Grok Build:
+
+```text
+/bb-writ README を読み、このプロジェクトの使い方を説明して。ファイルは変更しないで。
+```
+
+Claude Code は、普通の依頼文だけでは入口を使わない。入口の名前を付けずに使わせるには、作業するリポジトリの `CLAUDE.md` に「技術的な仕事は、まず bb-writ:bb-writ スキルを使って始める」と書く。Codex と Grok Build は、入口の名前を付けない普通の依頼でも入口を最初に読んだ（試験での観測）。どの CLI でも hook の設定は要らない。
 
 ## 仕組みと含まれるスキル
 
@@ -108,14 +139,13 @@ Claude Code は、普通の依頼文だけでは入口を使わない。入口�
 
 `delegate` や `interrogate` で別系統の CLI を起動する場合は、[前提](#前提)に加えて次を用意する。
 
-- Claude Code と Codex の両方。
-- 起動される CLI の bb-writ 専用ログイン。Codex で `interrogate` を使うときは、同じ Codex の審査役も別プロセスの Codex として起動するので、両方のログインが要る。
+- 起動する CLI と、起動される CLI（Claude Code・Codex・Grok Build のうち 2 つ以上）。
+- 起動される CLI の bb-writ 専用ログイン。Codex で `interrogate` を使うときは、同じ Codex の審査役も別プロセスの Codex として起動するので、Codex のログインも要る。
   - Claude Code：`claude setup-token` で得たトークンを、`~/.config/bb-writ/.env` の `CLAUDE_CODE_OAUTH_TOKEN` に [dotenvx](https://dotenvx.com/) で暗号化して置く（鍵の `.env.keys` も同じ場所）。起動するときも dotenvx がトークンを子の環境にだけ渡すので、dotenvx を入れておく。
   - Codex：`CODEX_HOME=~/.config/bb-writ/codex-home codex login`。
+  - Grok Build：`GROK_HOME=~/.config/bb-writ/grok-auth grok login`。
 
 呼び出し方は [`delegate` の手引き](skills/delegate/SKILL.md) にある。
-
-Grok Build は root の `plugin.json` を読む形にしてあるが、インストール・更新の動作は確認していない。
 
 ## 開発
 
