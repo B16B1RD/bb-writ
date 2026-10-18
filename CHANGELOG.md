@@ -4,6 +4,22 @@ bb-writ を使う人に向けて、版ごとに変わったことを書く。新
 
 commit ごとの細かい変更は、各版の末尾の「commit の一覧」（前の版のタグとの比較）で見られる。
 
+## 0.10.1 - 2026-10-19
+
+### 直したこと
+
+- Codex の子に書く仕事を任せると、worktree で commit できなかった。今は commit に要る Git の場所だけを渡し、Git の設定（`config`・`hooks`）や統合先のブランチには書けない。
+- Claude Code の子に、親の環境変数（`CLAUDE*`・`ANTHROPIC_*`）が渡っていた。そのため、利用者の mod（`CLAUDE_CODE_PLUGIN_DIRS` で読み込む拡張）が子の中で動き、親の effort の指定も子に効いていた。今は渡さない。`ANTHROPIC_API_KEY` があっても、子は専用ログインを使う。
+- 書く子が担当の記録の期限を遠い将来に書き換えると、親が担当を取り直せなかった。今は期限が 24 時間を超える担当は切れたものとみなす。`--lease` も 24 時間まで。
+- 書く子が自分のブランチ以外の ref（統合先の `main` など）を動かしたとき、`failed` の理由に前後の値と戻すコマンドを出す。launcher は自動では戻さない。
+
+### 文書
+
+- Grok Build はトークンの更新で専用ログインの `auth.json` を書き換え、起動ごとの home の symlink は残ることを `delegate` に書いた。
+- 子に任せている作業場所では外部操作を始めたままにしないことを、`delegate` に書いた。
+
+commit の一覧：https://github.com/B16B1RD/bb-writ/compare/bb-writ--v0.10.0...bb-writ--v0.10.1
+
 ## 0.10.0 - 2026-10-19
 
 ### 直したこと
