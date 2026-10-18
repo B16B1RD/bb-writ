@@ -4,6 +4,21 @@ bb-writ を使う人に向けて、版ごとに変わったことを書く。新
 
 commit ごとの細かい変更は、各版の末尾の「commit の一覧」（前の版のタグとの比較）で見られる。
 
+## 0.9.0 - 2026-10-18
+
+### 変えたこと
+
+- Grok Build で bb-writ を使えることを確かめた。`grok plugin install B16B1RD/bb-writ` で入る。Claude Code に bb-writ を入れてあれば、Grok Build に入れなくてもそのまま使える。入口の名前を付けない普通の依頼でも、入口から始まる。
+- `delegate`・`interrogate` で起動する別系統の CLI に、Grok Build を選べるようになった（`launch.py --host grok`）。専用のログインは `GROK_HOME=~/.config/bb-writ/grok-auth grok login` で作る。
+- 子の Grok Build には、利用者の `~/.claude`・`~/.cursor` の指示・スキル・hook と、親の環境の API キーを渡さない。読み取り専用の子は、書き込みを止められない場所（`/tmp` の下など）を対象にすると起動しない。sandbox を適用できなければ、子は起動を拒む。
+
+### 文書
+
+- README に、Grok Build の入れ方・更新のしかた・入口の呼び方・専用ログインを足した。手元のディレクトリから入れた場合は `grok plugin update` が変更を取り込まないので、入れ直す手順を書いた。
+- `delegate` の Grok Build の節を、実際に動かして確かめた内容に書き直した。
+
+commit の一覧：https://github.com/B16B1RD/bb-writ/compare/bb-writ--v0.8.0...bb-writ--v0.9.0
+
 ## 0.8.0 - 2026-10-18
 
 ### 変えたこと
