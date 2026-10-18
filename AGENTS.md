@@ -22,7 +22,7 @@ bb-writ は、CLI ハーネス（Claude Code・Codex。Grok Build も同じ SKIL
 ## 置き場
 
 - 設定 `~/.config/bb-writ/`（dotenvx の `.env`・`.env.keys`、専用ログインの `claude-home`・`codex-home`・`grok-auth`、比較用の `cmp/`）。状態 `~/.local/state/bb-writ/`（`work/` 作業場所ごとの担当・記録・証拠、`delegations/` 委任の記録、`notes/`、`worktrees/`）。
-- 専用ログイン: Claude Code は `~/.config/bb-writ/.env` の `CLAUDE_CODE_OAUTH_TOKEN`（dotenvx）と `CLAUDE_CONFIG_DIR=~/.config/bb-writ/claude-home`、Codex は `CODEX_HOME=~/.config/bb-writ/codex-home`、Grok Build は `~/.config/bb-writ/grok-auth`。呼び出し方は `skills/delegate/SKILL.md`。
+- 専用ログイン: Claude Code は `~/.config/bb-writ/.env` の `CLAUDE_CODE_OAUTH_TOKEN`（dotenvx）と `CLAUDE_CONFIG_DIR=~/.config/bb-writ/claude-home`、Codex は `CODEX_HOME=~/.config/bb-writ/codex-home`、Grok Build は `GROK_HOME=~/.config/bb-writ/grok-auth`。呼び出し方は `skills/delegate/SKILL.md`。
 - プラグインとして配る（大前提）。出すときは `.claude-plugin/plugin.json`・`plugin.json`・`.claude-plugin/marketplace.json` の版を一緒に上げる。Codex も同じ 2 つ（marketplace と root の `plugin.json`）を読む（0.163.0 で確認）。ホスト専用のマニフェストは、必要が実物で出るまで足さない。Codex の専用ログインは版ごとの写しなので、版を上げたら `codex plugin remove bb-writ@bb-writ` → `add`。
 - 変更履歴は利用者向けの `CHANGELOG.md` 1 つ。版を上げる commit で、先頭に `## <版> - <日付>` の節を足し、前のタグからの変更（版を上げなかった commit の分も）を利用者に何が変わるかで書く。開発者向けの履歴は別に書かず、タグの間の git log を使う。push の後、その commit に `claude plugin tag --push` でタグ（`bb-writ--v<版>`）を付け、Release は `gh release create <タグ> --title "bb-writ <版>" --notes-file <その節を抜き出したファイル>` で作る。Release の本文は手で書かない（同じ文面を 2 か所で持たないため。commit を経ない文は、公開前の検査も通らない）。
 

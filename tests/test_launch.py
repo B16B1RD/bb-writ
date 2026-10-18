@@ -43,7 +43,7 @@ FAKE_CLAUDE = textwrap.dedent(r'''
 FAKE_GROK = textwrap.dedent(r'''
     #!/usr/bin/env python3
     import json, os, sys
-    env = {k: v for k, v in os.environ.items() if k.startswith("GROK_")}
+    env = {k: v for k, v in os.environ.items() if k.startswith("GROK_") or k in ("XAI_API_KEY", "RUST_LOG")}
     open(os.environ["FAKE_ARGS"], "w").write(json.dumps(sys.argv[1:] + ["ENV=" + json.dumps(env, sort_keys=True)]))
     mode = os.environ.get("FAKE_MODE", "good")
     if mode == "signedout":
@@ -149,11 +149,13 @@ class TestLaunch(unittest.TestCase):
 
     def test_grok_parent_api_key_is_not_passed(self):
         self.run_launch("grok", cwd=self.grok_target(), env_extra={"XAI_API_KEY": "k"})
-        self.assertNotIn('"XAI_API_KEY"', self.args_file.read_text())
+        self.assertNotIn("XAI_API_KEY", self.grok_argv()[1])
 
     def test_grok_read_only_refuses_targets_overlapping_writable_places(self):
         target = self.grok_target()
-        for cwd, cfg in ((Path("/tmp"), None), (Path(tempfile.mkdtemp(dir="/var/tmp")), None), (self.cwd, None),  # self.cwd は /tmp の下
+        var_tmp = tempfile.TemporaryDirectory(dir="/var/tmp")
+        self.addCleanup(var_tmp.cleanup)
+        for cwd, cfg in ((Path("/tmp"), None), (Path(var_tmp.name), None), (self.cwd, None),  # self.cwd は /tmp の下
                          (Path("/"), None), (target, target / "cfg")):  # 対象が専用ログイン（read-only でも書ける）を含む
             if cfg:
                 (cfg / "grok-auth").mkdir(parents=True)

@@ -14,6 +14,6 @@ description: 「いったん止めて」「ここで中断」「後で続ける�
 5. **記録を書く。** `claim` の出力の `note.path`（`work.py status` でも分かる）に、次をこの順で: 目的、制約、できたと分かる確かめ方（述語）、決めたことと根拠、済んだことと確かめた証拠、今の状態（ブランチ・commit・作業場所・PR）、次の一手、結果が分からない外部操作、ホストと session ID。書けない環境なら、同じ内容を返答の末尾に書く。
 6. **担当を手放す。** `work.py release --dir <作業場所> --token <token>`。
 
-`work.py` はプラグインの置き場の `scripts/work.py`（Claude Code では `${CLAUDE_PLUGIN_ROOT}/scripts/work.py`、Codex ではこのスキルの SKILL.md から 2 つ上の `scripts/work.py`）。
+`work.py` はプラグインの置き場の `scripts/work.py`（Claude Code では `${CLAUDE_PLUGIN_ROOT}/scripts/work.py`、Codex・Grok Build ではこのスキルの SKILL.md から 2 つ上の `scripts/work.py`）。
 
 返答: どこで止めたか、残したもの（commit・記録のパス）、作業ツリーがきれいか、再開したときの最初の一手。これは止めるための報告で、完了の報告ではない。

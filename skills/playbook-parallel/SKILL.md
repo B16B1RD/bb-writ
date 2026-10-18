@@ -9,7 +9,7 @@ description: 入口 bb-writ の手順 5 で、feature・bug・docs-skill の手�
 
 Claude Code 同士・Codex 同士・混在を区別しない。作業の単位はタスクで、担当の名前はホストと session ID。1 タスクに 1 worktree・1 ブランチを割り当てる。担当が違うタスク同士は並行し、同じリポジトリへのローカル統合は直列にする。工程の判断はエージェントが行い、補助コードは作業場所の確保・排他・保存先と commit の照合だけを担う。
 
-`work.py` はプラグインの `scripts/work.py`。Claude Code は `${CLAUDE_PLUGIN_ROOT}/scripts/work.py`、Codex はこの SKILL.md から 2 つ上の `scripts/work.py` を使う。以下の `<work.py>` はその実物に置き換える。Python 3.9 以上、Linux・macOS・WSL2 が前提。
+`work.py` はプラグインの `scripts/work.py`。Claude Code は `${CLAUDE_PLUGIN_ROOT}/scripts/work.py`、Codex・Grok Build はこの SKILL.md から 2 つ上の `scripts/work.py` を使う。以下の `<work.py>` はその実物に置き換える。Python 3.9 以上、Linux・macOS・WSL2 が前提。
 
 ## 始める
 
