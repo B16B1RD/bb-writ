@@ -11,8 +11,6 @@ JSON が返ったことを成功にしない: 結論が空、証拠が無い、�
 """
 from __future__ import annotations  # macOS の Command Line Tools の python3（3.9）でも型注釈で落ちないように
 import argparse
-import fcntl
-import hashlib
 import json
 import os
 import re
@@ -72,18 +70,43 @@ def grok_git_dir(cwd: Path) -> tuple[Path | None, str | None]:
     return None, f"Git の共通ディレクトリを取れない（git rev-parse: {g.stderr.strip()[:200]}）"
 
 
-def grok_profile(home: Path, extends: str, read_write: list[Path]) -> str:
-    """独自の sandbox の profile を $GROK_HOME/sandbox.toml に足して名前を返す。組み込みの profile は適用できないと警告して強制せずに続くが、
-    独自の profile は起動を拒む（公式文書 18-sandbox）ので、読み取り専用も独自の profile にする。名前は中身から決め、並行する起動は排他して重ねない。"""
+def grok_commit_dirs(cwd: Path) -> tuple[list[Path], str | None]:
+    """worktree で commit するのに要る、共通ディレクトリの中の場所。共通ディレクトリの直下・config・hooks は渡さない
+    （書けると、利用者が次に git を動かしたとき sandbox の外でコードが動く）。worktree でなければ空。"""
+    common, why = grok_git_dir(cwd)
+    if why or not common:
+        return [], why
+    own = subprocess.run(["git", "-C", str(cwd), "rev-parse", "--git-dir"], capture_output=True, text=True)
+    own_dir = (cwd / own.stdout.strip()).resolve()
+    if own.returncode or own_dir == common:
+        return [], None if not own.returncode else f"Git の作業場所の管理ディレクトリを取れない（git rev-parse: {own.stderr.strip()[:200]}）"
+    return [common / "objects", common / "refs", common / "logs", own_dir], None
+
+
+def grok_home(login: Path, extends: str, read_write: list[Path]) -> tuple[Path, str]:
+    """起動ごとの GROK_HOME を作り、(場所, profile 名) を返す。Grok の sandbox は read-only でも GROK_HOME に書けるので、
+    sandbox.toml・config.toml・hooks・trusted_folders.toml を後の子と共有しない。共有するのはログインの auth.json だけ。
+    組み込みの profile は適用できないと警告して強制せずに続くが、独自の profile は起動を拒む（公式文書 18-sandbox）ので、読み取り専用も独自の profile にする。"""
+    base = state_dir() / "grok-homes"
+    base.mkdir(parents=True, exist_ok=True)
+    home = Path(tempfile.mkdtemp(prefix=time.strftime("%Y%m%d-%H%M%S-"), dir=base))
+    (home / "auth.json").symlink_to(login / "auth.json")
     rw = [str(p.resolve()) for p in read_write]
-    body = f'extends = "{extends}"\nread_write = {json.dumps(rw)}\n'
-    name = "bbwrit-" + hashlib.sha256(body.encode()).hexdigest()[:12]
-    with open(home / "sandbox.toml", "a+", encoding="utf-8") as f:
-        fcntl.flock(f, fcntl.LOCK_EX)
-        f.seek(0)
-        if f"[profiles.{name}]" not in f.read():
-            f.write(f"\n[profiles.{name}]\n{body}")
-    return name
+    (home / "sandbox.toml").write_text(f'[profiles.bbwrit]\nextends = "{extends}"\nread_write = {json.dumps(rw)}\n', encoding="utf-8")
+    return home, "bbwrit"
+
+
+def grok_keep_login(home: Path, login: Path) -> str | None:
+    """Grok が auth.json を symlink から通常のファイルに置き換えていたら（トークンの更新など）、専用ログインへ書き戻す。"""
+    auth = home / "auth.json"
+    if auth.is_symlink() or not auth.is_file():
+        return None
+    tmp = login / f".auth.json.{secrets.token_hex(4)}"
+    shutil.copy2(auth, tmp)
+    os.replace(tmp, login / "auth.json")
+    auth.unlink()
+    auth.symlink_to(login / "auth.json")
+    return "Grok が auth.json を置き換えたので、専用ログインに書き戻した"
 
 
 def command(a, prompt: str) -> tuple[list[str], dict, str | None]:
@@ -124,19 +147,20 @@ def command(a, prompt: str) -> tuple[list[str], dict, str | None]:
     if a.host == "grok":
         if not shutil.which("grok"):
             return [], env, "grok が PATH に無い"
-        home = cfg / "grok-auth"
-        if not (home / "auth.json").is_file():
-            return [], env, f"専用ログインが無い: {home}/auth.json（GROK_HOME={home} grok login）"
+        login = cfg / "grok-auth"
+        if not (login / "auth.json").is_file():
+            return [], env, f"専用ログインが無い: {login}/auth.json（GROK_HOME={login} grok login）"
         if a.write:
-            git_dir, why = grok_git_dir(a.cwd)
+            git_dirs, why = grok_commit_dirs(a.cwd)
             if why:
                 return [], env, why
-            profile = grok_profile(home, "workspace", [work_record(a.cwd)] + ([git_dir] if git_dir else []))
+            home, profile = grok_home(login, "workspace", [work_record(a.cwd), *git_dirs])
         else:
-            for d in grok_ro_writable(home):
+            # 起動ごとの home は状態ディレクトリの下にできるので、それと重なる対象も止める
+            for d in grok_ro_writable(state_dir() / "grok-homes"):
                 if a.cwd == d or d in a.cwd.parents or a.cwd in d.parents:
                     return [], env, f"対象と {d} が重なる。Grok の read-only の sandbox はそこへの書き込みを止めないので、読み取り専用にできない"
-            profile = grok_profile(home, "read-only", [])
+            home, profile = grok_home(login, "read-only", [])
         # 親の GROK_*（GROK_AGENT・GROK_SANDBOX・GROK_CONFIG など）と API キーを渡さない。API キーがあるとログインの代わりに別料金の API へ落ちる
         env = {k: v for k, v in env.items() if not k.startswith("GROK_") and k not in ("XAI_API_KEY", "RUST_LOG")}
         env.update(GROK_HOME=str(home), GROK_MEMORY="0", **GROK_COMPAT_OFF)
@@ -263,6 +287,8 @@ def main() -> int:
            "write": a.write, "out": str(out_dir)}
 
     cmd, env, why = command(a, a.prompt_file.read_text(encoding="utf-8") + CONTRACT)
+    if a.host == "grok" and not why:
+        rec["grok_home"] = env["GROK_HOME"]  # 再開（grok -r）はこの home で
     t0 = time.time()
     if why:
         rec.update(status="unavailable", problems=[why])
@@ -296,6 +322,10 @@ def main() -> int:
         except subprocess.TimeoutExpired:
             rec.update(status="failed", problems=[f"{a.timeout} 秒で終わらなかった"])
         finally:
+            if "grok_home" in rec:
+                note = grok_keep_login(Path(rec["grok_home"]), config_dir() / "grok-auth")
+                if note:
+                    rec["notes"] = [note]
             for d in reversed(made):
                 if d.is_dir() and not d.is_symlink() and not any(d.iterdir()):
                     d.rmdir()

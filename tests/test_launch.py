@@ -59,6 +59,10 @@ FAKE_GROK = textwrap.dedent(r'''
         print("warning: sandbox could not be applied: landlock unavailable", file=sys.stderr)  # 1.0.63 の実物の文言
     if mode == "leadernote":
         print("note: sandbox profile 'x' was requested, so leader mode is off", file=sys.stderr)
+    if mode == "refresh":  # トークンの更新で auth.json を置き換える
+        auth = os.path.join(os.environ["GROK_HOME"], "auth.json")
+        os.unlink(auth)
+        open(auth, "w").write('{"refreshed": true}')
     print(json.dumps({"text": os.environ["FAKE_TEXT"], "stopReason": "end_turn", "sessionId": "g-1",
                       "modelUsage": {"grok-4.7-build": {}}, "total_cost_usd": 0.02, "num_turns": 3}))
 ''').lstrip()
@@ -177,11 +181,16 @@ class TestLaunch(unittest.TestCase):
         argv = json.loads(self.args_file.read_text())
         return argv[:-1], json.loads(argv[-1][len("ENV="):])
 
-    def grok_profile_of(self, argv):
+    def grok_profile_of(self, argv, env):
+        """その起動だけの GROK_HOME にある profile。専用ログインの場所には sandbox.toml を作らない。"""
         name = argv[argv.index("--sandbox") + 1]
-        toml = (self.cfg / "grok-auth" / "sandbox.toml").read_text()
-        self.assertEqual(toml.count(f"[profiles.{name}]"), 1, toml)
-        return toml.split(f"[profiles.{name}]\n", 1)[1].split("\n[", 1)[0]
+        home = Path(env["GROK_HOME"])
+        self.assertEqual(home.parent, self.state / "grok-homes")
+        self.assertEqual((home / "auth.json").resolve(), (self.cfg / "grok-auth" / "auth.json").resolve())
+        self.assertFalse((self.cfg / "grok-auth" / "sandbox.toml").exists())
+        toml = (home / "sandbox.toml").read_text()
+        self.assertEqual(toml.count("[profiles."), 1, toml)
+        return toml.split(f"[profiles.{name}]\n", 1)[1]
 
     def test_grok_ok_is_read_only_and_isolated(self):
         rc, rec = self.run_launch("grok", cwd=self.grok_target(),
@@ -189,9 +198,10 @@ class TestLaunch(unittest.TestCase):
         self.assertEqual((rc, rec["status"], rec["session"], rec["model_effective"]), (0, "ok", "g-1", ["grok-4.7-build"]), rec)
         argv, env = self.grok_argv()
         # 組み込みの read-only は適用できないと強制せずに続くので、適用できなければ起動を拒む独自の profile で渡す
-        self.assertIn('extends = "read-only"', self.grok_profile_of(argv))
+        self.assertIn('extends = "read-only"', self.grok_profile_of(argv, env))
+        self.assertEqual(rec["grok_home"], env["GROK_HOME"])  # 再開に使う home を記録する
         compat = {f"GROK_{v}_{c}_ENABLED" for v in ("CLAUDE", "CURSOR") for c in ("AGENTS", "SKILLS", "RULES", "HOOKS", "MCPS")}
-        self.assertEqual(env, {"GROK_HOME": str(self.cfg / "grok-auth"), "GROK_MEMORY": "0", **{k: "false" for k in compat}})
+        self.assertEqual(env, {"GROK_HOME": env["GROK_HOME"], "GROK_MEMORY": "0", **{k: "false" for k in compat}})
 
     def test_grok_parent_api_key_is_not_passed(self):
         self.run_launch("grok", cwd=self.grok_target(), env_extra={"XAI_API_KEY": "k"})
@@ -201,12 +211,9 @@ class TestLaunch(unittest.TestCase):
         target = self.grok_target()
         var_tmp = tempfile.TemporaryDirectory(dir="/var/tmp")
         self.addCleanup(var_tmp.cleanup)
-        for cwd, cfg in ((Path("/tmp"), None), (Path(var_tmp.name), None), (self.cwd, None),  # self.cwd は /tmp の下
-                         (Path("/"), None), (target, target / "cfg")):  # 対象が専用ログイン（read-only でも書ける）を含む
-            if cfg:
-                (cfg / "grok-auth").mkdir(parents=True)
-                (cfg / "grok-auth" / "auth.json").write_text("{}")
-            rc, rec = self.run_launch("grok", cwd=cwd, env_extra={"BB_WRIT_CONFIG_DIR": str(cfg)} if cfg else None)
+        for cwd, state in ((Path("/tmp"), None), (Path(var_tmp.name), None), (self.cwd, None),  # self.cwd は /tmp の下
+                           (Path("/"), None), (target, target / "state")):  # 対象が起動ごとの GROK_HOME（read-only でも書ける）を含む
+            rc, rec = self.run_launch("grok", cwd=cwd, env_extra={"BB_WRIT_STATE_DIR": str(state)} if state else None)
             self.assertEqual(rec["status"], "unavailable", cwd)
             self.assertIn("読み取り専用にできない", rec["problems"][0])
         self.assertFalse(self.args_file.exists())  # 起動しない
@@ -220,21 +227,28 @@ class TestLaunch(unittest.TestCase):
         (wt / "a.txt").write_text("x\n")  # 偽の子の報告が指す証拠
         rc, rec = self.run_launch("grok", extra=["--write"], cwd=wt)
         self.assertEqual(rec["status"], "ok", rec)
-        profile = self.grok_profile_of(self.grok_argv()[0])
+        profile = self.grok_profile_of(*self.grok_argv())
         self.assertIn('extends = "workspace"', profile)
-        self.assertIn(json.dumps(self.record_of(wt)), profile)
-        self.assertNotIn(json.dumps(str(self.state.resolve())), profile)
-        self.assertIn(json.dumps(str((repo / ".git").resolve())), profile)  # worktree の外にある共通ディレクトリ
+        rw = json.loads(profile.split("read_write = ", 1)[1])
+        common = (repo / ".git").resolve()
+        # commit に要る場所だけ。共通ディレクトリの直下・config・hooks と、state 全体は渡さない
+        self.assertEqual(sorted(rw), sorted([self.record_of(wt), str(common / "objects"), str(common / "refs"), str(common / "logs"),
+                                             str(common / "worktrees" / "wt")]))
 
-    def test_grok_parallel_writes_add_one_profile(self):
+    def test_grok_parallel_launches_have_separate_homes(self):
         env = {**os.environ, "PATH": f"{self.bin}:/usr/bin:/bin", "BB_WRIT_CONFIG_DIR": str(self.cfg), "BB_WRIT_STATE_DIR": str(self.state),
                "FAKE_ARGS": str(self.args_file), "FAKE_TEXT": GOOD.encode().decode("unicode_escape")}
         procs = [subprocess.Popen([sys.executable, str(LAUNCH), "--host", "grok", "--cwd", str(self.cwd), "--prompt-file", str(self.prompt), "--write"],
                                   env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE) for _ in range(8)]
-        for pr in procs:
-            pr.communicate()
-        toml = (self.cfg / "grok-auth" / "sandbox.toml").read_text()
-        self.assertEqual(toml.count("[profiles."), 1, toml)
+        homes = {json.loads(pr.communicate()[0])["grok_home"] for pr in procs}
+        self.assertEqual(len(homes), 8)
+        self.assertFalse((self.cfg / "grok-auth" / "sandbox.toml").exists())
+
+    def test_grok_replaced_auth_is_written_back_to_the_login(self):
+        rc, rec = self.run_launch("grok", "refresh", cwd=self.grok_target())
+        self.assertEqual(rec["status"], "ok", rec)
+        self.assertEqual((self.cfg / "grok-auth" / "auth.json").read_text(), '{"refreshed": true}')
+        self.assertTrue((Path(rec["grok_home"]) / "auth.json").is_symlink())
 
     def test_grok_warning_is_failed_but_note_is_not(self):
         rc, rec = self.run_launch("grok", "nosandbox", cwd=self.grok_target())
