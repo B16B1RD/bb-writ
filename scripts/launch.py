@@ -66,6 +66,33 @@ def secret_env(env: dict) -> dict:
     return {"envVars": [{"name": n, "mode": "deny"} for n in sorted(names)]}
 
 
+READ_ONLY_ENV = {"PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "LANGUAGE", "TERM", "TZ", "TMPDIR",
+                 "SSL_CERT_FILE", "SSL_CERT_DIR", "NODE_EXTRA_CA_CERTS", "REQUESTS_CA_BUNDLE"}
+
+
+def outside_reads(keep: list[Path]) -> list[str]:
+    """ホームの下で、keep のどれにも至らない場所。keep に至る経路の上の兄弟だけを並べ、経路そのものは拒否しない。"""
+    keep_set = {p.resolve() for p in keep}
+    out = []
+
+    def walk(d: Path):
+        try:
+            entries = sorted(d.iterdir())
+        except OSError:
+            return
+        for e in entries:
+            r = e.resolve() if e.is_symlink() else e
+            if r in keep_set:
+                continue
+            if not e.is_symlink() and any(e in k.parents for k in keep_set):
+                walk(e)
+            else:
+                out.append(str(e))
+
+    walk(Path.home().resolve())
+    return out
+
+
 def secret_reads(cfg: Path) -> dict:
     """子の Bash に読ませない認証情報の置き場（専用ログインの置き場は ~/.config の外にも置ける）。Git の設定だけは読ませる。"""
     return {"denyRead": [str(Path.home() / p) for p in SECRET_PLACES] + [str(cfg)], "allowRead": [str(Path.home() / ".config" / "git")]}
@@ -179,8 +206,7 @@ def command(a, prompt: str) -> tuple[list[str], dict, str | None]:
                                     "network": {"allowedDomains": ["*"]}, "filesystem": secret_reads(cfg), "credentials": secret_env(env)}}
         else:
             # 読み取り専用は、コマンドの許可規則でなく OS の sandbox で守る（git log/diff/show は --output で書けた。2.1.302 で実測）。
-            # 書き込みは対象を含めて拒否し、ネットワークは許可した宛先が無いので出られない。読みは認証情報の置き場を拒否する
-            # （ホーム全体を拒否して対象だけ戻すと、bwrap が対象の中の保護ファイルを作れずに起動しなかった。同日）。
+            # 書き込みは対象を含めて拒否し、ネットワークは許可した宛先が無いので出られない。
             # --restricted は対象の .claude の設定（hook・許可規則）を読まず、ファイル系のツールを対象の中に閉じる。その下では
             # --allowedTools が効かないので、許可は --settings に書く。sandbox を起動できなければ子を起動しない（failIfUnavailable）
             # linked worktree では、sandbox が共有の .git とその周り（元のリポジトリの親まで書けた。同日）への書き込みを
@@ -189,10 +215,19 @@ def command(a, prompt: str) -> tuple[list[str], dict, str | None]:
             if why:
                 return [], env, why
             deny = [str(a.cwd), str(Path.home())] + ([str(git_dir), os.path.commonpath([a.cwd, git_dir])] if git_dir else [])
+            # 読みは、ホームのうち対象・共通ディレクトリ・Git の設定・PATH 上の道具に至る経路の外を拒否する（名前を挙げた置き場の外にある
+            # 別のリポジトリの .env なども読ませない）。ホーム全体を拒否して対象だけ戻すと、bwrap が対象の中の保護ファイルを作れずに起動しなかった（同日）
+            home = Path.home()
+            keep = [a.cwd, *([git_dir] if git_dir else []), home / ".gitconfig", home / ".config" / "git",
+                    *(Path(d) for d in env.get("PATH", "").split(os.pathsep) if d.startswith(str(home)))]
+            # 子の Bash に渡す環境も最小限にする（読み取り専用の子は git と読むコマンドしか使わない）
+            env = {k: v for k, v in env.items() if k in READ_ONLY_ENV or k.upper().endswith("_PROXY") or k.startswith("LC_")}
+            env["CLAUDE_CONFIG_DIR"] = str(cfg / "claude-home")
             perm = ["--permission-mode", "dontAsk", "--restricted", "--tools", "Read,Grep,Glob,Bash,Skill"]
             settings = {"permissions": {"allow": ["Read", "Grep", "Glob", "Bash", "Skill"]},
                         "sandbox": {"enabled": True, "allowUnsandboxedCommands": False, "failIfUnavailable": True,
-                                    "filesystem": {"denyWrite": sorted(set(deny)), **secret_reads(cfg)}, "credentials": secret_env(env)}}
+                                    "filesystem": {"denyWrite": sorted(set(deny)), "denyRead": outside_reads(keep) + [str(cfg)]},
+                                    "credentials": secret_env(env)}}
         cmd = ["dotenvx", "run", "-q", "-f", str(env_file), "-fk", str(keys), "--",
                "claude", "-p", prompt, "--output-format", "json", "--model", a.model, "--effort", a.effort,
                "--permission-prompts", "none", *perm, "--settings", json.dumps(settings),

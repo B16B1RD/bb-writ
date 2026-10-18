@@ -16,6 +16,9 @@ GOOD = 'ok.\\n```json\\n{"conclusion": "x は正しい", "evidence": [{"what": "
 FAKE_CODEX = textwrap.dedent(r'''
     #!/usr/bin/env python3
     import json, os, sys
+    _f = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fake_env.json")  # 子の環境を絞る launcher でも、試験の設定を届ける
+    os.environ.update({k: v for k, v in json.load(open(_f)).items() if k not in os.environ})
+    open(os.environ["FAKE_ARGS"] + ".allenv", "w").write(json.dumps(sorted(k for k in os.environ if not k.startswith("FAKE_"))))
     open(os.environ["FAKE_ARGS"], "w").write(json.dumps(sys.argv[1:]))
     mode = os.environ.get("FAKE_MODE", "good")
     if mode == "crash":
@@ -35,6 +38,9 @@ FAKE_CODEX = textwrap.dedent(r'''
 FAKE_CLAUDE = textwrap.dedent(r'''
     #!/usr/bin/env python3
     import json, os, sys
+    _f = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fake_env.json")  # 子の環境を絞る launcher でも、試験の設定を届ける
+    os.environ.update({k: v for k, v in json.load(open(_f)).items() if k not in os.environ})
+    open(os.environ["FAKE_ARGS"] + ".allenv", "w").write(json.dumps(sorted(k for k in os.environ if not k.startswith("FAKE_"))))
     open(os.environ["FAKE_ARGS"], "w").write(json.dumps(sys.argv[1:]))
     open(os.environ["FAKE_ARGS"] + ".scrub", "w").write(os.environ.get("CLAUDE_CODE_SUBPROCESS_ENV_SCRUB", ""))
     open(os.environ["FAKE_ARGS"] + ".env", "w").write(json.dumps(sorted(k for k in os.environ if k.startswith(("CLAUDE", "ANTHROPIC_")))))
@@ -67,6 +73,9 @@ FAKE_CLAUDE = textwrap.dedent(r'''
 FAKE_GROK = textwrap.dedent(r'''
     #!/usr/bin/env python3
     import json, os, sys
+    _f = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fake_env.json")  # 子の環境を絞る launcher でも、試験の設定を届ける
+    os.environ.update({k: v for k, v in json.load(open(_f)).items() if k not in os.environ})
+    open(os.environ["FAKE_ARGS"] + ".allenv", "w").write(json.dumps(sorted(k for k in os.environ if not k.startswith("FAKE_"))))
     env = {k: v for k, v in os.environ.items() if k.startswith("GROK_") or k in ("XAI_API_KEY", "RUST_LOG")}
     open(os.environ["FAKE_ARGS"], "w").write(json.dumps(sys.argv[1:] + ["ENV=" + json.dumps(env, sort_keys=True)]))
     mode = os.environ.get("FAKE_MODE", "good")
@@ -118,6 +127,7 @@ class TestLaunch(unittest.TestCase):
         env = {**os.environ, "PATH": path if path is not None else f"{self.bin}:/usr/bin:/bin", "BB_WRIT_CONFIG_DIR": str(self.cfg),
                "BB_WRIT_STATE_DIR": str(self.state), "FAKE_MODE": mode, "FAKE_ARGS": str(self.args_file),
                "FAKE_TEXT": GOOD.encode().decode("unicode_escape"), **(env_extra or {})}
+        (self.bin / "fake_env.json").write_text(json.dumps({k: v for k, v in env.items() if k.startswith("FAKE_")}))
         p = subprocess.run([sys.executable, str(LAUNCH), "--host", host, "--cwd", str(cwd or self.cwd), "--prompt-file", str(self.prompt), *extra],
                            env=env, capture_output=True, text=True)
         return p.returncode, json.loads(p.stdout)
@@ -151,8 +161,11 @@ class TestLaunch(unittest.TestCase):
         self.assertEqual((sandbox["enabled"], sandbox["allowUnsandboxedCommands"], sandbox["failIfUnavailable"]), (True, False, True))
         fs = sandbox["filesystem"]
         self.assertTrue({str(self.cwd.resolve()), str(Path.home())} <= set(fs["denyWrite"]))
-        for secret in (".config", ".ssh", ".claude", ".codex", ".grok"):  # gh のトークン・dotenvx の鍵・各 CLI のログイン
-            self.assertIn(str(Path.home() / secret), fs["denyRead"])
+        home = Path.home().resolve()
+        for secret in (home / ".config" / "gh", home / ".ssh", home / ".claude", home / ".codex", self.cfg):  # gh のトークン・鍵・各 CLI のログイン
+            covered = any(str(secret) == r or str(secret).startswith(r + "/") for r in fs["denyRead"])
+            self.assertTrue(covered or not secret.exists(), secret)
+        self.assertFalse(any(str(home / ".config" / "git").startswith(r + "/") or str(home / ".config" / "git") == r for r in fs["denyRead"]))
         self.assertIn("AGENTS.md・CLAUDE.md", argv[argv.index("-p") + 1])  # 自動で読まれない対象の指示を、資料として読ませる
 
     def record_of(self, d):
@@ -238,12 +251,18 @@ class TestLaunch(unittest.TestCase):
 
     def test_claude_read_only_in_worktree_denies_the_common_git_dir(self):
         repo, wt = self.worktree()
-        self.run_launch("claude", cwd=wt, env_extra={"MY_SERVICE_TOKEN": "x"})
+        self.run_launch("claude", cwd=wt, env_extra={"MY_SERVICE_TOKEN": "x", "HTTPS_PROXY": "http://p"})
         argv = json.loads(self.args_file.read_text())
         sandbox = json.loads(argv[argv.index("--settings") + 1])["sandbox"]
         self.assertIn(str((repo / ".git").resolve()), sandbox["filesystem"]["denyWrite"])  # sandbox は共有の .git を自動で許すので
         denied = {e["name"] for e in sandbox["credentials"]["envVars"] if e["mode"] == "deny"}
-        self.assertTrue({"CLAUDE_CODE_OAUTH_TOKEN", "GH_TOKEN", "MY_SERVICE_TOKEN"} <= denied)  # 子の Bash から認証情報の環境変数を消す
+        self.assertTrue({"CLAUDE_CODE_OAUTH_TOKEN", "GH_TOKEN"} <= denied)  # 子の Bash から認証情報の環境変数を消す
+        passed = set(json.loads(Path(str(self.args_file) + ".allenv").read_text()))
+        self.assertNotIn("MY_SERVICE_TOKEN", passed)  # 読み取り専用の子の環境は最小限。プロキシは残す
+        self.assertTrue({"PATH", "HOME", "HTTPS_PROXY", "CLAUDE_CONFIG_DIR"} <= passed)
+        reads = sandbox["filesystem"]["denyRead"]
+        self.assertNotIn(str(Path.home()), reads)  # ホーム全体は拒否しない（bwrap が起動しない）
+        self.assertFalse(any(str(wt).startswith(r + "/") or str(wt) == r for r in reads))  # 対象に至る経路は読める
         self.assertIn(str(Path.home()), sandbox["filesystem"]["denyWrite"])
         self.assertEqual(Path(str(self.args_file) + ".scrub").read_text(), "")  # SCRUB は許可の方針を default に戻すので使わない
 
