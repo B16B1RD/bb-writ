@@ -12,7 +12,7 @@ description: 前のセッション（別の CLI でもよい）の続きを引�
 3. **結果が分からない外部操作を照合する。** claim の出力の `pending_ops` の 1 つずつについて、外部の状態を見る（PR なら `gh pr list --head <ブランチ> --state all`、push なら `git ls-remote origin <ブランチ>`、コメントなら PR のコメント一覧）。結果が見つかれば `op done --result "<見つけたもの>"` で閉じ、やり直さない。見つからないと確かめられたときだけやり直す。やり直しも `op begin` から（同じ鍵は拒否されるので、`<鍵>:retry` のように別の鍵にする）。
 4. **済んだことと残りを分ける。** 目的と確かめ方の述語に照らし、済んだこと（commit・PR・確かめた証拠）と残りを並べ、再開点を 1 つ名指す。前の再現や確かめを、理由なくやり直さない。
 5. **続ける。** 残りの仕事に合う手引き（入口 `bb-writ` の表）へ渡す。引き継いだ主張は、最後に元の目的に照らして実物で確かめる（`principle-prove-it-works`）。
-6. **外部操作の約束を守る。** これから行う push・PR 作成・コメントなどは元の checkout から実行し、前に `op begin --key <種類:対象> --from <元の checkout>`（`push`・`pr`・`merge`・`release` は `--verified <検証した commit>` も。前の担当の検証は、その commit が今の HEAD と同じときだけ使える）、後に `op done --result <結果>`。照合（手順 3）の `gh` も元の checkout で実行する（作業場所では別のアカウントになり、PR が見えないことがある）。
+6. **外部操作の約束を守る。** これから行う push・PR 作成・コメントなどは元の checkout から実行し、前に `op begin --key <種類:対象> --from <元の checkout>`（push の鍵には出す commit を含める。`push:origin/main@<commit>`。`push`・`pr`・`merge`・`release` は `--verified <検証した commit>` も。前の担当の検証は、その commit が今の HEAD と同じときだけ使える）、後に `op done --result <結果>`。照合（手順 3）の `gh` も元の checkout で実行する（作業場所では別のアカウントになり、PR が見えないことがある）。
 
 `work.py` の場所は `playbook-pause-safely` と同じ。
 
