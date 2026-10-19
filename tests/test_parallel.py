@@ -334,7 +334,13 @@ class TestParallel(unittest.TestCase):
         self.addCleanup(finish.touch)
         first = self.integrating(a, ah)
         self.await_file(entered)
-        time.sleep(3.1)
+        # 期限は壁時計で判定する。WSL2 では壁時計が単調時計より数秒遅れることがあり、決まった長さの sleep では
+        # 期限前に引き継ぎを試して落ちた（100 秒で 3.4 秒の遅れ、20 回中 2 回。2026-10-19）。壁時計で期限を過ぎるまで待つ
+        expires_at = json.loads((Path(a['note']['path']).parent / 'lease.json').read_text())['expires_at']
+        until = time.monotonic() + 30
+        while time.time() < expires_at + 0.5 and time.monotonic() < until:
+            time.sleep(0.05)
+        self.assertGreater(time.time(), expires_at, '担当の期限が切れない')
         takeover = subprocess.Popen([sys.executable, '-B', str(WORK), 'claim', '--dir', a['dir'],
                                      '--holder', 'Codex'], env=self.env,
                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
