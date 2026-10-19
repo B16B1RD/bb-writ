@@ -1,6 +1,6 @@
 {
   "name": "bb-writ",
-  "version": "0.10.2",
+  "version": "0.11.0",
   "description": "Claude Code・Codex・Grok Build 向けのスキルのプラグイン。「直して」「作って」「調べて」といった普通の依頼を受け、リポジトリを読んで実装・修正・調査までやり遂げ、実物で動作を確かめた結果を根拠とともに返す。",
   "license": "MIT",
   "author": {
