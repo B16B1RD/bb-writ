@@ -176,6 +176,7 @@ def grok_parallel_read_only(out):
     applied = [grok_applied(h) for h in homes]
     checks = {
         'children_ran': all(r['status'] in ('ok', 'invalid-report') for r in recs),
+        'no_home_residue_any': all(r.get('home_residue') == [] for r in recs),
         'separate_homes': len(set(homes)) == 2,
         'own_profile_enforced': all(a and a[-1]['profile'] == 'bbwrit' and a[-1]['enforced'] for a in applied),
         'no_write_in_target': not (target / 'written.txt').exists(),
@@ -246,6 +247,7 @@ def main():
         d = a.out / name
         d.mkdir()
         checks, rec = CHECKS[name](d)
+        checks['no_home_residue'] = rec.get('home_residue') == []  # 名指しした場所の外（ホーム）に、子の CLI が空のファイルを残さない
         results[name] = {'passed': all(checks.values()), 'checks': checks, 'launch': {k: rec.get(k) for k in ('status', 'problems', 'model_effective', 'usage')}}
         print(json.dumps({name: results[name]}, ensure_ascii=False))
     status = 'passed' if all(r['passed'] for r in results.values()) else 'failed'

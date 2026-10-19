@@ -32,6 +32,18 @@ bb-writ は、CLI ハーネス（Claude Code・Codex。Grok Build も同じ SKIL
 - スキルの変更は、新しい CLI セッションで実物を確かめる（最初のツール呼び出しで使われるか、成果物）。比べるときは `skills/playbook-eval`。
 - GitHub に触れる確かめは、自分が管理する試験用のリポジトリで行う。子の CLI の起動に、普段渡さない設定（`GH_CONFIG_DIR`・`GH_TOKEN`）を足さない。
 
+## 規則と強制するもの
+
+訂正を受けたら、誤りを直してここに規則を足す。強制するものが無い規則で同じ誤りが起きたら、同じ変更で検査に上げる。起こりえなくなった規則は消す。
+
+| 規則 | 強制するもの |
+|---|---|
+| 子の起動の後、ホームに空のファイル・ディレクトリを残さない（子の CLI の sandbox が作る。空の `.bash_profile` でログインシェルが `.bashrc` を読まなくなった） | `scripts/launch.py` の `home_entries` が `failed` にする。`tests/test_launch.py` の `test_child_leaving_empty_files_in_home_fails`、`tests/verify_sandbox_live.py` の `no_home_residue` |
+| launcher はプラグインの置き場に `__pycache__` を作らない | `tests/test_launch.py` の `test_launch_leaves_no_bytecode_in_the_plugin` |
+| Claude Code の子に `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB` を使わない（許可の方針を既定に戻し、空のファイルを残した） | 読み取り専用の子は `tests/test_launch.py` の `test_claude_read_only_in_worktree_denies_the_common_git_dir`。書く子は試験が無く、残った空のファイルを上の `home_entries` が捕まえる |
+| Claude Code の子に、親の `CLAUDE*`・`ANTHROPIC_*` の環境変数を渡さない | `tests/test_launch.py` の `test_claude_child_gets_no_parent_claude_env` |
+| 版はマニフェストの間で揃え、`CHANGELOG.md` の先頭は今の版。スキルは SKILL.md の本文だけで届き、名前はフォルダと同じ | `tests/test_distribution.py` |
+
 ## commit
 
 - 通常は main に直接 commit する。並行開発ではタスク専用の worktree・ブランチで commit し、最新の main を取り込んで検証した版を、排他の下で main に統合する。Conventional Commits。

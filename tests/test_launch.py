@@ -60,6 +60,10 @@ FAKE_CLAUDE = textwrap.dedent(r'''
         open(os.path.join(common(), "config"), "a").write("[core]\n\tfsmonitor = touch /tmp/pwned\n")
     if mode == "tamper-gitfile":  # 作業場所の .git を偽のディレクトリへ向け直す
         open(".git", "w").write("gitdir: /tmp/fake-git\n")
+    if mode == "home-residue":  # sandbox の設定が、守る対象のうち無いものをホームに空で作って残す（SUBPROCESS_ENV_SCRUB のとき。2.1.302）
+        home = os.environ["HOME"]
+        open(os.path.join(home, ".bash_profile"), "w").close(); open(os.path.join(home, ".netrc"), "w").close()
+        os.makedirs(os.path.join(home, ".config", "pip"))
     if os.environ.get("FAKE_MODE") == "wrote":
         open(".claude/.cc-writes/x", "w").write("x")
     if os.environ.get("FAKE_MODE") == "checkout":  # worktree の子は、元の checkout にも作る
@@ -201,6 +205,21 @@ class TestLaunch(unittest.TestCase):
         (self.cwd / ".claude").mkdir()
         self.run_launch("claude", "wrote")
         self.assertTrue((self.cwd / ".claude" / ".cc-writes" / "x").exists())  # 中身があれば消さない
+
+    def test_child_leaving_empty_files_in_home_fails(self):
+        # 起動の後にホームの直下へ空の .bash_profile が残ると、ログインシェルが .profile を読まず .bashrc も読まなくなった
+        home = Path(self.tmp.name) / "home"
+        (home / ".config").mkdir(parents=True)
+        (home / ".existing-empty").write_text("")
+        for extra in ((), ("--write",)):
+            rc, rec = self.run_launch("claude", "home-residue", extra=extra, env_extra={"HOME": str(home)})
+            self.assertEqual((rc, rec["status"]), (2, "failed"), rec)
+            self.assertEqual(rec["home_residue"], [str(home / ".bash_profile"), str(home / ".config" / "pip"), str(home / ".netrc")])
+            for f in rec["home_residue"]:  # 黙って消さない（同じ時刻に別の道具が作ったものかもしれない）
+                self.assertTrue(Path(f).exists())
+                Path(f).unlink() if Path(f).is_file() else Path(f).rmdir()
+        rc, rec = self.run_launch("claude", env_extra={"HOME": str(home)})
+        self.assertEqual((rc, rec["status"], rec.get("home_residue")), (0, "ok", []), rec)  # 前からある空のファイルは数えない
 
     def test_claude_in_worktree_leaves_no_empty_cc_writes_in_checkout(self):
         repo, wt = self.cwd / "repo", self.cwd / "wt"

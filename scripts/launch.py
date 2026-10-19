@@ -98,6 +98,38 @@ def secret_reads(cfg: Path) -> dict:
     return {"denyRead": [str(Path.home() / p) for p in SECRET_PLACES] + [str(cfg)], "allowRead": [str(Path.home() / ".config" / "git")]}
 
 
+def home_entries(skip: list[Path]) -> tuple[set[str], set[str]]:
+    """ホームの 2 段目までの (すべての場所, 空のファイルと空のディレクトリ)。skip とその下は見ない。
+    子の CLI の sandbox は、守る対象のうち無いものを空のファイルで作り、残すことがある（.bash_profile が残ると、ログインシェルが .bashrc を読まなくなった。2.1.302）。"""
+    every, empty = set(), set()
+
+    def scan(d: Path, depth: int):
+        try:
+            entries = list(os.scandir(d))
+        except OSError:
+            return
+        for e in entries:
+            p = Path(e.path)
+            if any(p == s or s in p.parents for s in skip):
+                continue
+            every.add(e.path)
+            try:
+                if e.is_symlink():
+                    continue
+                if e.is_dir():
+                    if not any(os.scandir(e.path)):
+                        empty.add(e.path)
+                    elif depth < 2:
+                        scan(p, depth + 1)
+                elif e.is_file() and e.stat().st_size == 0:
+                    empty.add(e.path)
+            except OSError:
+                continue
+
+    scan(Path.home(), 1)
+    return every, empty
+
+
 def grok_ro_writable(home: Path) -> list[Path]:
     """Grok の read-only の sandbox でも書ける場所（公式文書 18-sandbox と、実物の sessions/sandbox-events.jsonl の read_write_paths）。"""
     roots = [Path("/tmp"), Path("/var/tmp"), Path(tempfile.gettempdir()), home]  # gettempdir は macOS の一時ディレクトリ
@@ -405,6 +437,9 @@ def main() -> int:
             git_dir, _ = grok_git_dir(a.cwd)
             for top in {a.cwd, *([git_dir.parent] if git_dir and git_dir.name == ".git" else [])}:
                 made += [d for d in (top / ".claude", top / ".claude" / ".cc-writes") if not d.exists()]
+        # 子の前後でホームを比べ、新しくできて空のままの場所を残りとして報告する。黙って消さない（同じ時刻に別の道具が作ったものかもしれない）
+        skip = [config_dir(), state_dir(), out_dir, a.cwd, Path.home() / ".cache"]
+        home_before, _ = home_entries(skip)
         try:
             # 子が残した背景のプロセスが、終了後の照合の後に書き換えないよう、プロセスグループごと止める
             child = subprocess.Popen(cmd, cwd=a.cwd, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -450,6 +485,11 @@ def main() -> int:
             for d in reversed(made):
                 if d.is_dir() and not d.is_symlink() and not any(d.iterdir()):
                     d.rmdir()
+            rec["home_residue"] = sorted(home_entries(skip)[1] - home_before)
+            if rec["home_residue"]:
+                rec.update(status="failed", problems=["子の起動の後、ホームに空のファイル・ディレクトリが新しく残った。中身を確かめて消す"
+                                                      "（空の ~/.bash_profile があると、ログインシェルが ~/.profile と ~/.bashrc を読まない）"]
+                           + rec["home_residue"][:20] + rec.get("problems", []))
     rec["duration_s"] = round(time.time() - t0, 1)
     (out_dir / "record.json").write_text(json.dumps(rec, ensure_ascii=False, indent=1), encoding="utf-8")
     with open(state_dir() / "delegations.jsonl", "a", encoding="utf-8") as f:
