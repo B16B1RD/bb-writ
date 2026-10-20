@@ -95,6 +95,8 @@ for item in os.environ.get("FAKE_GH_MAP", "").split(";"):
     if item and cwd.startswith(item.split("=")[0]):
         login, perm = item.split("=")[1].split(":")
 if sys.argv[1:3] == ["api", "user"]:
+    if login == "-":  # gh にログインしていない
+        print("To get started with GitHub CLI, please run:  gh auth login", file=sys.stderr); sys.exit(4)
     print(login)
 elif sys.argv[1:3] == ["repo", "view"]:
     # 引数のリポジトリは、実物と同じく SSH の別名を解決せず、そのホストへ接続しに行く。名前は .git の有無まで照合する
@@ -122,6 +124,12 @@ import os, sys
 arg = sys.argv[-1]; host = arg.split("@")[-1]  # git と同じく user@host で渡されれば、Match user も効く
 aliases = dict(a.split("=") for a in os.environ.get("FAKE_SSH_ALIASES", "").split(",") if a)
 print(f"host {host}\\nuser git\\nhostname {aliases.get(arg, aliases.get(host, host)).lower()}\\nport 22")
+if "-T" in sys.argv:  # GitHub は鍵のアカウントを stderr に返し、終了コードは 1。FAKE_SSH_KEY が空なら鍵が無い
+    keys = dict(a.split("=") for a in os.environ.get("FAKE_SSH_KEYS", "").split(",") if a)  # 別名ごとの鍵（Host ブロックの IdentityFile）
+    key = keys.get(host, os.environ.get("FAKE_SSH_KEY", "B16B1RD"))
+    print(f"Hi {key}! You've successfully authenticated, but GitHub does not provide shell access." if key
+          else "git@github.com: Permission denied (publickey).", file=sys.stderr)
+    sys.exit(1 if key else 255)
 proxies = dict(a.split("=") for a in os.environ.get("FAKE_SSH_PROXIES", "").split(",") if a)  # 別名=ProxyCommand。無ければ本物と同じく行を出さない
 if host in proxies:
     print("proxycommand " + proxies[host])
@@ -323,6 +331,11 @@ class TestAccountCheck(unittest.TestCase):
             self.assertEqual(rc, 5, url)
             self.assertIn("bad configuration", r["reason"], url)
         tok = self.claim()
+        subprocess.run(["git", "remote", "set-url", "origin", "git@github.com:B16B1RD/demo.git"], env=self.env, cwd=self.repo, check=True)
+        rc, r = self.begin(tok, "comment:issue-gh", "--from", str(self.repo))  # 名前が github.com の origin でも
+        self.assertEqual(rc, 5)
+        self.assertIn("bad configuration", r["reason"])
+        subprocess.run(["git", "remote", "set-url", "origin", "git@work:B16B1RD/demo.git"], env=self.env, cwd=self.repo, check=True)
         for key in ("comment:issue-1", "pr:feat", "merge:pr-1"):  # push 以外も、origin が分からなければ飛ばさない
             rc, r = self.begin(tok, key, "--from", str(self.repo))
             self.assertEqual(rc, 5, key)
@@ -336,6 +349,112 @@ class TestAccountCheck(unittest.TestCase):
         tok = self.claim()
         self.assertEqual(self.begin(tok, "comment:issue-1", "--from", str(self.repo))[0], 5)
 
+    def head_of_wt(self):
+        return subprocess.run(["git", "rev-parse", "HEAD"], env=self.env, cwd=self.wt, check=True, capture_output=True, text=True).stdout.strip()
+
+    def set_origin(self, *args):
+        subprocess.run(["git", "remote", "set-url", *args], env=self.env, cwd=self.repo, check=True)
+
+    def test_from_must_be_the_same_repository(self):
+        """--from に git でない場所や別のリポジトリを渡すと、そこのアカウントで確かめて通ってしまう。元の checkout と同じリポジトリに限る。"""
+        other = Path(self.tmp.name).resolve() / "personal" / "other"
+        other.mkdir()
+        subprocess.run(["git", "init", "-q"], env=self.env, cwd=other, check=True)
+        subprocess.run(["git", "remote", "add", "origin", "https://github.com/B16B1RD/demo.git"], env=self.env, cwd=other, check=True)
+        plain = Path(self.tmp.name).resolve() / "personal" / "plain"
+        plain.mkdir()
+        tok = self.claim()
+        for frm in (other, plain, Path(self.tmp.name) / "missing"):
+            rc, r = self.begin(tok, f"comment:issue-{frm.name}", "--from", str(frm))
+            self.assertEqual(rc, 2, frm)
+            self.assertIn(str(self.repo), r["reason"], frm)
+        self.assertEqual(self.begin(tok, "comment:issue-wt", "--from", str(self.repo))[0], 0)
+
+    def test_mismatched_account_is_refused_for_every_external_operation(self):
+        self.env["FAKE_GH_DEFAULT"] = "work-account:WRITE"
+        tok = self.claim()
+        for kind in ("push", "pr", "comment", "merge", "release", "issue"):
+            rc, r = self.begin(tok, f"{kind}:x", "--from", str(self.wt), "--verified", self.head_of_wt())
+            self.assertEqual(rc, 5, kind)
+            self.assertIn("食い違う", r["reason"], kind)
+
+    def test_checkout_account_unknown_or_blind_is_a_mismatch(self):
+        """元の checkout で gh にログインしていない・対象が見えない場合も、比べずに通さない。"""
+        self.env["FAKE_GH_DEFAULT"] = "B16B1RD:WRITE"
+        tok = self.claim()
+        for i, base in enumerate(("-:ADMIN", "work-account:NONE")):
+            self.env["FAKE_GH_MAP"] = f"{Path(self.tmp.name).resolve() / 'personal'}={base}"
+            rc, r = self.begin(tok, f"comment:issue-{i}", "--from", str(self.wt))
+            self.assertEqual(rc, 5, base)
+            self.assertIn("食い違う", r["reason"], base)
+
+    def test_maintain_can_publish_and_triage_cannot(self):
+        tok = self.claim()
+        for i, (perm, code) in enumerate((("MAINTAIN", 0), ("TRIAGE", 5))):
+            self.env["FAKE_GH_MAP"] = f"{Path(self.tmp.name).resolve() / 'personal'}=B16B1RD:{perm}"
+            self.assertEqual(self.begin(tok, f"push:feat@{i}", "--from", str(self.repo), "--verified", self.head_of_wt())[0], code, perm)
+
+    def test_other_operations_follow_the_remotes_gh_can_choose(self):
+        """push 以外は gh の既定のリポジトリに出る。origin が GitHub でなくても、GitHub の remote があれば確かめる。"""
+        self.env["FAKE_GH_UPSTREAM"] = "NONE"  # gh の既定（upstream）が見えない
+        add = lambda *a: subprocess.run(["git", "remote", *a], env=self.env, cwd=self.repo, check=True)
+        add("add", "upstream", "https://github.com/parent/demo.git")
+        tok = self.claim()
+        self.set_origin("origin", "https://gitlab.com/x/y.git")
+        self.assertEqual(self.begin(tok, "comment:a", "--from", str(self.repo))[0], 5)  # GitLab の origin と GitHub の upstream
+        add("remove", "origin")
+        self.assertEqual(self.begin(tok, "comment:b", "--from", str(self.repo))[0], 5)  # origin が無い
+        add("rename", "upstream", "origin")
+        self.set_origin("--push", "origin", "https://gitlab.com/x/y.git")  # pushurl だけが GitHub でないミラー
+        self.assertEqual(self.begin(tok, "comment:c", "--from", str(self.repo))[0], 5)
+        self.set_origin("origin", "https://gitlab.com/x/y.git")
+        rc, r = self.w("op", "begin", "--dir", str(self.wt), "--token", tok, "--key", "comment:d", "--what", "x", "--from", str(self.repo))
+        self.assertEqual(rc, 0)  # GitHub の remote が 1 つも無ければ飛ばす
+        self.assertTrue(self.w("check", "--dir", str(self.wt), "--from", str(self.repo))[1]["skipped"])
+
+    def test_ssh_push_checks_the_key_account(self):
+        """SSH の push は鍵のアカウントで行われる。gh のアカウントと違えば止める（別名で鍵を切り替える構成）。"""
+        self.env["FAKE_SSH_ALIASES"] = "work=github.com"
+        self.set_origin("origin", "git@work:B16B1RD/demo.git")
+        tok = self.claim()
+        for i, (key, code) in enumerate((("B16B1RD", 0), ("b16b1rd", 0), ("work-account", 5), ("B16B1RD/demo", 5), ("", 5))):  # deploy key・鍵なし
+            self.env["FAKE_SSH_KEY"] = key
+            rc, r = self.begin(tok, f"push:feat@{i}", "--from", str(self.repo), "--verified", self.head_of_wt())
+            self.assertEqual(rc, code, key)
+            if code:
+                self.assertIn("鍵のアカウント" + (" " + key if key else "が分からない"), r["reason"], key)
+                self.assertIn("Permission denied" if not key else "違う", r["reason"], key)
+        self.env["FAKE_SSH_KEY"], self.env["FAKE_SSH_KEYS"] = "work-account", "work=B16B1RD"  # 鍵は別名の Host ブロックで決まる
+        self.assertEqual(self.begin(tok, "push:feat@alias-key", "--from", str(self.repo), "--verified", self.head_of_wt())[0], 0)
+        self.set_origin("origin", "https://github.com/B16B1RD/demo.git")  # https の push は鍵を使わない
+        self.assertEqual(self.begin(tok, "push:feat@https", "--from", str(self.repo), "--verified", self.head_of_wt())[0], 0)
+
+    def test_git_ssh_command_and_core_ssh_command_are_used(self):
+        """git が push に使う ssh（GIT_SSH_COMMAND > core.sshCommand > GIT_SSH）で解決する。既定の ssh では別名が分からない。"""
+        wrap = self.bin / "ssh-work"
+        wrap.write_text(f"#!/bin/sh\nFAKE_SSH_ALIASES=only=github.com FAKE_SSH_KEY=B16B1RD exec {self.bin / 'ssh'} \"$@\"\n")
+        self.env["FAKE_SSH_KEY"] = ""  # 既定の ssh には鍵が無い。-T も git の ssh で繋ぐ
+        wrap.chmod(0o755)
+        self.set_origin("origin", "git@only:B16B1RD/demo.git")
+        tok = self.claim()
+        self.assertIn("skipped", self.w("check", "--dir", str(self.wt), "--from", str(self.repo))[1])
+        subprocess.run(["git", "config", "core.sshCommand", f"{wrap} -o X=y"], env=self.env, cwd=self.repo, check=True)
+        rc, r = self.begin(tok, "push:feat@core", "--from", str(self.repo), "--verified", self.head_of_wt())
+        self.assertEqual((rc, r["op"]["account"]), (0, "B16B1RD"))  # 飛ばした場合は account が無い
+        subprocess.run(["git", "config", "core.sshCommand", str(self.bin / "ssh")], env=self.env, cwd=self.repo, check=True)
+        self.env["GIT_SSH_COMMAND"] = str(wrap)  # 環境変数が設定より優先
+        rc, r = self.begin(tok, "push:feat@env", "--from", str(self.repo), "--verified", self.head_of_wt())
+        self.assertEqual((rc, r["op"]["account"]), (0, "B16B1RD"))  # 飛ばした場合は account が無い
+        del self.env["GIT_SSH_COMMAND"]
+        subprocess.run(["git", "config", "core.sshCommand", str(wrap)], env=self.env, cwd=self.repo, check=True)
+        self.env["GIT_SSH"] = str(self.bin / "ssh")  # 設定が GIT_SSH より優先
+        rc, r = self.begin(tok, "push:feat@core-over-git-ssh", "--from", str(self.repo), "--verified", self.head_of_wt())
+        self.assertEqual((rc, r["op"]["account"]), (0, "B16B1RD"))
+        subprocess.run(["git", "config", "--unset", "core.sshCommand"], env=self.env, cwd=self.repo, check=True)
+        self.env["GIT_SSH"] = str(wrap)
+        rc, r = self.begin(tok, "push:feat@git-ssh", "--from", str(self.repo), "--verified", self.head_of_wt())
+        self.assertEqual((rc, r["op"]["account"]), (0, "B16B1RD"))  # 飛ばした場合は account が無い
+
     def test_internal_ops_need_no_account(self):
         tok = self.claim()
         self.assertEqual(self.begin(tok, "note:x")[0], 0)
@@ -348,7 +467,7 @@ class TestVerifiedCommit(unittest.TestCase):
                                         TestAccountCheck.claim, TestAccountCheck.begin)
 
     def head(self):
-        return subprocess.run(["git", "rev-parse", "HEAD"], cwd=self.wt, check=True, capture_output=True, text=True).stdout.strip()
+        return subprocess.run(["git", "rev-parse", "HEAD"], env=self.env, cwd=self.wt, check=True, capture_output=True, text=True).stdout.strip()
 
     def test_publish_needs_the_verified_commit(self):
         tok = self.claim()
@@ -358,7 +477,7 @@ class TestVerifiedCommit(unittest.TestCase):
 
     def test_publish_after_the_tree_changed_is_refused(self):
         verified = self.head()
-        subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "after"], cwd=self.wt, check=True)
+        subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "after"], env=self.env, cwd=self.wt, check=True)
         tok = self.claim()
         rc, r = self.begin(tok, "pr:feat", "--from", str(self.repo), "--verified", verified)
         self.assertEqual(rc, 6)
