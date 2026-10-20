@@ -61,13 +61,13 @@ class TestWork(unittest.TestCase):
 
     def test_unknown_result_op_is_pending_and_not_restarted(self):
         rc, a = self.w("claim", "--holder", "A")
-        self.assertEqual(self.w("op", "begin", "--token", a["token"], "--key", "pr-create:feat/x", "--what", "gh pr create")[0], 0)
+        self.assertEqual(self.w("op", "begin", "--token", a["token"], "--key", "deploy:staging", "--what", "deploy staging")[0], 0)
         self.expire()  # A は結果を記録せずに止まり、期限が切れた（sleep で待つと、遅い機械で揺れた）
         rc, b = self.w("claim", "--holder", "B")
-        self.assertEqual([o["key"] for o in b["pending_ops"]], ["pr-create:feat/x"])
-        rc, again = self.w("op", "begin", "--token", b["token"], "--key", "pr-create:feat/x", "--what", "gh pr create")
+        self.assertEqual([o["key"] for o in b["pending_ops"]], ["deploy:staging"])
+        rc, again = self.w("op", "begin", "--token", b["token"], "--key", "deploy:staging", "--what", "deploy staging")
         self.assertEqual(rc, 4)  # やり直さず、照合を求める
-        rc, done = self.w("op", "done", "--token", b["token"], "--key", "pr-create:feat/x", "--result", "既存の PR #3 を確認")
+        rc, done = self.w("op", "done", "--token", b["token"], "--key", "deploy:staging", "--result", "既存の PR #3 を確認")
         self.assertEqual((rc, done["op"]["state"]), (0, "done"))
         self.assertEqual(self.w("op", "pending")[1]["pending_ops"], [])
 
@@ -493,6 +493,25 @@ class TestAccountCheck(unittest.TestCase):
     def test_internal_ops_need_no_account(self):
         tok = self.claim()
         self.assertEqual(self.begin(tok, "note:x")[0], 0)
+        self.assertEqual(self.begin(tok, "prepare-release-notes:x")[0], 0)  # 語の一部に pr を含むだけなら外部操作ではない
+
+    def test_external_looking_kinds_must_use_the_listed_names(self):
+        """一覧に無い書き方（大文字、言い換え）の外部操作は、--from も権限も確かめずに記録されていた。正しい種類を示して止める。"""
+        tok = self.claim()
+        for key in ("Push:origin/main", "gh-pr:feat", "pr-create:feat", "issue_comment:1", "MERGE:pr-1"):
+            rc, r = self.begin(tok, key, "--from", str(self.repo))
+            self.assertEqual(rc, 2, key)
+            self.assertIn("push・pr・comment・merge・release・issue", r["reason"], key)
+        self.assertEqual(self.w("op", "pending", "--dir", str(self.wt))[1]["pending_ops"], [])  # 記録されない
+
+    def test_unknown_gh_account_is_refused(self):
+        """gh api user だけが失敗する token では、アカウントが空のまま比べて通っていた。アカウントが分からなければ止める。"""
+        self.env["FAKE_GH_MAP"] = f"{Path(self.tmp.name).resolve() / 'personal'}=-:ADMIN"
+        tok = self.claim()
+        for key in ("push:feat", "comment:issue-1"):
+            rc, r = self.begin(tok, key, "--from", str(self.repo), "--verified", self.head_of_wt())
+            self.assertEqual(rc, 5, key)
+            self.assertIn("gh のアカウントが分からない", r["reason"], key)
 
 
 class TestVerifiedCommit(unittest.TestCase):
