@@ -29,7 +29,7 @@ GitHub が受け付ける（公開リポジトリへのコメントや fork か�
 リポジトリ（gh repo fork の後は upstream）で、push だけは push 先の origin（自分の fork）。黙って別のアカウントへ切り替えない。
 origin が SSH の別名なら ssh -G で実際のホストに直して見る。見るのは gh のアカウントで、push に使われる SSH の鍵や
 git の credential helper のアカウントは見ない。push 先は origin の最初の pushurl だけを見る（pushDefault・複数の pushurl は見ない）。
-ssh は既定の設定で解決する（core.sshCommand・GIT_SSH_COMMAND で渡す別の設定は見ない）。
+ssh は既定の設定で解決する（core.sshCommand・GIT_SSH_COMMAND で渡す別の設定は見ない）。IP・角括弧のホストは github.com とみなさない。
 
 担当の生死はプロセスで判定しない（Codex の sandbox の中は別の pid 名前空間で、外の CLI が見えない。2026-10-17 の実測）。
 claim は作業場所ごとの記録 note.md の雛形と証拠の置き場 evidence/ を作り、その場所と（書かれていれば）記録の中身を返す。後任は claim の出力だけで記録にたどり着く。
@@ -140,12 +140,12 @@ def github_repo(url: str, at: Path):
     SSH の別名（~/.ssh/config の Host）は ssh -G で実際のホスト名に直す。gh は既定のリポジトリの解決では
     別名を直すが、引数に渡した URL は直さず、別名のホストへ接続しに行って失敗する（2026-10-20 の実測）。
     別名を直せなければ GitHub かどうか分からないので、ValueError で止める（飛ばすと確かめずに通る）。"""
-    m = re.match(r"(?:([a-z+]+)://)?(?:[^@/]+@)?([^/:]+)(?::\d+)?[:/]/?([^/]+/[^/]+?)(?:\.git)?/?$", url, re.I)
+    m = re.match(r"(?:([a-z+]+)://)?(?:([^@/]+)@)?([^/:]+)(?::\d+)?[:/]/?([^/]+/[^/]+?)(?:\.git)?/?$", url, re.I)
     if not m:
         return None
-    scheme, host, name = m.groups()
-    if scheme is None or "ssh" in scheme.lower():
-        rc, conf, err = sh(["ssh", "-G", "--", host], at)
+    scheme, user, host, name = m.groups()
+    if scheme is None or "ssh" in scheme.lower():  # git と同じく user@host で渡す（ssh の設定の Match user が効く）
+        rc, conf, err = sh(["ssh", "-G", "--", f"{user}@{host}" if user else host], at)
         host = next((l.split()[1] for l in conf.splitlines() if l.startswith("hostname ")), None) if rc == 0 else None
         if not host:
             raise ValueError(f"ssh -G で origin のホストを解決できない: {err[:200]}")

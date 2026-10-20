@@ -119,9 +119,9 @@ elif sys.argv[1:3] == ["repo", "view"]:
 FAKE_SSH = """#!/usr/bin/env python3
 # ssh -G だけを真似る偽物。FAKE_SSH_ALIASES は「別名=HostName」を , で並べる。ほかは名前のまま。出力は本物と同じく複数行
 import os, sys
-host = sys.argv[-1].split("@")[-1]
+arg = sys.argv[-1]; host = arg.split("@")[-1]  # git と同じく user@host で渡されれば、Match user も効く
 aliases = dict(a.split("=") for a in os.environ.get("FAKE_SSH_ALIASES", "").split(",") if a)
-print(f"host {host}\\nuser git\\nhostname {aliases.get(host, host).lower()}\\nport 22")
+print(f"host {host}\\nuser git\\nhostname {aliases.get(arg, aliases.get(host, host)).lower()}\\nport 22")
 """
 
 
@@ -137,15 +137,17 @@ class TestAccountCheck(unittest.TestCase):
         (self.bin / "gh").chmod(0o755)
         (self.bin / "ssh").write_text(FAKE_SSH.replace("/usr/bin/env python3", sys.executable))
         (self.bin / "ssh").chmod(0o755)
-        g = lambda *a, cwd=None: subprocess.run(["git", *a], cwd=cwd, check=True, capture_output=True)
+        # 利用者の git の設定（全体・system・環境変数。insteadOf で git@github.com: が https になる）が origin の形を変えないように
+        env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_CONFIG")}
+        self.env = {**env, "BB_WRIT_STATE_DIR": str(t / "state"), "PATH": f"{self.bin}:{os.environ['PATH']}",
+                    "FAKE_GH_MAP": f"{t / 'personal'}=B16B1RD:ADMIN", "FAKE_GH_DEFAULT": "work-account:NONE",
+                    "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}
+        g = lambda *a, cwd=None: subprocess.run(["git", *a], env=self.env, cwd=cwd, check=True, capture_output=True)
         self.repo.mkdir(parents=True)
         g("init", "-q", "-b", "main", cwd=self.repo)
         g("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "init", cwd=self.repo)
         g("remote", "add", "origin", "https://github.com/B16B1RD/demo.git", cwd=self.repo)
         g("worktree", "add", "-q", "-b", "feat", str(self.wt), cwd=self.repo)
-        self.env = {**os.environ, "BB_WRIT_STATE_DIR": str(t / "state"), "PATH": f"{self.bin}:{os.environ['PATH']}",
-                    "FAKE_GH_MAP": f"{t / 'personal'}=B16B1RD:ADMIN", "FAKE_GH_DEFAULT": "work-account:NONE",
-                    "GIT_CONFIG_GLOBAL": os.devnull}  # 利用者の insteadOf（git@github.com: → https）が origin の形を変えないように
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -177,7 +179,7 @@ class TestAccountCheck(unittest.TestCase):
 
     def test_push_from_the_checkout_is_allowed_and_records_the_account(self):
         tok = self.claim()
-        head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=self.wt, check=True, capture_output=True, text=True).stdout.strip()
+        head = subprocess.run(["git", "rev-parse", "HEAD"], env=self.env, cwd=self.wt, check=True, capture_output=True, text=True).stdout.strip()
         rc, r = self.begin(tok, "push:feat", "--from", str(self.repo), "--verified", head)
         self.assertEqual((rc, r["op"]["account"]), (0, "B16B1RD"))
 
@@ -193,7 +195,7 @@ class TestAccountCheck(unittest.TestCase):
         """GitHub では書き込み権限が無くてもコメント・Issue・fork からの PR ができる（公開リポジトリへの寄与）。"""
         self.env["FAKE_GH_MAP"] = f"{Path(self.tmp.name).resolve() / 'personal'}=work-account:READ"
         tok = self.claim()
-        head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=self.wt, check=True, capture_output=True, text=True).stdout.strip()
+        head = subprocess.run(["git", "rev-parse", "HEAD"], env=self.env, cwd=self.wt, check=True, capture_output=True, text=True).stdout.strip()
         for key in ("comment:issue-1", "issue:new", "pr:feat"):
             rc, r = self.begin(tok, key, "--from", str(self.repo), "--verified", head)
             self.assertEqual((rc, r["op"]["account"]), (0, "work-account"), key)
@@ -213,7 +215,7 @@ class TestAccountCheck(unittest.TestCase):
         """gh repo fork の構成（origin が自分の fork、upstream が既定で読むだけ）。push は origin の権限で見る。"""
         self.env["FAKE_GH_UPSTREAM"] = "READ"
         tok = self.claim()
-        head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=self.wt, check=True, capture_output=True, text=True).stdout.strip()
+        head = subprocess.run(["git", "rev-parse", "HEAD"], env=self.env, cwd=self.wt, check=True, capture_output=True, text=True).stdout.strip()
         rc, r = self.begin(tok, "push:feat", "--from", str(self.repo), "--verified", head)
         self.assertEqual((rc, r["op"]["account"]), (0, "B16B1RD"))
         self.assertEqual(self.begin(tok, "comment:issue-1", "--from", str(self.repo))[0], 0)
@@ -226,15 +228,15 @@ class TestAccountCheck(unittest.TestCase):
         """PR は gh の既定のリポジトリ（upstream）に出る。見えなければ、自分の fork に書けても止める。"""
         self.env["FAKE_GH_UPSTREAM"] = "NONE"
         tok = self.claim()
-        head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=self.wt, check=True, capture_output=True, text=True).stdout.strip()
+        head = subprocess.run(["git", "rev-parse", "HEAD"], env=self.env, cwd=self.wt, check=True, capture_output=True, text=True).stdout.strip()
         self.assertEqual(self.begin(tok, "pr:feat", "--from", str(self.repo), "--verified", head)[0], 5)
 
     def test_push_checks_the_push_url_not_the_fetch_url(self):
         """fetch は upstream、push は自分の fork（pushurl）という構成。push の権限は pushurl で見る。"""
-        subprocess.run(["git", "remote", "set-url", "origin", "https://github.com/parent/demo.git"], cwd=self.repo, check=True)
-        subprocess.run(["git", "remote", "set-url", "--push", "origin", "https://github.com/B16B1RD/demo.git"], cwd=self.repo, check=True)
+        subprocess.run(["git", "remote", "set-url", "origin", "https://github.com/parent/demo.git"], env=self.env, cwd=self.repo, check=True)
+        subprocess.run(["git", "remote", "set-url", "--push", "origin", "https://github.com/B16B1RD/demo.git"], env=self.env, cwd=self.repo, check=True)
         tok = self.claim()
-        head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=self.wt, check=True, capture_output=True, text=True).stdout.strip()
+        head = subprocess.run(["git", "rev-parse", "HEAD"], env=self.env, cwd=self.wt, check=True, capture_output=True, text=True).stdout.strip()
         rc, r = self.begin(tok, "push:feat", "--from", str(self.repo), "--verified", head)
         self.assertEqual((rc, r["op"]["account"]), (0, "B16B1RD"))
 
@@ -245,7 +247,7 @@ class TestAccountCheck(unittest.TestCase):
         self.assertIn(str(self.repo), r["reason"])
 
     def test_non_github_origin_skips_the_check_and_says_so(self):
-        subprocess.run(["git", "remote", "set-url", "origin", "https://gitlab.example/x/y.git"], cwd=self.repo, check=True)
+        subprocess.run(["git", "remote", "set-url", "origin", "https://gitlab.example/x/y.git"], env=self.env, cwd=self.repo, check=True)
         rc, r = self.w("check", "--dir", str(self.wt), "--from", str(self.wt))
         self.assertEqual(rc, 0)
         self.assertIn("飛ばした", r["skipped"])
@@ -254,32 +256,33 @@ class TestAccountCheck(unittest.TestCase):
         """~/.ssh/config の別名（git@github.com-work:…）は gh repo view <url> が解決しない。ssh -G で github.com に直して見る。"""
         self.env["FAKE_SSH_ALIASES"] = "github.com-work=github.com,gh443=ssh.github.com"
         tok = self.claim()
-        head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=self.wt, check=True, capture_output=True, text=True).stdout.strip()
+        head = subprocess.run(["git", "rev-parse", "HEAD"], env=self.env, cwd=self.wt, check=True, capture_output=True, text=True).stdout.strip()
         for i, url in enumerate(("git@github.com-work:B16B1RD/demo.git", "ssh://git@gh443/B16B1RD/demo.git")):  # 443 番の ssh.github.com を指す別名も
-            subprocess.run(["git", "remote", "set-url", "origin", url], cwd=self.repo, check=True)
+            subprocess.run(["git", "remote", "set-url", "origin", url], env=self.env, cwd=self.repo, check=True)
             rc, r = self.begin(tok, f"push:feat@{i}", "--from", str(self.repo), "--verified", head)
             self.assertEqual((rc, r["op"]["account"]), (0, "B16B1RD"), url)
 
     def test_every_github_url_form_is_checked_against_the_repository(self):
         """git が github.com へ push する URL の形はどれも確かめる。飛ばすと、権限の無いアカウントでも通る。
         READ で拒否されれば、gh に正しい名前（github.com/B16B1RD/demo）が届いている。偽の gh は .git 付きなど別の名前を拒否する。"""
-        self.env["FAKE_SSH_ALIASES"] = "work=github.com,gh443=ssh.github.com"
+        self.env["FAKE_SSH_ALIASES"] = "work=github.com,gh443=ssh.github.com,git@mu=github.com"  # mu は ssh の設定の Match user git だけで github.com
+        subprocess.run(["git", "config", "url.git@github.com:.insteadOf", "gh:"], env=self.env, cwd=self.repo, check=True)  # git が展開する短縮
         self.env["FAKE_GH_MAP"] = f"{Path(self.tmp.name).resolve() / 'personal'}=work-account:READ"
         for url in ("https://github.com/B16B1RD/demo", "https://GitHub.com/B16B1RD/demo.git", "HTTPS://github.com/B16B1RD/demo/",
                     "git@github.com:B16B1RD/demo.git", "git@github.com:/B16B1RD/demo.git", "git@github.com:B16B1RD/demo.GIT",
                     "git@work:B16B1RD/demo.git", "work:B16B1RD/demo.git", "ssh://git@gh443:443/B16B1RD/demo.git",
                     "SSH://git@work/B16B1RD/demo.git", "git+ssh://git@work/B16B1RD/demo", "ssh+git://git@work/B16B1RD/demo", "https://www.github.com/B16B1RD/demo.git",
-                    "https://x:token@github.com/B16B1RD/demo.git"):
-            subprocess.run(["git", "remote", "set-url", "origin", url], cwd=self.repo, check=True)
+                    "https://x:token@github.com/B16B1RD/demo.git", "git@mu:B16B1RD/demo.git", "gh:B16B1RD/demo.git"):
+            subprocess.run(["git", "remote", "set-url", "origin", url], env=self.env, cwd=self.repo, check=True)
             rc, r = self.w("check", "--dir", str(self.wt), "--from", str(self.repo))
             self.assertEqual(rc, 5, url)
             self.assertIn("READ", r["reason"], url)
 
     def test_origin_on_another_host_skips_the_check(self):
-        self.env["FAKE_SSH_ALIASES"] = "lab=gitlab.com"
+        self.env["FAKE_SSH_ALIASES"] = "lab=gitlab.com,github.com=ghe.example"  # 名前が github.com でも、ssh の設定で別のホストへ行く
         for url in ("git@gitlab.com:x/y.git", "git@lab:x/y.git", "https://github.com.evil.example/x/y.git",
-                    "https://evilgithub.com/x/y.git", "https://ghe.example/x/y.git", str(Path(self.tmp.name) / "bare.git")):
-            subprocess.run(["git", "remote", "set-url", "origin", url], cwd=self.repo, check=True)
+                    "https://evilgithub.com/x/y.git", "https://ghe.example/x/y.git", str(Path(self.tmp.name) / "bare.git"), "git@github.com:x/y.git"):
+            subprocess.run(["git", "remote", "set-url", "origin", url], env=self.env, cwd=self.repo, check=True)
             rc, r = self.w("check", "--dir", str(self.wt), "--from", str(self.repo))
             self.assertEqual(rc, 0, url)
             self.assertIn("飛ばした", r["skipped"], url)
@@ -287,9 +290,9 @@ class TestAccountCheck(unittest.TestCase):
     def test_unresolvable_ssh_host_is_refused_not_skipped(self):
         """ssh -G が失敗すると GitHub かどうか分からない。確かめを飛ばさずに止める。"""
         (self.bin / "ssh").write_text("#!/bin/sh\necho 'ssh: bad configuration' >&2\nexit 255\n")
-        subprocess.run(["git", "remote", "set-url", "origin", "git@work:B16B1RD/demo.git"], cwd=self.repo, check=True)
-        for url in ("git@work:B16B1RD/demo.git", "git@github.com:B16B1RD/demo.git"):  # 名前が github.com でも、ssh の設定で別のホストになりうる
-            subprocess.run(["git", "remote", "set-url", "origin", url], cwd=self.repo, check=True)
+        subprocess.run(["git", "remote", "set-url", "origin", "git@work:B16B1RD/demo.git"], env=self.env, cwd=self.repo, check=True)
+        for url in ("git@work:B16B1RD/demo.git", "git@github.com:B16B1RD/demo.git", "ssh://git@work/B16B1RD/demo.git"):  # 名前が github.com でも、ssh の設定で別のホストになりうる
+            subprocess.run(["git", "remote", "set-url", "origin", url], env=self.env, cwd=self.repo, check=True)
             rc, r = self.w("check", "--dir", str(self.wt), "--from", str(self.repo))
             self.assertEqual(rc, 5, url)
             self.assertIn("bad configuration", r["reason"], url)
@@ -301,7 +304,7 @@ class TestAccountCheck(unittest.TestCase):
         """push 以外も、確かめるかどうかは origin で決める。別名の origin で飛ばすと、見えないリポジトリへのコメントも通る。"""
         self.env["FAKE_SSH_ALIASES"] = "work=github.com"
         self.env["FAKE_GH_MAP"] = f"{Path(self.tmp.name).resolve() / 'personal'}=work-account:NONE"
-        subprocess.run(["git", "remote", "set-url", "origin", "git@work:B16B1RD/demo.git"], cwd=self.repo, check=True)
+        subprocess.run(["git", "remote", "set-url", "origin", "git@work:B16B1RD/demo.git"], env=self.env, cwd=self.repo, check=True)
         tok = self.claim()
         self.assertEqual(self.begin(tok, "comment:issue-1", "--from", str(self.repo))[0], 5)
 
