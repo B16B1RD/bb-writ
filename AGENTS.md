@@ -42,7 +42,7 @@ bb-writ は、CLI ハーネス（Claude Code・Codex。Grok Build も同じ SKIL
 | launcher はプラグインの置き場に `__pycache__` を作らない | `tests/test_launch.py` の `test_launch_leaves_no_bytecode_in_the_plugin` |
 | Claude Code の子に `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB` を使わない（許可の方針を既定に戻し、空のファイルを残した） | 読み取り専用の子は `tests/test_launch.py` の `test_claude_read_only_in_worktree_denies_the_common_git_dir`。書く子は試験が無く、残った空のファイルを上の `home_entries` が捕まえる |
 | Claude Code の子に、親の `CLAUDE*`・`ANTHROPIC_*` の環境変数を渡さない | `tests/test_launch.py` の `test_claude_child_gets_no_parent_claude_env` |
-| 入口の聞く範囲・呼び直しの文・返答の形・検証の条件 (1)〜(6) の文を、要約の後に戻る先頭 5,000 トークン（字数で近似して 5,600 字）に置く。入口が合計の枠から丸ごと落ちたときのため、手引き 6 本・delegate・interrogate の本文の先頭 4,000 字以内に呼び直しの文を置く（原則と検証スキルには置いていない） | `tests/test_distribution.py` の `test_entry_keeps_what_to_ask_and_review_rules_within_the_compaction_head`（各文の書き出しの位置だけ。順と意味は確かめず、意味は読者役で確かめる）と `test_skills_invoked_after_the_entry_say_to_reinvoke_it_after_compaction` |
+| 入口の聞く範囲・呼び直しの文・返答の形・検証の条件 (1)〜(6) の文を、要約の後に戻る先頭 5,000 トークン（字数で近似して 5,600 字）に置く。入口が合計の枠から丸ごと落ちたときのため、手引き 6 本（feature・bug・docs-skill・investigation・parallel・session-pickup）・delegate・interrogate の 8 本だけ、本文の先頭 4,000 字以内に呼び直しの文を置く（単独でも呼ばれる delegate・interrogate は入口から始めた仕事に限る。pause-safely・eval・reflect・correct・unknowns・原則・検証スキルには置いていない） | `tests/test_distribution.py` の `test_entry_keeps_what_to_ask_and_review_rules_within_the_compaction_head`（目印の語の位置だけ。順と意味は確かめず、意味は読者役で確かめる）と `test_skills_invoked_after_the_entry_say_to_reinvoke_it_after_compaction` |
 | 版はマニフェストの間で揃え、`CHANGELOG.md` の先頭は今の版。スキルは SKILL.md の本文だけで届き、名前はフォルダと同じ | `tests/test_distribution.py` |
 
 ## commit

@@ -26,6 +26,13 @@ class TestManifests(unittest.TestCase):
         self.assertRegex(newest, rf"^## {re.escape(claude['version'])} - \d{{4}}-\d{{2}}-\d{{2}}$")
 
 
+def skill_body(case, text, name):
+    """frontmatter（1 行目の --- から次の --- の行まで）を除いた本文。"""
+    case.assertTrue(text.startswith("---\n"), f"{name}: frontmatter で始まらない")
+    case.assertIn("\n---\n", text[3:], f"{name}: frontmatter の閉じが見つからない")
+    return text[text.index("\n---\n", 3) + 5:]
+
+
 class TestSkills(unittest.TestCase):
     """スキルは目的ごとに分ける（入口・手引き・原則・委任・審査・学び）。"""
 
@@ -51,12 +58,10 @@ class TestSkills(unittest.TestCase):
     def test_entry_keeps_what_to_ask_and_review_rules_within_the_compaction_head(self):
         """Claude Code は要約の後、呼んだスキルを先頭 5,000 トークンまで戻す（合計の枠を超えた古いものは落ちる）。
         入口の聞く範囲・呼び直しの文・返答の形・検証の条件 (1)〜(6) の文が、それぞれ 1 つずつ戻る先頭にあることを確かめる。
-        確かめるのは各文の書き出し（目印）の位置だけで、目印同士の順・文の残りの位置・文の意味は確かめない
-        （意味は新しい文脈の読者役で確かめる）。目印の文を書き換えたら、ここの目印も直す。"""
+        確かめるのは目印の語が 1 回だけあり、条件の段落の終わり（5,600 字以内）より前にあることだけで、
+        目印同士の順と文の意味は確かめない（意味は新しい文脈の読者役で確かめる）。目印の文を書き換えたら、ここの目印も直す。"""
         text = (ROOT / "skills" / "bb-writ" / "SKILL.md").read_text(encoding="utf-8")
-        self.assertTrue(text.startswith("---\n"), "frontmatter で始まらない")
-        self.assertIn("\n---\n", text[3:], "frontmatter の閉じが見つからない")
-        body = text[text.index("\n---", 3) + 4:]
+        body = skill_body(self, text, "bb-writ")
         self.assertEqual(body.count("信じてよい条件"), 1, "検証の条件の段落が 1 つでない")
         start = body.index("信じてよい条件")
         self.assertIn("\n\n", body[start:], "検証の条件の段落の終わりが見つからない")
@@ -84,15 +89,20 @@ class TestSkills(unittest.TestCase):
             self.assertLess(body.index(anchor), end, anchor)
 
     def test_skills_invoked_after_the_entry_say_to_reinvoke_it_after_compaction(self):
-        """要約の後に入口が合計の枠から落ちたときのため、入口の手順 2・5 と委任・審査で呼ぶ 8 本の本文の先頭 4,000 字以内に
-        呼び直しの文を置く。原則・検証スキルなど、ほかに入口の後に呼ぶスキルには置いていない。"""
-        names = ("playbook-feature", "playbook-bug", "playbook-docs-skill", "playbook-investigation",
-                 "playbook-parallel", "playbook-session-pickup", "delegate", "interrogate")
-        for name in names:
-            text = (ROOT / "skills" / name / "SKILL.md").read_text(encoding="utf-8")
-            self.assertTrue(text.startswith("---\n") and "\n---\n" in text[3:], name)
-            body = text[text.index("\n---\n", 3) + 5:]  # description は本文として戻らない
-            at = body.find("入口を呼び直して全文を読み直す")
+        """要約の後に入口が合計の枠から落ちたときのため、手引き 6 本・delegate・interrogate の本文の先頭 4,000 字以内に
+        呼び直しの文を置く。単独でも呼ばれる delegate・interrogate は、入口から始めた仕事に限る。
+        playbook-pause-safely・playbook-eval・reflect・correct・unknowns・原則・検証スキルには置いていない。
+        目印の文を書き換えたら、ここの目印も直す。"""
+        plain = "会話が要約された後は、入口 `bb-writ` を呼び直して全文を読み直す"
+        scoped = "入口 `bb-writ` から始めた仕事で会話が要約された後は、入口を呼び直して全文を読み直す"
+        names = {
+            "playbook-feature": plain, "playbook-bug": plain, "playbook-docs-skill": plain,
+            "playbook-investigation": plain, "playbook-parallel": plain, "playbook-session-pickup": plain,
+            "delegate": scoped, "interrogate": scoped,
+        }
+        for name, sentence in names.items():
+            body = skill_body(self, (ROOT / "skills" / name / "SKILL.md").read_text(encoding="utf-8"), name)  # description は本文として戻らない
+            at = body.find(sentence)
             self.assertNotEqual(at, -1, name)
             self.assertLess(at, 4000, name)  # 先頭 5,000 トークンの内側
 
