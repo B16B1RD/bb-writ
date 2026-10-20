@@ -493,7 +493,7 @@ class TestAccountCheck(unittest.TestCase):
     def test_internal_ops_need_no_account(self):
         tok = self.claim()
         self.assertEqual(self.begin(tok, "note:x")[0], 0)
-        self.assertEqual(self.begin(tok, "prepare-release-notes:x")[0], 0)  # 語の一部に pr を含むだけなら外部操作ではない
+        self.assertEqual(self.begin(tok, "prepare:notes")[0], 0)  # 語の一部に pr を含むだけなら外部操作ではない
 
     def test_external_looking_kinds_must_use_the_listed_names(self):
         """一覧に無い書き方（大文字、言い換え）の外部操作は、--from も権限も確かめずに記録されていた。正しい種類を示して止める。"""

@@ -22,6 +22,7 @@ task と integrate の照合拒否は終了コード 6、担当の拒否は 3。
 検証の後に成果物が変わったら、証拠を取り直してから出す（plan-v3 6.2）。merge は、GitHub 側でも gh pr merge --match-head-commit <同じ commit> で止める。
 
 外部に出る操作（鍵の種類が push・pr・comment・merge・release・issue）の op begin には --from が要り、check を通す。
+種類は小文字のこの名前に限る。大文字や言い換え（Push・gh-pr・pr-create）は確かめずに通るので拒否する（2）。gh のアカウントが分からなければ拒否する（5）。
 外部操作は元の checkout（worktree なら `git rev-parse --git-common-dir` の親）から実行する。利用者のアカウントの切り替え
 （gh のラッパー、git の includeIf、direnv）は、たいてい置き場所で決まるため（2026-10-17 の実測）。--from が元の checkout と違い、
 そこで使われるアカウントが元の checkout のものと食い違えば拒否する。--from が元の checkout と別のリポジトリなら、そこでは確かめずに拒否する（2）。
@@ -231,6 +232,9 @@ def check(d: Path, frm: Path, kind: str = "push") -> tuple[dict, int]:
     res = {"checkout": str(c), "from": here}
     if not here["github"]:
         return {**res, "ok": True, "skipped": ("origin の pushurl が github.com でない" if push else "gh が GitHub の remote を見つけられない") + "ので確かめを飛ばした"}, 0
+    if not here["login"]:  # 比べる相手が分からないまま通さない（gh api user だけが失敗する token）
+        return {**res, "ok": False, "reason": f"{frm} で gh のアカウントが分からない。gh auth status を確かめる"
+                + (f"（エラー: {here['error']}）" if here.get("error") else "")}, 5
     if not here["permission"] or (write and here["permission"] not in WRITE_OK):
         return {**res, "ok": False, "reason": f"{frm} で使われるアカウント {here['login']} は {here['repo'] or 'origin'} に{'書け' if write else 'アクセスでき'}ない（権限: {here['permission'] or '見えない'}）。"
                 f"外部操作は元の checkout {c} から実行する。そこでも{'書け' if write else 'アクセスでき'}なければ、利用者のアカウントの設定を確かめる"
@@ -596,7 +600,11 @@ def main() -> int:
             return out({"ok": False, "reason": "--key が要る"}, 2)
         known = ops(r).get(a.key)
         acct = None
-        if a.action == "begin" and a.key.split(":")[0] in EXTERNAL:
+        kind = a.key.split(":")[0]
+        if a.action == "begin" and kind not in EXTERNAL and (kind.lower() in EXTERNAL or EXTERNAL & set(re.split(r"[-_]", kind.lower()))):
+            return out({"ok": False, "reason": f"鍵の種類 {kind} は外部操作に見えるが、確かめの対象の種類でない。"
+                        "push・pr・comment・merge・release・issue のどれかを小文字で使う"}, 2)
+        if a.action == "begin" and kind in EXTERNAL:
             if not a.frm:
                 return out({"ok": False, "reason": f"外部操作には --from <実行する場所> が要る。元の checkout は {checkout_of(a.dir)}"}, 2)
             res, code = check(a.dir, a.frm, a.key.split(":")[0])
