@@ -497,13 +497,14 @@ class TestAccountCheck(unittest.TestCase):
         tok = self.claim()
         self.assertEqual(self.begin(tok, "local-note:x")[0], 0)
         self.assertEqual(self.begin(tok, "local-merge-base:x")[0], 0)  # 外部に出ない操作は local- で始める
+        self.assertEqual(self.begin(tok, "local:pending")[0], 0)
 
     def test_external_looking_kinds_must_use_the_listed_names(self):
         """一覧に無い種類の鍵は、--from も権限も確かめずに記録されていた。書き間違い・言い換えを列挙しても漏れるので、
         外部操作の 6 つと local- で始まる種類のほかは止める。"""
         tok = self.claim()
         for key in ("Push:origin/main", "gh-pr:feat", "pr-create:feat", "issue_comment:1", "MERGE:pr-1", "push/origin/main@abc",
-                    "pr#12", "gh pr:feat", "pull-request:x", "tag:v1", " push:x", "ｐｕｓｈ:x", "note:x", "local:x"):
+                    "pr#12", "gh pr:feat", "pull-request:x", "tag:v1", " push:x", "ｐｕｓｈ:x", "note:x", "localpush:x"):
             rc, r = self.begin(tok, key, "--from", str(self.repo))
             self.assertEqual(rc, 2, key)
             self.assertIn("push・pr・comment・merge・release・issue", r["reason"], key)

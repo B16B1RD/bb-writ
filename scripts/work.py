@@ -22,7 +22,8 @@ task と integrate の照合拒否は終了コード 6、担当の拒否は 3。
 検証の後に成果物が変わったら、証拠を取り直してから出す（plan-v3 6.2）。merge は、GitHub 側でも gh pr merge --match-head-commit <同じ commit> で止める。
 
 外部に出る操作（鍵の種類が push・pr・comment・merge・release・issue）の op begin には --from が要り、check を通す。
-種類は小文字のこの名前に限る。大文字や言い換え（Push・gh-pr・pr-create）は確かめずに通るので拒否する（2）。gh のアカウントが分からなければ拒否する（5）。
+鍵の種類はこの 6 つか、外部に出ない操作の記録なら local（または local- で始まる名前）。ほかの種類（Push・gh-pr・push/…・tag）は、確かめずに記録されるので拒否する（2）。
+gh のアカウントが分からなければ拒否する（5）。
 外部操作は元の checkout（worktree なら `git rev-parse --git-common-dir` の親）から実行する。利用者のアカウントの切り替え
 （gh のラッパー、git の includeIf、direnv）は、たいてい置き場所で決まるため（2026-10-17 の実測）。--from が元の checkout と違い、
 そこで使われるアカウントが元の checkout のものと食い違えば拒否する。--from が元の checkout と別のリポジトリなら、そこでは確かめずに拒否する（2）。
@@ -210,7 +211,8 @@ def account(at: Path, push: bool = False, key: bool = True) -> dict:
             return {"at": str(at), "github": False, "remote": url or None}
     else:
         target = os.environ.get("GH_REPO")  # gh repo view は引数が無いと GH_REPO を見ない（issue・pr は見る）
-    _, login, err = sh(["gh", "api", "user", "--jq", ".login"], at)
+    rc, login, err = sh(["gh", "api", "user", "--jq", ".login"], at)
+    login = login if rc == 0 else ""  # 4xx の本文（JSON）は --jq を通らず stdout に出る（gh 2.102.0）
     rc, repo, err2 = sh(["gh", "repo", "view", *([target] if target else []), "--json", "nameWithOwner,viewerPermission",
                          "--jq", '.nameWithOwner + " " + .viewerPermission'], at)
     if rc and not target and re.search(NO_GITHUB_REMOTE, err2):
@@ -600,10 +602,11 @@ def main() -> int:
             return out({"ok": False, "reason": "--key が要る"}, 2)
         known = ops(r).get(a.key)
         acct = None
-        kind = a.key.split(":")[0]
-        if a.action == "begin" and kind not in EXTERNAL and (kind.lower() in EXTERNAL or EXTERNAL & set(re.split(r"[-_]", kind.lower()))):
-            return out({"ok": False, "reason": f"鍵の種類 {kind} は外部操作に見えるが、確かめの対象の種類でない。"
-                        "push・pr・comment・merge・release・issue のどれかを小文字で使う"}, 2)
+        kind = a.key.split(":")[0] if ":" in a.key else None
+        # 書き間違い・言い換えを列挙して止めると漏れる（push/…・pr#12・pull-request）ので、外部に出ない操作の記録を明示させる
+        if a.action == "begin" and kind not in EXTERNAL and kind != "local" and not (kind or "").startswith("local-"):
+            return out({"ok": False, "reason": f"鍵 {a.key!r} の種類が分からない。鍵は <種類:対象> で、種類は外部操作なら "
+                        "push・pr・comment・merge・release・issue のどれか（小文字）、外部に出ない操作の記録なら local（または local- で始まる名前）"}, 2)
         if a.action == "begin" and kind in EXTERNAL:
             if not a.frm:
                 return out({"ok": False, "reason": f"外部操作には --from <実行する場所> が要る。元の checkout は {checkout_of(a.dir)}"}, 2)
