@@ -13,7 +13,7 @@
   work.py task list --dir <checkout>                               → タスク、担当、未完了の統合
   work.py task resume --dir <checkout> --task <識別子> --holder <誰か> → 作業場所を保持して担当を取得
   work.py integrate --dir <worktree> --token <t> --expected <統合先commit> --verified <検証済みcommit> → 排他・照合して fast-forward
-  work.py task cleanup --dir <worktree> --token <t> --saved <別のブランチかタグ> → 保存先と差分を照合して片付け
+  work.py task cleanup --dir <worktree> --token <t> --saved <別のブランチかタグ> → 変更が保存先に入っていれば片付け（squash・rebase の統合も可）
 
 task と integrate の照合拒否は終了コード 6、担当の拒否は 3。統合のロックは期限では奪わず、子の Git にも渡す。
 統合の記録はリポジトリ共通。中断後は前回の候補を含む統合先から完了を復元するか、新しく検証した候補で再開する。
@@ -313,6 +313,19 @@ def git(d, *args, fds=()):
     return p.stdout.strip()
 
 
+def contained(repo, commit, ref):
+    """commit の変更が ref に入っているか。祖先でなくても（squash・rebase で統合した後に統合先が進んでも）、
+    commit を ref へマージした結果が ref のツリーのままなら入っている。衝突・取り消し・未統合の commit は入っていない。"""
+    if sh(['git', 'merge-base', '--is-ancestor', commit, ref], repo)[0] == 0:
+        return True
+    p = subprocess.run(['git', '-C', str(repo), 'merge-tree', '--write-tree', ref, commit], stdin=subprocess.DEVNULL,
+                       capture_output=True, text=True)
+    if p.returncode not in (0, 1) or not p.stdout:
+        raise ValueError('変更が保存先に入っているかを確かめられない（git merge-tree --write-tree には Git 2.38 以上が要る）: '
+                         + (p.stderr.strip() or 'git が失敗した'))
+    return p.returncode == 0 and p.stdout.split()[0] == git(repo, 'rev-parse', ref + '^{tree}')
+
+
 def clean(d, ignored=False):
     return not git(d, 'status', '--porcelain', '--untracked-files=all', *(['--ignored=matching'] if ignored else []))
 
@@ -412,7 +425,8 @@ def task_command(a):
                 raise ValueError('タスクの記録が task start の作った値と合わない。記録を照合する')
             cleanup = task.get('cleanup')
             if cleanup and not dest.exists() and not commit_of(repo, 'refs/heads/' + task['branch']):
-                git(repo, 'merge-base', '--is-ancestor', cleanup['commit'], cleanup['saved'])
+                if not contained(repo, cleanup['commit'], cleanup['saved']):
+                    raise ValueError(f"片付けの途中の保存先 {cleanup['saved']} に、このタスクの変更が入っていない。記録と差分を照合する")
                 wr = root(dest)
                 with locked(wr):
                     (wr / 'lease.json').unlink(missing_ok=True)
@@ -449,10 +463,14 @@ def task_command(a):
                 raise ValueError('未保存の変更・未完了の操作がある。作業場所を保持する')
             # 同じブランチ自身の名前を保存先として使うと、削除後に変更を失う。
             ref = git(repo, 'rev-parse', '--symbolic-full-name', a.saved)
-            if not ref.startswith(('refs/heads/', 'refs/tags/')) or ref == 'refs/heads/' + task['branch']:
-                raise ValueError('保存先には、このタスク以外のブランチかタグを指定する')
+            if not ref.startswith(('refs/heads/', 'refs/tags/')):
+                raise ValueError(f'保存先 {a.saved} の解決先 {ref or "（名前の付いた ref でない）"} は、ローカルのブランチかタグでない。'
+                                 'ローカルのブランチかタグを指定する')
+            if ref == 'refs/heads/' + task['branch']:
+                raise ValueError('タスク自身のブランチは片付けで削除するので、保存先にならない。統合先のブランチかタグを指定する')
             head = git(a.dir, 'rev-parse', 'HEAD')
-            git(repo, 'merge-base', '--is-ancestor', head, ref)
+            if not contained(repo, head, ref):
+                raise ValueError(f'保存先 {ref} に、このタスクの変更が入っていない。統合してから片付ける')
             write(registry / (task['task'] + '.json'), {**task, 'cleanup': {'saved': ref, 'commit': head}})
             git(repo, 'worktree', 'remove', str(a.dir.resolve()), fds=(rf, wf))
             git(repo, 'branch', '-D', task['branch'], fds=(rf, wf))

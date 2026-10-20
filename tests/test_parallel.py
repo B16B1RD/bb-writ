@@ -272,6 +272,17 @@ class TestParallel(unittest.TestCase):
         self.assertFalse(Path(a['dir']).exists())
         self.assertEqual(self.git(self.repo, 'branch', '--list', a['branch']), '')
 
+    def test_cleanup_accepts_a_rebase_merged_task(self):
+        a = self.start()
+        self.change(a, 'a')
+        self.change(a, 'b')
+        (self.repo / 'earlier').write_text('earlier\n')
+        self.git(self.repo, 'add', 'earlier')
+        self.git(self.repo, 'commit', '-qm', '先の変更')
+        self.git(self.repo, 'cherry-pick', a['base'] + '..' + a['branch'])
+        self.w('task', 'cleanup', '--dir', a['dir'], '--token', a['token'], '--saved', 'main')
+        self.assertFalse(Path(a['dir']).exists())
+
     def test_cleanup_refuses_a_squash_merged_task_with_later_commits(self):
         a = self.start()
         self.change(a, 'a')
