@@ -588,18 +588,25 @@ class TestReviewedCommit(unittest.TestCase):
     def pending(self):
         return [e["key"] for e in self.w("op", "pending", "--dir", str(self.wt))[1]["pending_ops"]]
 
+    def ops_file(self):
+        return b"".join(p.read_bytes() for p in sorted((Path(self.tmp.name).resolve() / "state" / "work").glob("*/ops.jsonl")))
+
+    def git(self, *args):
+        subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", *args], env=self.env, cwd=self.wt, check=True, capture_output=True)
+
     def pushed(self, tok, key):
         self.assertEqual(self.publish(tok, key, "--reviewed", self.head())[0], 0)
         self.assertEqual(self.w("op", "done", "--dir", str(self.wt), "--token", tok, "--key", key, "--result", "ok")[0], 0)
 
     def test_first_push_and_pr_without_a_declaration_are_refused_and_not_recorded(self):
         tok = self.claim()
+        before = self.ops_file()
         for key in ("push:feat@1", "pr:feat"):
             rc, r = self.publish(tok, key)
             self.assertEqual(rc, 2, key)
             self.assertIn("--reviewed", r["reason"], key)
             self.assertIn("終えた push・pr の記録が無い", r["reason"], key)
-        self.assertEqual(self.pending(), [])
+        self.assertEqual(self.ops_file(), before)
         self.assertEqual(self.publish(tok, "push:feat@1", "--reviewed", self.head())[0], 0)  # 言い直せば同じ鍵で通る
 
     def test_refusal_lists_the_files_changed_since_the_last_finished_push(self):
@@ -608,12 +615,13 @@ class TestReviewedCommit(unittest.TestCase):
         self.pushed(tok, "push:feat@1")
         self.commit("between.txt")
         self.pushed(tok, "push:feat@2")
+        self.commit("mid.txt")
         self.assertEqual(self.publish(tok, "push:feat@begun", "--reviewed", self.head())[0], 0)  # 終えていない push は前回に数えない
         self.commit("tests/test_new.py")
         self.commit("src/fix.py")
         rc, r = self.publish(tok, "push:feat@3")
         self.assertEqual(rc, 2)
-        for name in ("tests/test_new.py", "src/fix.py"):
+        for name in ("mid.txt", "tests/test_new.py", "src/fix.py"):
             self.assertIn(name, r["reason"])
         for name in ("before.txt", "between.txt"):
             self.assertNotIn(name, r["reason"])
@@ -628,20 +636,60 @@ class TestReviewedCommit(unittest.TestCase):
 
     def test_push_and_pr_of_a_commit_after_the_review_are_refused(self):
         reviewed = self.head()
-        self.commit("tests/test_fix.py")  # 審査の指摘を受けて試験を直した
+        self.commit("docs.md")  # 試験に触れない変更でも、審査の後に変えたら出せない
         tok = self.claim()
+        before = self.ops_file()
         for key in ("push:feat@1", "pr:feat"):
             rc, r = self.publish(tok, key, "--reviewed", reviewed)
             self.assertEqual(rc, 6, key)
             self.assertIn(self.head(), r["reason"], key)
-        self.assertEqual(self.pending(), [])
+            self.assertIn("docs.md", r["reason"], key)
+        self.assertEqual(self.ops_file(), before)  # 拒否は何も記録しない
 
     def test_a_moving_ref_an_unknown_commit_or_a_misspelled_none_is_refused(self):
         tok = self.claim()
-        for value in ("HEAD", "@", "main", "deadbeef", "None: 文書だけ", " none: 文書だけ"):
+        self.git("branch", "cafe1234", "HEAD")  # 16 進だけの名前のブランチ
+        before = self.ops_file()
+        for value in ("HEAD", "@", "main", "deadbeef", "cafe1234", "None: 文書だけ", " none: 文書だけ", "none 文書だけ"):
             rc, r = self.publish(tok, "push:feat@1", "--reviewed", value)
             self.assertEqual(rc, 2, value)
-        self.assertEqual(self.pending(), [])
+        self.assertEqual(self.ops_file(), before)
+
+    def test_a_later_push_without_a_declaration_is_refused_even_if_no_test_changed(self):
+        tok = self.claim()
+        self.pushed(tok, "pr:feat")  # pr を終えた記録も前回に数える
+        self.commit("docs.md")
+        rc, r = self.publish(tok, "push:feat@2")
+        self.assertEqual(rc, 2)
+        self.assertIn("docs.md", r["reason"])
+
+    def test_a_merge_is_not_counted_as_the_last_push(self):
+        tok = self.claim()
+        self.pushed(tok, "push:feat@1")
+        self.commit("before_merge.txt")
+        self.assertEqual(self.begin(tok, "merge:pr-1", "--from", str(self.repo), "--verified", self.head())[0], 0)
+        self.assertEqual(self.w("op", "done", "--dir", str(self.wt), "--token", tok, "--key", "merge:pr-1", "--result", "ok")[0], 0)
+        rc, r = self.publish(tok, "push:feat@2")
+        self.assertIn("before_merge.txt", r["reason"])
+
+    def test_the_last_push_is_chosen_by_when_it_finished(self):
+        tok = self.claim()
+        self.assertEqual(self.publish(tok, "push:feat@a", "--reviewed", self.head())[0], 0)
+        self.commit("after_a.txt")
+        self.pushed(tok, "push:feat@b")
+        self.assertEqual(self.w("op", "done", "--dir", str(self.wt), "--token", tok, "--key", "push:feat@a", "--result", "ok")[0], 0)
+        rc, r = self.publish(tok, "push:feat@c")
+        self.assertIn("after_a.txt", r["reason"])  # 最後に終えたのは a
+
+    def test_a_rewritten_history_is_noted(self):
+        tok = self.claim()
+        self.commit("old.txt")
+        self.pushed(tok, "push:feat@1")
+        self.git("reset", "-q", "--hard", "HEAD~1")
+        self.commit("new.txt")
+        rc, r = self.publish(tok, "push:feat@2")
+        self.assertEqual(rc, 2)
+        self.assertIn("祖先でない", r["reason"])
 
     def test_no_review_needs_a_reason_and_is_recorded(self):
         tok = self.claim()

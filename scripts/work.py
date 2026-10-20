@@ -21,8 +21,9 @@ task と integrate の照合拒否は終了コード 6、担当の拒否は 3。
 
 公開する操作（鍵の種類が push・pr・merge・release）の op begin には --verified <検証した commit> が要る。作業場所の HEAD と違えば拒否する（6）。
 push・pr には --reviewed も要る（初回の push も）。届ける前の審査（入口の条件 (5)・(6)）を通した commit の ID（16 進）か、
-要らない理由を none:<理由> で書く。無い・形が違う・commit が見つからなければ拒否し（2）、作業場所の HEAD と違えば拒否する（6）。
-拒否のときも通ったときも、この作業場所の記録で前回終えた push・pr（ブランチを問わない）から変えたファイルを示す。
+要らない理由を none:<理由> で書く。無い・形が違う・commit が見つからない・ID でなく参照に解決されたら拒否し（2）、作業場所の HEAD と違えば拒否する（6）。
+拒否のときも通ったときも、この作業場所の記録で最後に終えた push・pr（ブランチを問わない）から変えたファイルを示す（材料で、保証ではない）。
+op begin を通さない git push には効かない。
 審査を通したかどうかは確かめない。短い往復で審査を忘れたまま出すのを、宣言を求めて止める。
 検証の後に成果物が変わったら、証拠を取り直してから出す（plan-v3 6.2）。merge は、GitHub 側でも gh pr merge --match-head-commit <同じ commit> で止める。
 
@@ -97,17 +98,17 @@ def ops(r: Path) -> dict:
 
 
 def changed_since_publish(r: Path, d: Path, head: str) -> str:
-    """前回の push・pr で出した commit から HEAD までに変えたファイル。審査が要るかを決める材料として示す。"""
-    prev = [e["verified"] for e in ops(r).values()
-            if e.get("verified") and e.get("state") == "done" and e["key"].split(":")[0] in REVIEWED]
-    if not prev:
-        return "この作業場所に、終えた push・pr の記録が無い"
-    rc, files, err = sh(["git", "diff", "--name-only", f"{prev[-1]}..{head}"], d)
+    """最後に終えた push・pr で出した commit から HEAD までに変えたファイル。審査が要るかを決める材料で、保証ではない。"""
+    done = [e for e in ops(r).values() if e.get("verified") and e.get("state") == "done" and e["key"].split(":")[0] in REVIEWED]
+    if not done:
+        return " この作業場所に、終えた push・pr の記録が無い"
+    prev = max(done, key=lambda e: e["at"])["verified"]  # 鍵の並びは begin の順なので、終えた時刻で選ぶ
+    rc, files, err = sh(["git", "diff", "--name-only", f"{prev}..{head}"], d)
     if rc:
-        return f"前回の push・pr（{prev[-1]}）からの差分を出せない: {err}"
-    note = "" if sh(["git", "merge-base", "--is-ancestor", prev[-1], head], d)[0] == 0 else \
-        "（前回の commit は HEAD の祖先でない。rebase などの後なので、取り込んだ変更も並ぶ）"
-    return f"前回の push・pr（{prev[-1][:12]}）から変えたファイル{note}: " + (", ".join(files.splitlines()) or "なし")
+        return f" 前回の push・pr（{prev}）からの差分を出せない: {err}"
+    rc, _, err = sh(["git", "merge-base", "--is-ancestor", prev, head], d)
+    note = {0: "", 1: "（前回の commit は HEAD の祖先でない。rebase などの後なので、取り込んだ変更も並ぶ）"}.get(rc, f"（祖先かを確かめられない: {err}）")
+    return f" 前回の push・pr（{prev[:12]}）から変えたファイル{note}: " + (", ".join(files.splitlines()) or "なし")
 
 
 def pending(r: Path) -> list:
@@ -675,14 +676,18 @@ def main() -> int:
                 reviewed = "none: " + a.reviewed[5:].strip()
             else:
                 # HEAD・ブランチ名のような動く参照は、審査した commit を書いた宣言と見分けられないので受けない
-                if not re.fullmatch(r"[0-9a-f]{7,40}", a.reviewed):
-                    return out({"ok": False, "reason": f"--reviewed {a.reviewed!r} は commit の ID（16 進）でも none:<理由> でもない"}, 2)
+                if not re.fullmatch(r"[0-9a-f]{7,64}", a.reviewed):
+                    return out({"ok": False, "reason": f"--reviewed {a.reviewed!r} は commit の ID（16 進）でも none:<理由> でもない。"
+                                + changed_since_publish(r, a.dir, head)}, 2)
                 reviewed = commit_of(a.dir, a.reviewed)
                 if not reviewed:
-                    return out({"ok": False, "reason": f"--reviewed の commit {a.reviewed} が見つからない"}, 2)
+                    return out({"ok": False, "reason": f"--reviewed の commit {a.reviewed} が見つからない。" + changed_since_publish(r, a.dir, head)}, 2)
+                if not reviewed.startswith(a.reviewed):  # 16 進だけの名前のブランチ・タグは、git が ID より先に解決する
+                    return out({"ok": False, "reason": f"--reviewed {a.reviewed} は ID でなく参照（{reviewed[:12]}）に解決された。完全な ID を書く"}, 2)
                 if reviewed != head:
                     return out({"ok": False, "reason": f"審査を通した commit {reviewed or a.reviewed} と作業場所の HEAD {head} が違う。"
-                                "審査の後に変えた。直した commit で審査を通し直してから出す"}, 6)
+                                "審査の後に変えた。直した commit で審査を通し直してから出す。審査の後に変えたファイル: "
+                                + (", ".join(sh(["git", "diff", "--name-only", f"{reviewed}..{head}"], a.dir)[1].splitlines()) or "なし")}, 6)
         if a.action == "begin" and known:
             return out({"ok": False, "reason": "同じ鍵の操作が既にある。外部の状態を照合してから進める（やり直さない）", "op": known}, 4)
         if a.action == "done" and not known:
