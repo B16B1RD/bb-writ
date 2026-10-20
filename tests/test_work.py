@@ -138,7 +138,7 @@ class TestAccountCheck(unittest.TestCase):
         (self.bin / "ssh").write_text(FAKE_SSH.replace("/usr/bin/env python3", sys.executable))
         (self.bin / "ssh").chmod(0o755)
         # 利用者の git の設定（全体・system・環境変数。insteadOf で git@github.com: が https になる）が origin の形を変えないように
-        env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_CONFIG")}
+        env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}  # git の hook の中で回すときの GIT_DIR なども
         self.env = {**env, "BB_WRIT_STATE_DIR": str(t / "state"), "PATH": f"{self.bin}:{os.environ['PATH']}",
                     "FAKE_GH_MAP": f"{t / 'personal'}=B16B1RD:ADMIN", "FAKE_GH_DEFAULT": "work-account:NONE",
                     "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}
@@ -272,20 +272,32 @@ class TestAccountCheck(unittest.TestCase):
                     "git@github.com:B16B1RD/demo.git", "git@github.com:/B16B1RD/demo.git", "git@github.com:B16B1RD/demo.GIT",
                     "git@work:B16B1RD/demo.git", "work:B16B1RD/demo.git", "ssh://git@gh443:443/B16B1RD/demo.git",
                     "SSH://git@work/B16B1RD/demo.git", "git+ssh://git@work/B16B1RD/demo", "ssh+git://git@work/B16B1RD/demo", "https://www.github.com/B16B1RD/demo.git",
-                    "https://x:token@github.com/B16B1RD/demo.git", "git@mu:B16B1RD/demo.git", "gh:B16B1RD/demo.git"):
+                    "https://x:token@github.com/B16B1RD/demo.git", "git@mu:B16B1RD/demo.git", "ssh://git@mu/B16B1RD/demo.git", "gh:B16B1RD/demo.git",
+                    "https://github.com./B16B1RD/demo.git"):
             subprocess.run(["git", "remote", "set-url", "origin", url], env=self.env, cwd=self.repo, check=True)
             rc, r = self.w("check", "--dir", str(self.wt), "--from", str(self.repo))
             self.assertEqual(rc, 5, url)
             self.assertIn("READ", r["reason"], url)
 
     def test_origin_on_another_host_skips_the_check(self):
-        self.env["FAKE_SSH_ALIASES"] = "lab=gitlab.com,github.com=ghe.example"  # 名前が github.com でも、ssh の設定で別のホストへ行く
+        self.env["FAKE_SSH_ALIASES"] = "lab=gitlab.com,github.com=ghe.example,git@nu=github.com"  # 名前が github.com でも、ssh の設定で別のホストへ行く
         for url in ("git@gitlab.com:x/y.git", "git@lab:x/y.git", "https://github.com.evil.example/x/y.git",
-                    "https://evilgithub.com/x/y.git", "https://ghe.example/x/y.git", str(Path(self.tmp.name) / "bare.git"), "git@github.com:x/y.git"):
+                    "https://evilgithub.com/x/y.git", "https://ghe.example/x/y.git", str(Path(self.tmp.name) / "bare.git"), "git@github.com:x/y.git", "nu:x/y.git"):  # nu は Match user git でだけ github.com。user を書かない origin には当たらず、名前のまま
             subprocess.run(["git", "remote", "set-url", "origin", url], env=self.env, cwd=self.repo, check=True)
             rc, r = self.w("check", "--dir", str(self.wt), "--from", str(self.repo))
             self.assertEqual(rc, 0, url)
             self.assertIn("飛ばした", r["skipped"], url)
+
+    def test_https_origin_does_not_depend_on_the_ssh_config(self):
+        """https の push は ssh を使わない。ssh の設定（github.com を別のホストへ向ける）にも、ssh の故障にも左右されない。"""
+        self.env["FAKE_SSH_ALIASES"] = "github.com=ghe.example"
+        self.env["FAKE_GH_MAP"] = f"{Path(self.tmp.name).resolve() / 'personal'}=work-account:READ"
+        rc, r = self.w("check", "--dir", str(self.wt), "--from", str(self.repo))
+        self.assertEqual(rc, 5)
+        self.assertIn("READ", r["reason"])
+        (self.bin / "ssh").write_text("#!/bin/sh\necho 'ssh: bad configuration' >&2\nexit 255\n")
+        rc, r = self.w("check", "--dir", str(self.wt), "--from", str(self.repo))
+        self.assertIn("READ", r["reason"])
 
     def test_unresolvable_ssh_host_is_refused_not_skipped(self):
         """ssh -G が失敗すると GitHub かどうか分からない。確かめを飛ばさずに止める。"""
@@ -298,7 +310,9 @@ class TestAccountCheck(unittest.TestCase):
             self.assertIn("bad configuration", r["reason"], url)
         tok = self.claim()
         for key in ("comment:issue-1", "pr:feat", "merge:pr-1"):  # push 以外も、origin が分からなければ飛ばさない
-            self.assertEqual(self.begin(tok, key, "--from", str(self.repo))[0], 5, key)
+            rc, r = self.begin(tok, key, "--from", str(self.repo))
+            self.assertEqual(rc, 5, key)
+            self.assertIn("bad configuration", r["reason"], key)
 
     def test_alias_origin_is_checked_for_other_operations_too(self):
         """push 以外も、確かめるかどうかは origin で決める。別名の origin で飛ばすと、見えないリポジトリへのコメントも通る。"""
