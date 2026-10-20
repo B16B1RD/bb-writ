@@ -48,6 +48,16 @@ class TestSkills(unittest.TestCase):
             self.assertNotIn("references/", text, p)
             self.assertNotIn("playbooks/", text, p)
 
+    def test_entry_keeps_what_to_ask_and_review_rules_within_the_compaction_head(self):
+        """Claude Code は要約の後、スキルの先頭 5,000 トークンだけを残す。入口の聞く範囲・返答の形・検証の条件 (6) までをそこに収める。"""
+        text = (ROOT / "skills" / "bb-writ" / "SKILL.md").read_text(encoding="utf-8")
+        body = text[text.index("\n---", 3) + 4:]
+        end = body.index("| 対象 |")  # 検証の条件 (1)〜(6) の直後
+        # 5,650 字は opus の input_tokens で約 4,930 トークン（2026-10-20 の実測）
+        self.assertLessEqual(end, 5650)
+        for heading in ("## 進め方", "## 返答の形", "信じてよい条件:", "(6) "):
+            self.assertLess(body.index(heading), end, heading)
+
 
 if __name__ == "__main__":
     unittest.main()
