@@ -50,17 +50,19 @@ class TestSkills(unittest.TestCase):
 
     def test_entry_keeps_what_to_ask_and_review_rules_within_the_compaction_head(self):
         """Claude Code は要約の後、呼んだスキルを先頭 5,000 トークンまで戻す（合計の枠を超えた古いものは落ちる）。
-        入口の聞く範囲・呼び直しの文・返答の形・検証の条件 (1)〜(6) を、戻る先頭に収める。"""
+        入口の聞く範囲・呼び直しの文・返答の形・検証の条件 (1)〜(6) の文が、それぞれ 1 つずつ戻る先頭にあることを確かめる。
+        確かめるのは並びだけで、文の意味は確かめない（意味は新しい文脈の読者役で確かめる）。
+        目印の文を書き換えたら、ここの目印も直す。"""
         text = (ROOT / "skills" / "bb-writ" / "SKILL.md").read_text(encoding="utf-8")
-        self.assertIn("\n---", text[3:], "frontmatter の閉じが見つからない")
+        self.assertTrue(text.startswith("---\n"), "frontmatter で始まらない")
         body = text[text.index("\n---", 3) + 4:]
         self.assertEqual(body.count("信じてよい条件"), 1, "検証の条件の段落が 1 つでない")
         start = body.index("信じてよい条件")
         self.assertIn("\n\n", body[start:], "検証の条件の段落の終わりが見つからない")
-        end = body.index("\n\n", start)
-        # 5,650 字は opus の input_tokens の差で約 4,930 トークン（2026-10-20 の実測）。
-        # Claude Code が本文の前に付ける前置きの数え方と、切り詰めに使う数え方は確かめていない。
-        self.assertLessEqual(end, 5650)
+        end = body.index("\n\n", start)  # 条件 (1)〜(6) は 1 つの段落（分けたら、ここも直す）
+        # 境目の 5,589 字は、前置きの 1 行を含めて opus の input_tokens の差で 4,946 トークン（2026-10-20 の実測）。
+        # 字あたりのトークン数は中身で変わり、Claude Code の切り詰めの数え方も確かめていないので、上限に余裕を取る。
+        self.assertLessEqual(end, 5600, f"検証の条件の段落の終わりが {end} 字目")
         anchors = (
             "このスキルを呼び直して全文を読み直す",
             "聞くのは製品上の選択",
@@ -68,6 +70,9 @@ class TestSkills(unittest.TestCase):
             "## 返答の形",
             "4. 残る範囲",
             "(1) 何が観測",
+            "(2) 新しい自動検査は",
+            "(3) 意味の判断",
+            "(4) 未実行",
             "(5) 新しい自動検査",
             "(6) コード",
             "どこまで直すかを利用者に選ばせない",
@@ -75,6 +80,16 @@ class TestSkills(unittest.TestCase):
         for anchor in anchors:
             self.assertEqual(body.count(anchor), 1, anchor)
             self.assertLess(body.index(anchor), end, anchor)
+
+    def test_skills_invoked_after_the_entry_say_to_reinvoke_it_after_compaction(self):
+        """要約の後に入口が合計の枠から落ちたときのため、入口の後に呼ぶスキルの先頭近くに呼び直しの文を置く。"""
+        names = ("playbook-feature", "playbook-bug", "playbook-docs-skill", "playbook-investigation",
+                 "playbook-parallel", "playbook-session-pickup", "delegate", "interrogate")
+        for name in names:
+            text = (ROOT / "skills" / name / "SKILL.md").read_text(encoding="utf-8")
+            at = text.find("入口 `bb-writ` を呼び直して全文を読み直す")
+            self.assertNotEqual(at, -1, name)
+            self.assertLess(at, 4000, name)  # 先頭 5,000 トークンの内側
 
 if __name__ == "__main__":
     unittest.main()
