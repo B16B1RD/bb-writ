@@ -51,17 +51,19 @@ class TestSkills(unittest.TestCase):
     def test_entry_keeps_what_to_ask_and_review_rules_within_the_compaction_head(self):
         """Claude Code は要約の後、呼んだスキルを先頭 5,000 トークンまで戻す（合計の枠を超えた古いものは落ちる）。
         入口の聞く範囲・呼び直しの文・返答の形・検証の条件 (1)〜(6) の文が、それぞれ 1 つずつ戻る先頭にあることを確かめる。
-        確かめるのは並びだけで、文の意味は確かめない（意味は新しい文脈の読者役で確かめる）。
-        目印の文を書き換えたら、ここの目印も直す。"""
+        確かめるのは各文の書き出し（目印）の位置だけで、目印同士の順・文の残りの位置・文の意味は確かめない
+        （意味は新しい文脈の読者役で確かめる）。目印の文を書き換えたら、ここの目印も直す。"""
         text = (ROOT / "skills" / "bb-writ" / "SKILL.md").read_text(encoding="utf-8")
         self.assertTrue(text.startswith("---\n"), "frontmatter で始まらない")
+        self.assertIn("\n---\n", text[3:], "frontmatter の閉じが見つからない")
         body = text[text.index("\n---", 3) + 4:]
         self.assertEqual(body.count("信じてよい条件"), 1, "検証の条件の段落が 1 つでない")
         start = body.index("信じてよい条件")
         self.assertIn("\n\n", body[start:], "検証の条件の段落の終わりが見つからない")
         end = body.index("\n\n", start)  # 条件 (1)〜(6) は 1 つの段落（分けたら、ここも直す）
         # 境目の 5,589 字は、前置きの 1 行を含めて opus の input_tokens の差で 4,946 トークン（2026-10-20 の実測）。
-        # 字あたりのトークン数は中身で変わり、Claude Code の切り詰めの数え方も確かめていないので、上限に余裕を取る。
+        # 上限まで約 50 トークンしか余裕が無い。字あたりのトークン数は中身（英数字と日本語の割合）で変わり、
+        # 前置きの長さは置き場で変わり、Claude Code の切り詰めの数え方も確かめていないので、字数は近似にとどまる。
         self.assertLessEqual(end, 5600, f"検証の条件の段落の終わりが {end} 字目")
         anchors = (
             "このスキルを呼び直して全文を読み直す",
@@ -82,12 +84,15 @@ class TestSkills(unittest.TestCase):
             self.assertLess(body.index(anchor), end, anchor)
 
     def test_skills_invoked_after_the_entry_say_to_reinvoke_it_after_compaction(self):
-        """要約の後に入口が合計の枠から落ちたときのため、入口の後に呼ぶスキルの先頭近くに呼び直しの文を置く。"""
+        """要約の後に入口が合計の枠から落ちたときのため、入口の手順 2・5 と委任・審査で呼ぶ 8 本の本文の先頭 4,000 字以内に
+        呼び直しの文を置く。原則・検証スキルなど、ほかに入口の後に呼ぶスキルには置いていない。"""
         names = ("playbook-feature", "playbook-bug", "playbook-docs-skill", "playbook-investigation",
                  "playbook-parallel", "playbook-session-pickup", "delegate", "interrogate")
         for name in names:
             text = (ROOT / "skills" / name / "SKILL.md").read_text(encoding="utf-8")
-            at = text.find("入口 `bb-writ` を呼び直して全文を読み直す")
+            self.assertTrue(text.startswith("---\n") and "\n---\n" in text[3:], name)
+            body = text[text.index("\n---\n", 3) + 5:]  # description は本文として戻らない
+            at = body.find("入口を呼び直して全文を読み直す")
             self.assertNotEqual(at, -1, name)
             self.assertLess(at, 4000, name)  # 先頭 5,000 トークンの内側
 
