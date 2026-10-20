@@ -11,7 +11,11 @@ commit ごとの細かい変更は、各版の末尾の「commit の一覧」（
 - origin が SSH の別名（`~/.ssh/config` の `Host`。例 `git@github.com-work:owner/repo.git`）のとき、`work.py op begin` の push の確かめが、書けるアカウントでも「権限: 見えない」として止めていた。gh は引数に渡した URL の別名を解決せず、別名のホストへ接続しに行って失敗するため。今は `ssh -G` で別名を実際のホストに直し、gh には `github.com/owner/repo` の形で渡す。git と同じく `user@host` で渡すので、ssh の設定の `Match user` も効く。
 - 名前に `github.com` を含まない別名（例 `git@work:owner/repo.git`）は「GitHub でない」として確かめを飛ばし、書けないアカウントでも通していた。今は実際のホストで判定する。`ssh -G` で解決できないとき、または HostName を書かず ProxyCommand で接続先を決める別名のときは、GitHub か分からないので飛ばさずに止め、理由を示す。
 - 大文字のホスト名、先頭に `/` のある scp 形、`git+ssh://`・`ssh+git://`、末尾に点の付いたホスト名も github.com として確かめる。
-- 確かめるのは gh のアカウントで、push に使われる SSH の鍵や credential helper のアカウントは見ない。push 先は origin の最初の pushurl だけを見て、確かめるかどうかもそれで決める。`core.sshCommand` で渡す ssh の設定、IP・角括弧のホスト、リモートヘルパーの形（`persistent-https::…`）は見ない。
+- SSH の push では、push に使われる鍵の GitHub のアカウント（`ssh -T` に GitHub が返す名前）も gh のアカウントと照合し、違えば止める。別名や `core.sshCommand` で鍵を切り替える構成で、別のアカウントの鍵で push してしまうのを防ぐ。GitHub に SSH で繋がらないときも止める（git の push も同じ ssh で繋ぐため）。**今まで通っていた push が、鍵と gh のアカウントが違うことで止まるようになる。** 止まったら、ssh の設定で gh と同じアカウントの鍵を使う。
+- ssh は git と同じ順（`GIT_SSH_COMMAND`、`core.sshCommand`、`GIT_SSH`、`ssh`）で選んで使う。
+- `--from` に、元の checkout と別のリポジトリや git でない場所を渡すと、その場所のアカウントで確かめて通していた。今は確かめずに止める（終了コード 2）。
+- push 以外の操作（PR・コメント・マージなど）は gh の既定のリポジトリに出るのに、確かめるかどうかを origin で決めていた。origin が GitHub でない（upstream だけが GitHub、origin が無い、pushurl だけが GitHub でないミラー）と確かめを飛ばしていた。今は、gh 自身に既定のリポジトリを解決させ（`GH_REPO` があればそれ）、そのリポジトリを確かめる。gh が GitHub の remote を見つけられないとき（gh の操作も失敗する）だけ飛ばす。
+- 見ないもの: https の push に使われる credential helper のアカウント（認証情報に触れないため）、IP・角括弧のホスト・`/etc/hosts` の別名、リモートヘルパーの形（`persistent-https::…`）、複数の pushurl・`pushDefault`。SSH の確かめは対話しない（`BatchMode`）ので、known_hosts に無いホスト（`ssh.github.com:443` など）や、ssh-agent に載っていないパスフレーズ付きの鍵では止まる。
 
 commit の一覧：https://github.com/B16B1RD/bb-writ/compare/bb-writ--v0.11.4...bb-writ--v0.11.5
 
