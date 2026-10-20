@@ -4,6 +4,17 @@ bb-writ を使う人に向けて、版ごとに変わったことを書く。新
 
 commit ごとの細かい変更は、各版の末尾の「commit の一覧」（前の版のタグとの比較）で見られる。
 
+## 0.11.5 - 2026-10-20
+
+### 直したこと
+
+- origin が SSH の別名（`~/.ssh/config` の `Host`。例 `git@github.com-work:owner/repo.git`）のとき、`work.py op begin` の push の確かめが、書けるアカウントでも「権限: 見えない」として止めていた。gh は引数に渡した URL の別名を解決せず、別名のホストへ接続しに行って失敗するため。今は `ssh -G` で別名を実際のホストに直し、gh には `github.com/owner/repo` の形で渡す。git と同じく `user@host` で渡すので、ssh の設定の `Match user` も効く。
+- 名前に `github.com` を含まない別名（例 `git@work:owner/repo.git`）は「GitHub でない」として確かめを飛ばし、書けないアカウントでも通していた。今は実際のホストで判定する。`ssh -G` で解決できないとき、または HostName を書かず ProxyCommand で接続先を決める別名のときは、GitHub か分からないので飛ばさずに止め、理由を示す。
+- 大文字のホスト名、先頭に `/` のある scp 形、`git+ssh://`・`ssh+git://`、末尾に点の付いたホスト名も github.com として確かめる。
+- 確かめるのは gh のアカウントで、push に使われる SSH の鍵や credential helper のアカウントは見ない。push 先は origin の最初の pushurl だけを見て、確かめるかどうかもそれで決める。`core.sshCommand` で渡す ssh の設定、IP・角括弧のホスト、リモートヘルパーの形（`persistent-https::…`）は見ない。
+
+commit の一覧：https://github.com/B16B1RD/bb-writ/compare/bb-writ--v0.11.4...bb-writ--v0.11.5
+
 ## 0.11.4 - 2026-10-19
 
 ### 直したこと
