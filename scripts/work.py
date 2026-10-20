@@ -19,6 +19,9 @@ task と integrate の照合拒否は終了コード 6、担当の拒否は 3。
 統合の記録はリポジトリ共通。中断後は前回の候補を含む統合先から完了を復元するか、新しく検証した候補で再開する。
 
 公開する操作（鍵の種類が push・pr・merge・release）の op begin には --verified <検証した commit> が要る。作業場所の HEAD と違えば拒否する（6）。
+push・pr には --reviewed も要る。届ける前の審査（入口の条件 (5)・(6)）を通した commit か、要らない理由を none:<理由> で書く。
+無ければ、前回の push・pr から変えたファイルを示して拒否し（2）、commit が作業場所の HEAD と違えば拒否する（6）。
+審査を通したかどうかは確かめない。短い往復で審査を忘れたまま出すのを、宣言を求めて止める。
 検証の後に成果物が変わったら、証拠を取り直してから出す（plan-v3 6.2）。merge は、GitHub 側でも gh pr merge --match-head-commit <同じ commit> で止める。
 
 外部に出る操作（鍵の種類が push・pr・comment・merge・release・issue）の op begin には --from が要り、check を通す。
@@ -91,6 +94,17 @@ def ops(r: Path) -> dict:
     return out
 
 
+def changed_since_publish(r: Path, d: Path, head: str) -> str:
+    """前回の push・pr で出した commit から HEAD までに変えたファイル。審査が要るかを決める材料として示す。"""
+    prev = [e["verified"] for e in ops(r).values() if e.get("verified") and e["key"].split(":")[0] in REVIEWED]
+    if not prev:
+        return "前回の push・pr の記録が無い"
+    rc, files, err = sh(["git", "diff", "--name-only", f"{prev[-1]}..{head}"], d)
+    if rc:
+        return f"前回の push・pr（{prev[-1]}）からの差分を出せない: {err}"
+    return f"前回の push・pr（{prev[-1][:12]}）から変えたファイル: " + (", ".join(files.splitlines()) or "なし")
+
+
 def pending(r: Path) -> list:
     return [e for e in ops(r).values() if e.get("state") == "begun"]
 
@@ -121,6 +135,7 @@ def note(r: Path) -> dict:
 
 EXTERNAL = {"push", "pr", "comment", "merge", "release", "issue"}  # GitHub に出る操作の種類（鍵の ":" の前）
 PUBLISH = {"push", "pr", "merge", "release"}  # 成果物を外に出す操作。検証した commit と一致させる
+REVIEWED = {"push", "pr"}  # 届ける前の審査を通した commit（か、要らない理由）を宣言させる操作
 NEEDS_WRITE = {"push", "merge", "release"}  # 書き込み権限が要る操作。comment・issue・pr（fork から）は読めれば出せる
 WRITE_OK = {"ADMIN", "MAINTAIN", "WRITE"}
 NO_GITHUB_REMOTE = r"none of the git remotes configured for this repository point to a known GitHub host|no git remotes found"  # gh 2.102.0
@@ -576,6 +591,7 @@ def main() -> int:
     o.add_argument("--result", default="")
     o.add_argument("--from", dest="frm", type=Path, help="外部操作を実行する場所（push・pr・comment・merge・release・issue で必須）")
     o.add_argument("--verified", help="検証した commit（push・pr・merge・release で必須。作業場所の HEAD と一致させる）")
+    o.add_argument("--reviewed", help="届ける前の審査を通した commit か none:<理由>（push・pr で必須。commit は作業場所の HEAD と一致させる）")
     c = sub.add_parser("check")
     c.add_argument("--dir", type=Path, required=True)
     c.add_argument("--from", dest="frm", type=Path, required=True)
@@ -641,6 +657,20 @@ def main() -> int:
             if verified != head:
                 return out({"ok": False, "reason": f"検証した commit {verified or a.verified} と作業場所の HEAD {head} が違う。"
                             "検証の後に成果物が変わった。今の HEAD で証拠を取り直してから出す"}, 6)
+        reviewed = None
+        if a.action == "begin" and a.key.split(":")[0] in REVIEWED:
+            if not a.reviewed:
+                return out({"ok": False, "reason": "push・pr には --reviewed <届ける前の審査を通した commit> か --reviewed none:<要らない理由> が要る。"
+                            "試験・検査を足した・変えたなら、入口の条件 (5)・(6) をこの commit で通す。" + changed_since_publish(r, a.dir, head)}, 2)
+            if a.reviewed.startswith("none:"):
+                if not a.reviewed[5:].strip():
+                    return out({"ok": False, "reason": "--reviewed none: の後に、審査が要らない理由を書く。" + changed_since_publish(r, a.dir, head)}, 2)
+                reviewed = "none: " + a.reviewed[5:].strip()
+            else:
+                reviewed = commit_of(a.dir, a.reviewed)
+                if reviewed != head:
+                    return out({"ok": False, "reason": f"審査を通した commit {reviewed or a.reviewed} と作業場所の HEAD {head} が違う。"
+                                "審査の後に変えた。直した commit で審査を通し直してから出す"}, 6)
         if a.action == "begin" and known:
             return out({"ok": False, "reason": "同じ鍵の操作が既にある。外部の状態を照合してから進める（やり直さない）", "op": known}, 4)
         if a.action == "done" and not known:
@@ -651,6 +681,8 @@ def main() -> int:
             e.update({"from": acct["at"], "account": acct.get("login")})
         if verified:
             e["verified"] = verified
+        if reviewed:
+            e["reviewed"] = reviewed
         with open(r / "ops.jsonl", "a", encoding="utf-8") as f:
             f.write(json.dumps(e, ensure_ascii=False) + "\n")
         return out({"ok": True, "op": ops(r)[a.key]})

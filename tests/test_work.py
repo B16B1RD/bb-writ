@@ -216,7 +216,7 @@ class TestAccountCheck(unittest.TestCase):
     def test_push_from_the_checkout_is_allowed_and_records_the_account(self):
         tok = self.claim()
         head = subprocess.run(["git", "rev-parse", "HEAD"], env=self.env, cwd=self.wt, check=True, capture_output=True, text=True).stdout.strip()
-        rc, r = self.begin(tok, "push:feat", "--from", str(self.repo), "--verified", head)
+        rc, r = self.begin(tok, "push:feat", "--from", str(self.repo), "--verified", head, "--reviewed", "none:試験の外")
         self.assertEqual((rc, r["op"]["account"]), (0, "B16B1RD"))
 
     def test_checkout_account_without_write_is_refused_for_push_merge_release(self):
@@ -233,7 +233,7 @@ class TestAccountCheck(unittest.TestCase):
         tok = self.claim()
         head = subprocess.run(["git", "rev-parse", "HEAD"], env=self.env, cwd=self.wt, check=True, capture_output=True, text=True).stdout.strip()
         for key in ("comment:issue-1", "issue:new", "pr:feat"):
-            rc, r = self.begin(tok, key, "--from", str(self.repo), "--verified", head)
+            rc, r = self.begin(tok, key, "--from", str(self.repo), "--verified", head, "--reviewed", "none:試験の外")
             self.assertEqual((rc, r["op"]["account"]), (0, "work-account"), key)
 
     def test_comment_where_the_repository_is_not_visible_is_refused(self):
@@ -252,11 +252,11 @@ class TestAccountCheck(unittest.TestCase):
         self.env["FAKE_GH_UPSTREAM"] = "READ"
         tok = self.claim()
         head = subprocess.run(["git", "rev-parse", "HEAD"], env=self.env, cwd=self.wt, check=True, capture_output=True, text=True).stdout.strip()
-        rc, r = self.begin(tok, "push:feat", "--from", str(self.repo), "--verified", head)
+        rc, r = self.begin(tok, "push:feat", "--from", str(self.repo), "--verified", head, "--reviewed", "none:試験の外")
         self.assertEqual((rc, r["op"]["account"]), (0, "B16B1RD"))
         self.assertEqual(self.begin(tok, "comment:issue-1", "--from", str(self.repo))[0], 0)
         for key in ("merge:pr-1", "release:v1"):
-            rc, r = self.begin(tok, key, "--from", str(self.repo), "--verified", head)
+            rc, r = self.begin(tok, key, "--from", str(self.repo), "--verified", head, "--reviewed", "none:試験の外")
             self.assertEqual(rc, 5, key)  # マージ・リリースは upstream に書けない
             self.assertIn("parent/demo", json.dumps(r, ensure_ascii=False), key)
 
@@ -265,7 +265,7 @@ class TestAccountCheck(unittest.TestCase):
         self.env["FAKE_GH_UPSTREAM"] = "NONE"
         tok = self.claim()
         head = subprocess.run(["git", "rev-parse", "HEAD"], env=self.env, cwd=self.wt, check=True, capture_output=True, text=True).stdout.strip()
-        self.assertEqual(self.begin(tok, "pr:feat", "--from", str(self.repo), "--verified", head)[0], 5)
+        self.assertEqual(self.begin(tok, "pr:feat", "--from", str(self.repo), "--verified", head, "--reviewed", "none:試験の外")[0], 5)
 
     def test_push_checks_the_push_url_not_the_fetch_url(self):
         """fetch は upstream、push は自分の fork（pushurl）という構成。push の権限は pushurl で見る。"""
@@ -273,7 +273,7 @@ class TestAccountCheck(unittest.TestCase):
         subprocess.run(["git", "remote", "set-url", "--push", "origin", "https://github.com/B16B1RD/demo.git"], env=self.env, cwd=self.repo, check=True)
         tok = self.claim()
         head = subprocess.run(["git", "rev-parse", "HEAD"], env=self.env, cwd=self.wt, check=True, capture_output=True, text=True).stdout.strip()
-        rc, r = self.begin(tok, "push:feat", "--from", str(self.repo), "--verified", head)
+        rc, r = self.begin(tok, "push:feat", "--from", str(self.repo), "--verified", head, "--reviewed", "none:試験の外")
         self.assertEqual((rc, r["op"]["account"]), (0, "B16B1RD"))
 
     def test_external_op_needs_from(self):
@@ -295,7 +295,7 @@ class TestAccountCheck(unittest.TestCase):
         head = subprocess.run(["git", "rev-parse", "HEAD"], env=self.env, cwd=self.wt, check=True, capture_output=True, text=True).stdout.strip()
         for i, url in enumerate(("git@github.com-work:B16B1RD/demo.git", "ssh://git@gh443/B16B1RD/demo.git")):  # 443 番の ssh.github.com を指す別名も
             subprocess.run(["git", "remote", "set-url", "origin", url], env=self.env, cwd=self.repo, check=True)
-            rc, r = self.begin(tok, f"push:feat@{i}", "--from", str(self.repo), "--verified", head)
+            rc, r = self.begin(tok, f"push:feat@{i}", "--from", str(self.repo), "--verified", head, "--reviewed", "none:試験の外")
             self.assertEqual((rc, r["op"]["account"]), (0, "B16B1RD"), url)
 
     def test_every_github_url_form_is_checked_against_the_repository(self):
@@ -395,7 +395,7 @@ class TestAccountCheck(unittest.TestCase):
         self.env["FAKE_GH_DEFAULT"] = "work-account:WRITE"
         tok = self.claim()
         for kind in ("push", "pr", "comment", "merge", "release", "issue"):
-            rc, r = self.begin(tok, f"{kind}:x", "--from", str(self.wt), "--verified", self.head_of_wt())
+            rc, r = self.begin(tok, f"{kind}:x", "--from", str(self.wt), "--verified", self.head_of_wt(), "--reviewed", "none:試験の外")
             self.assertEqual(rc, 5, kind)
             self.assertIn("食い違う", r["reason"], kind)
 
@@ -413,7 +413,7 @@ class TestAccountCheck(unittest.TestCase):
         tok = self.claim()
         for i, (perm, code) in enumerate((("MAINTAIN", 0), ("TRIAGE", 5))):
             self.env["FAKE_GH_MAP"] = f"{Path(self.tmp.name).resolve() / 'personal'}=B16B1RD:{perm}"
-            self.assertEqual(self.begin(tok, f"push:feat@{i}", "--from", str(self.repo), "--verified", self.head_of_wt())[0], code, perm)
+            self.assertEqual(self.begin(tok, f"push:feat@{i}", "--from", str(self.repo), "--verified", self.head_of_wt(), "--reviewed", "none:試験の外")[0], code, perm)
 
     def test_other_operations_follow_the_remotes_gh_can_choose(self):
         """push 以外は gh の既定のリポジトリに出る。origin が GitHub でなくても、GitHub の remote があれば確かめる。"""
@@ -466,15 +466,15 @@ class TestAccountCheck(unittest.TestCase):
         tok = self.claim()
         for i, (key, code) in enumerate((("B16B1RD", 0), ("b16b1rd", 0), ("work-account", 5), ("B16B1RD/demo", 5), ("", 5))):  # deploy key・鍵なし
             self.env["FAKE_SSH_KEY"] = key
-            rc, r = self.begin(tok, f"push:feat@{i}", "--from", str(self.repo), "--verified", self.head_of_wt())
+            rc, r = self.begin(tok, f"push:feat@{i}", "--from", str(self.repo), "--verified", self.head_of_wt(), "--reviewed", "none:試験の外")
             self.assertEqual(rc, code, key)
             if code:
                 self.assertIn("鍵のアカウント" + (" " + key if key else "が分からない"), r["reason"], key)
                 self.assertIn("Permission denied" if not key else "違う", r["reason"], key)
         self.env["FAKE_SSH_KEY"], self.env["FAKE_SSH_KEYS"] = "work-account", "work=B16B1RD"  # 鍵は別名の Host ブロックで決まる
-        self.assertEqual(self.begin(tok, "push:feat@alias-key", "--from", str(self.repo), "--verified", self.head_of_wt())[0], 0)
+        self.assertEqual(self.begin(tok, "push:feat@alias-key", "--from", str(self.repo), "--verified", self.head_of_wt(), "--reviewed", "none:試験の外")[0], 0)
         self.set_origin("origin", "https://github.com/B16B1RD/demo.git")  # https の push は鍵を使わない
-        self.assertEqual(self.begin(tok, "push:feat@https", "--from", str(self.repo), "--verified", self.head_of_wt())[0], 0)
+        self.assertEqual(self.begin(tok, "push:feat@https", "--from", str(self.repo), "--verified", self.head_of_wt(), "--reviewed", "none:試験の外")[0], 0)
 
     def test_git_ssh_command_and_core_ssh_command_are_used(self):
         """git が push に使う ssh（GIT_SSH_COMMAND > core.sshCommand > GIT_SSH）で解決する。既定の ssh では別名が分からない。"""
@@ -486,20 +486,20 @@ class TestAccountCheck(unittest.TestCase):
         tok = self.claim()
         self.assertIn("skipped", self.w("check", "--dir", str(self.wt), "--from", str(self.repo))[1])
         subprocess.run(["git", "config", "core.sshCommand", f"{wrap} -o X=y"], env=self.env, cwd=self.repo, check=True)
-        rc, r = self.begin(tok, "push:feat@core", "--from", str(self.repo), "--verified", self.head_of_wt())
+        rc, r = self.begin(tok, "push:feat@core", "--from", str(self.repo), "--verified", self.head_of_wt(), "--reviewed", "none:試験の外")
         self.assertEqual((rc, r["op"]["account"]), (0, "B16B1RD"))  # 飛ばした場合は account が無い
         subprocess.run(["git", "config", "core.sshCommand", str(self.bin / "ssh")], env=self.env, cwd=self.repo, check=True)
         self.env["GIT_SSH_COMMAND"] = str(wrap)  # 環境変数が設定より優先
-        rc, r = self.begin(tok, "push:feat@env", "--from", str(self.repo), "--verified", self.head_of_wt())
+        rc, r = self.begin(tok, "push:feat@env", "--from", str(self.repo), "--verified", self.head_of_wt(), "--reviewed", "none:試験の外")
         self.assertEqual((rc, r["op"]["account"]), (0, "B16B1RD"))  # 飛ばした場合は account が無い
         del self.env["GIT_SSH_COMMAND"]
         subprocess.run(["git", "config", "core.sshCommand", str(wrap)], env=self.env, cwd=self.repo, check=True)
         self.env["GIT_SSH"] = str(self.bin / "ssh")  # 設定が GIT_SSH より優先
-        rc, r = self.begin(tok, "push:feat@core-over-git-ssh", "--from", str(self.repo), "--verified", self.head_of_wt())
+        rc, r = self.begin(tok, "push:feat@core-over-git-ssh", "--from", str(self.repo), "--verified", self.head_of_wt(), "--reviewed", "none:試験の外")
         self.assertEqual((rc, r["op"]["account"]), (0, "B16B1RD"))
         subprocess.run(["git", "config", "--unset", "core.sshCommand"], env=self.env, cwd=self.repo, check=True)
         self.env["GIT_SSH"] = str(wrap)
-        rc, r = self.begin(tok, "push:feat@git-ssh", "--from", str(self.repo), "--verified", self.head_of_wt())
+        rc, r = self.begin(tok, "push:feat@git-ssh", "--from", str(self.repo), "--verified", self.head_of_wt(), "--reviewed", "none:試験の外")
         self.assertEqual((rc, r["op"]["account"]), (0, "B16B1RD"))  # 飛ばした場合は account が無い
 
     def test_internal_ops_need_no_account(self):
@@ -525,7 +525,7 @@ class TestAccountCheck(unittest.TestCase):
         tok = self.claim()
         for key in ("push:feat-a", "comment:issue-a", "push:feat-b", "comment:issue-b"):
             self.env["FAKE_GH_MAP"] = f"{Path(self.tmp.name).resolve() / 'personal'}={'-' if key.endswith('a') else '403'}:ADMIN"
-            rc, r = self.begin(tok, key, "--from", str(self.repo), "--verified", self.head_of_wt())
+            rc, r = self.begin(tok, key, "--from", str(self.repo), "--verified", self.head_of_wt(), "--reviewed", "none:試験の外")
             self.assertEqual(rc, 5, key)
             self.assertIn("gh のアカウントが分からない", r["reason"], key)
 
@@ -549,18 +549,63 @@ class TestVerifiedCommit(unittest.TestCase):
         verified = self.head()
         subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "after"], env=self.env, cwd=self.wt, check=True)
         tok = self.claim()
-        rc, r = self.begin(tok, "pr:feat", "--from", str(self.repo), "--verified", verified)
+        rc, r = self.begin(tok, "pr:feat", "--from", str(self.repo), "--verified", verified, "--reviewed", "none:試験の外")
         self.assertEqual(rc, 6)
         self.assertIn(self.head(), r["reason"])
         self.assertEqual(self.w("op", "pending", "--dir", str(self.wt))[1]["pending_ops"], [])  # 記録されない
 
     def test_publish_of_the_verified_commit_is_allowed_and_recorded(self):
         tok = self.claim()
-        rc, r = self.begin(tok, "push:feat", "--from", str(self.repo), "--verified", self.head()[:10])  # 短い SHA も受ける
-        self.assertEqual((rc, r["op"]["verified"]), (0, self.head()))
+        rc, r = self.begin(tok, "push:feat", "--from", str(self.repo), "--verified", self.head()[:10], "--reviewed", self.head()[:10])  # 短い SHA も受ける
+        self.assertEqual((rc, r["op"]["verified"], r["op"]["reviewed"]), (0, self.head(), self.head()))
 
     def test_comment_needs_no_verified_commit(self):
         tok = self.claim()
+        self.assertEqual(self.begin(tok, "comment:pr-1", "--from", str(self.repo))[0], 0)
+
+
+
+class TestReviewedCommit(unittest.TestCase):
+    """push・pr は、届ける前の審査を通した commit（か、要らない理由）を宣言しないと出せない。"""
+    setUp, tearDown, w, claim, begin, head = (TestAccountCheck.setUp, TestAccountCheck.tearDown, TestAccountCheck.w,
+                                              TestAccountCheck.claim, TestAccountCheck.begin, TestVerifiedCommit.head)
+
+    def commit(self, name):
+        (self.wt / name).parent.mkdir(parents=True, exist_ok=True)
+        (self.wt / name).write_text(name, encoding="utf-8")
+        for cmd in (["git", "add", name], ["git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", name]):
+            subprocess.run(cmd, env=self.env, cwd=self.wt, check=True)
+
+    def push(self, tok, key, *reviewed):
+        return self.begin(tok, key, "--from", str(self.repo), "--verified", self.head(), *reviewed)
+
+    def test_push_without_a_review_declaration_is_refused_with_the_files_changed_since_the_last_push(self):
+        tok = self.claim()
+        self.assertEqual(self.push(tok, "push:feat@1", "--reviewed", self.head())[0], 0)
+        self.commit("tests/test_new.py")
+        rc, r = self.push(tok, "push:feat@2")
+        self.assertEqual(rc, 2)
+        self.assertIn("tests/test_new.py", r["reason"])  # 審査が要るかを決める材料
+        self.assertEqual(self.w("op", "pending", "--dir", str(self.wt))[1]["pending_ops"][0]["key"], "push:feat@1")  # 2 は記録されない
+
+    def test_pr_of_a_commit_after_the_review_is_refused(self):
+        reviewed = self.head()
+        self.commit("tests/test_fix.py")  # 審査の指摘を受けて試験を直した
+        tok = self.claim()
+        rc, r = self.begin(tok, "pr:feat", "--from", str(self.repo), "--verified", self.head(), "--reviewed", reviewed)
+        self.assertEqual(rc, 6)
+        self.assertIn(self.head(), r["reason"])
+        self.assertEqual(self.w("op", "pending", "--dir", str(self.wt))[1]["pending_ops"], [])
+
+    def test_no_review_needs_a_reason_and_is_recorded(self):
+        tok = self.claim()
+        self.assertEqual(self.push(tok, "push:feat@empty", "--reviewed", "none:  ")[0], 2)
+        rc, r = self.push(tok, "push:feat@docs", "--reviewed", "none: 文書だけ")
+        self.assertEqual((rc, r["op"]["reviewed"]), (0, "none: 文書だけ"))
+
+    def test_merge_and_comment_need_no_review_declaration(self):
+        tok = self.claim()
+        self.assertEqual(self.begin(tok, "merge:pr-1", "--from", str(self.repo), "--verified", self.head())[0], 0)
         self.assertEqual(self.begin(tok, "comment:pr-1", "--from", str(self.repo))[0], 0)
 
 
