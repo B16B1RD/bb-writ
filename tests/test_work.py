@@ -88,7 +88,7 @@ class TestWork(unittest.TestCase):
 
 FAKE_GH = """#!/usr/bin/env python3
 # 置き場所でアカウントを切り替える gh のラッパーと同じく、カレントディレクトリでアカウントを選ぶ偽物。FAKE_GH_MAP は「接頭辞=login:権限」を ; で並べ、最後の項目は既定。
-import os, re, sys
+import os, re, subprocess, sys
 cwd = os.getcwd()
 login, perm = os.environ["FAKE_GH_DEFAULT"].split(":")
 for item in os.environ.get("FAKE_GH_MAP", "").split(";"):
@@ -106,9 +106,22 @@ elif sys.argv[1:3] == ["repo", "view"]:
     host = m and m.group(1)
     if host and host != "github.com":
         print("error connecting to " + host, file=sys.stderr); sys.exit(1)
-    if arg and arg != "github.com/B16B1RD/demo":  # work.py が渡すのはこの形だけ（OWNER/REPO だけでは GH_HOST で別のホストになる）
+    if arg and arg not in ("github.com/B16B1RD/demo", os.environ.get("GH_REPO")):  # work.py が渡すのはこの形と GH_REPO だけ
         print("GraphQL: Could not resolve to a Repository", file=sys.stderr); sys.exit(1)
-    # 引数なしは gh の既定のリポジトリ。gh repo fork の後は upstream（FAKE_GH_UPSTREAM はそこでの権限）
+    # 引数なしは gh の既定のリポジトリ。実物と同じく remote の別名を PATH の ssh -G <host> で直し（失敗すれば名前のまま）、GitHub の remote を探す
+    if not arg:
+        urls = subprocess.run(["git", "remote", "-v"], capture_output=True, text=True).stdout.split()[1::3]
+        def gh_host(u):
+            m = re.match(r"(?:([a-z+]+)://)?(?:[^@/]+@)?([^/:]+)", u)
+            if m.group(1) in (None, "ssh", "git+ssh", "ssh+git"):
+                p = subprocess.run(["ssh", "-G", m.group(2)], capture_output=True, text=True)
+                return next((l.split()[1] for l in p.stdout.splitlines() if l.startswith("hostname ")), m.group(2)) if p.returncode == 0 else m.group(2)
+            return m.group(2)
+        if not urls:
+            print("no git remotes found", file=sys.stderr); sys.exit(1)
+        if not any(gh_host(u).lower() == "github.com" for u in urls):
+            print("none of the git remotes configured for this repository point to a known GitHub host.", file=sys.stderr); sys.exit(1)
+    # gh repo fork の後は upstream（FAKE_GH_UPSTREAM はそこでの権限）
     if not arg and os.environ.get("FAKE_GH_UPSTREAM") == "NONE":
         print("GraphQL: Could not resolve to a Repository", file=sys.stderr); sys.exit(1)
     if not arg and os.environ.get("FAKE_GH_UPSTREAM"):
@@ -330,16 +343,12 @@ class TestAccountCheck(unittest.TestCase):
             rc, r = self.w("check", "--dir", str(self.wt), "--from", str(self.repo))
             self.assertEqual(rc, 5, url)
             self.assertIn("bad configuration", r["reason"], url)
+        # push 以外は gh が操作する。gh は ssh -G に失敗すると名前のまま判定するので、名前が github.com なら gh も GitHub に出る
         tok = self.claim()
+        self.env["FAKE_GH_MAP"] = f"{Path(self.tmp.name).resolve() / 'personal'}=work-account:NONE"
         subprocess.run(["git", "remote", "set-url", "origin", "git@github.com:B16B1RD/demo.git"], env=self.env, cwd=self.repo, check=True)
-        rc, r = self.begin(tok, "comment:issue-gh", "--from", str(self.repo))  # 名前が github.com の origin でも
-        self.assertEqual(rc, 5)
-        self.assertIn("bad configuration", r["reason"])
-        subprocess.run(["git", "remote", "set-url", "origin", "git@work:B16B1RD/demo.git"], env=self.env, cwd=self.repo, check=True)
-        for key in ("comment:issue-1", "pr:feat", "merge:pr-1"):  # push 以外も、origin が分からなければ飛ばさない
-            rc, r = self.begin(tok, key, "--from", str(self.repo))
-            self.assertEqual(rc, 5, key)
-            self.assertIn("bad configuration", r["reason"], key)
+        for key in ("comment:issue-1", "pr:feat", "merge:pr-1"):
+            self.assertEqual(self.begin(tok, key, "--from", str(self.repo))[0], 5, key)
 
     def test_alias_origin_is_checked_for_other_operations_too(self):
         """push 以外も、確かめるかどうかは origin で決める。別名の origin で飛ばすと、見えないリポジトリへのコメントも通る。"""
@@ -411,6 +420,32 @@ class TestAccountCheck(unittest.TestCase):
         rc, r = self.w("op", "begin", "--dir", str(self.wt), "--token", tok, "--key", "comment:d", "--what", "x", "--from", str(self.repo))
         self.assertEqual(rc, 0)  # GitHub の remote が 1 つも無ければ飛ばす
         self.assertTrue(self.w("check", "--dir", str(self.wt), "--from", str(self.repo))[1]["skipped"])
+
+    def test_other_operations_follow_gh_not_the_git_ssh(self):
+        """push 以外は gh が既定のリポジトリを決める。gh は git の ssh（core.sshCommand）ではなく PATH の ssh で別名を直す。"""
+        wrap = self.bin / "ssh-plain"
+        wrap.write_text(f"#!/bin/sh\nFAKE_SSH_ALIASES= exec {self.bin / 'ssh'} \"$@\"\n")
+        wrap.chmod(0o755)
+        self.env["FAKE_SSH_ALIASES"] = "ghalias=github.com"
+        self.env["FAKE_GH_MAP"] = f"{Path(self.tmp.name).resolve() / 'personal'}=work-account:NONE"
+        self.set_origin("origin", "git@ghalias:B16B1RD/demo.git")
+        subprocess.run(["git", "config", "core.sshCommand", str(wrap)], env=self.env, cwd=self.repo, check=True)
+        tok = self.claim()
+        for key in ("comment:a", "pr:a", "issue:a"):
+            self.assertEqual(self.begin(tok, key, "--from", str(self.repo))[0], 5, key)
+
+    def test_gh_repo_is_the_target_of_other_operations(self):
+        """GH_REPO があると gh の issue・pr はそこに出る。remote が GitHub でなくても、そのリポジトリを確かめる。"""
+        self.set_origin("origin", "https://gitlab.com/x/y.git")
+        self.env["GH_REPO"] = "B16B1RD/demo"
+        tok = self.claim()
+        self.env["FAKE_GH_MAP"] = f"{Path(self.tmp.name).resolve() / 'personal'}=work-account:NONE"
+        rc, r = self.begin(tok, "comment:a", "--from", str(self.repo))
+        self.assertEqual(rc, 5)
+        self.assertIn("Could not resolve", r["reason"])  # gh のエラーを理由に書く
+        self.env["FAKE_GH_MAP"] = f"{Path(self.tmp.name).resolve() / 'personal'}=B16B1RD:READ"
+        rc, r = self.begin(tok, "comment:b", "--from", str(self.repo))
+        self.assertEqual((rc, r["op"]["account"]), (0, "B16B1RD"))
 
     def test_ssh_push_checks_the_key_account(self):
         """SSH の push は鍵のアカウントで行われる。gh のアカウントと違えば止める（別名で鍵を切り替える構成）。"""
