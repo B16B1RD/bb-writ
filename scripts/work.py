@@ -27,7 +27,8 @@ task と integrate の照合拒否は終了コード 6、担当の拒否は 3。
 そこで使われるアカウントが元の checkout のものと食い違えば拒否する。push・merge・release は書き込み権限が無いアカウントも拒否する。comment・issue・pr は、書き込み権限が無くても
 GitHub が受け付ける（公開リポジトリへのコメントや fork からの PR）ので、対象が見えれば通す。権限を見る対象は gh の既定の
 リポジトリ（gh repo fork の後は upstream）で、push だけは push 先の origin（自分の fork）。黙って別のアカウントへ切り替えない。
-origin が SSH の別名なら ssh -G で実際のホストに直して見る。見るのは gh のアカウントで、SSH の push に使われる鍵のアカウントは見ない。
+origin が SSH の別名なら ssh -G で実際のホストに直して見る。見るのは gh のアカウントで、push に使われる SSH の鍵や
+git の credential helper のアカウントは見ない。push 先は origin の最初の pushurl だけを見る（pushDefault・複数の pushurl は見ない）。
 
 担当の生死はプロセスで判定しない（Codex の sandbox の中は別の pid 名前空間で、外の CLI が見えない。2026-10-17 の実測）。
 claim は作業場所ごとの記録 note.md の雛形と証拠の置き場 evidence/ を作り、その場所と（書かれていれば）記録の中身を返す。後任は claim の出力だけで記録にたどり着く。
@@ -138,7 +139,7 @@ def github_repo(url: str, at: Path):
     SSH の別名（~/.ssh/config の Host）は ssh -G で実際のホスト名に直す。gh は既定のリポジトリの解決では
     別名を直すが、引数に渡した URL は直さず、別名のホストへ接続しに行って失敗する（2026-10-20 の実測）。
     別名を直せなければ GitHub かどうか分からないので、ValueError で止める（飛ばすと確かめずに通る）。"""
-    m = re.match(r"(?i:([a-z+]+)://)?(?:[^@/]+@)?([^/:]+)(?::\d+)?[:/]/?([^/]+/[^/]+?)(?:\.git)?/?$", url)
+    m = re.match(r"(?:([a-z+]+)://)?(?:[^@/]+@)?([^/:]+)(?::\d+)?[:/]/?([^/]+/[^/]+?)(?:\.git)?/?$", url, re.I)
     if not m:
         return None
     scheme, host, name = m.groups()
@@ -178,7 +179,8 @@ def check(d: Path, frm: Path, kind: str = "push") -> tuple[dict, int]:
         return {**res, "ok": True, "skipped": "origin が github.com でないので確かめを飛ばした"}, 0
     if not here["permission"] or (write and here["permission"] not in WRITE_OK):
         return {**res, "ok": False, "reason": f"{frm} で使われるアカウント {here['login']} は {here['repo'] or 'origin'} に{'書け' if write else 'アクセスでき'}ない（権限: {here['permission'] or '見えない'}）。"
-                f"外部操作は元の checkout {c} から実行する。そこでも{'書け' if write else 'アクセスでき'}なければ、利用者のアカウントの設定を確かめる"}, 5
+                f"外部操作は元の checkout {c} から実行する。そこでも{'書け' if write else 'アクセスでき'}なければ、利用者のアカウントの設定を確かめる"
+                + (f"（エラー: {here['error']}）" if here.get("error") else "")}, 5
     if frm.resolve() != c:
         base = account(c, push)
         res["checkout_account"] = base

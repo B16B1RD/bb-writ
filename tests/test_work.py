@@ -97,13 +97,15 @@ for item in os.environ.get("FAKE_GH_MAP", "").split(";"):
 if sys.argv[1:3] == ["api", "user"]:
     print(login)
 elif sys.argv[1:3] == ["repo", "view"]:
-    # 引数のリポジトリは、実物と同じく SSH の別名を解決せず、そのホストへ接続しに行く
-    # OWNER/REPO だけなら github.com
-    arg = None if sys.argv[3].startswith("-") else sys.argv[3]
+    # 引数のリポジトリは、実物と同じく SSH の別名を解決せず、そのホストへ接続しに行く。名前は .git の有無まで照合する
+    rest = sys.argv[3:]
+    arg = next((a for i, a in enumerate(rest) if not a.startswith("-") and not (i and rest[i - 1] in ("--json", "--jq"))), None)
     m = arg and re.match(r"(?:[a-z]+://)?(?:[^@/]+@)?([^/:]+)[:/][^/]+/[^/]+$|[^/]+/[^/]+$", arg)
     host = m and m.group(1)
     if host and host != "github.com":
         print("error connecting to " + host, file=sys.stderr); sys.exit(1)
+    if arg and arg not in ("B16B1RD/demo", "github.com/B16B1RD/demo", "https://github.com/B16B1RD/demo"):
+        print("GraphQL: Could not resolve to a Repository", file=sys.stderr); sys.exit(1)
     # 引数なしは gh の既定のリポジトリ。gh repo fork の後は upstream（FAKE_GH_UPSTREAM はそこでの権限）
     if not arg and os.environ.get("FAKE_GH_UPSTREAM"):
         print("parent/demo " + os.environ["FAKE_GH_UPSTREAM"]); sys.exit(0)
@@ -238,18 +240,24 @@ class TestAccountCheck(unittest.TestCase):
             rc, r = self.begin(tok, f"push:feat@{i}", "--from", str(self.repo), "--verified", head)
             self.assertEqual((rc, r["op"]["account"]), (0, "B16B1RD"), url)
 
-    def test_alias_without_github_in_its_name_is_still_checked(self):
-        """名前に github.com を含まない別名を「GitHub でない」として確かめを飛ばすと、権限の無いアカウントでも通る。"""
-        self.env["FAKE_SSH_ALIASES"] = "work=github.com"
+    def test_every_github_url_form_is_checked_against_the_repository(self):
+        """git が github.com へ push する URL の形はどれも確かめる。飛ばすと、権限の無いアカウントでも通る。
+        READ で拒否されれば、gh に正しい名前（github.com/B16B1RD/demo）が届いている。偽の gh は .git 付きなど別の名前を拒否する。"""
+        self.env["FAKE_SSH_ALIASES"] = "work=github.com,gh443=ssh.github.com"
         self.env["FAKE_GH_MAP"] = f"{Path(self.tmp.name).resolve() / 'personal'}=work-account:READ"
-        subprocess.run(["git", "remote", "set-url", "origin", "git@work:B16B1RD/demo.git"], cwd=self.repo, check=True)
-        rc, r = self.w("check", "--dir", str(self.wt), "--from", str(self.repo))
-        self.assertEqual(rc, 5)
-        self.assertIn("READ", r["reason"])
+        for url in ("https://github.com/B16B1RD/demo", "https://GitHub.com/B16B1RD/demo.git", "HTTPS://github.com/B16B1RD/demo/",
+                    "git@github.com:B16B1RD/demo.git", "git@github.com:/B16B1RD/demo.git", "git@github.com:B16B1RD/demo.GIT",
+                    "git@work:B16B1RD/demo.git", "work:B16B1RD/demo.git", "ssh://git@gh443:443/B16B1RD/demo.git",
+                    "SSH://git@work/B16B1RD/demo.git", "git+ssh://git@work/B16B1RD/demo"):
+            subprocess.run(["git", "remote", "set-url", "origin", url], cwd=self.repo, check=True)
+            rc, r = self.w("check", "--dir", str(self.wt), "--from", str(self.repo))
+            self.assertEqual(rc, 5, url)
+            self.assertIn("READ", r["reason"], url)
 
-    def test_ssh_origin_on_another_host_skips_the_check(self):
+    def test_origin_on_another_host_skips_the_check(self):
         self.env["FAKE_SSH_ALIASES"] = "lab=gitlab.com"
-        for url in ("git@gitlab.com:x/y.git", "git@lab:x/y.git", "https://github.com.evil.example/x/y.git"):
+        for url in ("git@gitlab.com:x/y.git", "git@lab:x/y.git", "https://github.com.evil.example/x/y.git",
+                    "https://evilgithub.com/x/y.git", "https://ghe.example/x/y.git", str(Path(self.tmp.name) / "bare.git")):
             subprocess.run(["git", "remote", "set-url", "origin", url], cwd=self.repo, check=True)
             rc, r = self.w("check", "--dir", str(self.wt), "--from", str(self.repo))
             self.assertEqual(rc, 0, url)
@@ -261,7 +269,7 @@ class TestAccountCheck(unittest.TestCase):
         subprocess.run(["git", "remote", "set-url", "origin", "git@work:B16B1RD/demo.git"], cwd=self.repo, check=True)
         rc, r = self.w("check", "--dir", str(self.wt), "--from", str(self.repo))
         self.assertEqual(rc, 5)
-        self.assertIn("bad configuration", r["from"]["error"])
+        self.assertIn("bad configuration", r["reason"])
 
     def test_internal_ops_need_no_account(self):
         tok = self.claim()
