@@ -61,13 +61,13 @@ class TestWork(unittest.TestCase):
 
     def test_unknown_result_op_is_pending_and_not_restarted(self):
         rc, a = self.w("claim", "--holder", "A")
-        self.assertEqual(self.w("op", "begin", "--token", a["token"], "--key", "deploy:staging", "--what", "deploy staging")[0], 0)
+        self.assertEqual(self.w("op", "begin", "--token", a["token"], "--key", "local-deploy:staging", "--what", "deploy staging")[0], 0)
         self.expire()  # A は結果を記録せずに止まり、期限が切れた（sleep で待つと、遅い機械で揺れた）
         rc, b = self.w("claim", "--holder", "B")
-        self.assertEqual([o["key"] for o in b["pending_ops"]], ["deploy:staging"])
-        rc, again = self.w("op", "begin", "--token", b["token"], "--key", "deploy:staging", "--what", "deploy staging")
+        self.assertEqual([o["key"] for o in b["pending_ops"]], ["local-deploy:staging"])
+        rc, again = self.w("op", "begin", "--token", b["token"], "--key", "local-deploy:staging", "--what", "deploy staging")
         self.assertEqual(rc, 4)  # やり直さず、照合を求める
-        rc, done = self.w("op", "done", "--token", b["token"], "--key", "deploy:staging", "--result", "既存の PR #3 を確認")
+        rc, done = self.w("op", "done", "--token", b["token"], "--key", "local-deploy:staging", "--result", "既存の PR #3 を確認")
         self.assertEqual((rc, done["op"]["state"]), (0, "done"))
         self.assertEqual(self.w("op", "pending")[1]["pending_ops"], [])
 
@@ -97,6 +97,9 @@ for item in os.environ.get("FAKE_GH_MAP", "").split(";"):
 if sys.argv[1:3] == ["api", "user"]:
     if login == "-":  # gh にログインしていない
         print("To get started with GitHub CLI, please run:  gh auth login", file=sys.stderr); sys.exit(4)
+    if login == "403":  # GitHub App・Actions の token。gh は 4xx の本文を --jq に通さず stdout に出す（gh 2.102.0）
+        print('{"message": "Resource not accessible by integration", "status": "403"}')
+        print("gh: Resource not accessible by integration (HTTP 403)", file=sys.stderr); sys.exit(1)
     print(login)
 elif sys.argv[1:3] == ["repo", "view"]:
     # 引数のリポジトリは、実物と同じく SSH の別名を解決せず、そのホストへ接続しに行く。名前は .git の有無まで照合する
@@ -492,23 +495,26 @@ class TestAccountCheck(unittest.TestCase):
 
     def test_internal_ops_need_no_account(self):
         tok = self.claim()
-        self.assertEqual(self.begin(tok, "note:x")[0], 0)
-        self.assertEqual(self.begin(tok, "prepare:notes")[0], 0)  # 語の一部に pr を含むだけなら外部操作ではない
+        self.assertEqual(self.begin(tok, "local-note:x")[0], 0)
+        self.assertEqual(self.begin(tok, "local-merge-base:x")[0], 0)  # 外部に出ない操作は local- で始める
 
     def test_external_looking_kinds_must_use_the_listed_names(self):
-        """一覧に無い書き方（大文字、言い換え）の外部操作は、--from も権限も確かめずに記録されていた。正しい種類を示して止める。"""
+        """一覧に無い種類の鍵は、--from も権限も確かめずに記録されていた。書き間違い・言い換えを列挙しても漏れるので、
+        外部操作の 6 つと local- で始まる種類のほかは止める。"""
         tok = self.claim()
-        for key in ("Push:origin/main", "gh-pr:feat", "pr-create:feat", "issue_comment:1", "MERGE:pr-1"):
+        for key in ("Push:origin/main", "gh-pr:feat", "pr-create:feat", "issue_comment:1", "MERGE:pr-1", "push/origin/main@abc",
+                    "pr#12", "gh pr:feat", "pull-request:x", "tag:v1", " push:x", "ｐｕｓｈ:x", "note:x", "local:x"):
             rc, r = self.begin(tok, key, "--from", str(self.repo))
             self.assertEqual(rc, 2, key)
             self.assertIn("push・pr・comment・merge・release・issue", r["reason"], key)
+            self.assertIn("local-", r["reason"], key)
         self.assertEqual(self.w("op", "pending", "--dir", str(self.wt))[1]["pending_ops"], [])  # 記録されない
 
     def test_unknown_gh_account_is_refused(self):
         """gh api user だけが失敗する token では、アカウントが空のまま比べて通っていた。アカウントが分からなければ止める。"""
-        self.env["FAKE_GH_MAP"] = f"{Path(self.tmp.name).resolve() / 'personal'}=-:ADMIN"
         tok = self.claim()
-        for key in ("push:feat", "comment:issue-1"):
+        for key in ("push:feat-a", "comment:issue-a", "push:feat-b", "comment:issue-b"):
+            self.env["FAKE_GH_MAP"] = f"{Path(self.tmp.name).resolve() / 'personal'}={'-' if key.endswith('a') else '403'}:ADMIN"
             rc, r = self.begin(tok, key, "--from", str(self.repo), "--verified", self.head_of_wt())
             self.assertEqual(rc, 5, key)
             self.assertIn("gh のアカウントが分からない", r["reason"], key)
