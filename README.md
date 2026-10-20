@@ -8,7 +8,7 @@ https://github.com/user-attachments/assets/dd9c669e-0d1e-4645-a631-ea70809b345a
 
 ## 前提
 
-基本機能に要るもの。基本機能は、`delegate`・`interrogate` で別系統の CLI（使っている CLI 以外の Claude Code・Codex・Grok Build）を起動する場合を除く、すべての使い方。
+基本機能に要るもの。基本機能は、`delegate`・`interrogate`・`reflect`・`playbook-eval` で別系統の CLI（使っている CLI 以外の Claude Code・Codex・Grok Build）を起動する場合を除く、すべての使い方。
 
 - OS：Linux・macOS・WSL2。Windows のネイティブ環境（PowerShell など）は対象外。入口がファイルに書く前に実行する `scripts/work.py` が、Unix にしか無い `fcntl` を使うので動かない。読むだけの使い方も、ネイティブ環境では確かめていない。Windows では、WSL2 の中に CLI を入れて、その中で起動する。
 - CLI：Claude Code・Codex・Grok Build のどれか 1 つ。
@@ -104,6 +104,8 @@ grok plugin install <ディレクトリ> --trust
 
 依頼文の書き方（どこまで任せるか、Issue からドラフト PR・マージまでの進め方、`unknowns` との使い分け）は [はじめての bb-writ](docs/getting-started.md) にある。
 
+その次に読むのは [スキルの使い方](docs/skills.md)。`interrogate`・`reflect`・`correct` など、自分で呼ぶスキルの頼み方と返ってくるものを 1 本ずつ説明している。
+
 作業するリポジトリで CLI を開き、入口のスキルを明示して頼む。たとえば README を調べるだけなら、次のように入力する。
 
 Claude Code:
@@ -139,7 +141,7 @@ Claude Code は、普通の依頼文だけでは入口を使わない。入口�
 
 ## 任意機能の準備
 
-`delegate` や `interrogate` で別系統の CLI を起動する場合は、[前提](#前提)に加えて次を用意する。
+`delegate`・`interrogate`・`reflect`・`playbook-eval` で別系統の CLI を起動する場合は、[前提](#前提)に加えて次を用意する。
 
 - 起動する CLI と、起動される CLI（Claude Code・Codex・Grok Build のうち 2 つ以上）。
 - 起動される CLI の bb-writ 専用ログイン。Codex で `interrogate` を使うときは、同じ Codex の審査役も別プロセスの Codex として起動するので、Codex のログインも要る。
