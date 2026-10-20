@@ -88,7 +88,7 @@ class TestWork(unittest.TestCase):
 
 FAKE_GH = """#!/usr/bin/env python3
 # 置き場所でアカウントを切り替える gh のラッパーと同じく、カレントディレクトリでアカウントを選ぶ偽物。FAKE_GH_MAP は「接頭辞=login:権限」を ; で並べ、最後の項目は既定。
-import os, sys
+import os, re, sys
 cwd = os.getcwd()
 login, perm = os.environ["FAKE_GH_DEFAULT"].split(":")
 for item in os.environ.get("FAKE_GH_MAP", "").split(";"):
@@ -97,12 +97,24 @@ for item in os.environ.get("FAKE_GH_MAP", "").split(";"):
 if sys.argv[1:3] == ["api", "user"]:
     print(login)
 elif sys.argv[1:3] == ["repo", "view"]:
+    # 引数のリポジトリは、実物と同じく SSH の別名を解決せず、そのホストへ接続しに行く
+    arg = None if sys.argv[3].startswith("-") else sys.argv[3]
+    host = arg and re.match(r"(?:[a-z]+://)?(?:[^@/]+@)?([^/:]+)", arg).group(1)
+    if host and host != "github.com":
+        print("error connecting to " + host, file=sys.stderr); sys.exit(1)
     # 引数なしは gh の既定のリポジトリ。gh repo fork の後は upstream（FAKE_GH_UPSTREAM はそこでの権限）
-    if not sys.argv[3].startswith("http") and os.environ.get("FAKE_GH_UPSTREAM"):
+    if not arg and os.environ.get("FAKE_GH_UPSTREAM"):
         print("parent/demo " + os.environ["FAKE_GH_UPSTREAM"]); sys.exit(0)
     if perm == "NONE":
         print("GraphQL: Could not resolve to a Repository", file=sys.stderr); sys.exit(1)
     print("B16B1RD/demo " + perm)
+"""
+
+FAKE_SSH = """#!/usr/bin/env python3
+# ssh -G だけを真似る偽物。FAKE_SSH_ALIASES に並べた別名（, 区切り）は github.com に解決し、ほかは名前のまま
+import os, sys
+host = sys.argv[2]
+print("hostname " + ("github.com" if host in os.environ.get("FAKE_SSH_ALIASES", "").split(",") else host))
 """
 
 
@@ -116,6 +128,8 @@ class TestAccountCheck(unittest.TestCase):
         self.bin.mkdir()
         (self.bin / "gh").write_text(FAKE_GH.replace("/usr/bin/env python3", sys.executable))
         (self.bin / "gh").chmod(0o755)
+        (self.bin / "ssh").write_text(FAKE_SSH.replace("/usr/bin/env python3", sys.executable))
+        (self.bin / "ssh").chmod(0o755)
         g = lambda *a, cwd=None: subprocess.run(["git", *a], cwd=cwd, check=True, capture_output=True)
         self.repo.mkdir(parents=True)
         g("init", "-q", "-b", "main", cwd=self.repo)
@@ -210,6 +224,24 @@ class TestAccountCheck(unittest.TestCase):
         rc, r = self.w("check", "--dir", str(self.wt), "--from", str(self.wt))
         self.assertEqual(rc, 0)
         self.assertIn("飛ばした", r["skipped"])
+
+    def test_push_through_an_ssh_alias_checks_the_real_host(self):
+        """~/.ssh/config の別名（git@github.com-work:…）は gh repo view <url> が解決しない。ssh -G で github.com に直して見る。"""
+        self.env["FAKE_SSH_ALIASES"] = "github.com-work"
+        subprocess.run(["git", "remote", "set-url", "origin", "git@github.com-work:B16B1RD/demo.git"], cwd=self.repo, check=True)
+        tok = self.claim()
+        head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=self.wt, check=True, capture_output=True, text=True).stdout.strip()
+        rc, r = self.begin(tok, "push:feat", "--from", str(self.repo), "--verified", head)
+        self.assertEqual((rc, r["op"]["account"]), (0, "B16B1RD"))
+
+    def test_alias_without_github_in_its_name_is_still_checked(self):
+        """名前に github.com を含まない別名を「GitHub でない」として確かめを飛ばすと、権限の無いアカウントでも通る。"""
+        self.env["FAKE_SSH_ALIASES"] = "work"
+        self.env["FAKE_GH_MAP"] = f"{Path(self.tmp.name).resolve() / 'personal'}=work-account:READ"
+        subprocess.run(["git", "remote", "set-url", "origin", "git@work:B16B1RD/demo.git"], cwd=self.repo, check=True)
+        rc, r = self.w("check", "--dir", str(self.wt), "--from", str(self.repo))
+        self.assertEqual(rc, 5)
+        self.assertIn("READ", r["reason"])
 
     def test_internal_ops_need_no_account(self):
         tok = self.claim()

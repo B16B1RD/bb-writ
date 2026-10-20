@@ -132,14 +132,29 @@ def checkout_of(d: Path) -> Path:
     return (c if c.is_absolute() else d / c).resolve().parent
 
 
+def github_repo(url: str, at: Path):
+    """push 先の URL を gh が受け取る github.com/OWNER/REPO にする。GitHub でなければ None。
+    SSH の別名（~/.ssh/config の Host）は ssh -G で実際のホスト名に直す。gh は既定のリポジトリの解決では
+    別名を直すが、引数に渡した URL は直さず、別名のホストへ接続しに行って失敗する（2026-10-20 の実測）。"""
+    m = re.match(r"(?:([a-z+]+)://)?(?:[^@/]+@)?([^/:]+)(?::\d+)?[:/]([^/]+/[^/]+?)(?:\.git)?/?$", url)
+    if not m:
+        return None
+    scheme, host, name = m.groups()
+    if scheme is None or "ssh" in scheme:
+        rc, conf, _ = sh(["ssh", "-G", host], at)
+        host = next((l.split()[1] for l in conf.splitlines() if l.startswith("hostname ")), host) if rc == 0 else host
+    return f"github.com/{name}" if host == "github.com" or host.endswith(".github.com") else None
+
+
 def account(at: Path, push: bool = False) -> dict:
     """at で外部操作をしたときに使われる GitHub のアカウントと、対象のリポジトリへの権限（gh を at で実行して観測する）。
     対象は gh の既定のリポジトリ（gh repo fork の後は upstream）。push だけは push 先の origin。"""
     rc, url, _ = sh(["git", "remote", "get-url", "--push", "origin"], at)
-    if rc or "github.com" not in url:
+    target = None if rc else github_repo(url, at)
+    if not target:
         return {"at": str(at), "github": False, "remote": url or None}
     _, login, err = sh(["gh", "api", "user", "--jq", ".login"], at)
-    rc, repo, err2 = sh(["gh", "repo", "view", *([url] if push else []), "--json", "nameWithOwner,viewerPermission",
+    rc, repo, err2 = sh(["gh", "repo", "view", *([target] if push else []), "--json", "nameWithOwner,viewerPermission",
                          "--jq", '.nameWithOwner + " " + .viewerPermission'], at)
     name, _, perm = repo.partition(" ") if rc == 0 else (None, None, None)
     return {"at": str(at), "github": True, "login": login or None, "repo": name, "permission": perm or None,
