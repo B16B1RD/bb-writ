@@ -71,6 +71,15 @@ class TestWork(unittest.TestCase):
         self.assertEqual((rc, done["op"]["state"]), (0, "done"))
         self.assertEqual(self.w("op", "pending")[1]["pending_ops"], [])
 
+    def test_op_begun_by_an_earlier_version_can_still_be_closed(self):
+        """前の版は種類を問わず記録した。版を上げた後も、残った操作を op done で閉じられる。"""
+        rc, a = self.w("claim", "--holder", "A")
+        with open(Path(a["note"]["path"]).parent / "ops.jsonl", "a", encoding="utf-8") as f:
+            f.write(json.dumps({"key": "pr-create:feat/x", "state": "begun", "at": time.time(), "holder": "A", "what": "gh pr create"}) + "\n")
+        self.assertEqual([o["key"] for o in self.w("op", "pending")[1]["pending_ops"]], ["pr-create:feat/x"])
+        self.assertEqual(self.w("op", "done", "--token", a["token"], "--key", "pr-create:feat/x", "--result", "PR #3 を確認")[0], 0)
+        self.assertEqual(self.w("op", "pending")[1]["pending_ops"], [])
+
     def test_claim_hands_the_note_to_the_next_holder(self):
         rc, a = self.w("claim", "--holder", "A")
         self.assertFalse(a["note"]["filled"])

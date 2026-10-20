@@ -16,7 +16,7 @@ commit ごとの細かい変更は、各版の末尾の「commit の一覧」（
 - `--from` に、元の checkout と別のリポジトリや git でない場所を渡すと、その場所のアカウントで確かめて通していた。今は確かめずに止める（終了コード 2）。
 - push 以外の操作（PR・コメント・マージなど）は gh の既定のリポジトリに出るのに、確かめるかどうかを origin で決めていた。origin が GitHub でない（upstream だけが GitHub、origin が無い、pushurl だけが GitHub でないミラー）と確かめを飛ばしていた。今は、gh 自身に既定のリポジトリを解決させ（`GH_REPO` があればそれ）、そのリポジトリを確かめる。gh が GitHub の remote を見つけられないとき（gh の操作も失敗する）だけ飛ばす。
 - 鍵の種類を `Push:`・`gh-pr:`・`push/…`・`tag:` のように書くと外部操作とみなされず、`--from` も権限も確かめずに記録されていた。今は、外部操作の 6 つの種類（`push`・`pr`・`comment`・`merge`・`release`・`issue`）か、`local`・`local-` で始まる種類（外部に出ない操作の記録）だけを受け付け、ほかは止める（終了コード 2）。**外部に出ない操作を別の種類で記録していたら、種類を `local` にするか `local-` を付ける。**
-- gh の token によっては `gh api user` だけが失敗し、アカウントが分からないまま比べて通っていた。今は止める。
+- gh の token によっては `gh api user` だけが失敗し、アカウントが分からないまま比べて通っていた。今は止める（終了コード 5）。
 - 見ないもの: https の push に使われる credential helper のアカウント（認証情報に触れないため）、IP・角括弧のホスト・`/etc/hosts` の別名、リモートヘルパーの形（`persistent-https::…`）、複数の pushurl・`pushDefault`。SSH の確かめは対話しない（`BatchMode`）ので、known_hosts に無いホスト（`ssh.github.com:443` など）や、ssh-agent に載っていないパスフレーズ付きの鍵では止まる。
 
 commit の一覧：https://github.com/B16B1RD/bb-writ/compare/bb-writ--v0.11.4...bb-writ--v0.11.5

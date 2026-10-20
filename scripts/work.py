@@ -8,7 +8,7 @@
   work.py op begin   --dir <作業場所> --token <t> --key <操作の鍵> --what <何をするか>  → 同じ鍵が既にあれば拒否（4）
   work.py op done    --dir <作業場所> --token <t> --key <操作の鍵> --result <結果>
   work.py op pending --dir <作業場所>                                 → 始めたが終わりの記録が無い操作
-  work.py check   --dir <作業場所> --from <外部操作を実行する場所>      → そこで使われる GitHub のアカウントと、push 先の origin への書き込み権限（書けなければ 5）
+  work.py check   --dir <作業場所> --from <外部操作を実行する場所>      → そこで使われる GitHub のアカウントと、push 先の origin への書き込み権限（書けない・アカウントが分からなければ 5）
   work.py task start --dir <checkout> --holder <誰か> [--base <commit等>] [--target <ブランチ>] → 専用 worktree と担当を作る
   work.py task list --dir <checkout>                               → タスク、担当、未完了の統合
   work.py task resume --dir <checkout> --task <識別子> --holder <誰か> → 作業場所を保持して担当を取得
@@ -35,7 +35,7 @@ push の SSH の形の URL は、git が使う ssh（GIT_SSH_COMMAND > core.sshC
 SSH の push は、同じ ssh の -T -o BatchMode=yes で GitHub が返す鍵のアカウントも gh のアカウントと照合する（別名や core.sshCommand で鍵を切り替える構成）。
 繋がらなければ止める（known_hosts に無い ssh.github.com:443、ssh-agent の無いパスフレーズ付きの鍵も止まる）。
 https の push に使われる git の credential helper のアカウントは見ない（認証情報に触れない）。IP・角括弧のホスト・/etc/hosts の別名と、リモートヘルパーの形
-（persistent-https::…）は github.com とみなさない。gh api user だけが失敗する token では、アカウントは空のまま比べる。
+（persistent-https::…）は github.com とみなさない。
 
 担当の生死はプロセスで判定しない（Codex の sandbox の中は別の pid 名前空間で、外の CLI が見えない。2026-10-17 の実測）。
 claim は作業場所ごとの記録 note.md の雛形と証拠の置き場 evidence/ を作り、その場所と（書かれていれば）記録の中身を返す。後任は claim の出力だけで記録にたどり着く。
