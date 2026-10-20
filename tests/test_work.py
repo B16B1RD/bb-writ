@@ -104,7 +104,7 @@ elif sys.argv[1:3] == ["repo", "view"]:
     host = m and m.group(1)
     if host and host != "github.com":
         print("error connecting to " + host, file=sys.stderr); sys.exit(1)
-    if arg and arg not in ("B16B1RD/demo", "github.com/B16B1RD/demo", "https://github.com/B16B1RD/demo"):
+    if arg and arg != "github.com/B16B1RD/demo":  # work.py が渡すのはこの形だけ（OWNER/REPO だけでは GH_HOST で別のホストになる）
         print("GraphQL: Could not resolve to a Repository", file=sys.stderr); sys.exit(1)
     # 引数なしは gh の既定のリポジトリ。gh repo fork の後は upstream（FAKE_GH_UPSTREAM はそこでの権限）
     if not arg and os.environ.get("FAKE_GH_UPSTREAM") == "NONE":
@@ -144,7 +144,8 @@ class TestAccountCheck(unittest.TestCase):
         g("remote", "add", "origin", "https://github.com/B16B1RD/demo.git", cwd=self.repo)
         g("worktree", "add", "-q", "-b", "feat", str(self.wt), cwd=self.repo)
         self.env = {**os.environ, "BB_WRIT_STATE_DIR": str(t / "state"), "PATH": f"{self.bin}:{os.environ['PATH']}",
-                    "FAKE_GH_MAP": f"{t / 'personal'}=B16B1RD:ADMIN", "FAKE_GH_DEFAULT": "work-account:NONE"}
+                    "FAKE_GH_MAP": f"{t / 'personal'}=B16B1RD:ADMIN", "FAKE_GH_DEFAULT": "work-account:NONE",
+                    "GIT_CONFIG_GLOBAL": os.devnull}  # 利用者の insteadOf（git@github.com: → https）が origin の形を変えないように
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -267,7 +268,8 @@ class TestAccountCheck(unittest.TestCase):
         for url in ("https://github.com/B16B1RD/demo", "https://GitHub.com/B16B1RD/demo.git", "HTTPS://github.com/B16B1RD/demo/",
                     "git@github.com:B16B1RD/demo.git", "git@github.com:/B16B1RD/demo.git", "git@github.com:B16B1RD/demo.GIT",
                     "git@work:B16B1RD/demo.git", "work:B16B1RD/demo.git", "ssh://git@gh443:443/B16B1RD/demo.git",
-                    "SSH://git@work/B16B1RD/demo.git", "git+ssh://git@work/B16B1RD/demo", "https://www.github.com/B16B1RD/demo.git"):
+                    "SSH://git@work/B16B1RD/demo.git", "git+ssh://git@work/B16B1RD/demo", "ssh+git://git@work/B16B1RD/demo", "https://www.github.com/B16B1RD/demo.git",
+                    "https://x:token@github.com/B16B1RD/demo.git"):
             subprocess.run(["git", "remote", "set-url", "origin", url], cwd=self.repo, check=True)
             rc, r = self.w("check", "--dir", str(self.wt), "--from", str(self.repo))
             self.assertEqual(rc, 5, url)
@@ -286,9 +288,11 @@ class TestAccountCheck(unittest.TestCase):
         """ssh -G が失敗すると GitHub かどうか分からない。確かめを飛ばさずに止める。"""
         (self.bin / "ssh").write_text("#!/bin/sh\necho 'ssh: bad configuration' >&2\nexit 255\n")
         subprocess.run(["git", "remote", "set-url", "origin", "git@work:B16B1RD/demo.git"], cwd=self.repo, check=True)
-        rc, r = self.w("check", "--dir", str(self.wt), "--from", str(self.repo))
-        self.assertEqual(rc, 5)
-        self.assertIn("bad configuration", r["reason"])
+        for url in ("git@work:B16B1RD/demo.git", "git@github.com:B16B1RD/demo.git"):  # 名前が github.com でも、ssh の設定で別のホストになりうる
+            subprocess.run(["git", "remote", "set-url", "origin", url], cwd=self.repo, check=True)
+            rc, r = self.w("check", "--dir", str(self.wt), "--from", str(self.repo))
+            self.assertEqual(rc, 5, url)
+            self.assertIn("bad configuration", r["reason"], url)
         tok = self.claim()
         for key in ("comment:issue-1", "pr:feat", "merge:pr-1"):  # push 以外も、origin が分からなければ飛ばさない
             self.assertEqual(self.begin(tok, key, "--from", str(self.repo))[0], 5, key)
