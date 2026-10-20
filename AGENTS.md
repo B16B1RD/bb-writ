@@ -42,7 +42,7 @@ bb-writ は、CLI ハーネス（Claude Code・Codex。Grok Build も同じ SKIL
 | launcher はプラグインの置き場に `__pycache__` を作らない | `tests/test_launch.py` の `test_launch_leaves_no_bytecode_in_the_plugin` |
 | Claude Code の子に `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB` を使わない（許可の方針を既定に戻し、空のファイルを残した） | 読み取り専用の子は `tests/test_launch.py` の `test_claude_read_only_in_worktree_denies_the_common_git_dir`。書く子は試験が無く、残った空のファイルを上の `home_entries` が捕まえる |
 | Claude Code の子に、親の `CLAUDE*`・`ANTHROPIC_*` の環境変数を渡さない | `tests/test_launch.py` の `test_claude_child_gets_no_parent_claude_env` |
-| 入口の聞く範囲・返答の形・検証の条件 (6) までを、要約の後も残る先頭 5,000 トークン（約 5,650 字）に収める | `tests/test_distribution.py` の `test_entry_keeps_what_to_ask_and_review_rules_within_the_compaction_head` |
+| 入口の聞く範囲・呼び直しの文・返答の形・検証の条件 (6) までを、要約の後に戻る先頭 5,000 トークン（約 5,650 字）に収める（合計の枠を超えて入口が丸ごと落ちたときのために、手引きにも呼び直しの文を置く） | `tests/test_distribution.py` の `test_entry_keeps_what_to_ask_and_review_rules_within_the_compaction_head` |
 | 版はマニフェストの間で揃え、`CHANGELOG.md` の先頭は今の版。スキルは SKILL.md の本文だけで届き、名前はフォルダと同じ | `tests/test_distribution.py` |
 
 ## commit

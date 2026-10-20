@@ -49,15 +49,32 @@ class TestSkills(unittest.TestCase):
             self.assertNotIn("playbooks/", text, p)
 
     def test_entry_keeps_what_to_ask_and_review_rules_within_the_compaction_head(self):
-        """Claude Code は要約の後、スキルの先頭 5,000 トークンだけを残す。入口の聞く範囲・返答の形・検証の条件 (6) までをそこに収める。"""
+        """Claude Code は要約の後、呼んだスキルを先頭 5,000 トークンまで戻す（合計の枠を超えた古いものは落ちる）。
+        入口の聞く範囲・呼び直しの文・返答の形・検証の条件 (1)〜(6) を、戻る先頭に収める。"""
         text = (ROOT / "skills" / "bb-writ" / "SKILL.md").read_text(encoding="utf-8")
+        self.assertIn("\n---", text[3:], "frontmatter の閉じが見つからない")
         body = text[text.index("\n---", 3) + 4:]
-        end = body.index("| 対象 |")  # 検証の条件 (1)〜(6) の直後
-        # 5,650 字は opus の input_tokens で約 4,930 トークン（2026-10-20 の実測）
+        self.assertEqual(body.count("信じてよい条件"), 1, "検証の条件の段落が 1 つでない")
+        start = body.index("信じてよい条件")
+        self.assertIn("\n\n", body[start:], "検証の条件の段落の終わりが見つからない")
+        end = body.index("\n\n", start)
+        # 5,650 字は opus の input_tokens の差で約 4,930 トークン（2026-10-20 の実測）。
+        # Claude Code が本文の前に付ける前置きの数え方と、切り詰めに使う数え方は確かめていない。
         self.assertLessEqual(end, 5650)
-        for heading in ("## 進め方", "## 返答の形", "信じてよい条件:", "(6) "):
-            self.assertLess(body.index(heading), end, heading)
-
+        anchors = (
+            "このスキルを呼び直して全文を読み直す",
+            "聞くのは製品上の選択",
+            "自分で立てた審査の指摘をどこまで直すかも聞かない",
+            "## 返答の形",
+            "4. 残る範囲",
+            "(1) 何が観測",
+            "(5) 新しい自動検査",
+            "(6) コード",
+            "どこまで直すかを利用者に選ばせない",
+        )
+        for anchor in anchors:
+            self.assertEqual(body.count(anchor), 1, anchor)
+            self.assertLess(body.index(anchor), end, anchor)
 
 if __name__ == "__main__":
     unittest.main()
