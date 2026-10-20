@@ -24,13 +24,14 @@ task と integrate の照合拒否は終了コード 6、担当の拒否は 3。
 外部に出る操作（鍵の種類が push・pr・comment・merge・release・issue）の op begin には --from が要り、check を通す。
 外部操作は元の checkout（worktree なら `git rev-parse --git-common-dir` の親）から実行する。利用者のアカウントの切り替え
 （gh のラッパー、git の includeIf、direnv）は、たいてい置き場所で決まるため（2026-10-17 の実測）。--from が元の checkout と違い、
-そこで使われるアカウントが元の checkout のものと食い違えば拒否する。push・merge・release は書き込み権限が無いアカウントも拒否する。comment・issue・pr は、書き込み権限が無くても
+そこで使われるアカウントが元の checkout のものと食い違えば拒否する。--from が元の checkout と別のリポジトリなら、そこでは確かめずに拒否する（2）。
+push・merge・release は書き込み権限が無いアカウントも拒否する。comment・issue・pr は、書き込み権限が無くても
 GitHub が受け付ける（公開リポジトリへのコメントや fork からの PR）ので、対象が見えれば通す。権限を見る対象は gh の既定の
-リポジトリ（gh repo fork の後は upstream）で、push だけは push 先の origin（自分の fork）。黙って別のアカウントへ切り替えない。
-origin が SSH の別名なら ssh -G で実際のホストに直して見る。見るのは gh のアカウントで、push に使われる SSH の鍵や
-git の credential helper のアカウントは見ない。push 先は origin の最初の pushurl だけを見る（pushDefault・複数の pushurl は見ない）。
-確かめるかどうかも、どの操作でもその pushurl で決める（pushurl だけが GitHub でないミラーの構成では、GitHub への comment・pr も飛ばす）。
-ssh は既定の設定で解決する（core.sshCommand・GIT_SSH_COMMAND で渡す別の設定は見ない）。IP・角括弧のホストと、リモートヘルパーの形（persistent-https::…）は github.com とみなさない。
+リポジトリ（gh repo fork の後は upstream）で、push だけは push 先の origin の最初の pushurl（自分の fork。pushDefault・複数の pushurl は見ない）。
+gh は既定を fetch の URL の remote から選ぶので、push 以外は GitHub の remote が 1 つでもあれば確かめる。黙って別のアカウントへ切り替えない。
+SSH の形の URL は、git が使う ssh（GIT_SSH_COMMAND > core.sshCommand > GIT_SSH > ssh）の -G で実際のホストに直して見る。解決できない remote が
+1 つでもあれば止める。SSH の push は、同じ ssh の -T で GitHub が返す鍵のアカウントも gh のアカウントと照合する（別名や core.sshCommand で鍵を切り替える構成）。
+https の push に使われる git の credential helper のアカウントは見ない（認証情報に触れない）。IP・角括弧のホストと、リモートヘルパーの形（persistent-https::…）は github.com とみなさない。
 
 担当の生死はプロセスで判定しない（Codex の sandbox の中は別の pid 名前空間で、外の CLI が見えない。2026-10-17 の実測）。
 claim は作業場所ごとの記録 note.md の雛形と証拠の置き場 evidence/ を作り、その場所と（書かれていれば）記録の中身を返す。後任は claim の出力だけで記録にたどり着く。
@@ -129,31 +130,51 @@ def sh(cmd, cwd: Path):
 
 
 def checkout_of(d: Path) -> Path:
-    rc, common, err = sh(["git", "rev-parse", "--git-common-dir"], d)
+    c = checkout_or_none(d)
+    if not c:
+        raise SystemExit(out({"ok": False, "reason": f"git のリポジトリでない: {d}"}, 2))
+    return c
+
+
+def checkout_or_none(d: Path):
+    rc, common, _ = sh(["git", "rev-parse", "--git-common-dir"], d)
     if rc:
-        raise SystemExit(out({"ok": False, "reason": f"git のリポジトリでない: {d}: {err}"}, 2))
+        return None
     c = Path(common)
     return (c if c.is_absolute() else d / c).resolve().parent
 
 
+def ssh_command(at: Path) -> list:
+    """git が push に使う ssh。GIT_SSH_COMMAND > core.sshCommand（どちらもシェルで解釈）> GIT_SSH（プログラム）> ssh
+    （git 2.43 の実測。core.sshCommand で鍵を切り替える構成もある）。"""
+    cmd = os.environ.get("GIT_SSH_COMMAND")
+    if not cmd:
+        rc, cmd, _ = sh(["git", "config", "--get", "core.sshCommand"], at)
+        cmd = cmd if rc == 0 else None
+    return ["sh", "-c", cmd + ' "$@"', "sh"] if cmd else [os.environ.get("GIT_SSH") or "ssh"]
+
+
 def github_repo(url: str, at: Path):
-    """push 先の URL を gh が受け取る github.com/OWNER/REPO にする。github.com でなければ None。
+    """push 先の URL を、gh が受け取る github.com/OWNER/REPO と、SSH なら git と同じ ssh の接続先の引数にする。
+    github.com でなければ (None, None)。
     SSH の別名（~/.ssh/config の Host）は ssh -G で実際のホスト名に直す。gh は既定のリポジトリの解決では
     別名を直すが、引数に渡した URL は直さず、別名のホストへ接続しに行って失敗する（2026-10-20 の実測）。
     別名を直せなければ GitHub かどうか分からないので、ValueError で止める（飛ばすと確かめずに通る）。"""
-    m = re.match(r"(?:([a-z+]+)://)?(?:([^@/]+)@)?([^/:]+)(?::\d+)?[:/]/?([^/]+/[^/]+?)(?:\.git)?/?$", url, re.I)
+    m = re.match(r"(?:([a-z+]+)://)?(?:([^@/]+)@)?([^/:]+)(?::(\d+))?[:/]/?([^/]+/[^/]+?)(?:\.git)?/?$", url, re.I)
     if not m:
-        return None
-    scheme, user, host, name = m.groups()
+        return None, None
+    scheme, user, host, port, name = m.groups()
+    dest = None
     if scheme is None or "ssh" in scheme.lower():  # git と同じく user@host で渡す（ssh の設定の Match user が効く）
-        rc, conf, err = sh(["ssh", "-G", "--", f"{user}@{host}" if user else host], at)
+        dest = [*(["-p", port] if port and scheme else []), "--", f"{user}@{host}" if user else host]
+        rc, conf, err = sh([*ssh_command(at), "-G", *dest], at)
         opts = dict(l.split(" ", 1) for l in reversed(conf.splitlines()) if " " in l) if rc == 0 else {}
         host = opts.get("hostname")
         if not host:
-            raise ValueError(f"ssh -G で origin のホストを解決できない: {err[:200]}")
+            raise ValueError(f"ssh -G で {url} のホストを解決できない: {err[:200]}")
         if not is_github(host) and opts.get("proxycommand", "none") != "none":  # 接続先は ProxyCommand が決める（ProxyJump は踏み台だけ）
             raise ValueError(f"ssh の設定の ProxyCommand が接続先を決めるので、GitHub か分からない: {opts['proxycommand'][:200]}")
-    return f"github.com/{name}" if is_github(host) else None
+    return (f"github.com/{name}", dest) if is_github(host) else (None, None)
 
 
 def is_github(host: str) -> bool:
@@ -161,37 +182,62 @@ def is_github(host: str) -> bool:
     return host == "github.com" or host.endswith(".github.com")
 
 
-def account(at: Path, push: bool = False) -> dict:
+def key_login(dest: list, at: Path):
+    """SSH の push で使われる鍵の GitHub のアカウント。GitHub は ssh -T に「Hi <login>!」を返す（終了コードは 1。deploy key は owner/repo）。"""
+    _, o, e = sh([*ssh_command(at), "-T", "-o", "BatchMode=yes", *dest], at)
+    m = re.search(r"Hi ([^!\s]+)!", o + "\n" + e)
+    return (m.group(1), None) if m else (None, (e or o)[:300])
+
+
+def account(at: Path, push: bool = False, key: bool = True) -> dict:
     """at で外部操作をしたときに使われる GitHub のアカウントと、対象のリポジトリへの権限（gh を at で実行して観測する）。
-    対象は gh の既定のリポジトリ（gh repo fork の後は upstream）。push だけは push 先の origin。"""
-    rc, url, _ = sh(["git", "remote", "get-url", "--push", "origin"], at)
+    push は push 先の origin の pushurl、ほかは gh の既定のリポジトリ（gh repo fork の後は upstream）を見る。
+    gh は既定を fetch の URL の remote から選ぶので、GitHub の remote が 1 つでもあれば確かめる。
+    SSH の push は、鍵のアカウント（key_login）も見る。"""
+    if push:
+        rc, url, _ = sh(["git", "remote", "get-url", "--push", "origin"], at)
+        urls = [] if rc else [url]
+    else:
+        _, names, _ = sh(["git", "remote"], at)
+        urls = [u for n in names.split() for rc, u, _ in [sh(["git", "remote", "get-url", n], at)] if rc == 0]
     try:
-        target = None if rc else github_repo(url, at)
+        target, dest = next((r for r in (github_repo(u, at) for u in urls) if r[0]), (None, None))
     except ValueError as e:
         return {"at": str(at), "github": True, "login": None, "repo": None, "permission": None, "error": str(e)}
     if not target:
-        return {"at": str(at), "github": False, "remote": url or None}
+        return {"at": str(at), "github": False, "remotes": urls}
     _, login, err = sh(["gh", "api", "user", "--jq", ".login"], at)
     rc, repo, err2 = sh(["gh", "repo", "view", *([target] if push else []), "--json", "nameWithOwner,viewerPermission",
                          "--jq", '.nameWithOwner + " " + .viewerPermission'], at)
     name, _, perm = repo.partition(" ") if rc == 0 else (None, None, None)
-    return {"at": str(at), "github": True, "login": login or None, "repo": name, "permission": perm or None,
-            "error": None if login and rc == 0 else (err or err2)[:300]}
+    res = {"at": str(at), "github": True, "login": login or None, "repo": name, "permission": perm or None,
+           "error": None if login and rc == 0 else (err or err2)[:300]}
+    if push and dest and key:
+        res["key_login"], res["key_error"] = key_login(dest, at)
+    return res
 
 
 def check(d: Path, frm: Path, kind: str = "push") -> tuple[dict, int]:
     c = checkout_of(d)
+    if checkout_or_none(frm) != c:  # 別の場所のアカウントで確かめて通さない
+        return {"checkout": str(c), "ok": False, "reason": f"--from {frm} は元の checkout {c} と同じリポジトリでない。外部操作は元の checkout から実行する"}, 2
     write, push = kind in NEEDS_WRITE, kind == "push"
     here = account(frm, push)
     res = {"checkout": str(c), "from": here}
     if not here["github"]:
-        return {**res, "ok": True, "skipped": "origin が github.com でないので確かめを飛ばした"}, 0
+        return {**res, "ok": True, "skipped": ("origin の pushurl" if push else "remote") + " が github.com でないので確かめを飛ばした"}, 0
     if not here["permission"] or (write and here["permission"] not in WRITE_OK):
         return {**res, "ok": False, "reason": f"{frm} で使われるアカウント {here['login']} は {here['repo'] or 'origin'} に{'書け' if write else 'アクセスでき'}ない（権限: {here['permission'] or '見えない'}）。"
                 f"外部操作は元の checkout {c} から実行する。そこでも{'書け' if write else 'アクセスでき'}なければ、利用者のアカウントの設定を確かめる"
                 + (f"（エラー: {here['error']}）" if here.get("error") else "")}, 5
+    if "key_login" in here and not here["key_login"]:
+        return {**res, "ok": False, "reason": f"SSH で GitHub に繋がらず、push に使われる鍵のアカウントが分からない（ssh: {here['key_error']}）。"
+                "git の push も同じ ssh で繋ぐので、ssh の設定（鍵・known_hosts）を確かめる"}, 5
+    if "key_login" in here and here["key_login"].lower() != (here["login"] or "").lower():
+        return {**res, "ok": False, "reason": f"SSH の push に使われる鍵のアカウント {here['key_login']} が gh のアカウント {here['login']} と違う。"
+                "ssh の設定（別名の IdentityFile・core.sshCommand）で、gh と同じアカウントの鍵を使う"}, 5
     if frm.resolve() != c:
-        base = account(c, push)
+        base = account(c, push, key=False)
         res["checkout_account"] = base
         if base.get("login") != here["login"]:
             return {**res, "ok": False, "reason": f"{frm} のアカウント {here['login']} と元の checkout {c} のアカウント {base.get('login')} が食い違う。"
