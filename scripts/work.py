@@ -22,7 +22,7 @@ task と integrate の照合拒否は終了コード 6、担当の拒否は 3。
 公開する操作（鍵の種類が push・pr・merge・release）の op begin には --verified <検証した commit> が要る。作業場所の HEAD と違えば拒否する（6）。
 push・pr には --reviewed も要る（初回の push も）。届ける前の審査（入口の条件 (5)・(6)）を通した commit の ID（16 進）か、
 要らない理由を none:<理由> で書く。無い・形が違う・commit が見つからない・ID でなく参照に解決されたら拒否し（2）、作業場所の HEAD と違えば拒否する（6）。
-拒否のときも通ったときも、この作業場所の記録で最後に終えた push・pr（ブランチを問わない）から変えたファイルを示す（材料で、保証ではない）。
+HEAD と違うときは審査の後に変えたファイルを、ほかの拒否と通ったときは、この作業場所の記録で最後に終えた push・pr（ブランチを問わない）から変えたファイルを示す（材料で、保証ではない）。
 op begin を通さない git push には効かない。
 審査を通したかどうかは確かめない。短い往復で審査を忘れたまま出すのを、宣言を求めて止める。
 検証の後に成果物が変わったら、証拠を取り直してから出す（plan-v3 6.2）。merge は、GitHub 側でも gh pr merge --match-head-commit <同じ commit> で止める。
@@ -683,11 +683,13 @@ def main() -> int:
                 if not reviewed:
                     return out({"ok": False, "reason": f"--reviewed の commit {a.reviewed} が見つからない。" + changed_since_publish(r, a.dir, head)}, 2)
                 if not reviewed.startswith(a.reviewed):  # 16 進だけの名前のブランチ・タグは、git が ID より先に解決する
-                    return out({"ok": False, "reason": f"--reviewed {a.reviewed} は ID でなく参照（{reviewed[:12]}）に解決された。完全な ID を書く"}, 2)
+                    return out({"ok": False, "reason": f"--reviewed {a.reviewed} は ID でなく参照（{reviewed[:12]}）に解決された。完全な ID を書く。"
+                                + changed_since_publish(r, a.dir, head)}, 2)
                 if reviewed != head:
-                    return out({"ok": False, "reason": f"審査を通した commit {reviewed or a.reviewed} と作業場所の HEAD {head} が違う。"
-                                "審査の後に変えた。直した commit で審査を通し直してから出す。審査の後に変えたファイル: "
-                                + (", ".join(sh(["git", "diff", "--name-only", f"{reviewed}..{head}"], a.dir)[1].splitlines()) or "なし")}, 6)
+                    rc, files, err = sh(["git", "diff", "--name-only", f"{reviewed}..{head}"], a.dir)
+                    after = (", ".join(files.splitlines()) or "なし") if rc == 0 else f"（差分を出せない: {err}）"
+                    return out({"ok": False, "reason": f"審査を通した commit {reviewed} と作業場所の HEAD {head} が違う。"
+                                f"審査の後に変えた。直した commit で審査を通し直してから出す。審査の後に変えたファイル: {after}"}, 6)
         if a.action == "begin" and known:
             return out({"ok": False, "reason": "同じ鍵の操作が既にある。外部の状態を照合してから進める（やり直さない）", "op": known}, 4)
         if a.action == "done" and not known:
