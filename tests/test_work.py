@@ -99,7 +99,7 @@ if sys.argv[1:3] == ["api", "user"]:
 elif sys.argv[1:3] == ["repo", "view"]:
     # 引数のリポジトリは、実物と同じく SSH の別名を解決せず、そのホストへ接続しに行く。名前は .git の有無まで照合する
     rest = sys.argv[3:]
-    arg = next((a for i, a in enumerate(rest) if not a.startswith("-") and not (i and rest[i - 1] in ("--json", "--jq"))), None)
+    arg = next((a for i, a in enumerate(rest) if not a.startswith("-") and not (i and rest[i - 1] in ("--json", "--jq", "-q", "--template", "-t"))), None)
     m = arg and re.match(r"(?:[a-z]+://)?(?:[^@/]+@)?([^/:]+)[:/][^/]+/[^/]+$|[^/]+/[^/]+$", arg)
     host = m and m.group(1)
     if host and host != "github.com":
@@ -107,6 +107,8 @@ elif sys.argv[1:3] == ["repo", "view"]:
     if arg and arg not in ("B16B1RD/demo", "github.com/B16B1RD/demo", "https://github.com/B16B1RD/demo"):
         print("GraphQL: Could not resolve to a Repository", file=sys.stderr); sys.exit(1)
     # 引数なしは gh の既定のリポジトリ。gh repo fork の後は upstream（FAKE_GH_UPSTREAM はそこでの権限）
+    if not arg and os.environ.get("FAKE_GH_UPSTREAM") == "NONE":
+        print("GraphQL: Could not resolve to a Repository", file=sys.stderr); sys.exit(1)
     if not arg and os.environ.get("FAKE_GH_UPSTREAM"):
         print("parent/demo " + os.environ["FAKE_GH_UPSTREAM"]); sys.exit(0)
     if perm == "NONE":
@@ -214,9 +216,26 @@ class TestAccountCheck(unittest.TestCase):
         rc, r = self.begin(tok, "push:feat", "--from", str(self.repo), "--verified", head)
         self.assertEqual((rc, r["op"]["account"]), (0, "B16B1RD"))
         self.assertEqual(self.begin(tok, "comment:issue-1", "--from", str(self.repo))[0], 0)
-        rc, r = self.begin(tok, "merge:pr-1", "--from", str(self.repo), "--verified", head)
-        self.assertEqual(rc, 5)  # マージは upstream に書けない
-        self.assertIn("parent/demo", json.dumps(r, ensure_ascii=False))
+        for key in ("merge:pr-1", "release:v1"):
+            rc, r = self.begin(tok, key, "--from", str(self.repo), "--verified", head)
+            self.assertEqual(rc, 5, key)  # マージ・リリースは upstream に書けない
+            self.assertIn("parent/demo", json.dumps(r, ensure_ascii=False), key)
+
+    def test_pr_checks_the_upstream_not_the_fork(self):
+        """PR は gh の既定のリポジトリ（upstream）に出る。見えなければ、自分の fork に書けても止める。"""
+        self.env["FAKE_GH_UPSTREAM"] = "NONE"
+        tok = self.claim()
+        head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=self.wt, check=True, capture_output=True, text=True).stdout.strip()
+        self.assertEqual(self.begin(tok, "pr:feat", "--from", str(self.repo), "--verified", head)[0], 5)
+
+    def test_push_checks_the_push_url_not_the_fetch_url(self):
+        """fetch は upstream、push は自分の fork（pushurl）という構成。push の権限は pushurl で見る。"""
+        subprocess.run(["git", "remote", "set-url", "origin", "https://github.com/parent/demo.git"], cwd=self.repo, check=True)
+        subprocess.run(["git", "remote", "set-url", "--push", "origin", "https://github.com/B16B1RD/demo.git"], cwd=self.repo, check=True)
+        tok = self.claim()
+        head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=self.wt, check=True, capture_output=True, text=True).stdout.strip()
+        rc, r = self.begin(tok, "push:feat", "--from", str(self.repo), "--verified", head)
+        self.assertEqual((rc, r["op"]["account"]), (0, "B16B1RD"))
 
     def test_external_op_needs_from(self):
         tok = self.claim()
@@ -248,7 +267,7 @@ class TestAccountCheck(unittest.TestCase):
         for url in ("https://github.com/B16B1RD/demo", "https://GitHub.com/B16B1RD/demo.git", "HTTPS://github.com/B16B1RD/demo/",
                     "git@github.com:B16B1RD/demo.git", "git@github.com:/B16B1RD/demo.git", "git@github.com:B16B1RD/demo.GIT",
                     "git@work:B16B1RD/demo.git", "work:B16B1RD/demo.git", "ssh://git@gh443:443/B16B1RD/demo.git",
-                    "SSH://git@work/B16B1RD/demo.git", "git+ssh://git@work/B16B1RD/demo"):
+                    "SSH://git@work/B16B1RD/demo.git", "git+ssh://git@work/B16B1RD/demo", "https://www.github.com/B16B1RD/demo.git"):
             subprocess.run(["git", "remote", "set-url", "origin", url], cwd=self.repo, check=True)
             rc, r = self.w("check", "--dir", str(self.wt), "--from", str(self.repo))
             self.assertEqual(rc, 5, url)
@@ -270,6 +289,17 @@ class TestAccountCheck(unittest.TestCase):
         rc, r = self.w("check", "--dir", str(self.wt), "--from", str(self.repo))
         self.assertEqual(rc, 5)
         self.assertIn("bad configuration", r["reason"])
+        tok = self.claim()
+        for key in ("comment:issue-1", "pr:feat", "merge:pr-1"):  # push 以外も、origin が分からなければ飛ばさない
+            self.assertEqual(self.begin(tok, key, "--from", str(self.repo))[0], 5, key)
+
+    def test_alias_origin_is_checked_for_other_operations_too(self):
+        """push 以外も、確かめるかどうかは origin で決める。別名の origin で飛ばすと、見えないリポジトリへのコメントも通る。"""
+        self.env["FAKE_SSH_ALIASES"] = "work=github.com"
+        self.env["FAKE_GH_MAP"] = f"{Path(self.tmp.name).resolve() / 'personal'}=work-account:NONE"
+        subprocess.run(["git", "remote", "set-url", "origin", "git@work:B16B1RD/demo.git"], cwd=self.repo, check=True)
+        tok = self.claim()
+        self.assertEqual(self.begin(tok, "comment:issue-1", "--from", str(self.repo))[0], 5)
 
     def test_internal_ops_need_no_account(self):
         tok = self.claim()
