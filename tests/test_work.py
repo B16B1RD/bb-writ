@@ -122,6 +122,9 @@ import os, sys
 arg = sys.argv[-1]; host = arg.split("@")[-1]  # git と同じく user@host で渡されれば、Match user も効く
 aliases = dict(a.split("=") for a in os.environ.get("FAKE_SSH_ALIASES", "").split(",") if a)
 print(f"host {host}\\nuser git\\nhostname {aliases.get(arg, aliases.get(host, host)).lower()}\\nport 22")
+proxies = dict(a.split("=") for a in os.environ.get("FAKE_SSH_PROXIES", "").split(",") if a)  # 別名=ProxyCommand。無ければ本物と同じく行を出さない
+if host in proxies:
+    print("proxycommand " + proxies[host])
 """
 
 
@@ -298,6 +301,17 @@ class TestAccountCheck(unittest.TestCase):
         (self.bin / "ssh").write_text("#!/bin/sh\necho 'ssh: bad configuration' >&2\nexit 255\n")
         rc, r = self.w("check", "--dir", str(self.wt), "--from", str(self.repo))
         self.assertIn("READ", r["reason"])
+
+    def test_proxy_command_alias_is_refused_unless_it_names_github(self):
+        """HostName を書かず ProxyCommand で github.com へ繋ぐ別名は、ssh -G が別名のまま返す。接続先が分からないので止める。"""
+        self.env["FAKE_SSH_ALIASES"] = "corp=github.com"
+        self.env["FAKE_SSH_PROXIES"] = "pc=ssh -W github.com:22 bastion,corp=connect -H proxy %h %p"
+        self.env["FAKE_GH_MAP"] = f"{Path(self.tmp.name).resolve() / 'personal'}=work-account:READ"
+        for url, words in (("pc:B16B1RD/demo.git", "ProxyCommand"), ("git@corp:B16B1RD/demo.git", "READ")):  # HostName が github.com なら普通に確かめる
+            subprocess.run(["git", "remote", "set-url", "origin", url], env=self.env, cwd=self.repo, check=True)
+            rc, r = self.w("check", "--dir", str(self.wt), "--from", str(self.repo))
+            self.assertEqual(rc, 5, url)
+            self.assertIn(words, r["reason"], url)
 
     def test_unresolvable_ssh_host_is_refused_not_skipped(self):
         """ssh -G が失敗すると GitHub かどうか分からない。確かめを飛ばさずに止める。"""

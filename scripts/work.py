@@ -29,6 +29,7 @@ GitHub が受け付ける（公開リポジトリへのコメントや fork か�
 リポジトリ（gh repo fork の後は upstream）で、push だけは push 先の origin（自分の fork）。黙って別のアカウントへ切り替えない。
 origin が SSH の別名なら ssh -G で実際のホストに直して見る。見るのは gh のアカウントで、push に使われる SSH の鍵や
 git の credential helper のアカウントは見ない。push 先は origin の最初の pushurl だけを見る（pushDefault・複数の pushurl は見ない）。
+確かめるかどうかも、どの操作でもその pushurl で決める（pushurl だけが GitHub でないミラーの構成では、GitHub への comment・pr も飛ばす）。
 ssh は既定の設定で解決する（core.sshCommand・GIT_SSH_COMMAND で渡す別の設定は見ない）。IP・角括弧のホストと、リモートヘルパーの形（persistent-https::…）は github.com とみなさない。
 
 担当の生死はプロセスで判定しない（Codex の sandbox の中は別の pid 名前空間で、外の CLI が見えない。2026-10-17 の実測）。
@@ -146,11 +147,18 @@ def github_repo(url: str, at: Path):
     scheme, user, host, name = m.groups()
     if scheme is None or "ssh" in scheme.lower():  # git と同じく user@host で渡す（ssh の設定の Match user が効く）
         rc, conf, err = sh(["ssh", "-G", "--", f"{user}@{host}" if user else host], at)
-        host = next((l.split()[1] for l in conf.splitlines() if l.startswith("hostname ")), None) if rc == 0 else None
+        opts = dict(l.split(" ", 1) for l in reversed(conf.splitlines()) if " " in l) if rc == 0 else {}
+        host = opts.get("hostname")
         if not host:
             raise ValueError(f"ssh -G で origin のホストを解決できない: {err[:200]}")
+        if not is_github(host) and opts.get("proxycommand", "none") != "none":  # 接続先は ProxyCommand が決める（ProxyJump は踏み台だけ）
+            raise ValueError(f"ssh の設定の ProxyCommand が接続先を決めるので、GitHub か分からない: {opts['proxycommand'][:200]}")
+    return f"github.com/{name}" if is_github(host) else None
+
+
+def is_github(host: str) -> bool:
     host = host.lower().rstrip(".")  # 末尾の点は同じホスト（github.com.）
-    return f"github.com/{name}" if host == "github.com" or host.endswith(".github.com") else None
+    return host == "github.com" or host.endswith(".github.com")
 
 
 def account(at: Path, push: bool = False) -> dict:
