@@ -98,8 +98,10 @@ if sys.argv[1:3] == ["api", "user"]:
     print(login)
 elif sys.argv[1:3] == ["repo", "view"]:
     # 引数のリポジトリは、実物と同じく SSH の別名を解決せず、そのホストへ接続しに行く
+    # OWNER/REPO だけなら github.com
     arg = None if sys.argv[3].startswith("-") else sys.argv[3]
-    host = arg and re.match(r"(?:[a-z]+://)?(?:[^@/]+@)?([^/:]+)", arg).group(1)
+    m = arg and re.match(r"(?:[a-z]+://)?(?:[^@/]+@)?([^/:]+)[:/][^/]+/[^/]+$|[^/]+/[^/]+$", arg)
+    host = m and m.group(1)
     if host and host != "github.com":
         print("error connecting to " + host, file=sys.stderr); sys.exit(1)
     # 引数なしは gh の既定のリポジトリ。gh repo fork の後は upstream（FAKE_GH_UPSTREAM はそこでの権限）
@@ -111,10 +113,11 @@ elif sys.argv[1:3] == ["repo", "view"]:
 """
 
 FAKE_SSH = """#!/usr/bin/env python3
-# ssh -G だけを真似る偽物。FAKE_SSH_ALIASES に並べた別名（, 区切り）は github.com に解決し、ほかは名前のまま
+# ssh -G だけを真似る偽物。FAKE_SSH_ALIASES は「別名=HostName」を , で並べる。ほかは名前のまま。出力は本物と同じく複数行
 import os, sys
-host = sys.argv[2]
-print("hostname " + ("github.com" if host in os.environ.get("FAKE_SSH_ALIASES", "").split(",") else host))
+host = sys.argv[-1].split("@")[-1]
+aliases = dict(a.split("=") for a in os.environ.get("FAKE_SSH_ALIASES", "").split(",") if a)
+print(f"host {host}\\nuser git\\nhostname {aliases.get(host, host).lower()}\\nport 22")
 """
 
 
@@ -227,21 +230,38 @@ class TestAccountCheck(unittest.TestCase):
 
     def test_push_through_an_ssh_alias_checks_the_real_host(self):
         """~/.ssh/config の別名（git@github.com-work:…）は gh repo view <url> が解決しない。ssh -G で github.com に直して見る。"""
-        self.env["FAKE_SSH_ALIASES"] = "github.com-work"
-        subprocess.run(["git", "remote", "set-url", "origin", "git@github.com-work:B16B1RD/demo.git"], cwd=self.repo, check=True)
+        self.env["FAKE_SSH_ALIASES"] = "github.com-work=github.com,gh443=ssh.github.com"
         tok = self.claim()
         head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=self.wt, check=True, capture_output=True, text=True).stdout.strip()
-        rc, r = self.begin(tok, "push:feat", "--from", str(self.repo), "--verified", head)
-        self.assertEqual((rc, r["op"]["account"]), (0, "B16B1RD"))
+        for i, url in enumerate(("git@github.com-work:B16B1RD/demo.git", "ssh://git@gh443/B16B1RD/demo.git")):  # 443 番の ssh.github.com を指す別名も
+            subprocess.run(["git", "remote", "set-url", "origin", url], cwd=self.repo, check=True)
+            rc, r = self.begin(tok, f"push:feat@{i}", "--from", str(self.repo), "--verified", head)
+            self.assertEqual((rc, r["op"]["account"]), (0, "B16B1RD"), url)
 
     def test_alias_without_github_in_its_name_is_still_checked(self):
         """名前に github.com を含まない別名を「GitHub でない」として確かめを飛ばすと、権限の無いアカウントでも通る。"""
-        self.env["FAKE_SSH_ALIASES"] = "work"
+        self.env["FAKE_SSH_ALIASES"] = "work=github.com"
         self.env["FAKE_GH_MAP"] = f"{Path(self.tmp.name).resolve() / 'personal'}=work-account:READ"
         subprocess.run(["git", "remote", "set-url", "origin", "git@work:B16B1RD/demo.git"], cwd=self.repo, check=True)
         rc, r = self.w("check", "--dir", str(self.wt), "--from", str(self.repo))
         self.assertEqual(rc, 5)
         self.assertIn("READ", r["reason"])
+
+    def test_ssh_origin_on_another_host_skips_the_check(self):
+        self.env["FAKE_SSH_ALIASES"] = "lab=gitlab.com"
+        for url in ("git@gitlab.com:x/y.git", "git@lab:x/y.git", "https://github.com.evil.example/x/y.git"):
+            subprocess.run(["git", "remote", "set-url", "origin", url], cwd=self.repo, check=True)
+            rc, r = self.w("check", "--dir", str(self.wt), "--from", str(self.repo))
+            self.assertEqual(rc, 0, url)
+            self.assertIn("飛ばした", r["skipped"], url)
+
+    def test_unresolvable_ssh_host_is_refused_not_skipped(self):
+        """ssh -G が失敗すると GitHub かどうか分からない。確かめを飛ばさずに止める。"""
+        (self.bin / "ssh").write_text("#!/bin/sh\necho 'ssh: bad configuration' >&2\nexit 255\n")
+        subprocess.run(["git", "remote", "set-url", "origin", "git@work:B16B1RD/demo.git"], cwd=self.repo, check=True)
+        rc, r = self.w("check", "--dir", str(self.wt), "--from", str(self.repo))
+        self.assertEqual(rc, 5)
+        self.assertIn("bad configuration", r["from"]["error"])
 
     def test_internal_ops_need_no_account(self):
         tok = self.claim()
