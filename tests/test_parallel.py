@@ -241,13 +241,65 @@ class TestParallel(unittest.TestCase):
         a = self.start()
         head = self.change(a, 'a')
         self.git(self.repo, 'update-ref', 'refs/stash', head)
-        self.w('task', 'cleanup', '--dir', a['dir'], '--token', a['token'], '--saved', 'refs/stash', code=6)
+        r = self.w('task', 'cleanup', '--dir', a['dir'], '--token', a['token'], '--saved', 'refs/stash', code=6)
+        self.assertIn('refs/stash', r['reason'])
         self.assertTrue(Path(a['dir']).exists())
 
+    def test_cleanup_tells_a_remote_branch_apart_from_the_task_branch(self):
+        a = self.start()
+        head = self.change(a, 'a')
+        self.integrate(a, a['base'], head)
+        self.git(self.repo, 'update-ref', 'refs/remotes/origin/main', head)
+        remote = self.w('task', 'cleanup', '--dir', a['dir'], '--token', a['token'], '--saved', 'origin/main', code=6)
+        self.assertIn('refs/remotes/origin/main', remote['reason'])
+        own = self.w('task', 'cleanup', '--dir', a['dir'], '--token', a['token'], '--saved', a['branch'], code=6)
+        self.assertNotEqual(own['reason'], remote['reason'])
+        self.assertTrue(Path(a['dir']).exists())
+
+    def squash(self, task):
+        self.git(self.repo, 'merge', '--squash', task['branch'])
+        self.git(self.repo, 'commit', '-qm', 'squash')
+
+    def test_cleanup_accepts_a_squash_merged_task_after_the_target_moves_on(self):
+        a = self.start()
+        self.change(a, 'a')
+        self.change(a, 'b')
+        self.squash(a)
+        (self.repo / 'later').write_text('later\n')
+        self.git(self.repo, 'add', 'later')
+        self.git(self.repo, 'commit', '-qm', '後の変更')
+        self.w('task', 'cleanup', '--dir', a['dir'], '--token', a['token'], '--saved', 'main')
+        self.assertFalse(Path(a['dir']).exists())
+        self.assertEqual(self.git(self.repo, 'branch', '--list', a['branch']), '')
+
+    def test_cleanup_refuses_a_squash_merged_task_with_later_commits(self):
+        a = self.start()
+        self.change(a, 'a')
+        self.squash(a)
+        head = self.change(a, 'not-merged')
+        r = self.w('task', 'cleanup', '--dir', a['dir'], '--token', a['token'], '--saved', 'main', code=6)
+        self.assertIn('入っていない', r['reason'])
+        self.assertEqual(self.git(self.repo, 'rev-parse', a['branch']), head)
+        self.assertTrue(Path(a['dir']).is_dir())
+
+    def test_cleanup_refuses_a_squash_merged_task_reverted_at_the_target(self):
+        a = self.start()
+        self.change(a, 'a')
+        self.squash(a)
+        self.git(self.repo, 'revert', '--no-edit', 'HEAD')
+        self.w('task', 'cleanup', '--dir', a['dir'], '--token', a['token'], '--saved', 'main', code=6)
+        self.assertTrue(Path(a['dir']).is_dir())
+
     def test_resume_finishes_interrupted_cleanup_without_recreating_old_work(self):
+        self.resume_interrupted_cleanup(lambda a, head: self.integrate(a, a['base'], head))
+
+    def test_resume_finishes_interrupted_cleanup_of_a_squash_merged_task(self):
+        self.resume_interrupted_cleanup(lambda a, head: self.squash(a))
+
+    def resume_interrupted_cleanup(self, merge):
         a = self.start()
         head = self.change(a, 'saved')
-        self.integrate(a, a['base'], head)
+        merge(a, head)
         real_git = shutil.which('git')
         bin_dir = Path(self.tmp.name) / 'bin'
         bin_dir.mkdir()
