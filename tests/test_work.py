@@ -2,6 +2,7 @@
 
 import json
 import os
+import signal
 import subprocess
 import sys
 import tempfile
@@ -922,8 +923,8 @@ class TestOpRun(unittest.TestCase):
     def test_the_command_cannot_prompt_on_the_terminal(self):
         tok = self.claim()
         rc, r = self.run_op(tok, "push:feat@1", "--reviewed", self.head(),
-                            *self.script("import os; print('prompt', os.environ.get('GIT_TERMINAL_PROMPT'), 'sid', os.getsid(0) == os.getpid())"))
-        self.assertIn("prompt 0 sid True", r["op"]["result"])
+                            *self.script(f"import os; print('prompt', os.environ.get('GIT_TERMINAL_PROMPT'), 'sid', os.getsid(0) != {os.getsid(0)})"))
+        self.assertIn("prompt 0 sid True", r["op"]["result"])  # 呼んだ側の端末のセッションから切り離す
 
     def test_only_op_run_takes_a_command_after_double_dash(self):
         tok = self.claim()
@@ -936,6 +937,91 @@ class TestOpRun(unittest.TestCase):
         rc, r = self.op(tok, "local:probe", "--from", str(self.repo), *self.script("import os; print(os.getcwd())"))
         self.assertEqual(rc, 0)
         self.assertIn(str(self.repo.resolve()), r["op"]["result"])
+
+    def left(self):
+        return json.loads(self.lease_file().read_text())["expires_at"] - time.time()
+
+    def test_the_lease_is_kept_while_a_long_command_runs(self):
+        """20 分を超えるコマンドでも、動いている間は担当を保つ（切れると、後任が終わっていない push を照合してやり直した）。"""
+        tok = self.claim()
+        shrink = ("d = json.load(open(f)); d['expires_at'] = time.time() + 1; open(f + '.t', 'w').write(json.dumps(d)); os.replace(f + '.t', f); time.sleep(2.5); "  # 20 分の経過の代わり
+                  "print('left', int(json.load(open(f))['expires_at'] - time.time())); ")
+        body = ("import json, os, subprocess, sys, time; f = " + repr(str(self.lease_file())) + "; " + shrink + shrink +
+                f"r = subprocess.run([sys.executable, {str(WORK)!r}, 'claim', '--dir', {str(self.wt)!r}, '--holder', 'B'], capture_output=True); "
+                "print('claim', r.returncode)")
+        rc, r = self.run_op(tok, "push:feat@1", "--reviewed", self.head(), *self.script(body))
+        self.assertEqual(rc, 0, r)
+        lefts = [int(x.split()[0]) for x in r["op"]["result"].split("left ")[1:]]
+        self.assertEqual(len(lefts), 2)
+        for v in lefts:  # 2 回とも、19 分を切ったら 20 分先に延ばした
+            self.assertGreater(v, 19 * 60, lefts)
+        self.assertIn("claim 3", r["op"]["result"])
+
+    def test_the_lease_of_a_new_holder_is_not_extended(self):
+        tok = self.claim()
+        body = ("import json, subprocess, sys, time; f = " + repr(str(self.lease_file())) + "; "
+                f"subprocess.run([sys.executable, {str(WORK)!r}, 'release', '--dir', {str(self.wt)!r}, '--token', {tok!r}], check=True, capture_output=True); "
+                f"subprocess.run([sys.executable, {str(WORK)!r}, 'claim', '--dir', {str(self.wt)!r}, '--holder', 'A', '--lease', '1'], check=True, capture_output=True); "
+                "time.sleep(2.5); print('left', int(json.load(open(f))['expires_at'] - time.time()))")
+        rc, r = self.run_op(tok, "push:feat@1", "--reviewed", self.head(), *self.script(body))
+        self.assertEqual(rc, 3)
+        self.assertLess(int(r["output"].split("left ")[1].split()[0]), 60)  # 同じ名前で取り直した 1 分の担当も延ばさない
+
+    def test_stopping_op_run_leaves_the_command_and_its_record_to_the_supervisor(self):
+        """op run が止められても、監督役がコマンドを最後まで動かし、担当を保ち、done を書く。その間、外部操作と手での done は止める。"""
+        for sig in (signal.SIGKILL, signal.SIGTERM):
+            with self.subTest(sig=sig):
+                tok = self.claim() if sig == signal.SIGKILL else self.tok2
+                key = f"push:feat@{int(sig)}"
+                go, done = Path(self.tmp.name) / f"go{int(sig)}", Path(self.tmp.name) / f"done{int(sig)}"
+                body = (f"import os, sys, time\nwhile not os.path.exists({str(go)!r}): time.sleep(0.05)\n"
+                        "for i in range(2000): print('late output', i)\n"  # 親が止められた後に書く（パイプなら SIGPIPE で死んだ）
+                        f"open({str(done)!r}, 'w')\nsys.exit(3)")
+                p = subprocess.Popen([sys.executable, str(WORK), "op", "run", "--dir", str(self.wt), "--token", tok, "--key", key,
+                                      "--what", "x", "--from", str(self.repo), "--verified", self.head(), "--reviewed", self.head(),
+                                      *self.script(body)], env=self.env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                for _ in range(200):
+                    if [o for o in self.pending() if o == key] and self.w("op", "pending", "--dir", str(self.wt))[1]["pending_ops"][0].get("running"):
+                        break
+                    time.sleep(0.05)
+                p.send_signal(sig)
+                p.wait()
+                self.assertEqual([(o["key"], o.get("running")) for o in self.w("op", "pending", "--dir", str(self.wt))[1]["pending_ops"]],
+                                 [(key, True)])  # 止められた後も、監督役が動かしていると分かる
+                d = json.loads(self.lease_file().read_text())
+                self.lease_file().write_text(json.dumps({**d, "expires_at": time.time() + 1}))
+                time.sleep(2)  # 監督役が延ばす
+                self.assertGreater(self.left(), 19 * 60)
+                self.assertEqual(self.w("claim", "--dir", str(self.wt), "--holder", "B")[0], 3)
+                kinds = [("begin", "--key", f"{k}:x", "--from", str(self.repo), "--verified", self.head(), "--reviewed", "none:x")
+                         for k in ("push", "pr", "comment", "merge", "release", "issue")]
+                for args in (*kinds, ("done", "--key", key, "--result", "閉じる")):
+                    rc, r = self.w("op", args[0], "--dir", str(self.wt), "--token", tok, "--what", "x", *args[1:])
+                    self.assertEqual(rc, 4, args)
+                    self.assertIn(key, r["reason"])
+                self.assertEqual(self.run_op(tok, "pr:feat", "--reviewed", "none:x", *self.script("print(1)"))[0], 4)
+                self.assertEqual(self.op(tok, "local:note", *self.script("print(1)"))[0], 4)  # 監督役は作業場所に 1 つ
+                self.assertEqual(self.pending(), [key])  # 拒否した操作は記録しない
+                go.write_text("")
+                for _ in range(200):
+                    if not self.pending():
+                        break
+                    time.sleep(0.05)
+                self.assertTrue(done.exists())
+                rec = [json.loads(x) for x in self.ops_file().decode().splitlines() if json.loads(x)["key"] == key][-1]
+                self.assertEqual(rec["state"], "done")
+                self.assertIn("exit 3", rec["result"])
+                self.assertIn("late output 1999", rec["result"])
+                self.tok2 = tok
+
+    def test_a_broken_lease_file_does_not_stop_the_supervisor(self):
+        tok = self.claim()
+        body = ("import os, time; f = " + repr(str(self.lease_file())) + "; good = open(f).read(); "
+                "open(f + '.t', 'w').write('{'); os.replace(f + '.t', f); time.sleep(2.5); "
+                "open(f + '.t', 'w').write(good); os.replace(f + '.t', f); print('restored')")
+        rc, r = self.run_op(tok, "push:feat@1", "--reviewed", self.head(), *self.script(body))
+        self.assertEqual(rc, 0, r)
+        self.assertIn("restored", r["op"]["result"])
 
     def test_command_runs_in_the_from_directory_without_a_shell(self):
         tok = self.claim()
