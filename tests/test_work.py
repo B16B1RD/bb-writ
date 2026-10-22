@@ -1159,6 +1159,25 @@ class TestOpRun(unittest.TestCase):
         return sorted(x.name for x in self.lease_file().parent.iterdir()
                       if x.name not in ("lease.json", "ops.jsonl", "note.md", "evidence", "running.lock", "supervise.err", ".mutex", "task.json"))
 
+    def test_a_stop_before_the_command_starts_does_not_start_it(self):
+        """監督役が起こす前に止めろと言われたら、外部操作を始めない（起こしてから殺すと、結果の分からない push を作る）。"""
+        tok = self.claim()
+        self.assertEqual(self.w("op", "begin", "--dir", str(self.wt), "--token", tok, "--key", "local:x", "--what", "x")[0], 0)
+        marker = Path(self.tmp.name) / "ran"
+        r = self.lease_file().parent
+        helper = (  # op run と同じく、ロックを取り、シグナルを塞いで監督役を起こす。起こす前に SIGTERM を保留させておく
+            "import fcntl, json, os, signal, sys\n"
+            f"fd = os.open({str(r / 'running.lock')!r}, os.O_RDWR | os.O_CREAT); fcntl.flock(fd, fcntl.LOCK_EX); os.write(fd, b'local:x')\n"
+            "os.set_inheritable(fd, True)\n"
+            "signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGTERM}); os.kill(os.getpid(), signal.SIGTERM)\n"
+            f"spec = json.dumps({{'dir': {str(self.wt)!r}, 'token': {tok!r}, 'key': 'local:x', 'cwd': {str(self.wt)!r}, 'lock_fd': fd}})\n"
+            f"os.execv(sys.executable, [sys.executable, {str(WORK)!r}, '_supervise', spec, '--', sys.executable, '-c', \"open({str(marker)!r}, 'w')\"])")
+        p = subprocess.run([sys.executable, "-c", helper], env=self.env, capture_output=True, text=True)
+        rec = self.wait_done("local:x")
+        self.assertIn("exit 143", rec["result"])
+        self.assertIn("起動の前に止められた", rec["result"])
+        self.assertFalse(marker.exists())
+
     def test_a_supervisor_that_cannot_start_closes_the_op(self):
         tok = self.claim()
         (self.lease_file().parent / "supervise.err").mkdir()  # 監督役の stderr を開けない

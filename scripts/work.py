@@ -753,6 +753,7 @@ def op_run(a, r: Path, argv: list) -> int:
 def supervise(spec: dict, argv: list) -> int:
     """op run の監督役。コマンドを実行し、動いている間は担当を保ち、終わったら done を書いて結果を出す。
     running.lock は op run から受け継いだ fd で持ち、この監督役が終わると外れる（コマンドには渡さない）。"""
+    early = signal.sigpending() & STOP_SIGNALS  # 保留中のシグナルは fork の子に受け継がれないので、先に見ておく
     if os.fork():  # 2 回目の fork。op run の子孫の木から外れ、木ごと止めるハーネスに巻き込まれない
         os._exit(0)
     d = Path(spec["dir"])
@@ -766,7 +767,10 @@ def supervise(spec: dict, argv: list) -> int:
             p.send_signal(sig)  # 起こす前のシグナルは、起こさないことで受ける
     for sig in STOP_SIGNALS:
         signal.signal(sig, forward)
-    signal.pthread_sigmask(signal.SIG_UNBLOCK, STOP_SIGNALS)  # op run が塞いで起こした。コマンドには塞がずに渡す
+    # op run が塞いで起こした。塞いだまま、起こす前に届いたかを見る。起こした後で外すので、その間に届いたものもコマンドに伝わる
+    early |= signal.sigpending() & STOP_SIGNALS
+    if early:
+        caught.extend(sorted(early))
     warned = set()
 
     def warn(msg):  # 同じ文言は 1 回だけ（毎秒の延長の失敗で育たない）
@@ -775,16 +779,19 @@ def supervise(spec: dict, argv: list) -> int:
             sys.stderr.write(f"{spec['key']}: {msg}\n")
             sys.stderr.flush()
     if caught:  # 起こす前に止めろと言われた。外部操作を始めない
+        signal.pthread_sigmask(signal.SIG_UNBLOCK, STOP_SIGNALS)
         rc, output = 128 + caught[0], "起動の前に止められた（コマンドは走っていない）"
     else:
         try:
             with open(run_log(r, spec["key"]), "wb") as logf:
                 # 出力はファイルへ。op run が止められても、パイプの相手を失って書けなくならない
                 p = subprocess.Popen(argv, cwd=spec["cwd"], stdin=subprocess.DEVNULL, stdout=logf, stderr=subprocess.STDOUT,
-                                     env={**os.environ, "GIT_TERMINAL_PROMPT": "0"})
+                                     env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
+                                     preexec_fn=lambda: signal.pthread_sigmask(signal.SIG_UNBLOCK, STOP_SIGNALS))  # コマンドには塞がずに渡す
         except OSError as e:  # 起動できない（走っていない）のはここだけ
             rc, output = 127, f"起動できない（コマンドは走っていない）: {e}"
         else:
+            signal.pthread_sigmask(signal.SIG_UNBLOCK, STOP_SIGNALS)  # 起こしてから外す。待っていたシグナルはここで伝わる
             while True:
                 try:
                     p.wait(timeout=1)
