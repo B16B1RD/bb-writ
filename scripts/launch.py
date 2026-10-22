@@ -566,6 +566,7 @@ def main() -> int:
                 # 2.1.309 の sandbox は、CLAUDE_CONFIG_DIR に関わらずホームに空の .claude/ssh（0700）を作って書ける場所に足す。
                 # 子の後に空なら、前からあっても消す（並行する別の launcher の子が作ったものを、その launcher は前からあると数える）。
                 # 前から中身があるもの・symlink と、symlink の .claude（行き先は利用者の持ち物）の下は触らない
+                # HOME が空のときは子（Node）がホームを空と読み、対象の中に .claude/ssh を作る。それは見ない（HOME が無いか設定されているときだけ一致する）
                 cc = Path.home() / ".claude"
                 if not cc.is_symlink():
                     ssh = cc / "ssh"
