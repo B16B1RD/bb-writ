@@ -1,5 +1,6 @@
 """担当の貸し出しと外部操作の記録（scripts/work.py）: 二重書き込みの拒否、旧担当の停止、結果が分からない操作の照合。"""
 
+import errno
 import json
 import os
 import signal
@@ -1442,6 +1443,7 @@ class TestOpRun(unittest.TestCase):
         os.environ["BB_WRIT_SUPERVISE_GATE"] = str(gate / "missing")
         work.gate("x")  # 無い場所なら、すぐ進む
 
+    @unittest.skipIf(os.geteuid() == 0, "root には権限の制限が効かない")
     def test_a_lock_file_that_cannot_be_removed_after_done_is_not_reported_as_a_failed_done(self):
         tok = self.claim()
         d = self.lease_file().parent
@@ -1452,6 +1454,7 @@ class TestOpRun(unittest.TestCase):
         self.assertEqual(rc, 0, r)  # done は書けた。ロックのファイルを消せなかっただけ
         self.assertEqual(r["op"]["state"], "done")
 
+    @unittest.skipIf(os.geteuid() == 0, "root には権限の制限が効かない")
     def test_the_gate_skips_a_place_it_cannot_write(self):
         work, gate = self.work_module(), Path(self.tmp.name) / "gate9"
         gate.mkdir()
@@ -1468,8 +1471,9 @@ class TestOpRun(unittest.TestCase):
         rc, r = self.run_op(tok, "push:feat@1", "--reviewed", self.head(), *self.script("print('SECRET'); raise SystemExit(1)"))
         self.assertEqual((rc, r["op"]["state"]), (1, "done"))
         self.assertEqual(self.outputs(), [])  # 失敗しても、記録できたなら全体の出力は残さない
-        p = self.start_run(tok, "push:feat@2", "import time; time.sleep(1); print('SECRET'); raise SystemExit(1)")
-        time.sleep(0.3)
+        ready = Path(self.tmp.name) / "ready-f2"
+        p = self.start_run(tok, "push:feat@2", f"import time; open({str(ready)!r}, 'w'); time.sleep(1); print('SECRET'); raise SystemExit(1)")
+        self.wait_file(ready)  # 監督役がコマンドを起こした
         p.kill()
         p.wait()
         self.wait_done("push:feat@2")
@@ -1491,6 +1495,7 @@ class TestOpRun(unittest.TestCase):
         self.wait_done("push:feat@1")
         self.assertEqual(self.outputs(), [])
 
+    @unittest.skipIf(os.geteuid() == 0, "root には権限の制限が効かない")
     def test_the_supervisor_survives_when_the_mutex_cannot_be_opened(self):
         tok = self.claim()
         m = self.lease_file().parent / ".mutex"
@@ -1501,6 +1506,7 @@ class TestOpRun(unittest.TestCase):
         self.assertEqual(rc, 1, r)
         self.assertIn("done を書けない", r["reason"])  # 黙って落ちず、理由を返す
 
+    @unittest.skipIf(os.geteuid() == 0, "root には権限の制限が効かない")
     def test_losing_the_lease_and_failing_to_remove_the_lock_still_says_3(self):
         tok = self.claim()
         d = self.lease_file().parent
@@ -1520,7 +1526,7 @@ class TestOpRun(unittest.TestCase):
         work = self.work_module()
         lock = work.run_lock(self.lease_file().parent, "push:feat@1")
         holder = subprocess.Popen([sys.executable, "-c", f"import fcntl, os, time; fd = os.open({str(lock)!r}, os.O_RDWR | os.O_CREAT); "
-                                   "os.write(fd, b'push:feat@1'); fcntl.flock(fd, fcntl.LOCK_EX); print('held', flush=True); time.sleep(3)"],
+                                   "os.write(fd, b'push:feat@1'); fcntl.flock(fd, fcntl.LOCK_EX); print('held', flush=True); time.sleep(60)"],
                                   stdout=subprocess.PIPE, text=True)
         self.assertEqual(holder.stdout.readline().strip(), "held")
         self.assertEqual(self.run_op(tok, "pr:feat", "--reviewed", "none:x", *self.script("print(2)"))[0], 0)
@@ -1550,8 +1556,16 @@ class TestOpRun(unittest.TestCase):
 
     def test_spaces_inside_kept_lines_are_kept(self):
         work, f = self.work_module(), Path(self.tmp.name) / "sp.log"
-        f.write_bytes(b"  first  \n  CODE  \n \n\t\n")
-        self.assertEqual(work.tail(f), "  first  \n  CODE  ")
+        for data, want in ((b"  first  \n  CODE  \n \n\t\n", "  first  \n  CODE  "),
+                           (b"abc   ", "abc   "),  # 改行で終わらない最後の行
+                           (b"  \n", ""), (b" \t \n\n", "")):  # 空白だけの出力は記録しない
+            f.write_bytes(data)
+            got = work.tail(f, budget=10 ** 9)
+            self.assertEqual(got, want, data[:20])
+        f.write_bytes(b"abc" + b" " * (70 * 1024) + b"\n" + b" \n" * 40000)  # 意味のある行が、行末の空白で 64 KiB をまたぐ
+        got = work.tail(f, budget=10 ** 9)
+        self.assertTrue(got.startswith("（先頭を省いた）"), got[:20])  # 読んだ窓の中は行の途中から。空にせず、省いたと書く
+        self.assertTrue(got.endswith(" ") and not got.removeprefix("（先頭を省いた）").strip())  # 行の空白は残す
 
     def test_a_lock_file_that_vanishes_while_checking_is_skipped(self):
         work, r = self.work_module(), Path(self.tmp.name) / "rh"
@@ -1561,11 +1575,12 @@ class TestOpRun(unittest.TestCase):
 
         def vanish(path, *a, **kw):  # glob の後、開く前に監督役が消した
             if str(path).endswith(".lock"):
-                raise FileNotFoundError(path)
+                raise FileNotFoundError(errno.ENOENT, "消えた", str(path))
             return real(path, *a, **kw)
         work.os = type("O", (), {**{k: getattr(os, k) for k in dir(os) if not k.startswith("__")}, "open": staticmethod(vanish)})
         self.assertIsNone(work.run_holder(r))
 
+    @unittest.skipIf(os.geteuid() == 0, "root には権限の制限が効かない")
     def test_the_supervisor_survives_when_neither_done_nor_the_lock_removal_works(self):
         tok = self.claim()
         d, m = self.lease_file().parent, self.lease_file().parent / ".mutex"
@@ -1585,6 +1600,87 @@ class TestOpRun(unittest.TestCase):
         self.assertEqual(self.w("op", "done", "--dir", str(self.wt), "--token", tok, "--key", "push:feat@1", "--result", "x")[0], 4)
         self.assertFalse(log.is_file())  # 既に終わっていた。誰も消さない出力を残さない
 
+    def test_a_supervisor_lost_after_done_returns_the_recorded_result(self):
+        tok = self.claim()
+        gate = Path(self.tmp.name) / "gate10"
+        gate.mkdir()
+        self.gos = [*getattr(self, "gos", []), gate / "before-print"]
+        for name in ("after-begin", "relay", "relay-told", "before-check", "before-start", "before-done"):
+            (gate / name).write_text("")
+        p = subprocess.Popen([sys.executable, str(WORK), "op", "run", "--dir", str(self.wt), "--token", tok, "--key", "push:feat@1",
+                              "--what", "x", "--from", str(self.repo), "--verified", self.head(), "--reviewed", self.head(),
+                              *self.script("print('SECRET')")], env={**self.env, "BB_WRIT_SUPERVISE_GATE": str(gate)},
+                             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+        self.wait_file(gate / "at-before-print")
+        os.kill(int((gate / "at-before-print").read_text()), signal.SIGKILL)
+        r = json.loads(p.communicate()[0])
+        self.assertEqual(r["op"]["state"], "done")  # 照合を求めず、記録の結果を返す
+        self.assertIn("SECRET", r["op"]["result"])
+        self.assertEqual(self.outputs(), [])
+
+    @unittest.skipIf(os.geteuid() == 0, "root には権限の制限が効かない")
+    def test_an_unreadable_record_still_returns_the_result(self):
+        tok = self.claim()
+        f = self.lease_file().parent / "ops.jsonl"
+        try:
+            rc, r = self.run_op(tok, "push:feat@1", "--reviewed", self.head(), *self.script(f"import os; print('OUT'); os.chmod({str(f)!r}, 0)"))
+        finally:
+            os.chmod(f, 0o644)
+        self.assertEqual(rc, 1)
+        self.assertIn("done を書けない", r["reason"])  # 結果の JSON が届く
+        self.assertIn("OUT", r["output"])
+
+    def test_a_paused_op_run_does_not_keep_recorded_output(self):
+        """op run が一時停止（Ctrl-Z）されても、done を書けた出力は監督役が消す。"""
+        tok = self.claim()
+        p = self.start_run(tok, "push:feat@1", "import time; time.sleep(0.5); print('SECRET-AFTER-DONE')")
+        self.wait_running("push:feat@1")
+        p.send_signal(signal.SIGSTOP)
+        try:
+            self.wait_done("push:feat@1")
+            for _ in range(100):
+                if not self.outputs():
+                    break
+                time.sleep(0.05)
+            self.assertEqual(self.outputs(), [])
+        finally:
+            p.send_signal(signal.SIGCONT)
+            p.wait()
+
+    def test_a_lock_that_cannot_be_opened_counts_as_running(self):
+        work, r = self.work_module(), Path(self.tmp.name) / "rh2"
+        r.mkdir()
+        (r / "running-y.lock").write_text("push:y")
+        real = work.os.open
+
+        def denied(path, *a, **kw):
+            if str(path).endswith(".lock"):
+                raise PermissionError(errno.EACCES, "開けない", str(path))
+            return real(path, *a, **kw)
+        work.os = type("O", (), {**{k: getattr(os, k) for k in dir(os) if not k.startswith("__")}, "open": staticmethod(denied)})
+        self.assertIsNotNone(work.run_holder(r))  # 動いているかが分からないので、動いているとみなす
+
+    @unittest.skipIf(os.geteuid() == 0, "root には権限の制限が効かない")
+    def test_a_failed_done_without_the_mutex_still_releases_the_lock_for_leftovers(self):
+        """.mutex を開けずに done を書けなくても、ロックのファイルは排他なしで消す。残りがロックを持っていても次の操作を止めない。"""
+        tok = self.claim()
+        m = self.lease_file().parent / ".mutex"
+        body = (f"import os, subprocess; os.chmod({str(m)!r}, 0); "
+                "print('left', subprocess.Popen(['sleep', '3'], close_fds=False).pid)")
+        try:
+            rc, r = self.run_op(tok, "push:feat@1", "--reviewed", self.head(), *self.script(body))
+        finally:
+            os.chmod(m, 0o644)
+        self.assertEqual(rc, 1, r)
+        left = int(r["output"].split("left ")[1].split()[0])
+        self.assertEqual(self.run_op(tok, "pr:feat", "--reviewed", "none:x", *self.script("print(2)"))[0], 0)
+        self.pid_gone(left)
+
+    def test_tail_reads_back_exactly_16_mib(self):
+        work, f = self.work_module(), Path(self.tmp.name) / "b16.log"
+        f.write_bytes(b"A\n" + b"\n" * (16 * 1024 * 1024 - 32 * 1024))  # A は 16 MiB の内側
+        self.assertEqual(work.tail(f), "A")
+
     def test_a_supervisor_that_cannot_start_closes_the_op(self):
         tok = self.claim()
         (self.lease_file().parent / "supervise.err").mkdir()  # 監督役の stderr を開けない
@@ -1595,6 +1691,7 @@ class TestOpRun(unittest.TestCase):
         self.assertFalse(marker.exists())
         self.assertEqual(self.pending(), [])  # 走っていないと記録して閉じる
 
+    @unittest.skipIf(os.geteuid() == 0, "root には権限の制限が効かない")
     def test_unreadable_output_keeps_the_exit_code_of_the_command(self):
         tok = self.claim()
         body = "import glob, os, sys; [os.chmod(f, 0) for f in glob.glob(" + repr(str(self.lease_file().parent) + "/*.log") + ")]; sys.exit(9)"
