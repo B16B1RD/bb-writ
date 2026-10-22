@@ -931,6 +931,12 @@ class TestOpRun(unittest.TestCase):
         rec, _ = self.record_of(tok, "push:feat@4", "import sys; sys.stdout.write('y' * 3_000_000)")
         self.assertLessEqual(len(rec.encode()), 8 * 1024 + 40)  # 改行の無い大きな出力でも、記録は膨らまない
 
+    def test_trailing_blank_lines_of_any_whitespace_are_skipped(self):
+        tok = self.claim()
+        for n, tailer in enumerate(("'\\r\\n' * 40000", "' \\n' * 40000", "'\\t\\n' * 40000")):
+            rec, _ = self.record_of(tok, f"push:feat@{n}", f"import sys\nprint('IMPORTANT: pushed abc123')\nsys.stdout.write({tailer})")
+            self.assertEqual(rec.strip(), "IMPORTANT: pushed abc123", tailer)
+
     def test_the_whole_output_is_shown(self):
         tok = self.claim()
         _, shown = self.record_of(tok, "push:feat@1", "print('first line'); print('z' * 2_000_000); print('last line')")
@@ -1313,19 +1319,29 @@ class TestOpRun(unittest.TestCase):
         work.open = counting_open
         self.assertTrue(work.tail(f).endswith("last line"))  # 改行だけの塊を飛ばし、最後の意味のある行を残す
         self.assertLess(sum(got), 1024 * 1024)  # 全体（4 MiB 余り）は読まない
+        got.clear()
+        f.write_bytes(b"line\n" + b"\n" * (20 * 1024 * 1024))  # 改行だけが 20 MiB
+        work.tail(f)
+        self.assertLess(sum(got), 17 * 1024 * 1024)  # 16 MiB で諦める
 
-    def test_keys_with_newlines_or_too_long_are_refused(self):
+    def test_too_long_keys_are_refused(self):
         tok = self.claim()
-        for key in ("local:x\nrecorded", "local:" + "x" * 1100):
+        for key in ("local:" + "x" * 1100, "local:" + "あ" * 400):  # 長さはバイトで数える（後者は 406 字・1206 バイト）
             self.assertEqual(self.w("op", "begin", "--dir", str(self.wt), "--token", tok, "--key", key, "--what", "x")[0], 2)
         self.assertEqual(self.pending(), [])
 
     def test_the_record_stays_small_after_json_escaping(self):
         tok = self.claim()
         rc, r = self.run_op(tok, "push:feat@1", "--reviewed", self.head(), *self.script("import sys; sys.stdout.write('\\x01' * 20000)"))
-        self.assertLessEqual(len(json.dumps(r["op"]["result"])), 8 * 1024 + 64)
+        stored = lambda s: len(json.dumps(s, ensure_ascii=False).encode()) - 2  # ops.jsonl に書かれる形の大きさ
+        self.assertLessEqual(stored(r["op"]["result"]), 8 * 1024)
         rc, r = self.run_op(tok, "push:feat@2", "--reviewed", self.head(), *self.script("import os; os.write(1, b'\\xff' * 20000)"))
-        self.assertLessEqual(len(json.dumps(r["op"]["result"])), 8 * 1024 + 64)
+        self.assertLessEqual(stored(r["op"]["result"]), 8 * 1024)  # 「exit N: 」と省いた注記を含めて 8 KiB
+        rc, r = self.run_op(tok, "push:feat@3", "--reviewed", self.head(), *self.script("print('あ' * 20000)"))
+        self.assertLessEqual(stored(r["op"]["result"]), 8 * 1024)
+        self.assertGreater(stored(r["op"]["result"]), 8 * 1024 - 16)  # 日本語でも 8 KiB 近くまで使う
+        rc, r = self.run_op(tok, "push:feat@4", "--reviewed", self.head(), *self.script("print('z' * 20000)"))
+        self.assertLessEqual(stored(r["op"]["result"]), 8 * 1024)  # 「exit 0: 」を含めて上限に収める
 
     def test_the_test_gate_is_not_passed_to_the_command(self):
         tok = self.claim()
@@ -1367,6 +1383,79 @@ class TestOpRun(unittest.TestCase):
         (gate / "before-done").write_text("")
         p.wait()
         self.assertIn("real result", self.wait_done("push:feat@1")["result"])
+
+    def test_unrecorded_output_is_kept_even_if_op_run_was_stopped(self):
+        """done を書けず、読む op run も居ないときの出力は、照合の唯一の材料なので残す。"""
+        tok = self.claim()
+        ready, go = Path(self.tmp.name) / "ready7", self.go_file("go7")
+        body = (f"import json, os, time\nprint('SECRET-EVIDENCE', flush=True)\nopen({str(ready)!r}, 'w')\n"
+                f"while not os.path.exists({str(go)!r}): time.sleep(0.05)\n"
+                f"f = {str(self.lease_file())!r}; open(f + '.t', 'w').write(json.dumps({{**json.load(open(f)), 'token': 'other'}})); os.replace(f + '.t', f)")
+        p = self.start_run(tok, "push:feat@1", body)
+        self.wait_file(ready)
+        p.kill()
+        p.wait()
+        go.write_text("")
+        for _ in range(100):
+            pend = self.w("op", "pending", "--dir", str(self.wt))[1]["pending_ops"]
+            if pend and not pend[0].get("running"):
+                break
+            time.sleep(0.05)
+        self.assertIn("SECRET-EVIDENCE", Path(pend[0]["output"]).read_text())
+
+    def test_unrecorded_output_is_kept_when_op_run_is_alive(self):
+        tok = self.claim()
+        body = ("import json, os; f = " + repr(str(self.lease_file())) + "; print('SECRET-EVIDENCE'); "
+                "open(f + '.t', 'w').write(json.dumps({**json.load(open(f)), 'token': 'other'})); os.replace(f + '.t', f)")
+        rc, r = self.run_op(tok, "push:feat@1", "--reviewed", self.head(), *self.script(body))
+        self.assertEqual(rc, 3)
+        pend = self.w("op", "pending", "--dir", str(self.wt))[1]["pending_ops"]
+        self.assertIn("SECRET-EVIDENCE", Path(pend[0]["output"]).read_text())  # 別のセッションの後任にも材料を残す
+
+    def test_a_refused_op_done_keeps_the_output(self):
+        tok = self.claim()
+        self.assertEqual(self.w("op", "begin", "--dir", str(self.wt), "--token", tok, "--key", "local:y", "--what", "x")[0], 0)
+        work = self.work_module()
+        log = work.run_log(self.lease_file().parent, "local:y")
+        log.write_text("evidence")
+        self.assertEqual(self.w("op", "done", "--dir", str(self.wt), "--token", "bad", "--key", "local:y", "--result", "x")[0], 3)
+        self.assertTrue(log.is_file())  # 拒否された done では消さない
+        self.assertEqual(self.w("op", "done", "--dir", str(self.wt), "--token", tok, "--key", "local:y", "--result", "x")[0], 0)
+        self.assertFalse(log.is_file())
+
+    def test_the_gate_gives_up_after_a_while_and_ignores_a_missing_directory(self):
+        work = self.work_module()
+        clock = iter(range(0, 10_000, 10))
+        work.time = type("T", (), {"time": staticmethod(lambda: next(clock)), "sleep": staticmethod(lambda s: None)})
+        gate = Path(self.tmp.name) / "gate8"
+        gate.mkdir()
+        os.environ["BB_WRIT_SUPERVISE_GATE"] = str(gate)
+        self.addCleanup(os.environ.pop, "BB_WRIT_SUPERVISE_GATE", None)
+        work.gate("never")  # 60 秒（偽の時計）で先へ進む
+        self.assertTrue((gate / "at-never").is_file())
+        os.environ["BB_WRIT_SUPERVISE_GATE"] = str(gate / "missing")
+        work.gate("x")  # 無い場所なら、すぐ進む
+
+    def test_a_lock_file_that_cannot_be_removed_after_done_is_not_reported_as_a_failed_done(self):
+        tok = self.claim()
+        d = self.lease_file().parent
+        try:
+            rc, r = self.run_op(tok, "push:feat@1", "--reviewed", self.head(), *self.script(f"import os; print('ok'); os.chmod({str(d)!r}, 0o555)"))
+        finally:
+            os.chmod(d, 0o755)  # 一時ディレクトリを消せるように戻す
+        self.assertEqual(rc, 0, r)  # done は書けた。ロックのファイルを消せなかっただけ
+        self.assertEqual(r["op"]["state"], "done")
+
+    def test_the_gate_skips_a_place_it_cannot_write(self):
+        work, gate = self.work_module(), Path(self.tmp.name) / "gate9"
+        gate.mkdir()
+        os.chmod(gate, 0o555)
+        os.environ["BB_WRIT_SUPERVISE_GATE"] = str(gate)
+        try:
+            work.gate("x")  # 書けなければ、止まらずに進む（例外を出さない）
+        finally:
+            os.environ.pop("BB_WRIT_SUPERVISE_GATE", None)
+            os.chmod(gate, 0o755)
 
     def test_a_supervisor_that_cannot_start_closes_the_op(self):
         tok = self.claim()
