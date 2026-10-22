@@ -196,7 +196,7 @@ class TestAccountCheck(unittest.TestCase):
         self.tmp.cleanup()
 
     def w(self, *args):
-        p = subprocess.run([sys.executable, str(WORK), *args], env=self.env, capture_output=True, text=True)
+        p = subprocess.run([sys.executable, str(WORK), *args], env=self.env, capture_output=True, text=True, errors="replace")
         return p.returncode, json.loads(p.stdout)
 
     def claim(self):
@@ -912,6 +912,17 @@ class TestOpRun(unittest.TestCase):
         self.assertIn("stdin 0", json.loads(p.stdout)["op"]["result"])
         self.assertIn("shown", p.stderr)  # 出力の全体は stderr に出す
 
+    def test_long_lines_keep_the_last_20_lines_and_the_whole_output_is_shown(self):
+        tok = self.claim()
+        body = "for i in range(25): print(f'line {i} ' + 'x' * 5000)"
+        p = self.raw("op", "run", "--dir", str(self.wt), "--token", tok, "--key", "push:feat@1", "--what", "x", "--from", str(self.repo),
+                     "--verified", self.head(), "--reviewed", self.head(), *self.script(body))
+        result = json.loads(p.stdout)["op"]["result"]
+        self.assertTrue(result.startswith("exit 0: "))
+        got = [int(x.split()[1]) for x in result.removeprefix("exit 0: ").splitlines()]
+        self.assertEqual(got, list(range(5, 25)))  # 長い行でも、末尾のちょうど 20 行
+        self.assertIn("line 0 ", p.stderr)  # 表示は全体（先頭も見える）
+
     def test_the_command_cannot_prompt_on_the_terminal(self):
         tok = self.claim()
         rc, r = self.run_op(tok, "push:feat@1", "--reviewed", self.head(),
@@ -1237,19 +1248,49 @@ class TestOpRun(unittest.TestCase):
         go.write_text("")
         p.wait()
 
-    def test_the_lock_is_not_left_with_a_process_the_command_leaves_behind(self):
+    def pid_gone(self, pid):
+        for _ in range(100):
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                return
+            time.sleep(0.05)
+        self.fail(f"{pid} が終わらない")
+
+    def test_a_process_the_command_leaves_behind_keeps_the_lock_until_it_ends(self):
+        """コマンドが残したもの（シェルの & など）が外部操作を続けているかもしれない。終わるまで次の外部操作を始めない。"""
         tok = self.claim()
-        rc, r = self.run_op(tok, "push:feat@1", "--reviewed", self.head(),
-                            "--", "sh", "-c", "sleep 2 >/dev/null 2>&1 & echo left $!")  # シェルの & は fd を閉じずに受け継ぐ（git の gc と同じ）
+        rc, r = self.run_op(tok, "push:feat@1", "--reviewed", self.head(), "--", "sh", "-c", "sleep 1.5 >/dev/null 2>&1 & echo left $!")
         self.assertEqual(rc, 0)
         left = int(r["op"]["result"].split("left ")[1].split()[0])
-        self.assertEqual(self.run_op(tok, "pr:feat", "--reviewed", "none:x", *self.script("print(1)"))[0], 0)  # git の gc のような残りに縛られない
-        for _ in range(60):  # 残した sleep の終わりを待つ（試験の後にプロセスを残さない）
-            try:
-                os.kill(left, 0)
-            except ProcessLookupError:
+        self.assertEqual(self.run_op(tok, "pr:feat", "--reviewed", "none:x", *self.script("print(1)"))[0], 4)  # 残りが動いている
+        self.pid_gone(left)
+        self.assertEqual(self.run_op(tok, "pr:feat", "--reviewed", "none:x", *self.script("print(1)"))[0], 0)  # 終われば始められる
+
+    def test_killing_the_supervisor_with_sigkill_does_not_let_the_op_run_twice(self):
+        """監督役が kill -9 されても、コマンドがロックを持つので、後任は取れず、やり直せない。"""
+        tok = self.claim()
+        go, ready = self.go_file(), Path(self.tmp.name) / "ready"
+        p = self.start_run(tok, "push:feat@1", f"import os, time\nopen({str(ready)!r}, 'w')\nwhile not os.path.exists({str(go)!r}): time.sleep(0.05)")
+        self.wait_file(ready)
+        sup = self.supervisor_of(ready)
+        os.kill(sup, signal.SIGKILL)
+        self.pid_gone(sup)
+        d = json.loads(self.lease_file().read_text())
+        self.lease_file().write_text(json.dumps({**d, "expires_at": time.time() - 1}))  # 延ばす者がいなくなり、期限が切れた
+        self.assertEqual(self.w("claim", "--dir", str(self.wt), "--holder", "B")[0], 3)
+        self.assertEqual(self.run_op(tok, "push:feat@1:retry", "--reviewed", self.head(), *self.script("print(1)"))[0], 4)  # やり直せない
+        self.assertEqual([(o["key"], o.get("running")) for o in self.w("op", "pending", "--dir", str(self.wt))[1]["pending_ops"]],
+                         [("push:feat@1", True)])
+        go.write_text("")
+        p.wait()
+        for _ in range(100):
+            if not self.w("op", "pending", "--dir", str(self.wt))[1]["pending_ops"][0].get("running"):
                 break
-            time.sleep(0.1)
+            time.sleep(0.05)
+        self.assertEqual([(o["key"], o.get("running")) for o in self.w("op", "pending", "--dir", str(self.wt))[1]["pending_ops"]],
+                         [("push:feat@1", None)])  # 終われば、後任が外部の状態と照合する
+        self.assertEqual(self.w("claim", "--dir", str(self.wt), "--holder", "B")[0], 0)
 
     def test_the_lease_is_extended_below_19_minutes_and_after_expiry_with_the_same_token(self):
         tok = self.claim()

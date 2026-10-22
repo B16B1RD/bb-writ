@@ -8,9 +8,10 @@
   work.py op begin   --dir <作業場所> --token <t> --key <操作の鍵> --what <何をするか> [--from <場所>] [--verified <c>] [--reviewed <c>|none:<理由>]
                      → 同じ鍵が既にあれば拒否（4）
   work.py op run     （op begin と同じ引数） -- <コマンド>              → begin が通ったときだけ --from（無ければ作業場所）でコマンドを
-                     シェルを通さず標準入力なしで実行し、終了コードと出力（stderr を含む）の末尾 20 行（64 KiB の範囲）を done に記録する。
+                     シェルを通さず標準入力なしで実行し、終了コードと出力（stderr を含む）の末尾 20 行を done に記録する。
                      終了コードはコマンドのもの（シグナルは 128+N、起動できなければ 127、begin の拒否は begin の値、担当を失って
-                     done を書けなければ 3、done の書き込みに失敗したら 1）。表示する出力も末尾 64 KiB まで。
+                     done を書けなければ 3、done の書き込みに失敗したら 1）。出力は全体を表示する。
+                     ロックはコマンドとそれが残したもの（シェルの & など）も持ち、それらが終わるまで次の外部操作を始めない
                      実行と記録は別のセッションの監督役が行い、コマンドが終わるまで担当を保つ。op run が止められても続く。
                      監督役が動いている間は、その作業場所の op run と外部操作の op begin、動いている操作の op done を拒否する（4）
   work.py op done    --dir <作業場所> --token <t> --key <操作の鍵> --result <結果>    → 照合で見つけた結果を閉じるとき
@@ -672,13 +673,29 @@ def run_log(r: Path, key: str) -> Path:
     return r / f"run-{hashlib.sha256(key.encode('utf-8')).hexdigest()[:16]}.log"
 
 
-def tail(f: Path, size: int = 64 * 1024) -> str:
-    """出力の末尾だけを読む（大きな出力を丸ごとメモリに載せない）。"""
+def tail(f: Path, lines: int = 20) -> str:
+    """出力の末尾の lines 行を読む。後ろから 64 KiB ずつ読み、行が揃ったら止める（全体をメモリに載せない）。"""
     if not f.is_file():
         return ""
     with open(f, "rb") as fh:
-        fh.seek(max(0, f.stat().st_size - size))
-        return fh.read().decode("utf-8", "replace").strip()
+        end = fh.seek(0, os.SEEK_END)
+        data = b""
+        while end > 0 and data.rstrip(b"\n").count(b"\n") < lines:
+            start = max(0, end - 64 * 1024)
+            fh.seek(start)
+            data = fh.read(end - start) + data
+            end = start
+    return "\n".join(data.decode("utf-8", "replace").strip().splitlines()[-lines:])
+
+
+def show(f: Path):
+    """出力の全体を、少しずつ stderr に写す。"""
+    if not f.is_file():
+        return
+    with open(f, "rb") as fh:
+        for chunk in iter(lambda: fh.read(64 * 1024), b""):
+            sys.stderr.buffer.write(chunk)
+    sys.stderr.buffer.flush()
 
 
 def keep_lease(r: Path, token: str):
@@ -741,10 +758,9 @@ def op_run(a, r: Path, argv: list) -> int:
     # 監督役は 2 回目の fork の先で動く（この op run の子孫から外れる）。結果は、その標準出力の 1 行目に終了コード、2 行目に JSON
     lines = sup.communicate()[0].decode("utf-8", "replace").strip().splitlines()
     try:
-        output = tail(run_log(r, a.key))
+        show(run_log(r, a.key))
     except OSError as e:
-        output = f"（出力を読めない: {e!r}）"
-    sys.stderr.write(output + "\n" if output else "")
+        sys.stderr.write(f"（出力を読めない: {e!r}）\n")
     if len(lines) < 2:
         return out({"ok": False, "reason": f"監督役が結果を返さずに終わった。{r / 'supervise.err'} を読み、op pending と外部の状態で照合する"}, 1)
     run_log(r, a.key).unlink(missing_ok=True)  # 出力を読んだら消す（秘密が出ていても、記録の末尾 20 行より長く残さない）
@@ -789,6 +805,9 @@ def supervise(spec: dict, argv: list) -> int:
                 # 出力はファイルへ。op run が止められても、パイプの相手を失って書けなくならない
                 p = subprocess.Popen(argv, cwd=spec["cwd"], stdin=subprocess.DEVNULL, stdout=logf, stderr=subprocess.STDOUT,
                                      env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
+                                     # ロックをコマンドにも持たせる。監督役が kill -9 されても、コマンド（とそれが残したもの）が
+                                     # 生きている間はロックが外れず、後任がやり直さない
+                                     pass_fds=[spec["lock_fd"]],
                                      preexec_fn=lambda: signal.pthread_sigmask(signal.SIG_UNBLOCK, STOP_SIGNALS))  # コマンドには塞がずに渡す
         except OSError as e:  # 起動できない（走っていない）のはここだけ
             rc, output = 127, f"起動できない（コマンドは走っていない）: {e}"
