@@ -10,7 +10,8 @@
   work.py op run     （op begin と同じ引数） -- <コマンド>              → begin が通ったときだけ --from（無ければ作業場所）でコマンドを
                      シェルを通さず標準入力なしで実行し、終了コードと出力（stderr を含む）の末尾 20 行を done に記録する。
                      終了コードはコマンドのもの（シグナルは 128+N、起動できなければ 127、begin の拒否は begin の値、担当を失って
-                     done を書けなければ 3、done の書き込みに失敗したら 1）。出力は全体を表示する。
+                     done を書けなければ 3、done の書き込みに失敗したら 1、監督役が結果を返さずに終わったら、記録があれば記録の
+                     終了コード、無ければ（読めなければ）1 で exit は null）。出力は全体を表示する。
                      コマンドが終わるまでは、コマンドとそれが残したもの（シェルの & など）もロックを持つ。終わった後は（done を
                      書けたかに関わらず）、残したものは数えない（外部操作を & で背景に回すと、終わる前に明け渡すので、そうしない）
                      実行と記録は別のセッションの監督役が行い、コマンドが終わるまで担当を保つ。op run が止められても続く
@@ -686,6 +687,8 @@ def run_holder(r: Path):
             if fd is not None:
                 os.close(fd)
             done = ops(r) if done is None else done
+            if any(e.get("state") == "done" and run_lock(r, k).name == f.name for k, e in done.items()):
+                continue  # 鍵がもう done（flock で見るときと同じく数えない）
             keys = [k for k, e in done.items() if e.get("state") == "begun" and run_lock(r, k).name == f.name]
             held = held or (keys[0] if keys else f.name)
             continue
@@ -719,7 +722,7 @@ MAX_TAIL = 8 * 1024  # 記録に残す出力の上限（バイト）。改行の
 
 def tail(f: Path, lines: int = 20, budget: int = MAX_TAIL) -> str:
     """出力の末尾の lines 行を、記録（ops.jsonl に書く JSON の値）にして budget バイトまで返す。
-    出力の末尾の空白（改行を含む）は記録しない。最後の意味のある文字の前の 64 KiB だけを読む
+    出力の末尾の ASCII の空白（改行を含む。全角の空白などは残す）は記録しない。最後の意味のある文字の前の 64 KiB だけを読む
     （そこを探して後ろから 64 KiB ずつ遡る。16 MiB 遡っても無ければ空を返す）。行の中の空白は変えない。"""
     if not f.is_file():
         return ""
@@ -743,7 +746,13 @@ def tail(f: Path, lines: int = 20, budget: int = MAX_TAIL) -> str:
             fh.seek(start - 1)
             partial = fh.read(1) != b"\n"
         fh.seek(start)
-        rows = fh.read(end - start).split(b"\n")  # 行は改行だけで数える（\r の進捗表示で行を割らない）
+        data = fh.read(end - start)
+        if partial:  # 文字の途中から読まない（UTF-8 の継続バイトを飛ばす）
+            k = 0
+            while k < min(3, len(data)) and 0x80 <= data[k] <= 0xBF:
+                k += 1
+            data = data[k:]
+        rows = data.split(b"\n")  # 行は改行だけで数える（\r の進捗表示で行を割らない）
     text = b"\n".join(rows[-lines:]).decode("utf-8", "replace")
     cut = partial and len(rows) <= lines  # 残す行の先頭が、行の途中から始まる
 
@@ -820,7 +829,7 @@ def op_run(a, r: Path, argv: list) -> int:
                                    pass_fds=[fd], start_new_session=True, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                                    stderr=errf)
         except OSError as e:  # 監督役を起こせなければ、コマンドも走っていない。そう記録して閉じる
-            a.result = f"exit 127: 監督役を起動できない（コマンドは走っていない）: {e}"
+            a.result = f"exit 127: 起動の準備ができない（出力のファイルか監督役。コマンドは走っていない）: {e}"
             with locked(r):
                 res, _ = op_step(a, r, read(r / "lease.json"), time.time(), "done")
                 run_lock(r, a.key).unlink(missing_ok=True)
@@ -849,11 +858,13 @@ def op_run(a, r: Path, argv: list) -> int:
     if len(lines) < 2:  # 監督役が結果を返さなかった。記録を読む（読めなければ、書けていないとみなす）
         try:
             rec = ops(r).get(a.key, {})
-        except (OSError, ValueError):
+        except (OSError, ValueError, KeyError, TypeError, AttributeError):
             rec = {}
     if len(lines) < 2 and rec.get("state") == "done":  # done を書いた後に監督役が居なくなった。結果は記録にある
         m = re.match(r"exit (\d+):", rec.get("result", ""))
-        rc = int(m.group(1)) if m else 1
+        if not m:  # 手で閉じた記録など。走ったかは記録の result で判断する
+            return out({"ok": False, "exit": None, "op": rec, "reason": "監督役が結果を返さずに終わった。記録の result で判断する"}, 1)
+        rc = int(m.group(1))
         return out({"ok": rc == 0, "exit": rc, "op": rec, "reason": "監督役が結果を返さずに終わったが、結果は記録済み"}, rc if rc < 256 else 1)
     if len(lines) < 2:  # コマンドは走ったかもしれない（exit は分からない）
         return out({"ok": False, "exit": None, "reason": f"監督役が結果を返さずに終わった。{r / 'supervise.err'} を読み、"
