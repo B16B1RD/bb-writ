@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """同じ作業場所への二重書き込みを防ぐ担当の貸し出し（lease）と、結果が分からない外部操作の記録（plan-v3 4.2・6.3）。
 
-  work.py claim   --dir <作業場所> [--holder <誰か>] [--lease <分>]   → token を返す。生きた担当がいるか、op run の監督役が動いていれば拒否（終了コード 3）
+  work.py claim   --dir <作業場所> [--holder <誰か>] [--lease <分>]   → token を返す。生きた担当がいるか、結果を記録していない op run があれば拒否（終了コード 3）
   work.py renew   --dir <作業場所> --token <t> [--lease <分>]          → 引き継がれていれば拒否（3）。旧担当はここで止まる
-  work.py release --dir <作業場所> --token <t>                         → op run の監督役が動いていれば拒否（4）
+  work.py release --dir <作業場所> --token <t>                         → 結果を記録していない op run があれば拒否（4）
   work.py status  --dir <作業場所>
   work.py op begin   --dir <作業場所> --token <t> --key <操作の鍵> --what <何をするか> [--from <場所>] [--verified <c>] [--reviewed <c>|none:<理由>]
                      → 同じ鍵が既にあれば拒否（4）
@@ -13,9 +13,10 @@
                      done を書けなければ 3、done の書き込みに失敗したら 1）。出力は全体を表示する。
                      ロックはコマンドとそれが残したもの（シェルの & など）も持ち、それらが終わるまで次の外部操作を始めない
                      実行と記録は別のセッションの監督役が行い、コマンドが終わるまで担当を保つ。op run が止められても続く。
-                     監督役が動いている間は、その作業場所の op run と外部操作の op begin、動いている操作の op done を拒否する（4）
+                     結果を記録するまで（監督役が強制終了されたら、コマンドとそれが残したものが終わるまで）、その作業場所の op run と
+                     外部操作の op begin、その操作の op done を拒否する（4）
   work.py op done    --dir <作業場所> --token <t> --key <操作の鍵> --result <結果>    → 照合で見つけた結果を閉じるとき
-  work.py op pending --dir <作業場所>                                 → 始めたが終わりの記録が無い操作（監督役が動かしている操作は running: true）
+  work.py op pending --dir <作業場所>                                 → 始めたが終わりの記録が無い操作（結果を記録していない op run の操作は running: true）
   work.py check   --dir <作業場所> --from <外部操作を実行する場所>      → そこで使われる GitHub のアカウントと、push 先の origin への書き込み権限（書けない・アカウントが分からなければ 5）
   work.py task start --dir <checkout> --holder <誰か> [--base <commit等>] [--target <ブランチ>] → 専用 worktree と担当を作る
   work.py task list --dir <checkout>                               → タスク、担当、未完了の統合
@@ -51,7 +52,8 @@ https の push に使われる git の credential helper のアカウントは�
 （persistent-https::…）は github.com とみなさない。
 
 担当の生死はプロセスで判定しない（Codex の sandbox の中は別の pid 名前空間で、外の CLI が見えない。2026-10-17 の実測）。
-op run の監督役が動いているかも pid では見ず、監督役が持つ running.lock の flock で見る（プロセスが死ねば OS が外す）。
+op run が結果を記録していないかも pid では見ず、操作ごとのロック（running-<鍵のハッシュ>.lock）の flock と、記録の印で見る
+（ロックは監督役・コマンド・それが残したものが持ち、プロセスが死ねば OS が外す）。
 claim は作業場所ごとの記録 note.md の雛形と証拠の置き場 evidence/ を作り、その場所と（書かれていれば）記録の中身を返す。後任は claim の出力だけで記録にたどり着く。
 期限内に renew しない担当は止まったとみなし、別の担当が claim できる。claim のたびに token が変わるので、
 旧担当の renew・op は拒否される。出力はどれも 1 行の JSON。
@@ -649,20 +651,36 @@ def op_step(a, r: Path, live, now: float, action: str):
     return res, 0
 
 
+RECORDED = "\nrecorded"  # 監督役が結果を記録した印。ロックの中身の鍵の後に足す
+
+
+def run_lock(r: Path, key: str) -> Path:
+    """op run のロック。操作ごとに分ける。コマンドとそれが残したもの（シェルの & など）もこのロックを持つ。"""
+    return r / f"running-{hashlib.sha256(key.encode('utf-8')).hexdigest()[:16]}.lock"
+
+
 def run_holder(r: Path):
-    """op run の監督役が動いていれば、その操作の鍵を返す（作業場所に 1 つ）。動いていなければ None。
-    監督役が持つ running.lock の flock で見る。プロセスが死ねば OS が外すので、pid やプロセスの開始時刻を照らさない。"""
-    f = r / "running.lock"
-    if not f.is_file():
-        return None
-    fd = os.open(f, os.O_RDONLY)
-    try:
-        fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
-        return None
-    except BlockingIOError:
-        return f.read_text(encoding="utf-8") or "?"  # 鍵はそのまま比べる（空白を落とすと、記録の鍵と食い違う）
-    finally:
-        os.close(fd)
+    """結果をまだ記録していない op run があれば、その操作の鍵を返す（作業場所に 1 つ）。無ければ None。呼ぶ側が r の排他を持つ。
+    ロックの flock で見る。プロセスが死ねば OS が外すので、pid やプロセスの開始時刻を照らさない。
+    記録の印があるロックは、コマンドが残したもの（git の credential daemon など）が持っていても数えない。
+    監督役が強制終了されて印の無いロックは、コマンドとそれが残したものが終わるまで数える（外部操作を続けているかもしれない）。"""
+    held = None
+    for f in sorted(r.glob("running*.lock")):  # running.lock は 0.11.12 の名前
+        fd = os.open(f, os.O_RDONLY)
+        try:
+            text = os.read(fd, 4096).decode("utf-8", "replace")
+            try:
+                fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+            except BlockingIOError:
+                if not text.endswith(RECORDED) and held is None:
+                    held = text or "?"  # 鍵はそのまま比べる（空白を落とすと、記録の鍵と食い違う）
+                continue
+            if text and not text.endswith(RECORDED):  # 監督役が記録せずに終わった。読む者のいない出力を残さない
+                run_log(r, text).unlink(missing_ok=True)
+            f.unlink(missing_ok=True)
+        finally:
+            os.close(fd)
+    return held
 
 
 STOP_SIGNALS = {signal.SIGTERM, signal.SIGHUP, signal.SIGINT}  # 監督役が受けてコマンドに伝えるシグナル
@@ -673,19 +691,20 @@ def run_log(r: Path, key: str) -> Path:
     return r / f"run-{hashlib.sha256(key.encode('utf-8')).hexdigest()[:16]}.log"
 
 
+MAX_TAIL = 8 * 1024  # 記録に残す出力の上限（バイト）。改行の無い大きな出力で ops.jsonl を膨らませない
+
+
 def tail(f: Path, lines: int = 20) -> str:
-    """出力の末尾の lines 行を読む。後ろから 64 KiB ずつ読み、行が揃ったら止める（全体をメモリに載せない）。"""
+    """出力の末尾の lines 行を、MAX_TAIL まで読む。後ろの 64 KiB だけを読む（記録は MAX_TAIL までなので、それより前は要らない）。"""
     if not f.is_file():
         return ""
     with open(f, "rb") as fh:
-        end = fh.seek(0, os.SEEK_END)
-        data = b""
-        while end > 0 and data.rstrip(b"\n").count(b"\n") < lines:
-            start = max(0, end - 64 * 1024)
-            fh.seek(start)
-            data = fh.read(end - start) + data
-            end = start
-    return "\n".join(data.decode("utf-8", "replace").strip().splitlines()[-lines:])
+        start = max(0, fh.seek(0, os.SEEK_END) - 64 * 1024)
+        fh.seek(start)
+        data = fh.read().strip(b"\n")
+    kept = b"\n".join(data.split(b"\n")[-lines:])  # 行は改行だけで数える（\r の進捗表示で行を割らない）
+    cut = len(kept) > MAX_TAIL or (start > 0 and kept == data)
+    return ("（先頭を省いた）" if cut else "") + kept[-MAX_TAIL:].decode("utf-8", "replace")
 
 
 def show(f: Path):
@@ -716,19 +735,20 @@ def op_run(a, r: Path, argv: list) -> int:
     担当を保ち、done を書く。20 分を超えるコマンドの間に担当が切れ、後任が終わっていない操作をやり直したため。"""
     if not argv:
         return out({"ok": False, "reason": "op run には、-- の後に実行するコマンドが要る（例: -- git push origin <ブランチ>）"}, 2)
-    fd = os.open(r / "running.lock", os.O_RDWR | os.O_CREAT, 0o600)
+    fd = None
     try:
         with locked(r):
             lease = read(r / "lease.json")
             now = time.time()
-            try:  # 照合と記録の前に取る。拒否した操作の begun を残さない
-                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            held = run_holder(r)  # 照合と記録の前に見る。拒否した操作の begun を残さない
+            if held:
+                res, code = {"ok": False, "reason": f"この作業場所で、op run の外部操作がまだ動いている: {held}。"
+                             "終わるのを待つ（終われば監督役が done を書く）"}, 4
+            else:
                 res, code = op_step(a, r, lease if alive(lease, now) else None, now, "begin")
-            except BlockingIOError:
-                res, code = {"ok": False, "reason": "この作業場所で、op run の外部操作がまだ動いている: " + (run_holder(r) or "?")
-                             + "。終わるのを待つ（終われば監督役が done を書く）"}, 4
             if not code:
-                os.ftruncate(fd, 0)
+                fd = os.open(run_lock(r, a.key), os.O_RDWR | os.O_CREAT | os.O_TRUNC, 0o600)
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)  # 鍵ごとの新しいファイルなので取れる（同じ鍵は op_step が 4 で拒否する）
                 os.write(fd, a.key.encode("utf-8"))
                 if float(lease["expires_at"]) < now + 20 * 60:
                     lease["expires_at"] = now + 20 * 60
@@ -748,29 +768,42 @@ def op_run(a, r: Path, argv: list) -> int:
             a.result = f"exit 127: 監督役を起動できない（コマンドは走っていない）: {e}"
             with locked(r):
                 res, _ = op_step(a, r, read(r / "lease.json"), time.time(), "done")
+                os.write(fd, RECORDED.encode())
             return out({"ok": False, "exit": 127, "op": res.get("op"), "reason": a.result}, 127)
         finally:
             signal.pthread_sigmask(signal.SIG_SETMASK, blocked)
             if errf:
                 errf.close()
     finally:
-        os.close(fd)  # ロックは監督役が持ち続ける
+        if fd is not None:
+            os.close(fd)  # ロックは監督役が持ち続ける
     # 監督役は 2 回目の fork の先で動く（この op run の子孫から外れる）。結果は、その標準出力の 1 行目に終了コード、2 行目に JSON
     lines = sup.communicate()[0].decode("utf-8", "replace").strip().splitlines()
     try:
         show(run_log(r, a.key))
     except OSError as e:
         sys.stderr.write(f"（出力を読めない: {e!r}）\n")
-    if len(lines) < 2:
-        return out({"ok": False, "reason": f"監督役が結果を返さずに終わった。{r / 'supervise.err'} を読み、op pending と外部の状態で照合する"}, 1)
+    if len(lines) < 2:  # コマンドは走ったかもしれない（exit は分からない）
+        return out({"ok": False, "exit": None, "reason": f"監督役が結果を返さずに終わった。{r / 'supervise.err'} を読み、"
+                    "op pending の running が消えるのを待ってから、外部の状態で照合する"}, 1)
     run_log(r, a.key).unlink(missing_ok=True)  # 出力を読んだら消す（秘密が出ていても、記録の末尾 20 行より長く残さない）
     print(lines[1])
     return int(lines[0])
 
 
+def gate(name: str):
+    """試験だけが使う止まり所。BB_WRIT_SUPERVISE_GATE のディレクトリに at-<name>（中身は pid）を書き、<name> ができるまで待つ。
+    監督役の中の数 ms の窓（fork の後・コマンドを起こす前）に、試験がシグナルを送れるようにする。"""
+    d = os.environ.get("BB_WRIT_SUPERVISE_GATE")
+    if d:
+        (Path(d) / f"at-{name}").write_text(str(os.getpid()))
+        while not (Path(d) / name).exists():
+            time.sleep(0.02)
+
+
 def supervise(spec: dict, argv: list) -> int:
     """op run の監督役。コマンドを実行し、動いている間は担当を保ち、終わったら done を書いて結果を出す。
-    running.lock は op run から受け継いだ fd で持ち、この監督役が終わると外れる（コマンドには渡さない）。"""
+    操作のロックは op run から受け継いだ fd で持ち、コマンドにも渡す。結果を記録したらロックに印を付ける。"""
     # 2 回目の fork。op run の子孫の木から外れ、木ごと止めるハーネスに巻き込まれない。保留中のシグナルは fork の子に
     # 受け継がれないので、中継（親）が fork の後に見て、パイプで子に渡す。子はそれを受け取るまで起こさない。
     # ここが「起こす前」の決め所で、これより後に中継へ届いたものは、起こした後に op run を止めたのと同じ扱い（コマンドは続く）
@@ -797,6 +830,7 @@ def supervise(spec: dict, argv: list) -> int:
     for sig in STOP_SIGNALS:
         signal.signal(sig, forward)
     # op run が塞いで起こした。塞いだまま、起こす前に届いたかを見る。起こした後で外すので、その間に届いたものもコマンドに伝わる
+    gate("before-check")
     early |= signal.sigpending() & STOP_SIGNALS
     if early:
         caught.extend(sorted(early))
@@ -812,6 +846,7 @@ def supervise(spec: dict, argv: list) -> int:
         rc, output = 128 + caught[0], "起動の前に止められた（コマンドは走っていない）"
     else:
         try:
+            gate("before-start")
             with open(run_log(r, spec["key"]), "wb") as logf:
                 # 出力はファイルへ。op run が止められても、パイプの相手を失って書けなくならない
                 p = subprocess.Popen(argv, cwd=spec["cwd"], stdin=subprocess.DEVNULL, stdout=logf, stderr=subprocess.STDOUT,
@@ -841,10 +876,13 @@ def supervise(spec: dict, argv: list) -> int:
     if rc < 0:  # シグナルで止まった。シェルと同じ 128+N にする
         rc = 128 - rc
     a = argparse.Namespace(key=spec["key"], token=spec["token"], dir=d, frm=None, verified=None, reviewed=None, what="",
-                           result=f"exit {rc}: " + "\n".join(output.splitlines()[-20:]))
+                           result=f"exit {rc}: " + output)  # output は tail で末尾 20 行・8 KiB にしてある
     try:
         with locked(r):
             res, code = op_step(a, r, read(r / "lease.json"), time.time(), "done")  # 期限が切れても、token が同じなら書く
+            if not code:  # 記録した。コマンドが残したものがロックを持っていても、次の操作を止めない
+                os.lseek(spec["lock_fd"], 0, os.SEEK_END)
+                os.write(spec["lock_fd"], RECORDED.encode())
     except (OSError, ValueError, KeyError, TypeError, AttributeError) as e:  # 書けなくても結果は出す。begun は残るので照合で閉じる
         warn(f"done を書けない: {e!r}")
         res, code = {"ok": False, "reason": f"done を書けない: {e!r}"}, 1

@@ -912,16 +912,30 @@ class TestOpRun(unittest.TestCase):
         self.assertIn("stdin 0", json.loads(p.stdout)["op"]["result"])
         self.assertIn("shown", p.stderr)  # 出力の全体は stderr に出す
 
-    def test_long_lines_keep_the_last_20_lines_and_the_whole_output_is_shown(self):
-        tok = self.claim()
-        body = "for i in range(25): print(f'line {i} ' + 'x' * 5000)"
-        p = self.raw("op", "run", "--dir", str(self.wt), "--token", tok, "--key", "push:feat@1", "--what", "x", "--from", str(self.repo),
+    def record_of(self, tok, key, body):
+        p = self.raw("op", "run", "--dir", str(self.wt), "--token", tok, "--key", key, "--what", "x", "--from", str(self.repo),
                      "--verified", self.head(), "--reviewed", self.head(), *self.script(body))
-        result = json.loads(p.stdout)["op"]["result"]
-        self.assertTrue(result.startswith("exit 0: "))
-        got = [int(x.split()[1]) for x in result.removeprefix("exit 0: ").splitlines()]
-        self.assertEqual(got, list(range(5, 25)))  # 長い行でも、末尾のちょうど 20 行
-        self.assertIn("line 0 ", p.stderr)  # 表示は全体（先頭も見える）
+        return json.loads(p.stdout)["op"]["result"].removeprefix("exit 0: "), p.stderr
+
+    def test_the_record_keeps_the_last_20_lines_up_to_8_kib(self):
+        tok = self.claim()
+        rec, _ = self.record_of(tok, "push:feat@1", "for i in range(100): print(f'line {i} ' + 'x' * 200)\nprint('\\n' * 10, end='')")
+        self.assertEqual([int(x.split()[1]) for x in rec.splitlines()], list(range(80, 100)))  # 末尾の空行は数えない
+        rec, _ = self.record_of(tok, "push:feat@2", "import sys\nfor i in range(30): sys.stdout.write(f'step {i}\\r')\nprint()\nprint('end')")
+        self.assertEqual(rec.splitlines()[-1], "end")
+        self.assertIn("step 0", rec)  # \r では行を割らない
+        rec, _ = self.record_of(tok, "push:feat@3", "for i in range(100): print(f'line {i} ' + 'x' * 3300)")
+        self.assertTrue(rec.startswith("（先頭を省いた）"), rec[:40])
+        self.assertLessEqual(len(rec.encode()), 8 * 1024 + 40)
+        self.assertTrue(rec.rstrip().endswith("x"))
+        rec, _ = self.record_of(tok, "push:feat@4", "import sys; sys.stdout.write('y' * 3_000_000)")
+        self.assertLessEqual(len(rec.encode()), 8 * 1024 + 40)  # 改行の無い大きな出力でも、記録は膨らまない
+
+    def test_the_whole_output_is_shown(self):
+        tok = self.claim()
+        _, shown = self.record_of(tok, "push:feat@1", "print('first line'); print('z' * 2_000_000); print('last line')")
+        self.assertIn("first line", shown)  # 表示は全体（先頭も見える）
+        self.assertIn("last line", shown)
 
     def test_the_command_cannot_prompt_on_the_terminal(self):
         tok = self.claim()
@@ -1052,10 +1066,10 @@ class TestOpRun(unittest.TestCase):
         self.gos = [*getattr(self, "gos", []), go]
         return go
 
-    def start_run(self, tok, key, body, **kw):
+    def start_run(self, tok, key, body, env=None, **kw):
         return subprocess.Popen([sys.executable, str(WORK), "op", "run", "--dir", str(self.wt), "--token", tok, "--key", key,
                                  "--what", "x", "--from", str(self.repo), "--verified", self.head(), "--reviewed", self.head(),
-                                 *self.script(body)], env=self.env, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, **kw)
+                                 *self.script(body)], env={**self.env, **(env or {})}, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, **kw)
 
     def wait_running(self, key):
         for _ in range(200):
@@ -1161,6 +1175,10 @@ class TestOpRun(unittest.TestCase):
 
     def test_a_finished_op_cannot_be_closed_again(self):
         tok = self.claim()
+        for _ in range(2):  # 手で閉じた操作も、閉じ直させない
+            rc = self.w("op", ("begin" if _ == 0 else "done"), "--dir", str(self.wt), "--token", tok, "--key", "local:m", "--what", "x", "--result", "x")[0]
+        self.assertEqual(rc, 0)
+        self.assertEqual(self.w("op", "done", "--dir", str(self.wt), "--token", tok, "--key", "local:m", "--result", "y")[0], 4)
         rc, r = self.run_op(tok, "push:feat@1", "--reviewed", self.head(), *self.script("import sys; print('rejected'); sys.exit(1)"))
         self.assertEqual(rc, 1)
         self.assertEqual(self.w("op", "done", "--dir", str(self.wt), "--token", tok, "--key", "push:feat@1", "--result", "照合した")[0], 4)
@@ -1179,26 +1197,61 @@ class TestOpRun(unittest.TestCase):
 
     def outputs(self):
         return sorted(x.name for x in self.lease_file().parent.iterdir()
-                      if x.name not in ("lease.json", "ops.jsonl", "note.md", "evidence", "running.lock", "supervise.err", ".mutex", "task.json"))
+                      if x.name not in ("lease.json", "ops.jsonl", "note.md", "evidence", "supervise.err", ".mutex", "task.json")
+                      and not (x.name.startswith("running") and x.name.endswith(".lock")))
 
     def test_a_stop_before_the_command_starts_does_not_start_it(self):
         """監督役が起こす前に止めろと言われたら、外部操作を始めない（起こしてから殺すと、結果の分からない push を作る）。"""
         tok = self.claim()
-        self.assertEqual(self.w("op", "begin", "--dir", str(self.wt), "--token", tok, "--key", "local:x", "--what", "x")[0], 0)
-        marker = Path(self.tmp.name) / "ran"
         r = self.lease_file().parent
-        helper = (  # op run と同じく、ロックを取り、シグナルを塞いで監督役を起こす。起こす前に SIGTERM を保留させておく
-            "import fcntl, json, os, signal, sys\n"
-            f"fd = os.open({str(r / 'running.lock')!r}, os.O_RDWR | os.O_CREAT); fcntl.flock(fd, fcntl.LOCK_EX); os.write(fd, b'local:x')\n"
-            "os.set_inheritable(fd, True)\n"
-            "signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGTERM}); os.kill(os.getpid(), signal.SIGTERM)\n"
-            f"spec = json.dumps({{'dir': {str(self.wt)!r}, 'token': {tok!r}, 'key': 'local:x', 'cwd': {str(self.wt)!r}, 'lock_fd': fd}})\n"
-            f"os.execv(sys.executable, [sys.executable, {str(WORK)!r}, '_supervise', spec, '--', sys.executable, '-c', \"open({str(marker)!r}, 'w')\"])")
-        p = subprocess.run([sys.executable, "-c", helper], env=self.env, capture_output=True, text=True)
-        rec = self.wait_done("local:x")
-        self.assertIn("exit 143", rec["result"])
-        self.assertIn("起動の前に止められた", rec["result"])
-        self.assertFalse(marker.exists())
+        for sig in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT):
+            with self.subTest(sig=sig):
+                key, marker = f"local:x{int(sig)}", Path(self.tmp.name) / f"ran{int(sig)}"
+                self.assertEqual(self.w("op", "begin", "--dir", str(self.wt), "--token", tok, "--key", key, "--what", "x")[0], 0)
+                helper = (  # op run と同じく、ロックを取り、シグナルを塞いで監督役を起こす。起こす前に止めを保留させておく
+                    "import fcntl, json, os, signal, sys\n"
+                    f"fd = os.open({str(r / ('running-' + str(int(sig)) + '.lock'))!r}, os.O_RDWR | os.O_CREAT); fcntl.flock(fd, fcntl.LOCK_EX); os.write(fd, {key!r}.encode())\n"
+                    "os.set_inheritable(fd, True)\n"
+                    f"signal.pthread_sigmask(signal.SIG_BLOCK, {{{int(sig)}}}); os.kill(os.getpid(), {int(sig)})\n"
+                    f"spec = json.dumps({{'dir': {str(self.wt)!r}, 'token': {tok!r}, 'key': {key!r}, 'cwd': {str(self.wt)!r}, 'lock_fd': fd}})\n"
+                    f"os.execv(sys.executable, [sys.executable, {str(WORK)!r}, '_supervise', spec, '--', sys.executable, '-c', \"open({str(marker)!r}, 'w')\"])")
+                p = subprocess.run([sys.executable, "-c", helper], env=self.env, capture_output=True, text=True)
+                rec = self.wait_done(key)
+                self.assertIn(f"exit {128 + int(sig)}", rec["result"])
+                self.assertIn("起動の前に止められた", rec["result"])
+                self.assertFalse(marker.exists())
+                self.assertNotIn("Traceback", p.stderr)  # 監督役が終わり際に落ちていない
+                self.assertNotIn("Traceback", (r / "supervise.err").read_text() if (r / "supervise.err").exists() else "")
+
+    def stop_at(self, gate, at, ran, extra=""):
+        tok = self.claim() if not hasattr(self, "gtok") else self.gtok
+        self.gtok = tok
+        gate.mkdir(exist_ok=True)
+        self.gos = [*getattr(self, "gos", []), gate / "before-check", gate / "before-start"]  # 落ちても監督役を待たせたままにしない
+        key = f"push:{at}"
+        if at == "before-start":
+            (gate / "before-check").write_text("")  # 手前の止まり所は通す
+        p = self.start_run(tok, key, f"import sys, time\n{extra}open({str(ran)!r}, 'w')\ntime.sleep(1)", env={"BB_WRIT_SUPERVISE_GATE": str(gate)})
+        self.wait_file(gate / f"at-{at}")
+        os.kill(int((gate / f"at-{at}").read_text()), signal.SIGTERM)  # 監督役に、窓の中で止めを送る
+        time.sleep(0.2)
+        for name in ("before-check", "before-start"):
+            (gate / name).write_text("")
+        p.wait()
+        return self.wait_done(key)["result"]
+
+    def test_a_stop_right_after_the_fork_does_not_start_the_command(self):
+        ran = Path(self.tmp.name) / "ran1"
+        rec = self.stop_at(Path(self.tmp.name) / "gate1", "before-check", ran)
+        self.assertIn("exit 143", rec)
+        self.assertIn("起動の前に止められた", rec)
+        self.assertFalse(ran.exists())
+
+    def test_a_stop_right_before_the_start_is_passed_to_the_command(self):
+        ran = Path(self.tmp.name) / "ran2"
+        rec = self.stop_at(Path(self.tmp.name) / "gate2", "before-start", ran)
+        self.assertNotIn("exit 0", rec)  # 起こしたコマンドに伝わり、最後までは走らない
+        self.assertIn("exit 143", rec)
 
     def test_a_supervisor_that_cannot_start_closes_the_op(self):
         tok = self.claim()
@@ -1249,23 +1302,22 @@ class TestOpRun(unittest.TestCase):
         p.wait()
 
     def pid_gone(self, pid):
-        for _ in range(100):
-            try:
-                os.kill(pid, 0)
-            except ProcessLookupError:
+        for _ in range(100):  # ゾンビ（親が刈り取っていない）も終わったとみなす
+            st = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True).stdout.strip()
+            if not st or st.startswith("Z"):
                 return
             time.sleep(0.05)
         self.fail(f"{pid} が終わらない")
 
-    def test_a_process_the_command_leaves_behind_keeps_the_lock_until_it_ends(self):
-        """コマンドが残したもの（シェルの & など）が外部操作を続けているかもしれない。終わるまで次の外部操作を始めない。"""
+    def test_a_process_the_command_leaves_behind_does_not_block_once_recorded(self):
+        """コマンドが残したもの（git の credential daemon など）はロックを受け継ぐ。記録の後は次の操作を止めない（15 分待たされた）。"""
         tok = self.claim()
-        rc, r = self.run_op(tok, "push:feat@1", "--reviewed", self.head(), "--", "sh", "-c", "sleep 1.5 >/dev/null 2>&1 & echo left $!")
+        rc, r = self.run_op(tok, "push:feat@1", "--reviewed", self.head(), "--", "sh", "-c", "sleep 3 >/dev/null 2>&1 & echo left $!")
         self.assertEqual(rc, 0)
         left = int(r["op"]["result"].split("left ")[1].split()[0])
-        self.assertEqual(self.run_op(tok, "pr:feat", "--reviewed", "none:x", *self.script("print(1)"))[0], 4)  # 残りが動いている
+        self.assertEqual(self.run_op(tok, "pr:feat", "--reviewed", "none:x", *self.script("print(1)"))[0], 0)  # 残りが動いていても始められる
+        self.assertEqual(self.w("op", "pending", "--dir", str(self.wt))[1]["pending_ops"], [])
         self.pid_gone(left)
-        self.assertEqual(self.run_op(tok, "pr:feat", "--reviewed", "none:x", *self.script("print(1)"))[0], 0)  # 終われば始められる
 
     def test_killing_the_supervisor_with_sigkill_does_not_let_the_op_run_twice(self):
         """監督役が kill -9 されても、コマンドがロックを持つので、後任は取れず、やり直せない。"""
@@ -1282,12 +1334,14 @@ class TestOpRun(unittest.TestCase):
         self.assertEqual(self.run_op(tok, "push:feat@1:retry", "--reviewed", self.head(), *self.script("print(1)"))[0], 4)  # やり直せない
         self.assertEqual([(o["key"], o.get("running")) for o in self.w("op", "pending", "--dir", str(self.wt))[1]["pending_ops"]],
                          [("push:feat@1", True)])
+        self.assertIsNone(json.loads(p.stdout.read())["exit"])  # 結果を返さずに終わった。走ったかは分からない
         go.write_text("")
         p.wait()
         for _ in range(100):
             if not self.w("op", "pending", "--dir", str(self.wt))[1]["pending_ops"][0].get("running"):
                 break
             time.sleep(0.05)
+        self.assertEqual(self.outputs(), [])  # 記録されないまま残った出力も消す
         self.assertEqual([(o["key"], o.get("running")) for o in self.w("op", "pending", "--dir", str(self.wt))[1]["pending_ops"]],
                          [("push:feat@1", None)])  # 終われば、後任が外部の状態と照合する
         self.assertEqual(self.w("claim", "--dir", str(self.wt), "--holder", "B")[0], 0)
