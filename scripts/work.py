@@ -10,8 +10,8 @@
   work.py op run     （op begin と同じ引数） -- <コマンド>              → begin が通ったときだけ --from（無ければ作業場所）でコマンドを
                      シェルを通さず標準入力なしで実行し、終了コードと出力（stderr を含む）の末尾 20 行を done に記録する。
                      終了コードはコマンドのもの（シグナルは 128+N、起動できなければ 127、begin の拒否は begin の値、担当を失って
-                     done を書けなければ 3、done の書き込みに失敗したら 1、監督役が結果を返さずに終わったら、記録があれば記録の
-                     終了コード、無ければ（読めなければ）1 で exit は null）。出力は全体を表示する。
+                     done を書けなければ 3、done の書き込みに失敗したら 1、監督役が結果を返さずに終わったら、記録に終了コードが
+                     あればそれ、無ければ（読めなければ）1 で exit は null。記録はあるが終了コードが無ければ、op を添える）。出力は全体を表示する。
                      コマンドが終わるまでは、コマンドとそれが残したもの（シェルの & など）もロックを持つ。終わった後は（done を
                      書けたかに関わらず）、残したものは数えない（外部操作を & で背景に回すと、終わる前に明け渡すので、そうしない）
                      実行と記録は別のセッションの監督役が行い、コマンドが終わるまで担当を保つ。op run が止められても続く
@@ -671,7 +671,8 @@ def run_holder(r: Path):
     監督役はコマンドが終わったらロックのファイルを消すので、コマンドが残したもの（git の credential daemon など）が
     消えたファイルを持っていても数えない。監督役が強制終了されて消されなかったロックは、コマンドとそれが残したものが
     終わるまで数える（外部操作を続けているかもしれない）。ただし鍵が done のロック（done を書いた直後に監督役が殺された）は
-    数えない。そのファイルは、持つ者が居なくなったときに消す（それまで、呼ぶたびに記録を読む）。"""
+    数えない。そのファイルは、持つ者が居なくなったときに消す（それまで、呼ぶたびに記録を読む）。
+    開けない・読めないロックは消さない（鍵を始めた記録から引き、done なら数えず、引けなければファイル名で数える）。"""
     held = None
     done = None
 
@@ -685,9 +686,7 @@ def run_holder(r: Path):
         try:
             fd = os.open(f, os.O_RDONLY)
             text = os.read(fd, 4096).decode("utf-8", "replace")  # 鍵は 1024 バイトまで（op_step が拒否する）
-        except FileNotFoundError:  # 監督役が消した
-            if fd is not None:
-                os.close(fd)
+        except FileNotFoundError:  # 監督役が消した（開く前。開いた後に消えても読める）
             continue
         except OSError:  # 開けない・読めない。動いているかが分からないので、動いているとみなす。鍵は始めた記録から引く
             if fd is not None:
@@ -867,7 +866,8 @@ def op_run(a, r: Path, argv: list) -> int:
         except (OSError, ValueError, KeyError, TypeError, AttributeError):
             rec = {}
     if len(lines) < 2 and rec.get("state") == "done":  # done を書いた後に監督役が居なくなった。結果は記録にある
-        m = re.match(r"exit (\d+):", rec.get("result", ""))
+        result = rec.get("result")
+        m = re.match(r"exit ([0-9]+):", result) if isinstance(result, str) else None  # 監督役が書く ASCII の形だけ
         if not m:  # 手で閉じた記録など。走ったかは記録の result で判断する
             return out({"ok": False, "exit": None, "op": rec, "reason": "監督役が結果を返さずに終わった。記録の result で判断する"}, 1)
         rc = int(m.group(1))
