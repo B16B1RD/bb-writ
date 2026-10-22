@@ -674,15 +674,22 @@ def run_holder(r: Path):
     held = None
     done = None
     for f in sorted(r.glob("running*.lock")):  # running.lock は 0.11.12 の名前
+        fd = None
         try:
             fd = os.open(f, os.O_RDONLY)
+            text = os.read(fd, 4096).decode("utf-8", "replace")  # 鍵は 1024 バイトまで（op_step が拒否する）
         except FileNotFoundError:  # 監督役が消した
+            if fd is not None:
+                os.close(fd)
             continue
-        except OSError:  # 開けない。動いているかが分からないので、動いているとみなす
-            held = held or f.name
+        except OSError:  # 開けない・読めない。動いているかが分からないので、動いているとみなす。鍵は始めた記録から引く
+            if fd is not None:
+                os.close(fd)
+            done = ops(r) if done is None else done
+            keys = [k for k, e in done.items() if e.get("state") == "begun" and run_lock(r, k).name == f.name]
+            held = held or (keys[0] if keys else f.name)
             continue
         try:
-            text = os.read(fd, 4096).decode("utf-8", "replace")  # 鍵は 1024 バイトまで（op_step が拒否する）
             try:
                 fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
             except BlockingIOError:
@@ -711,35 +718,32 @@ MAX_TAIL = 8 * 1024  # 記録に残す出力の上限（バイト）。改行の
 
 
 def tail(f: Path, lines: int = 20, budget: int = MAX_TAIL) -> str:
-    """出力の末尾の lines 行を、記録（ops.jsonl に書く JSON の値）にして budget バイトまで返す。後ろから 64 KiB 単位で読む。
-    末尾が空白・改行だけの塊なら、その前の意味のある行まで遡る（16 MiB で諦め、空を返す）。"""
+    """出力の末尾の lines 行を、記録（ops.jsonl に書く JSON の値）にして budget バイトまで返す。
+    出力の末尾の空白（改行を含む）は記録しない。最後の意味のある文字の前の 64 KiB だけを読む
+    （そこを探して後ろから 64 KiB ずつ遡る。16 MiB 遡っても無ければ空を返す）。行の中の空白は変えない。"""
     if not f.is_file():
         return ""
     with open(f, "rb") as fh:
         end = fh.seek(0, os.SEEK_END)
         for _ in range(256):
-            fh.seek(max(0, end - 64 * 1024))
-            block = fh.read(end - max(0, end - 64 * 1024))
-            if block.strip() or end <= 64 * 1024:
-                last = max(0, end - 64 * 1024) + len(block.rstrip())  # 最後の意味のある文字の後ろ
+            start = max(0, end - 64 * 1024)
+            fh.seek(start)
+            block = fh.read(end - start)
+            if block.strip():
+                end = start + len(block.rstrip())  # 最後の意味のある文字の後ろ
                 break
-            end -= len(block)
+            if start == 0:
+                return ""  # 空白だけの出力
+            end = start
         else:
             return ""
-        fh.seek(last)  # その行の終わり（次の改行。無ければファイルの終わり）まで。行の空白は残す
-        end = last
-        while (chunk := fh.read(64 * 1024)):
-            nl = chunk.find(b"\n")
-            if nl != -1:
-                end += nl
-                break
-            end += len(chunk)
         start = max(0, end - 64 * 1024)
+        partial = False
+        if start > 0:  # 窓の先頭が行の途中か（1 バイト前が改行でなければ途中）
+            fh.seek(start - 1)
+            partial = fh.read(1) != b"\n"
         fh.seek(start)
         rows = fh.read(end - start).split(b"\n")  # 行は改行だけで数える（\r の進捗表示で行を割らない）
-    partial = start > 0  # 窓の先頭の行は、行の途中から始まる
-    while rows and not rows[-1].strip() and not (partial and len(rows) == 1):  # 末尾の空白だけの行を除く（途中から読んだ行は残す）
-        rows.pop()
     text = b"\n".join(rows[-lines:]).decode("utf-8", "replace")
     cut = partial and len(rows) <= lines  # 残す行の先頭が、行の途中から始まる
 
@@ -805,12 +809,12 @@ def op_run(a, r: Path, argv: list) -> int:
         gate("after-begin")
         spec = json.dumps({"dir": str(a.dir), "token": a.token, "key": a.key, "cwd": str(a.frm or a.dir), "lock_fd": fd})
         # 出力のファイルは先に作って開いておく。消すのは監督役だけ（done を書けたら消す）で、消されても開いたファイルから表示できる
-        run_log(r, a.key).write_bytes(b"")
-        shown = open(run_log(r, a.key), "rb")
         # 監督役がシグナルの扱いを登録するまでの間に止められないよう、塞いだまま起こす（監督役が登録してから外す）
         blocked = signal.pthread_sigmask(signal.SIG_BLOCK, STOP_SIGNALS)
-        errf = None
+        errf = shown = None
         try:
+            run_log(r, a.key).write_bytes(b"")
+            shown = open(run_log(r, a.key), "rb")
             errf = open(r / "supervise.err", "ab")
             sup = subprocess.Popen([sys.executable, "-B", str(Path(__file__).resolve()), "_supervise", spec, "--", *argv],
                                    pass_fds=[fd], start_new_session=True, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
@@ -820,8 +824,12 @@ def op_run(a, r: Path, argv: list) -> int:
             with locked(r):
                 res, _ = op_step(a, r, read(r / "lease.json"), time.time(), "done")
                 run_lock(r, a.key).unlink(missing_ok=True)
-                run_log(r, a.key).unlink(missing_ok=True)
-            shown.close()
+                try:
+                    run_log(r, a.key).unlink(missing_ok=True)
+                except OSError:
+                    pass
+            if shown:
+                shown.close()
             return out({"ok": False, "exit": 127, "op": res.get("op"), "reason": a.result}, 127)
         finally:
             signal.pthread_sigmask(signal.SIG_SETMASK, blocked)
@@ -837,13 +845,16 @@ def op_run(a, r: Path, argv: list) -> int:
             show(shown)
         except OSError as e:
             sys.stderr.write(f"（出力を読めない: {e!r}）\n")
+    rec = {}
     if len(lines) < 2:  # 監督役が結果を返さなかった。記録を読む（読めなければ、書けていないとみなす）
         try:
-            recorded = ops(r).get(a.key, {}).get("state") == "done"
+            rec = ops(r).get(a.key, {})
         except (OSError, ValueError):
-            recorded = False
-    if len(lines) < 2 and recorded:  # done を書いた後に監督役が居なくなった。結果は記録にある
-        return out({"ok": False, "exit": None, "op": ops(r)[a.key], "reason": "監督役が結果を返さずに終わったが、結果は記録済み（op の result）"}, 1)
+            rec = {}
+    if len(lines) < 2 and rec.get("state") == "done":  # done を書いた後に監督役が居なくなった。結果は記録にある
+        m = re.match(r"exit (\d+):", rec.get("result", ""))
+        rc = int(m.group(1)) if m else 1
+        return out({"ok": rc == 0, "exit": rc, "op": rec, "reason": "監督役が結果を返さずに終わったが、結果は記録済み"}, rc if rc < 256 else 1)
     if len(lines) < 2:  # コマンドは走ったかもしれない（exit は分からない）
         return out({"ok": False, "exit": None, "reason": f"監督役が結果を返さずに終わった。{r / 'supervise.err'} を読み、"
                     "op pending の running が消えるのを待ってから、外部の状態で照合する"}, 1)

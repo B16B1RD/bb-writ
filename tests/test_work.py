@@ -1529,8 +1529,10 @@ class TestOpRun(unittest.TestCase):
                                    "os.write(fd, b'push:feat@1'); fcntl.flock(fd, fcntl.LOCK_EX); print('held', flush=True); time.sleep(60)"],
                                   stdout=subprocess.PIPE, text=True)
         self.assertEqual(holder.stdout.readline().strip(), "held")
-        self.assertEqual(self.run_op(tok, "pr:feat", "--reviewed", "none:x", *self.script("print(2)"))[0], 0)
-        holder.kill()
+        try:
+            self.assertEqual(self.run_op(tok, "pr:feat", "--reviewed", "none:x", *self.script("print(2)"))[0], 0)
+        finally:
+            holder.kill()
         holder.wait()
 
     def test_the_key_limit_is_exactly_1024_bytes(self):
@@ -1554,18 +1556,23 @@ class TestOpRun(unittest.TestCase):
         f.write_bytes(b"A\n" + b"\n" * (16 * 1024 * 1024 + 30 * 1024))  # 16 MiB 遡った先の 64 KiB には A が入る
         self.assertEqual(work.tail(f), "")  # 16 MiB で諦めたら、その先は読まない
 
-    def test_spaces_inside_kept_lines_are_kept(self):
+    def test_the_record_drops_only_the_trailing_blank_part(self):
+        """出力の末尾の空白（改行を含む）は記録しない。行の中の空白と、行頭の空白は変えない。"""
         work, f = self.work_module(), Path(self.tmp.name) / "sp.log"
-        for data, want in ((b"  first  \n  CODE  \n \n\t\n", "  first  \n  CODE  "),
-                           (b"abc   ", "abc   "),  # 改行で終わらない最後の行
-                           (b"  \n", ""), (b" \t \n\n", "")):  # 空白だけの出力は記録しない
+        for data, want in ((b"  first  \n  CODE  \n \n\t\n", "  first  \n  CODE"),
+                           (b"abc   ", "abc"),
+                           (b"  \n", ""), (b" \t \n\n", ""),
+                           (b" " * 100000, ""), (b" " * 100000 + b"\n", ""), (b"\t" * 70000 + b"\n\n", ""),  # 空白だけは空
+                           (b"ERROR: x" + b" " * 70000, "ERROR: x"),  # 行末の空白が 64 KiB を超えても中身を残す
+                           (b"abc" + b" " * (70 * 1024) + b"\n" + b" \n" * 40000, "abc")):
             f.write_bytes(data)
-            got = work.tail(f, budget=10 ** 9)
-            self.assertEqual(got, want, data[:20])
-        f.write_bytes(b"abc" + b" " * (70 * 1024) + b"\n" + b" \n" * 40000)  # 意味のある行が、行末の空白で 64 KiB をまたぐ
-        got = work.tail(f, budget=10 ** 9)
-        self.assertTrue(got.startswith("（先頭を省いた）"), got[:20])  # 読んだ窓の中は行の途中から。空にせず、省いたと書く
-        self.assertTrue(got.endswith(" ") and not got.removeprefix("（先頭を省いた）").strip())  # 行の空白は残す
+            self.assertEqual(work.tail(f, budget=10 ** 9), want, data[:20])
+        f.write_bytes(b"ab\n" * 30000)  # 64 KiB を超えるが、窓の先頭は行の頭で、21 行以上ある
+        self.assertEqual(work.tail(f), "\n".join(["ab"] * 20))
+        f.write_bytes(b"x" * 100000)  # 1 行が窓より長い
+        self.assertTrue(work.tail(f, budget=10 ** 9).startswith("（先頭を省いた）"))
+        f.write_bytes(b"x" * 100 + b"\n" + b"y" * (64 * 1024))  # 窓の先頭がちょうど行の頭
+        self.assertEqual(work.tail(f, budget=10 ** 9), "y" * (64 * 1024))
 
     def test_a_lock_file_that_vanishes_while_checking_is_skipped(self):
         work, r = self.work_module(), Path(self.tmp.name) / "rh"
@@ -1647,18 +1654,28 @@ class TestOpRun(unittest.TestCase):
             p.send_signal(signal.SIGCONT)
             p.wait()
 
-    def test_a_lock_that_cannot_be_opened_counts_as_running(self):
-        work, r = self.work_module(), Path(self.tmp.name) / "rh2"
-        r.mkdir()
-        (r / "running-y.lock").write_text("push:y")
-        real = work.os.open
-
-        def denied(path, *a, **kw):
-            if str(path).endswith(".lock"):
-                raise PermissionError(errno.EACCES, "開けない", str(path))
-            return real(path, *a, **kw)
-        work.os = type("O", (), {**{k: getattr(os, k) for k in dir(os) if not k.startswith("__")}, "open": staticmethod(denied)})
-        self.assertIsNotNone(work.run_holder(r))  # 動いているかが分からないので、動いているとみなす
+    @unittest.skipIf(os.geteuid() == 0, "root には権限の制限が効かない")
+    def test_a_lock_that_cannot_be_opened_or_read_counts_as_running(self):
+        tok = self.claim()
+        work, r = self.work_module(), self.lease_file().parent
+        for key, broken in (("push:y", "chmod"), ("push:z", "dir")):
+            with self.subTest(broken=broken):
+                self.assertEqual(self.w("op", "begin", "--dir", str(self.wt), "--token", tok, "--key", key, "--what", "x",
+                                        "--from", str(self.repo), "--verified", self.head(), "--reviewed", self.head())[0], 0)
+                lock = work.run_lock(r, key)
+                if broken == "chmod":
+                    lock.write_text(key)
+                    lock.chmod(0)
+                else:
+                    lock.mkdir()  # 開けるが読めない
+                try:
+                    pend = {o["key"]: o.get("running") for o in self.w("op", "pending", "--dir", str(self.wt))[1]["pending_ops"]}
+                    self.assertTrue(pend[key])  # 鍵で「動いている」と出る
+                    self.assertEqual(self.w("op", "done", "--dir", str(self.wt), "--token", tok, "--key", key, "--result", "x")[0], 4)
+                finally:
+                    lock.chmod(0o644) if broken == "chmod" else None
+                    lock.unlink() if broken == "chmod" else lock.rmdir()
+                self.assertEqual(self.w("op", "done", "--dir", str(self.wt), "--token", tok, "--key", key, "--result", "x")[0], 0)
 
     @unittest.skipIf(os.geteuid() == 0, "root には権限の制限が効かない")
     def test_a_failed_done_without_the_mutex_still_releases_the_lock_for_leftovers(self):
@@ -1702,6 +1719,66 @@ class TestOpRun(unittest.TestCase):
         self.assertIn("消せない", r["warning"])
         self.assertTrue(log.is_file())
 
+    def test_an_output_file_that_cannot_be_made_closes_the_op(self):
+        tok = self.claim()
+        work = self.work_module()
+        work.run_log(self.lease_file().parent, "push:feat@1").mkdir()  # 出力のファイルを作れない
+        marker = Path(self.tmp.name) / "ran-o"
+        rc, r = self.run_op(tok, "push:feat@1", "--reviewed", self.head(), *self.script(f"open({str(marker)!r}, 'w')"))
+        self.assertEqual(rc, 127, r)
+        self.assertFalse(marker.exists())
+        self.assertEqual(self.pending(), [])  # 走っていないと記録して閉じる
+
+    def test_an_unopenable_lock_marks_its_op_running_and_refuses_its_done(self):
+        tok = self.claim()
+        self.assertEqual(self.w("op", "begin", "--dir", str(self.wt), "--token", tok, "--key", "push:y", "--what", "x",
+                                "--from", str(self.repo), "--verified", self.head(), "--reviewed", self.head())[0], 0)
+        work = self.work_module()
+        lock = work.run_lock(self.lease_file().parent, "push:y")
+        lock.write_text("push:y")
+        real = os.open
+        orig = work.os
+        work.os = type("O", (), {**{k: getattr(os, k) for k in dir(os) if not k.startswith("__")},
+                                 "open": staticmethod(lambda p, *a, **kw: (_ for _ in ()).throw(PermissionError(errno.EACCES, "x", str(p)))
+                                                      if str(p).endswith(".lock") else real(p, *a, **kw))})
+        self.assertEqual(work.run_holder(self.lease_file().parent), "push:y")  # ファイル名でなく鍵を返す
+        work.os = orig
+        lock.unlink()
+
+    def test_a_supervisor_lost_after_done_returns_the_exit_code(self):
+        tok = self.claim()
+        gate = Path(self.tmp.name) / "gate11"
+        gate.mkdir()
+        self.gos = [*getattr(self, "gos", []), gate / "before-print"]
+        for name in ("after-begin", "relay", "relay-told", "before-check", "before-start", "before-done"):
+            (gate / name).write_text("")
+        p = subprocess.Popen([sys.executable, str(WORK), "op", "run", "--dir", str(self.wt), "--token", tok, "--key", "push:feat@1",
+                              "--what", "x", "--from", str(self.repo), "--verified", self.head(), "--reviewed", self.head(),
+                              *self.script("raise SystemExit(7)")], env={**self.env, "BB_WRIT_SUPERVISE_GATE": str(gate)},
+                             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+        self.wait_file(gate / "at-before-print")
+        os.kill(int((gate / "at-before-print").read_text()), signal.SIGKILL)
+        r = json.loads(p.communicate()[0])
+        self.assertEqual((p.returncode, r["exit"]), (7, 7))  # 記録の終了コードを返す
+
+    def test_a_lost_supervisor_and_an_unreadable_record_still_return_json(self):
+        tok = self.claim()
+        gate = Path(self.tmp.name) / "gate12"
+        gate.mkdir()
+        self.gos = [*getattr(self, "gos", []), gate / "before-print"]
+        for name in ("after-begin", "relay", "relay-told", "before-check", "before-start", "before-done"):
+            (gate / name).write_text("")
+        f = self.lease_file().parent / "ops.jsonl"
+        p = subprocess.Popen([sys.executable, str(WORK), "op", "run", "--dir", str(self.wt), "--token", tok, "--key", "push:feat@1",
+                              "--what", "x", "--from", str(self.repo), "--verified", self.head(), "--reviewed", self.head(),
+                              *self.script("print(1)")], env={**self.env, "BB_WRIT_SUPERVISE_GATE": str(gate)},
+                             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+        self.wait_file(gate / "at-before-print")
+        f.write_text("{broken\n")  # 記録が読めない
+        os.kill(int((gate / "at-before-print").read_text()), signal.SIGKILL)
+        r = json.loads(p.communicate()[0])  # 落ちずに JSON を返す
+        self.assertIsNone(r["exit"])
+
     def test_a_supervisor_that_cannot_start_closes_the_op(self):
         tok = self.claim()
         (self.lease_file().parent / "supervise.err").mkdir()  # 監督役の stderr を開けない
@@ -1711,6 +1788,7 @@ class TestOpRun(unittest.TestCase):
         self.assertIn("監督役を起動できない", r["op"]["result"])
         self.assertFalse(marker.exists())
         self.assertEqual(self.pending(), [])  # 走っていないと記録して閉じる
+        self.assertEqual(self.outputs(), [])  # 空の出力のファイルも残さない
 
     @unittest.skipIf(os.geteuid() == 0, "root には権限の制限が効かない")
     def test_unreadable_output_keeps_the_exit_code_of_the_command(self):
