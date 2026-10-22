@@ -259,11 +259,24 @@ class TestLaunch(unittest.TestCase):
                                             ("codex", "deep-usage", "failed", "子の結果を記録に書けない")):
             with self.subTest(mode=mode):
                 rc, rec = self.run_launch(host, mode=mode)
-                try:  # 書ける深さは Python の版で違う（3.13 以降は深さ 3000 も書ける）。書けるなら ok が正しい
-                    json.dumps(json.loads("[" * 3000 + "]" * 3000), indent=1)
-                    status, problem = "ok", None
+                # 読める深さ・書ける深さは Python の版で違う（3.10 は深さ 3000 を読めず、3.13 以降は書ける）。launcher と同じ Python で見る
+                try:
+                    json.loads("[" * 3000 + "]" * 3000)
+                    readable = True
                 except RecursionError:
-                    pass
+                    readable = False
+                deep = []
+                for _ in range(2999):
+                    deep = [deep]
+                try:
+                    json.dumps(deep, indent=1)
+                    writable = True
+                except RecursionError:
+                    writable = False
+                if not readable:  # 報告は読めない報告に、usage の行は読めない行として飛ばされる
+                    status, problem = ("invalid-report", "読めない") if mode == "deep" else ("ok", None)
+                elif writable:
+                    status, problem = "ok", None
                 self.assertEqual(rec["status"], status, rec)
                 if problem:
                     self.assertTrue([p for p in rec["problems"] if problem in p], rec)
@@ -568,7 +581,8 @@ class TestLaunch(unittest.TestCase):
                     f"m = importlib.util.module_from_spec(s); s.loader.exec_module(m); print(m.read_child_file(__import__('pathlib').Path({str(d / name)!r}))[0])")
             p = subprocess.run([sys.executable, "-B", "-c", code], capture_output=True, text=True, timeout=20)  # 開くところで止まらない
             self.assertEqual(p.returncode, 0, p.stderr[-300:])
-            self.assertFalse(p.stdout.startswith("sha256:"), p.stdout)  # 読まずに種類で表す
+            self.assertNotIn("sha256:", p.stdout)  # 読まずに種類で表す
+            self.assertIn("（", p.stdout)
         (d / "l1").symlink_to("a-target")
         (d / "l2").symlink_to("b-target")
         self.assertNotEqual(launch.read_child_file(d / "l1")[0], launch.read_child_file(d / "l2")[0])  # 行き先の変化も差分

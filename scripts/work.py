@@ -921,7 +921,9 @@ def gate(name: str):
     d = os.environ.get("BB_WRIT_SUPERVISE_GATE")
     if d and Path(d).is_dir():
         try:
-            (Path(d) / f"at-{name}").write_text(str(os.getpid()))
+            tmp = Path(d) / f".at-{name}.{os.getpid()}"
+            tmp.write_text(str(os.getpid()))
+            os.replace(tmp, Path(d) / f"at-{name}")  # 試験が名前を見たときに、中身が揃っているように
         except OSError:  # 置き場が消えた。止まらずに進む
             return
         deadline = time.time() + 60  # 環境に残っていても、永久には待たない
