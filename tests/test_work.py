@@ -816,13 +816,16 @@ class TestOpRun(unittest.TestCase):
         self.assertIn("exit 127", r["op"]["result"])
         self.assertEqual(self.pending(), [])
 
-    def test_losing_the_lease_while_running_leaves_the_op_pending(self):
+    def test_release_is_refused_while_the_command_runs(self):
+        """手放すと、監督役が結果を記録できず、begun が残った。"""
         tok = self.claim()
-        release = f"import subprocess, sys; subprocess.run([sys.executable, {str(WORK)!r}, 'release', '--dir', {str(self.wt)!r}, '--token', {tok!r}], check=True)"
+        release = (f"import subprocess, sys; print('release', subprocess.run([sys.executable, {str(WORK)!r}, 'release', '--dir', "
+                   f"{str(self.wt)!r}, '--token', {tok!r}], capture_output=True).returncode)")
         rc, r = self.run_op(tok, "push:feat@1", "--reviewed", self.head(), *self.script(release))
-        self.assertEqual(rc, 3)
-        self.assertEqual(r["exit"], 0)
-        self.assertEqual(self.pending(), ["push:feat@1"])  # 次の担当が外部の状態と照合する
+        self.assertEqual(rc, 0, r)
+        self.assertIn("release 4", r["op"]["result"])
+        self.assertEqual(self.pending(), [])
+        self.assertEqual(self.w("release", "--dir", str(self.wt), "--token", tok)[0], 0)  # 終われば手放せる
 
     def test_an_expired_lease_not_taken_over_still_records_the_result(self):
         tok = self.claim()
@@ -950,11 +953,12 @@ class TestOpRun(unittest.TestCase):
         tok = self.claim()
         claim = f"subprocess.run([sys.executable, {str(WORK)!r}, 'claim', '--dir', {str(self.wt)!r}, '--holder', 'B'], capture_output=True).returncode"
         body = ("import json, os, subprocess, sys, time; f = " + repr(str(self.lease_file())) + "; "
-                f"subprocess.run([sys.executable, {str(WORK)!r}, 'release', '--dir', {str(self.wt)!r}, '--token', {tok!r}], check=True, capture_output=True); "
+                f"print('release', subprocess.run([sys.executable, {str(WORK)!r}, 'release', '--dir', {str(self.wt)!r}, '--token', {tok!r}], capture_output=True).returncode); "
                 f"print('after release', {claim}); "
                 "open(f + '.t', 'w').write(json.dumps({'token': 'x', 'holder': 'X', 'expires_at': time.time() - 1})); os.replace(f + '.t', f); "
                 f"print('after expiry', {claim})")
         rc, r = self.run_op(tok, "push:feat@1", "--reviewed", self.head(), *self.script(body))
+        self.assertIn("release 4", r["output"] if "output" in r else r["op"]["result"])
         self.assertIn("after release 3", r["output"] if "output" in r else r["op"]["result"])
         self.assertIn("after expiry 3", r["output"] if "output" in r else r["op"]["result"])
         self.assertEqual(self.w("claim", "--dir", str(self.wt), "--holder", "B")[0], 0)  # 終われば取れる
@@ -1057,32 +1061,40 @@ class TestOpRun(unittest.TestCase):
             time.sleep(0.05)
         self.fail(f"{key} の done が書かれない")
 
+    def wait_file(self, f):
+        for _ in range(200):
+            if f.exists():
+                return
+            time.sleep(0.05)
+        self.fail(f"{f} ができない")
+
+    def supervisor_of(self, ready):
+        """ready を書いたコマンドの親（監督役）の pid。"""
+        procs = subprocess.run(["ps", "-eo", "pid=,ppid=,args="], capture_output=True, text=True).stdout.splitlines()
+        cmd = [x.split() for x in procs if str(ready) in x and "_supervise" not in x and " op run " not in x]
+        self.assertEqual(len(cmd), 1, cmd)
+        sup = cmd[0][1]
+        self.assertIn("_supervise", subprocess.run(["ps", "-o", "args=", "-p", sup], capture_output=True, text=True).stdout)
+        return int(sup)
+
     def test_a_signal_to_the_supervisor_is_passed_on_and_the_result_still_recorded(self):
         """監督役が止められると、ロックが外れて、動いているコマンドの横で次の op run が通った。"""
         tok = self.claim()
-        go = self.go_file()
-        body = (f"import os, signal, sys, time\nsignal.signal(signal.SIGTERM, lambda *_: print('got TERM', flush=True))\n"
-                f"while not os.path.exists({str(go)!r}): time.sleep(0.05)\nsys.exit(5)")
-        p = self.start_run(tok, "push:feat@1", body)
-        self.wait_running("push:feat@1")
-        for _ in range(200):  # running はロックを取った時点で付く。コマンドが起きるまで待つ
-            procs = subprocess.run(["ps", "-eo", "pid=,args="], capture_output=True, text=True).stdout.splitlines()
-            cmd = [x.split()[0] for x in procs if str(go) in x and "_supervise" not in x and " op run " not in x]
-            if cmd:
-                break
-            time.sleep(0.05)
-        self.assertEqual(len(cmd), 1, cmd)
-        time.sleep(0.3)  # コマンドが SIGTERM の扱いを登録するまで
-        sup = subprocess.run(["ps", "-o", "ppid=", "-p", cmd[0]], capture_output=True, text=True).stdout.strip()  # コマンドの親が監督役
-        self.assertIn("_supervise", subprocess.run(["ps", "-o", "args=", "-p", sup], capture_output=True, text=True).stdout)
-        os.kill(int(sup), signal.SIGTERM)
-        time.sleep(0.5)
-        self.assertEqual(self.run_op(tok, "pr:feat", "--reviewed", "none:x", *self.script("print(1)"))[0], 4)  # まだ動いている
-        go.write_text("")
-        rec = self.wait_done("push:feat@1")
-        self.assertIn("exit 5", rec["result"])
-        self.assertIn("got TERM", rec["result"])  # コマンドに伝えた
-        self.assertEqual(p.wait(), 5)
+        for n, sig in enumerate((signal.SIGTERM, signal.SIGHUP, signal.SIGINT)):
+            with self.subTest(sig=sig):
+                key, go, ready = f"push:feat@{n}", self.go_file(f"go{n}"), Path(self.tmp.name) / f"ready{n}"
+                body = (f"import os, signal, sys, time\nsignal.signal({int(sig)}, lambda *_: print('got', {int(sig)}, flush=True))\n"
+                        f"open({str(ready)!r}, 'w')\nwhile not os.path.exists({str(go)!r}): time.sleep(0.05)\nsys.exit(5)")
+                p = self.start_run(tok, key, body)
+                self.wait_file(ready)  # コマンドが扱いを登録した
+                os.kill(self.supervisor_of(ready), sig)
+                time.sleep(0.3)
+                self.assertEqual(self.run_op(tok, "pr:feat", "--reviewed", "none:x", *self.script("print(1)"))[0], 4)  # まだ動いている
+                go.write_text("")
+                rec = self.wait_done(key)
+                self.assertIn("exit 5", rec["result"])
+                self.assertIn(f"got {int(sig)}", rec["result"])  # コマンドに伝えた
+                self.assertEqual(p.wait(), 5)
 
     def test_killing_the_whole_group_of_op_run_leaves_the_supervisor(self):
         tok = self.claim()
@@ -1101,9 +1113,11 @@ class TestOpRun(unittest.TestCase):
         """ハーネスは、止めるプロセスの子孫を木ごと止める（Claude Code の TaskStop で、監督役もコマンドも死んだ）。"""
         tok = self.claim()
         go = self.go_file()
-        p = self.start_run(tok, "push:feat@1", f"import os, sys, time\nwhile not os.path.exists({str(go)!r}): time.sleep(0.05)\nsys.exit(6)")
-        self.wait_running("push:feat@1")
-        time.sleep(0.5)
+        ready = Path(self.tmp.name) / "ready"
+        p = self.start_run(tok, "push:feat@1", f"import os, sys, time\nopen({str(ready)!r}, 'w')\nwhile not os.path.exists({str(go)!r}): time.sleep(0.05)\nsys.exit(6)")
+        self.wait_file(ready)
+        self.assertNotEqual(subprocess.run(["ps", "-o", "ppid=", "-p", str(self.supervisor_of(ready))], capture_output=True, text=True).stdout.strip(),
+                            str(p.pid))  # 監督役は、もう op run の子ではない
         rows = [x.split() for x in subprocess.run(["ps", "-eo", "pid=,ppid="], capture_output=True, text=True).stdout.splitlines()]
         tree, grew = {p.pid}, True
         while grew:
@@ -1141,6 +1155,29 @@ class TestOpRun(unittest.TestCase):
         go.write_text("")
         p.wait()
 
+    def outputs(self):
+        return sorted(x.name for x in self.lease_file().parent.iterdir()
+                      if x.name not in ("lease.json", "ops.jsonl", "note.md", "evidence", "running.lock", "supervise.err", ".mutex", "task.json"))
+
+    def test_a_supervisor_that_cannot_start_closes_the_op(self):
+        tok = self.claim()
+        (self.lease_file().parent / "supervise.err").mkdir()  # 監督役の stderr を開けない
+        marker = Path(self.tmp.name) / "ran"
+        rc, r = self.run_op(tok, "push:feat@1", "--reviewed", self.head(), *self.script(f"open({str(marker)!r}, 'w')"))
+        self.assertEqual(rc, 127)
+        self.assertIn("監督役を起動できない", r["op"]["result"])
+        self.assertFalse(marker.exists())
+        self.assertEqual(self.pending(), [])  # 走っていないと記録して閉じる
+
+    def test_unreadable_output_keeps_the_exit_code_of_the_command(self):
+        tok = self.claim()
+        body = "import glob, os, sys; [os.chmod(f, 0) for f in glob.glob(" + repr(str(self.lease_file().parent) + "/*.log") + ")]; sys.exit(9)"
+        rc, r = self.run_op(tok, "push:feat@1", "--reviewed", self.head(), *self.script(body))
+        self.assertEqual(rc, 9)  # 走ったコマンドを「起動できない」にしない
+        self.assertIn("出力を読めない", r["op"]["result"])
+        for f in self.lease_file().parent.glob("*.log"):
+            f.chmod(0o600)
+
     def test_the_output_is_removed_when_op_run_was_stopped(self):
         tok = self.claim()
         go = self.go_file()
@@ -1151,10 +1188,10 @@ class TestOpRun(unittest.TestCase):
         go.write_text("")
         self.assertIn("secret", self.wait_done("push:feat@1")["result"])  # 末尾は記録に残る
         for _ in range(40):
-            if not list(self.lease_file().parent.glob("run-*.log")):
+            if not self.outputs():
                 break
             time.sleep(0.05)
-        self.assertEqual(list(self.lease_file().parent.glob("run-*.log")), [])
+        self.assertEqual(self.outputs(), [])
 
     def test_only_external_begin_and_the_running_done_are_refused_while_running(self):
         tok = self.claim()
@@ -1173,7 +1210,7 @@ class TestOpRun(unittest.TestCase):
     def test_the_lock_is_not_left_with_a_process_the_command_leaves_behind(self):
         tok = self.claim()
         rc, r = self.run_op(tok, "push:feat@1", "--reviewed", self.head(),
-                            *self.script("import subprocess; print('left', subprocess.Popen(['sleep', '2'], start_new_session=True).pid)"))
+                            "--", "sh", "-c", "sleep 2 >/dev/null 2>&1 & echo left $!")  # シェルの & は fd を閉じずに受け継ぐ（git の gc と同じ）
         self.assertEqual(rc, 0)
         left = int(r["op"]["result"].split("left ")[1].split()[0])
         self.assertEqual(self.run_op(tok, "pr:feat", "--reviewed", "none:x", *self.script("print(1)"))[0], 0)  # git の gc のような残りに縛られない
@@ -1198,7 +1235,7 @@ class TestOpRun(unittest.TestCase):
     def test_the_output_file_is_removed_after_it_is_read(self):
         tok = self.claim()
         self.run_op(tok, "push:feat@1", "--reviewed", self.head(), *self.script("print('first secret')"))
-        self.assertEqual(list(self.lease_file().parent.glob("run-*.log")), [])
+        self.assertEqual(self.outputs(), [])  # 名前を問わず、出力のファイルを残さない
         p = self.raw("op", "run", "--dir", str(self.wt), "--token", tok, "--key", "push:feat@2", "--what", "x", "--from", str(self.repo),
                      "--verified", self.head(), "--reviewed", self.head(), *self.script("print('second')"))
         self.assertIn("second", p.stderr)
@@ -1206,11 +1243,12 @@ class TestOpRun(unittest.TestCase):
 
     def test_a_lease_file_without_an_expiry_does_not_stop_the_supervisor(self):
         tok = self.claim()
-        body = ("import json, os, time; f = " + repr(str(self.lease_file())) + "; good = open(f).read(); d = json.loads(good); "
-                "d['expires_at'] = None; open(f + '.t', 'w').write(json.dumps(d)); os.replace(f + '.t', f); time.sleep(2.5); "
-                "open(f + '.t', 'w').write(good); os.replace(f + '.t', f)")
-        rc, r = self.run_op(tok, "push:feat@1", "--reviewed", self.head(), *self.script(body))
-        self.assertEqual(rc, 0, r)
+        for n, broken in enumerate(("d['expires_at'] = None", "del d['expires_at']", "d = [1]")):
+            body = ("import json, os, time; f = " + repr(str(self.lease_file())) + "; good = open(f).read(); d = json.loads(good); "
+                    f"{broken}; open(f + '.t', 'w').write(json.dumps(d)); os.replace(f + '.t', f); time.sleep(2.5); "
+                    "open(f + '.t', 'w').write(good); os.replace(f + '.t', f)")
+            rc, r = self.run_op(tok, f"push:feat@{n}", "--reviewed", self.head(), *self.script(body))
+            self.assertEqual(rc, 0, (broken, r))
         self.assertIn("担当の期限を延ばせない", (self.lease_file().parent / "supervise.err").read_text(encoding="utf-8"))
 
     def test_command_runs_in_the_from_directory_without_a_shell(self):

@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
 """同じ作業場所への二重書き込みを防ぐ担当の貸し出し（lease）と、結果が分からない外部操作の記録（plan-v3 4.2・6.3）。
 
-  work.py claim   --dir <作業場所> [--holder <誰か>] [--lease <分>]   → token を返す。生きた担当がいれば拒否（終了コード 3）
+  work.py claim   --dir <作業場所> [--holder <誰か>] [--lease <分>]   → token を返す。生きた担当がいるか、op run の監督役が動いていれば拒否（終了コード 3）
   work.py renew   --dir <作業場所> --token <t> [--lease <分>]          → 引き継がれていれば拒否（3）。旧担当はここで止まる
-  work.py release --dir <作業場所> --token <t>
+  work.py release --dir <作業場所> --token <t>                         → op run の監督役が動いていれば拒否（4）
   work.py status  --dir <作業場所>
   work.py op begin   --dir <作業場所> --token <t> --key <操作の鍵> --what <何をするか> [--from <場所>] [--verified <c>] [--reviewed <c>|none:<理由>]
                      → 同じ鍵が既にあれば拒否（4）
   work.py op run     （op begin と同じ引数） -- <コマンド>              → begin が通ったときだけ --from（無ければ作業場所）でコマンドを
-                     シェルを通さず標準入力なしで実行し、終了コードと出力（stderr を含む）の末尾 20 行を done に記録する。
-                     終了コードはコマンドのもの（シグナルは 128+N、起動できなければ 127、begin の拒否は begin の値、実行中に引き継がれたら 3）。
+                     シェルを通さず標準入力なしで実行し、終了コードと出力（stderr を含む）の末尾 20 行（64 KiB の範囲）を done に記録する。
+                     終了コードはコマンドのもの（シグナルは 128+N、起動できなければ 127、begin の拒否は begin の値、担当を失って
+                     done を書けなければ 3、done の書き込みに失敗したら 1）。表示する出力も末尾 64 KiB まで。
                      実行と記録は別のセッションの監督役が行い、コマンドが終わるまで担当を保つ。op run が止められても続く。
                      監督役が動いている間は、その作業場所の op run と外部操作の op begin、動いている操作の op done を拒否する（4）
   work.py op done    --dir <作業場所> --token <t> --key <操作の鍵> --result <結果>    → 照合で見つけた結果を閉じるとき
@@ -715,13 +716,15 @@ def op_run(a, r: Path, argv: list) -> int:
                     write(r / "lease.json", lease)
         if code:
             return out(res, code)
-        spec = json.dumps({"dir": str(a.dir), "token": a.token, "key": a.key, "cwd": str(a.frm or a.dir)})
+        spec = json.dumps({"dir": str(a.dir), "token": a.token, "key": a.key, "cwd": str(a.frm or a.dir), "lock_fd": fd})
         # 監督役がシグナルの扱いを登録するまでの間に止められないよう、塞いだまま起こす（監督役が登録してから外す）
         blocked = signal.pthread_sigmask(signal.SIG_BLOCK, STOP_SIGNALS)
+        errf = None
         try:
+            errf = open(r / "supervise.err", "ab")
             sup = subprocess.Popen([sys.executable, "-B", str(Path(__file__).resolve()), "_supervise", spec, "--", *argv],
                                    pass_fds=[fd], start_new_session=True, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                                   stderr=open(r / "supervise.err", "ab"))
+                                   stderr=errf)
         except OSError as e:  # 監督役を起こせなければ、コマンドも走っていない。そう記録して閉じる
             a.result = f"exit 127: 監督役を起動できない（コマンドは走っていない）: {e}"
             with locked(r):
@@ -729,11 +732,16 @@ def op_run(a, r: Path, argv: list) -> int:
             return out({"ok": False, "exit": 127, "op": res.get("op"), "reason": a.result}, 127)
         finally:
             signal.pthread_sigmask(signal.SIG_SETMASK, blocked)
+            if errf:
+                errf.close()
     finally:
         os.close(fd)  # ロックは監督役が持ち続ける
     # 監督役は 2 回目の fork の先で動く（この op run の子孫から外れる）。結果は、その標準出力の 1 行目に終了コード、2 行目に JSON
     lines = sup.communicate()[0].decode("utf-8", "replace").strip().splitlines()
-    output = tail(run_log(r, a.key))
+    try:
+        output = tail(run_log(r, a.key))
+    except OSError as e:
+        output = f"（出力を読めない: {e!r}）"
     sys.stderr.write(output + "\n" if output else "")
     if len(lines) < 2:
         return out({"ok": False, "reason": f"監督役が結果を返さずに終わった。{r / 'supervise.err'} を読み、op pending と外部の状態で照合する"}, 1)
@@ -755,31 +763,42 @@ def supervise(spec: dict, argv: list) -> int:
     def forward(sig, _frame):  # 監督役は止まらず、コマンドに伝えて終わりを待つ（止まるとロックが外れ、やり直しが通る）
         caught.append(sig)
         if p is not None and p.poll() is None:
-            p.send_signal(sig)
+            p.send_signal(sig)  # 起こす前のシグナルは、起こさないことで受ける
     for sig in STOP_SIGNALS:
         signal.signal(sig, forward)
     signal.pthread_sigmask(signal.SIG_UNBLOCK, STOP_SIGNALS)  # op run が塞いで起こした。コマンドには塞がずに渡す
-    try:
-        with open(run_log(r, spec["key"]), "wb") as logf:
-            # 出力はファイルへ。op run が止められても、パイプの相手を失って書けなくならない
-            p = subprocess.Popen(argv, cwd=spec["cwd"], stdin=subprocess.DEVNULL, stdout=logf, stderr=subprocess.STDOUT,
-                                 env={**os.environ, "GIT_TERMINAL_PROMPT": "0"})
-        if caught:
-            p.send_signal(caught[0])
-        while True:
-            try:
-                p.wait(timeout=1)
-                break
-            except subprocess.TimeoutExpired:
+    warned = set()
+
+    def warn(msg):  # 同じ文言は 1 回だけ（毎秒の延長の失敗で育たない）
+        if msg not in warned:
+            warned.add(msg)
+            sys.stderr.write(f"{spec['key']}: {msg}\n")
+            sys.stderr.flush()
+    if caught:  # 起こす前に止めろと言われた。外部操作を始めない
+        rc, output = 128 + caught[0], "起動の前に止められた（コマンドは走っていない）"
+    else:
+        try:
+            with open(run_log(r, spec["key"]), "wb") as logf:
+                # 出力はファイルへ。op run が止められても、パイプの相手を失って書けなくならない
+                p = subprocess.Popen(argv, cwd=spec["cwd"], stdin=subprocess.DEVNULL, stdout=logf, stderr=subprocess.STDOUT,
+                                     env={**os.environ, "GIT_TERMINAL_PROMPT": "0"})
+        except OSError as e:  # 起動できない（走っていない）のはここだけ
+            rc, output = 127, f"起動できない（コマンドは走っていない）: {e}"
+        else:
+            while True:
                 try:
-                    keep_lease(r, spec["token"])
-                except Exception as e:  # 延ばせなくても、監督役は止まらない
-                    sys.stderr.write(f"{spec['key']}: 担当の期限を延ばせない: {e!r}\n")
-        rc = p.returncode
-        output = tail(run_log(r, spec["key"]))
-    except OSError as e:
-        rc, output = 127, f"起動できない: {e}"
-        run_log(r, spec["key"]).write_text(output, encoding="utf-8")
+                    p.wait(timeout=1)
+                    break
+                except subprocess.TimeoutExpired:
+                    try:
+                        keep_lease(r, spec["token"])
+                    except (OSError, ValueError, KeyError, TypeError, AttributeError) as e:  # 延ばせなくても止まらない
+                        warn(f"担当の期限を延ばせない: {e!r}")
+            rc = p.returncode
+            try:
+                output = tail(run_log(r, spec["key"]))
+            except OSError as e:
+                output = f"（出力を読めない: {e!r}）"
     if rc < 0:  # シグナルで止まった。シェルと同じ 128+N にする
         rc = 128 - rc
     a = argparse.Namespace(key=spec["key"], token=spec["token"], dir=d, frm=None, verified=None, reviewed=None, what="",
@@ -787,9 +806,10 @@ def supervise(spec: dict, argv: list) -> int:
     try:
         with locked(r):
             res, code = op_step(a, r, read(r / "lease.json"), time.time(), "done")  # 期限が切れても、token が同じなら書く
-    except Exception as e:  # 書けなくても、結果は出す。begun は残るので照合で閉じる
-        sys.stderr.write(f"{spec['key']}: done を書けない: {e!r}\n")
+    except (OSError, ValueError, KeyError, TypeError, AttributeError) as e:  # 書けなくても結果は出す。begun は残るので照合で閉じる
+        warn(f"done を書けない: {e!r}")
         res, code = {"ok": False, "reason": f"done を書けない: {e!r}"}, 1
+    os.close(spec["lock_fd"])  # 記録を書いたら、すぐ次の担当・操作に明け渡す
     if code:  # 実行の間に引き継がれた・解放された。begun のまま残るので、次の担当が照合する
         res, rc = {**res, "exit": rc, "output": output[-2000:]}, code
     else:
@@ -883,6 +903,9 @@ def main() -> int:
             why = check_token(live, a.token)
             if why:
                 return out({"ok": False, "reason": why, "holder": live and live["holder"]}, 3)
+            held = run_holder(r) if a.cmd == "release" else None
+            if held:  # 手放すと、監督役が結果を記録できない
+                return out({"ok": False, "reason": f"op run の外部操作がまだ動いている: {held}。終わるのを待ってから手放す"}, 4)
             if a.cmd == "renew":
                 live["expires_at"] = now + a.lease * 60
                 write(r / "lease.json", live)
