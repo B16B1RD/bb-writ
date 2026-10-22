@@ -18,6 +18,7 @@ import re
 import shutil
 import signal
 import secrets
+import stat
 import subprocess
 import sys
 import tempfile
@@ -98,14 +99,18 @@ def secret_reads(cfg: Path) -> dict:
     return {"denyRead": [str(Path.home() / p) for p in SECRET_PLACES] + [str(cfg)], "allowRead": [str(Path.home() / ".config" / "git")]}
 
 
-def home_entries(skip: list[Path]) -> tuple[set[str], set[str]]:
-    """ホームの 2 段目までの (すべての場所, 空のファイルと空のディレクトリ)。skip とその下は見ない。
+def home_entries(skip: list[Path]) -> tuple[set[str], set[str], set[str]]:
+    """ホームの 2 段目までの (すべての場所, 空のファイルと空のディレクトリ, 読めない場所)。skip とその下は見ない。
+    読めない場所を黙って飛ばすと、子が権限を落とした場所の残りを見逃すので、呼ぶ側が前後で比べる。
     子の CLI の sandbox は、守る対象のうち無いものを空のファイルで作り、残すことがある（.bash_profile が残ると、ログインシェルが .bashrc を読まなくなった。2.1.302）。"""
-    every, empty = set(), set()
+    every, empty, unreadable = set(), set(), set()
 
     def scan(d: Path, depth: int):
         try:
             entries = list(os.scandir(d))
+        except PermissionError:  # 権限で読めない場所だけを数える（走査の途中で消えた一時ファイルは数えない）
+            unreadable.add(str(d))
+            return
         except OSError:
             return
         for e in entries:
@@ -123,11 +128,13 @@ def home_entries(skip: list[Path]) -> tuple[set[str], set[str]]:
                         scan(p, depth + 1)
                 elif e.is_file() and e.stat().st_size == 0:
                     empty.add(e.path)
+            except PermissionError:
+                unreadable.add(e.path)
             except OSError:
                 continue
 
     scan(Path.home(), 1)
-    return every, empty
+    return every, empty, unreadable
 
 
 def grok_ro_writable(home: Path) -> list[Path]:
@@ -136,9 +143,12 @@ def grok_ro_writable(home: Path) -> list[Path]:
     return sorted({p.resolve() for p in roots})
 
 
+GIT_TIMEOUT = float(os.environ.get("BB_WRIT_GIT_TIMEOUT") or 60)  # 子が管理ファイルを FIFO にすると、git はそれを開いたまま止まる（環境変数は試験だけが使う）
+
+
 def grok_git_dir(cwd: Path) -> tuple[Path | None, str | None]:
     """worktree の commit が書く Git の共通ディレクトリ。Git の外なら None。"""
-    g = subprocess.run(["git", "-C", str(cwd), "rev-parse", "--git-common-dir"], capture_output=True, text=True)
+    g = subprocess.run(["git", "-C", str(cwd), "rev-parse", "--git-common-dir"], capture_output=True, text=True, timeout=GIT_TIMEOUT)
     if g.returncode == 0:
         return (cwd / g.stdout.strip()).resolve(), None
     if "not a git repository" in g.stderr:
@@ -149,7 +159,7 @@ def grok_git_dir(cwd: Path) -> tuple[Path | None, str | None]:
 def worktree_dirs(cwd: Path) -> tuple[Path | None, Path | None, str | None]:
     """(その作業場所の管理ディレクトリ, 共通ディレクトリ, 理由)。Git の外なら (None, None, None)。"""
     g = subprocess.run(["git", "-C", str(cwd), "rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir"],
-                       capture_output=True, text=True)
+                       capture_output=True, text=True, timeout=GIT_TIMEOUT)
     if g.returncode == 0:
         own, common = g.stdout.split()
         return Path(own).resolve(), Path(common).resolve(), None
@@ -171,23 +181,82 @@ def commit_dirs(own: Path, common: Path) -> list[Path]:
     return dirs
 
 
+def read_child_file(f: Path, keep: int = 0):
+    """書く子が書き換えうるファイルを読む。FIFO・/dev/zero への symlink・巨大なファイルにされても止まらず尽きないよう、
+    symlink は行き先と、行き先の種類（通常のファイルならその中身のハッシュ）で表す。どれも止まらずに開いて種類を見て、
+    通常のファイルだけを決まった大きさずつハッシュする。
+    無ければ None。(表し, 先頭 keep バイト, 通常のファイルか) を返す。表しは中身全体の変化を映す。"""
+    try:
+        st = os.lstat(f)
+    except FileNotFoundError:
+        return None, b"", False
+    if stat.S_ISLNK(st.st_mode):  # 行き先と、行き先が通常のファイルならその中身の変化も差分にする（symlink の config は普段の使い方でありうる）
+        try:
+            fd = os.open(f, os.O_RDONLY | os.O_NONBLOCK)
+        except OSError as e:
+            return f"symlink: {os.readlink(f)!r}（開けない: {e.strerror}）", b"", False
+        try:
+            mode = os.fstat(fd).st_mode
+            return f"symlink: {os.readlink(f)!r} " + (digest_of(fd) if stat.S_ISREG(mode) else f"（{stat.filemode(mode)}）"), b"", False
+        finally:
+            os.close(fd)
+    fd = os.open(f, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)  # FIFO でも開くところで止まらない
+    try:
+        mode = os.fstat(fd).st_mode  # 開いたものの種類（lstat の後に置き換えられても）
+        if not stat.S_ISREG(mode):
+            return f"（通常のファイルでない: {stat.filemode(mode)}）", b"", False
+        head = []
+        return digest_of(fd, keep, head), b"".join(head), True
+    finally:
+        os.close(fd)
+
+
+def digest_of(fd: int, keep: int = 0, head: list | None = None) -> str:
+    """開いた通常のファイルを区切って読み、ハッシュを返す（大きくてもメモリは一定）。head に先頭 keep バイトを足す。"""
+    h, kept = hashlib.sha256(), 0
+    while chunk := os.read(fd, 1 << 20):
+        h.update(chunk)
+        if head is not None and kept < keep:
+            head.append(chunk[:keep - kept])
+            kept += len(head[-1])
+    return f"sha256: {h.hexdigest()}"
+
+
+def read_head(f: Path) -> str:
+    """作業場所の HEAD。小さければ中身（末尾の空白の変化も見るので整えない）、大きければ大きさとハッシュで表す。"""
+    digest, head, regular = read_child_file(f, 4097)
+    if digest is None:
+        return "（無い）"
+    if not regular:  # symlink・通常のファイルでない
+        return digest
+    return head.decode("utf-8", "surrogateescape") if len(head) <= 4096 else f"（4 KiB を超える。{digest}）"
+
+
 def git_snapshot(own: Path, common: Path, cwd: Path) -> dict:
     """書く子の前後で比べる Git の管理情報。子の書いた .git ファイルを読まないよう、共通ディレクトリを明示して読む。"""
+    for f in (common / "config", common / "packed-refs"):  # git が開いたまま止まる・尽きるもの（FIFO・デバイス）を渡さない
+        try:
+            mode = os.stat(f).st_mode  # git と同じく symlink はたどる（symlink の config は普段の使い方でありうる）
+        except FileNotFoundError:
+            continue
+        if not stat.S_ISREG(mode):
+            raise ValueError(f"{f} が通常のファイルでない: {stat.filemode(mode)}")
     refs = subprocess.run(["git", "--git-dir", str(common), "for-each-ref", "--format=%(refname) %(objectname)"],
-                          capture_output=True, text=True, check=True).stdout.splitlines()
+                          capture_output=True, check=True, timeout=GIT_TIMEOUT).stdout.decode("utf-8", "surrogateescape").split("\n")  # ref の名前は UTF-8 とは限らない（比べるだけ）
     files = [cwd / ".git", own / "commondir", own / "gitdir", own / "config.worktree", common / "config",
              common / "objects" / "info" / "alternates"]
     for d in (common / "hooks", common / "info"):
-        files += sorted(f for f in d.rglob("*") if f.is_file()) if d.is_dir() else []
+        files += sorted(f for f in d.rglob("*") if f.is_file() or f.is_symlink()) if d.is_dir() else []
     return {"refs": dict(r.split(" ", 1) for r in refs if " " in r),
-            "files": {str(f): hashlib.sha256(f.read_bytes()).hexdigest() if f.is_file() else None for f in files},
-            "head": (own / "HEAD").read_text(encoding="utf-8").strip()}
+            "files": {str(f): read_child_file(f)[0] for f in files},
+            "head": read_head(own / "HEAD")}
 
 
 def git_changes(before: dict, after: dict, common: Path) -> list[str]:
     """子が変えてよいのは、起動時に checkout していたブランチの ref と、その作業場所の HEAD・index だけ。
     ref は前後の値と戻すコマンドを添える（自動では戻さない。子の実行中に親や別のタスクが正当に動かしたかもしれない）。"""
-    mine = before["head"][len("ref: "):] if before["head"].startswith("ref: ") else None
+    head = before["head"].strip()
+    mine = head[len("ref: "):] if head.startswith("ref: ") else None
     out = []
     for r in sorted(set(before["refs"]) | set(after["refs"])):
         old, new = before["refs"].get(r), after["refs"].get(r)
@@ -196,7 +265,7 @@ def git_changes(before: dict, after: dict, common: Path) -> list[str]:
             out.append(f"{r}: {old or '(無し)'} → {new or '(削除)'}（戻すなら: {undo}）")
     out += sorted(f for f in set(before["files"]) | set(after["files"]) if before["files"].get(f) != after["files"].get(f))
     if after["head"] != before["head"]:
-        out.append(f"HEAD: {before['head']} → {after['head']}")
+        out.append(f"HEAD: {before['head']!r} → {after['head']!r}")
     return out
 
 
@@ -309,58 +378,97 @@ def command(a, prompt: str) -> tuple[list[str], dict, str | None]:
     return cmd, env, None
 
 
+def obj(v) -> dict:
+    """子の JSON の値。オブジェクトでなければ空として扱う（子の出力は外からの入力）。"""
+    return v if isinstance(v, dict) else {}
+
+
+def text_of(v) -> str:
+    return v if isinstance(v, str) else ""
+
+
+def json_lines(out: str) -> list:
+    """JSON Lines の行。区切りは \n だけ（CLI は文字列の中の U+2028・U+0085 をエスケープせずに出し、splitlines はそこでも割る）。"""
+    return out.split("\n")
+
+
 def parse_claude(out: str) -> dict:
     d = {}
-    for line in out.splitlines():
+    for line in json_lines(out):
         if line.startswith("{"):
             try:
-                d = json.loads(line)
-            except json.JSONDecodeError:
+                d = obj(json.loads(line))
+            except (ValueError, RecursionError):
                 continue
-    return {"text": d.get("result") or "", "session": d.get("session_id"), "is_error": d.get("is_error"),
+    return {"text": text_of(d.get("result")), "session": text_of(d.get("session_id")) or None, "is_error": d.get("is_error"),
             "errors": [str(d.get("result"))[:300]] if d.get("is_error") else [],
-            "model_effective": sorted((d.get("modelUsage") or {}).keys()) or None,
+            "model_effective": sorted(obj(d.get("modelUsage")).keys()) or None,
             "usage": {"cost_usd": d.get("total_cost_usd"), "turns": d.get("num_turns")}}
+
+
+def rollout_lines(f: Path, limit: int = 256 << 20):
+    """Codex の記録の行（\n だけで分ける。json_lines と同じ理由）。子が書きうるので、通常のファイルだけを、
+    1 行 1 MiB・全体 limit までで読む（巨大な行は割れて読めない行になり、飛ばされる）。全体の上限を越えたら、
+    途中までの実効値を使わないよう、読めない行を 1 つ返して終える。"""
+    try:
+        fd = os.open(f, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError:
+        return
+    if not stat.S_ISREG(os.fstat(fd).st_mode):  # fdopen はディレクトリを拒むので、その前に見る
+        os.close(fd)
+        return
+    with os.fdopen(fd, "rb") as fh:
+        read = 0
+        while line := fh.readline(1 << 20):
+            read += len(line)
+            if read > limit:
+                yield b'{"type": "turn_context", "payload": {}}'  # 上限を越えた。実効値は不明（各値を null にする）
+                return
+            yield line.rstrip(b"\n")
 
 
 def parse_codex(out: str) -> dict:
     text, session, usage, errors = "", None, None, []
-    for line in out.splitlines():
+    for line in json_lines(out):
         try:
-            e = json.loads(line)
-        except json.JSONDecodeError:
+            e = obj(json.loads(line))
+        except (ValueError, RecursionError):
             continue
-        item = e.get("item") or {}
+        item = obj(e.get("item"))
         if e.get("type") == "thread.started":
-            session = e.get("thread_id")
+            session = text_of(e.get("thread_id")) or None
         elif e.get("type") == "item.completed" and item.get("type") == "agent_message":
-            text = item.get("text") or ""
+            text = text_of(item.get("text"))
         elif e.get("type") == "turn.completed":
             usage = e.get("usage")
         elif e.get("type") in ("error", "turn.failed"):
-            errors.append(str(e.get("message") or (e.get("error") or {}).get("message") or "")[:300])
+            errors.append(str(e.get("message") or obj(e.get("error")).get("message") or "")[:300])
     eff = None
-    if session:  # 実効値は記録の turn_context から（メタデータだけを読む）
+    # 実効値は記録の turn_context から（メタデータだけを読む）。session は UUID の形のときだけ探す（glob に記号を渡さず、別の記録の末尾に当たらない）
+    if session and re.fullmatch(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}", session):
         for f in (config_dir() / "codex-home" / "sessions").glob(f"**/rollout-*-{session}.jsonl"):
-            for line in f.read_text(encoding="utf-8").splitlines():
-                e = json.loads(line)
+            for line in rollout_lines(f):
+                try:
+                    e = obj(json.loads(line.decode("utf-8")))
+                except (ValueError, RecursionError):  # 書きかけの行、UTF-8 として読めない行（置き換えた文字を実効値にしない）。取れなければ null
+                    continue
                 if e.get("type") == "turn_context":
-                    p = e.get("payload") or {}
-                    eff = {"model": p.get("model"), "effort": p.get("effort"), "sandbox": (p.get("sandbox_policy") or {}).get("type")}
+                    p = obj(e.get("payload"))
+                    eff = {"model": text_of(p.get("model")) or None, "effort": text_of(p.get("effort")) or None,
+                           "sandbox": text_of(obj(p.get("sandbox_policy")).get("type")) or None}
     return {"text": text, "session": session, "model_effective": eff, "usage": usage, "errors": errors}
 
 
 def parse_grok(out: str) -> dict:
     try:
         d = json.loads(out.strip() or "{}")
-    except json.JSONDecodeError:
+    except (ValueError, RecursionError):
         d = {}
-    if not isinstance(d, dict):
-        d = {}
+    d = obj(d)
     error = d.get("type") == "error"
-    return {"text": "" if error else d.get("text") or "", "session": d.get("sessionId"), "is_error": error,
+    return {"text": "" if error else text_of(d.get("text")), "session": text_of(d.get("sessionId")) or None, "is_error": error,
             "errors": [str(d.get("message") or "")[:300]] if error else [],
-            "model_effective": sorted((d.get("modelUsage") or {}).keys()) or None,  # effort は結果に出ない
+            "model_effective": sorted(obj(d.get("modelUsage")).keys()) or None,  # effort は結果に出ない
             "usage": {"cost_usd": d.get("total_cost_usd"), "turns": d.get("num_turns")}}
 
 
@@ -370,10 +478,14 @@ def check_report(text: str, cwd: Path) -> tuple[dict | None, list[str]]:
         return None, ["報告の JSON ブロックが無い"]
     try:  # 閉じのフェンスが無くても、最後のブロックの JSON を読む
         r, _ = json.JSONDecoder().raw_decode(text[i + len("```json"):].lstrip())
-    except json.JSONDecodeError as e:
-        return None, [f"報告の JSON が読めない: {e}"]
+    except (ValueError, RecursionError) as e:  # 深い入れ子も、読めない報告
+        return None, [f"報告の JSON が読めない: {e!r}"]
     if not isinstance(r, dict):
         return None, ["報告の JSON がオブジェクトでない"]
+    try:  # 記録（indent 付きは Python の encoder で、C の decoder より浅い深さで落ちる）に書けるか
+        json.dumps(r, indent=1)
+    except (RecursionError, ValueError) as e:
+        return None, [f"報告の JSON が深すぎて記録に書けない: {e!r}"]
     problems = []
     if not str(r.get("conclusion") or "").strip():
         problems.append("conclusion が空")
@@ -382,7 +494,7 @@ def check_report(text: str, cwd: Path) -> tuple[dict | None, list[str]]:
         problems.append("evidence が無い")
         ev = []
     for item in ev:
-        where = str((item or {}).get("where") or "").strip()
+        where = str(obj(item).get("where") or "").strip()
         if not where:
             problems.append("where の無い証拠がある")
             continue
@@ -390,9 +502,25 @@ def check_report(text: str, cwd: Path) -> tuple[dict | None, list[str]]:
         if m and not m.group(1).startswith("http"):
             path = m.group(1)
             p = Path(path) if Path(path).is_absolute() else cwd / path
-            if not p.is_file():
-                problems.append(f"証拠のファイルが無い: {path}")
+            try:
+                found = p.is_file()
+            except OSError:  # 長すぎる名前など（3.12 の is_file は ENAMETOOLONG を投げる）
+                found = False
+            if not found:
+                problems.append(f"証拠のファイルが無い: {path[:300]}")
     return r, problems
+
+
+def launcher_error(out_dir: Path) -> str:
+    """想定外の例外のトレースバックを out に残し、その場所を返す。"""
+    import traceback
+    f = out_dir / "launcher-error.log"
+    try:
+        with open(f, "a", encoding="utf-8", errors="backslashreplace") as h:
+            h.write(traceback.format_exc())
+        return str(f)
+    except OSError as e:
+        return f"残せない: {e!r}"
 
 
 def main() -> int:
@@ -414,36 +542,43 @@ def main() -> int:
     rec = {"host": a.host, "cwd": str(a.cwd), "model_requested": a.model, "effort_requested": a.effort,
            "write": a.write, "out": str(out_dir)}
 
-    snapshot = None
-    if a.write:
-        own, common, why = worktree_dirs(a.cwd)
-        if not why and own and own == common:
-            # 元の checkout（とその下・submodule）の記録の置き場にはタスクの一覧があり、Grok の子には .git 全体が渡る
-            why = "書く子は task start の作業場所（worktree）で起動する。元の checkout とその下では起動しない"
-        if not why and own:
-            snapshot = (own, common, git_snapshot(own, common, a.cwd))
-    if not (a.write and why):
-        cmd, env, why = command(a, a.prompt_file.read_text(encoding="utf-8") + CONTRACT)
-    if a.host == "grok" and not why:
-        rec["grok_home"] = env["GROK_HOME"]  # 再開（grok -r）はこの home で
+    snapshot, why, prep = None, None, None
+    try:  # 起動の前の準備も、前の子が残したもの（FIFO・権限・壊れた HEAD）に当たりうる。止まらず落ちずに記録して返す
+        if a.write:
+            own, common, why = worktree_dirs(a.cwd)
+            if not why and own and own == common:
+                # 元の checkout（とその下・submodule）の記録の置き場にはタスクの一覧があり、Grok の子には .git 全体が渡る
+                why = "書く子は task start の作業場所（worktree）で起動する。元の checkout とその下では起動しない"
+            if not why and own:
+                snapshot = (own, common, git_snapshot(own, common, a.cwd))
+        if not (a.write and why):
+            cmd, env, why = command(a, a.prompt_file.read_text(encoding="utf-8") + CONTRACT)
+        if a.host == "grok" and not why:
+            rec["grok_home"] = env["GROK_HOME"]  # 再開（grok -r）はこの home で
+        if not why:
+            # --restricted の Claude Code は、対象と（worktree なら）元の checkout に空の .claude/.cc-writes を作る（2.1.302）。
+            # 残すと task cleanup が未保存の変更とみなすので、この起動で新しくでき、空のままのものだけを後で消す
+            made = []
+            if a.host == "claude":
+                git_dir, _ = grok_git_dir(a.cwd)
+                for top in {a.cwd, *([git_dir.parent] if git_dir and git_dir.name == ".git" else [])}:
+                    made += [d for d in (top / ".claude", top / ".claude" / ".cc-writes") if not d.exists()]
+            # 子の前後でホームを比べ、新しくできて空のままの場所を残りとして報告する。黙って消さない（同じ時刻に別の道具が作ったものかもしれない）
+            skip = [config_dir(), state_dir(), out_dir, a.cwd, Path.home() / ".cache"]
+            home_before, _, unreadable_before = home_entries(skip)
+    except Exception as e:
+        prep = [f"起動の前の準備ができない: {e!r}"[:300], f"詳細: {launcher_error(out_dir)}"]
     t0 = time.time()
-    if why:
+    if prep:
+        rec.update(status="failed", problems=prep)
+    elif why:
         rec.update(status="unavailable", problems=[why])
     else:
-        # --restricted の Claude Code は、対象と（worktree なら）元の checkout に空の .claude/.cc-writes を作る（2.1.302）。
-        # 残すと task cleanup が未保存の変更とみなすので、この起動で新しくでき、空のままのものだけを後で消す
-        made = []
-        if a.host == "claude":
-            git_dir, _ = grok_git_dir(a.cwd)
-            for top in {a.cwd, *([git_dir.parent] if git_dir and git_dir.name == ".git" else [])}:
-                made += [d for d in (top / ".claude", top / ".claude" / ".cc-writes") if not d.exists()]
-        # 子の前後でホームを比べ、新しくできて空のままの場所を残りとして報告する。黙って消さない（同じ時刻に別の道具が作ったものかもしれない）
-        skip = [config_dir(), state_dir(), out_dir, a.cwd, Path.home() / ".cache"]
-        home_before, _ = home_entries(skip)
+        child = None
         try:
             # 子が残した背景のプロセスが、終了後の照合の後に書き換えないよう、プロセスグループごと止める
             child = subprocess.Popen(cmd, cwd=a.cwd, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                     text=True, start_new_session=True)
+                                     start_new_session=True)  # バイトで受ける（子の出力は UTF-8 とは限らない）
             try:
                 stdout, stderr = child.communicate(timeout=a.timeout)
             finally:
@@ -451,9 +586,9 @@ def main() -> int:
                     os.killpg(child.pid, signal.SIGKILL)
                 except ProcessLookupError:
                     pass
-            p = subprocess.CompletedProcess(cmd, child.wait(), stdout, stderr)
-            (out_dir / "stdout.jsonl").write_text(p.stdout, encoding="utf-8")
-            (out_dir / "stderr.log").write_text(p.stderr, encoding="utf-8")
+            (out_dir / "stdout.jsonl").write_bytes(stdout)  # 照合の材料は生のまま残す
+            (out_dir / "stderr.log").write_bytes(stderr)
+            p = subprocess.CompletedProcess(cmd, child.wait(), stdout.decode("utf-8", "replace"), stderr.decode("utf-8", "replace"))
             got = {"claude": parse_claude, "codex": parse_codex, "grok": parse_grok}[a.host](p.stdout)
             # 警告の行（sandbox の適用失敗、効かなかった引数）があれば、権限の約束どおりに動いたか分からないので結果を使わない
             unsafe = [l for l in p.stderr.splitlines() if a.host == "grok" and GROK_WARNING.search(l)][-5:]
@@ -468,32 +603,61 @@ def main() -> int:
             else:
                 report, problems = check_report(got["text"], a.cwd)
                 rec.update(status="invalid-report" if problems else "ok", report=report, problems=problems)
-                (out_dir / "report.md").write_text(got["text"], encoding="utf-8")
+                (out_dir / "report.md").write_text(got["text"], encoding="utf-8", errors="backslashreplace")  # 単独のサロゲート
         except subprocess.TimeoutExpired:
             rec.update(status="failed", problems=[f"{a.timeout} 秒で終わらなかった"])
+        except Exception as e:  # 想定外。委任の記録は書き、失敗として返す（トレースバックは out に残す）
+            what = "子を起動できない" if child is None else "子の結果を読めない"
+            rec.update(status="failed", problems=[f"{what}: {e!r}"[:300], f"詳細: {launcher_error(out_dir)}"])
         finally:
+            # 後処理は、子が書き換えた場所を触る。どの段が失敗しても、記録は書き、失敗として返す
             if snapshot:
-                # Claude Code の sandbox は、worktree の管理ディレクトリに保護のための空の config.worktree を作る（2.1.302）。
-                # 起動前に無く空のままのファイルは、中身が無く git の動きを変えないので、消してから照合する
-                for f, h in snapshot[2]["files"].items():
-                    if h is None and Path(f).is_file() and not Path(f).is_symlink() and Path(f).stat().st_size == 0:
-                        Path(f).unlink()
-                changed = git_changes(snapshot[2], git_snapshot(*snapshot[:2], a.cwd), snapshot[1])
+                try:
+                    # Claude Code の sandbox は、worktree の管理ディレクトリに保護のための空の config.worktree を作る（2.1.302）。
+                    # 起動前に無く空のままのファイルは、中身が無く git の動きを変えないので、消してから照合する
+                    for f, h in snapshot[2]["files"].items():
+                        if h is None and Path(f).is_file() and not Path(f).is_symlink() and Path(f).stat().st_size == 0:
+                            Path(f).unlink()
+                    changed = git_changes(snapshot[2], git_snapshot(*snapshot[:2], a.cwd), snapshot[1])
+                    headline = "子が、自分のブランチ以外の Git の管理情報を変えた。"
+                except Exception as e:  # 子が管理情報を壊したかもしれない。黙らず、照合できなかったことを返す
+                    changed = [f"Git の管理情報を読めない（子が壊したかもしれない）: {e!r}"[:300], f"詳細: {launcher_error(out_dir)}"]
+                    headline = "子の後に Git の管理情報を照合できない。"
                 if changed:
-                    rec.update(status="failed", problems=["子が、自分のブランチ以外の Git の管理情報を変えた。この作業場所で git を動かす前に、"
-                                                          "下の場所を確かめる（偽の設定が sandbox の外で動きうる）"] + changed[:20])
-            for d in reversed(made):
-                if d.is_dir() and not d.is_symlink() and not any(d.iterdir()):
-                    d.rmdir()
-            rec["home_residue"] = sorted(home_entries(skip)[1] - home_before)
+                    rec.update(status="failed", problems=[headline + "この作業場所で git を動かす前に、下の場所を確かめる（偽の設定が sandbox の外で動きうる）"]
+                               + changed[:20] + rec.get("problems", []))
+            try:
+                for d in reversed(made):
+                    if d.is_dir() and not d.is_symlink() and not any(d.iterdir()):
+                        d.rmdir()
+            except Exception as e:  # 子が権限を変えたなど。残ったものは task cleanup が未保存の変更とみなす
+                rec.update(status="failed", problems=[f"子の起動で作られた空の .claude を片付けられない: {e!r}"[:300],
+                                                      f"詳細: {launcher_error(out_dir)}"] + rec.get("problems", []))
+            try:
+                _, empty, unreadable = home_entries(skip)
+                rec["home_residue"] = sorted(empty - home_before)
+                if unreadable - unreadable_before:  # 子が権限を落とした場所は、残りを確かめられない
+                    raise PermissionError(f"読めない場所が増えた: {sorted(unreadable - unreadable_before)[:20]}")
+            except Exception as e:
+                rec.setdefault("home_residue", [])
+                rec.update(status="failed", problems=[f"ホームの残りを確かめられない: {e!r}"[:600], f"詳細: {launcher_error(out_dir)}"]
+                           + rec.get("problems", []))
             if rec["home_residue"]:
                 rec.update(status="failed", problems=["子の起動の後、ホームに空のファイル・ディレクトリが新しく残った。中身を確かめて消す"
                                                       "（空の ~/.bash_profile があると、ログインシェルが ~/.profile と ~/.bashrc を読まない）"]
                            + rec["home_residue"][:20] + rec.get("problems", []))
     rec["duration_s"] = round(time.time() - t0, 1)
-    (out_dir / "record.json").write_text(json.dumps(rec, ensure_ascii=False, indent=1), encoding="utf-8")
-    with open(state_dir() / "delegations.jsonl", "a", encoding="utf-8") as f:
-        f.write(json.dumps({k: v for k, v in rec.items() if k != "report"}, ensure_ascii=False) + "\n")
+    try:
+        body = json.dumps(rec, ensure_ascii=False, indent=1)
+    except (RecursionError, ValueError) as e:  # 子から来た値が深すぎる。外して、失敗として記録する
+        rec.update({k: None for k in ("report", "usage", "model_effective") if k in rec}, status="failed",
+                   problems=[f"子の結果を記録に書けない（外した）: {e!r}"[:300]] + rec.get("problems", []))
+        body = json.dumps(rec, ensure_ascii=False, indent=1)
+    # 子の文字列には単独のサロゲートがありうる（JS の JSON.stringify が出す）。書き出しで落ちず、\udXXX の形で残す
+    (out_dir / "record.json").write_text(body, encoding="utf-8", errors="backslashreplace")
+    with open(state_dir() / "delegations.jsonl", "a", encoding="utf-8") as f:  # 1 行 1 件。U+2028 なども生で入れない
+        f.write(json.dumps({k: v for k, v in rec.items() if k != "report"}) + "\n")
+    sys.stdout.reconfigure(errors="backslashreplace")
     print(json.dumps(rec, ensure_ascii=False))
     return 0 if rec["status"] == "ok" else 2
 
