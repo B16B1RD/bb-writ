@@ -33,11 +33,15 @@ FAKE_CODEX = textwrap.dedent(r'''
     raw = not os.environ.get("FAKE_RAW")  # 本物の CLI は U+2028 などをエスケープせずに出す
     if mode == "blockout":  # 結果の置き場をふさぐ（launcher の想定外の失敗を起こす）
         os.makedirs(os.path.join(os.environ["FAKE_OUT"], "stdout.jsonl"))
-    if mode == "shapes":  # 形の違う行（オブジェクトでない行、item が文字列）
+    if mode == "shapes":  # 形の違う行（オブジェクトでない行、item が文字列、深すぎる行）
         print("1"); print(json.dumps({"type": "item.completed", "item": "x"})); print(json.dumps({"type": "error", "error": "x"}))
-    print(json.dumps({"type": "thread.started", "thread_id": "t-1"}, ensure_ascii=raw))
+        print("[" * 100000 + "]" * 100000)
+    print(json.dumps({"type": "thread.started", "thread_id": "**" if mode == "glob-session" else "t-1"}, ensure_ascii=raw))
     print(json.dumps({"type": "item.completed", "item": {"type": "agent_message", "text": text}}, ensure_ascii=raw))
-    print(json.dumps({"type": "turn.completed", "usage": {"input_tokens": 5}}, ensure_ascii=raw))
+    if mode == "deep-usage":  # 読めるが、記録（indent 付き）には書けない深さ
+        print('{"type": "turn.completed", "usage": ' + "[" * 3000 + "]" * 3000 + "}")
+    else:
+        print(json.dumps({"type": "turn.completed", "usage": {"input_tokens": 5}}, ensure_ascii=raw))
     if mode == "badbytes":  # UTF-8 でないバイト（途中で切れた多バイト文字）
         sys.stdout.flush(); sys.stdout.buffer.write(b"\xe3\x81\n"); sys.stderr.buffer.write(b"warn \xff\n")
 ''').lstrip()
@@ -77,11 +81,19 @@ FAKE_CLAUDE = textwrap.dedent(r'''
         import subprocess
         common = subprocess.run(["git", "rev-parse", "--path-format=absolute", "--git-common-dir"], capture_output=True, text=True).stdout.strip()
         os.makedirs(os.path.join(os.path.dirname(common), ".claude", ".cc-writes"), exist_ok=True)
+    if mode == "bad-head":  # 自分の作業場所の HEAD を UTF-8 でない中身にする
+        gd = subprocess.run(["git", "rev-parse", "--path-format=absolute", "--git-dir"], capture_output=True, text=True).stdout.strip()
+        open(os.path.join(gd, "HEAD"), "wb").write(b"ref: refs/heads/bb-writ/\xff\n")
+    if mode == "shapes":  # 深すぎる行
+        print('{"a": ' + "[" * 100000 + "]" * 100000 + "}")
     result = os.environ["FAKE_TEXT"]
+    if mode == "deep":  # 読めるが、記録（indent 付き）には書けない深さの報告
+        result = result.replace('"conclusion": "', '"z": ' + "[" * 3000 + "]" * 3000 + ', "conclusion": "')
     if mode == "surrogate":  # JS の JSON.stringify は単独のサロゲートを \ud83d の形で出す。本文と、報告の JSON の中の両方
         result = "\ud83d" + result.replace('"conclusion": "', '"conclusion": "\\ud83d')
     print(json.dumps({"type": "result", "result": result, "session_id": "s-1", "is_error": False,
-                      "modelUsage": {"claude-sonnet-5-5": {}}, "total_cost_usd": 0.01, "num_turns": 2}, ensure_ascii=not os.environ.get("FAKE_RAW")))
+                      "modelUsage": "x" if mode == "shapes" else {"claude-sonnet-5-5": {}}, "total_cost_usd": 0.01, "num_turns": 2},
+                     ensure_ascii=not os.environ.get("FAKE_RAW")))
 ''').lstrip()
 
 FAKE_GROK = textwrap.dedent(r'''
@@ -104,7 +116,7 @@ FAKE_GROK = textwrap.dedent(r'''
         os.unlink(auth)
         open(auth, "w").write('{"refreshed": true}')
     print(json.dumps({"text": os.environ["FAKE_TEXT"], "stopReason": "end_turn", "sessionId": "g-1",
-                      "modelUsage": {"grok-4.7-build": {}}, "total_cost_usd": 0.02, "num_turns": 3}))
+                      "modelUsage": "x" if mode == "shapes" else {"grok-4.7-build": {}}, "total_cost_usd": 0.02, "num_turns": 3}))
 ''').lstrip()
 
 FAKE_DOTENVX = textwrap.dedent(r'''
@@ -166,7 +178,8 @@ class TestLaunch(unittest.TestCase):
         rollout.parent.mkdir(parents=True)
         rollout.write_bytes((json.dumps({"type": "event", "payload": {"output": "a\u2028b"}}, ensure_ascii=False) + "\n"
                              + '{"type": "tu\n1\n{"type": "turn_context", "payload": "x"}\n'  # 書きかけの行、形の違う行は飛ばして続ける
-                             + json.dumps({"type": "turn_context", "payload": {"model": "m", "effort": "e", "cwd": "a\u2028b"}}, ensure_ascii=False)
+                             + json.dumps({"type": "turn_context", "payload": {"model": "m", "effort": "e\u2028", "cwd": "a\u2028b",
+                                                                               "sandbox_policy": "x"}}, ensure_ascii=False)
                              + "\n").encode()
                             + b'{"type": "turn_context", "payload": {"model": "gpt-\xff"}}\n')  # UTF-8 として読めない行は使わない
         for host in ("codex", "claude"):
@@ -175,12 +188,14 @@ class TestLaunch(unittest.TestCase):
                 self.assertEqual((rc, rec["status"]), (0, "ok"), rec)  # 報告を失わない
                 if host == "codex":
                     self.assertEqual(rec["model_effective"]["model"], "m")  # 記録の行を割らずに読む
+                    self.assertNotIn("\u2028", (self.state / "delegations.jsonl").read_text())  # 委任の記録は 1 行 1 件のまま
 
     def test_unexpected_child_output_still_writes_the_record(self):
-        for host, mode in (("codex", "badbytes"), ("codex", "shapes"), ("claude", "surrogate")):
+        for host, mode in (("codex", "badbytes"), ("codex", "shapes"), ("codex", "glob-session"), ("claude", "surrogate"),
+                           ("claude", "shapes"), ("grok", "shapes")):
             with self.subTest(mode=mode):
                 before = (self.state / "delegations.jsonl").read_text().count("\n") if (self.state / "delegations.jsonl").exists() else 0
-                rc, rec = self.run_launch(host, mode=mode)
+                rc, rec = self.run_launch(host, mode=mode, cwd=self.grok_target() if host == "grok" else None)
                 self.assertEqual((rc, rec["status"]), (0, "ok"), rec)  # 報告は読め、落ちない
                 out = Path(rec["out"])
                 self.assertTrue((out / "record.json").is_file())
@@ -189,14 +204,41 @@ class TestLaunch(unittest.TestCase):
                 json.loads(lines[-2])
                 if mode == "badbytes":
                     self.assertTrue((out / "stdout.jsonl").read_bytes().endswith(b"\xe3\x81\n"))  # 生のまま残す
+                    self.assertIn(b"warn \xff\n", (out / "stderr.log").read_bytes())
                 if mode == "surrogate":
                     self.assertIn("\\ud83d", (out / "report.md").read_text())
+
+    def test_values_too_deep_to_record_still_write_the_record(self):
+        for host, mode, status, problem in (("claude", "deep", "invalid-report", "深すぎて記録に書けない"),
+                                            ("codex", "deep-usage", "failed", "子の結果を記録に書けない")):
+            with self.subTest(mode=mode):
+                rc, rec = self.run_launch(host, mode=mode)
+                self.assertEqual(rec["status"], status, rec)
+                self.assertTrue([p for p in rec["problems"] if problem in p], rec)
+                self.assertTrue((Path(rec["out"]) / "record.json").is_file())
+                self.assertIn(rec["out"], (self.state / "delegations.jsonl").read_text())
+
+    def test_a_write_child_breaking_its_head_is_reported(self):
+        _, wt = self.worktree("bad-head")
+        rc, rec = self.run_launch("claude", "bad-head", extra=["--write"], cwd=wt)
+        self.assertEqual(rec["status"], "failed", rec)
+        self.assertIn("git を動かす前に", rec["problems"][0])
+        self.assertTrue([p for p in rec["problems"] if p.startswith("HEAD: ")], rec)
+        self.assertIn(rec["out"], (self.state / "delegations.jsonl").read_text())
+
+    def test_a_child_that_cannot_be_started_is_recorded(self):
+        (self.bin / "codex").write_text("#!/nonexistent/interpreter\n")  # 実行できるが、起動できない
+        rc, rec = self.run_launch("codex")
+        self.assertEqual((rc, rec["status"]), (2, "failed"), rec)
+        self.assertIn("子を起動できない", rec["problems"][0])
+        self.assertIn(rec["out"], (self.state / "delegations.jsonl").read_text())
 
     def test_an_unexpected_failure_after_the_child_still_writes_the_record(self):
         out = Path(self.tmp.name) / "out-blocked"
         rc, rec = self.run_launch("codex", mode="blockout", extra=("--out", str(out)), env_extra={"FAKE_OUT": str(out)})
         self.assertEqual((rc, rec["status"]), (2, "failed"), rec)
         self.assertIn("子の結果を読めない", rec["problems"][0])
+        self.assertIn("Traceback", (out / "launcher-error.log").read_text())  # 詳細を残す
         self.assertTrue((out / "record.json").is_file())
         self.assertIn(str(out), (self.state / "delegations.jsonl").read_text())
 
@@ -208,6 +250,7 @@ class TestLaunch(unittest.TestCase):
             with self.subTest(problem=problem):
                 _, problems = launch.check_report(text, self.cwd)
                 self.assertTrue([p for p in problems if problem in p], problems)
+                self.assertTrue(all(len(p) <= 400 for p in problems))  # 子の長い文を、そのまま記録に積まない
 
     def test_git_snapshot_reads_refs_that_are_not_utf8(self):
         launch = load_launch()
