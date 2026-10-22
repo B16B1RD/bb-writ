@@ -1681,6 +1681,27 @@ class TestOpRun(unittest.TestCase):
         f.write_bytes(b"A\n" + b"\n" * (16 * 1024 * 1024 - 32 * 1024))  # A は 16 MiB の内側
         self.assertEqual(work.tail(f), "A")
 
+    @unittest.skipIf(os.geteuid() == 0, "root には権限の制限が効かない")
+    def test_output_that_cannot_be_removed_does_not_hold_the_lock_or_break_op_done(self):
+        tok = self.claim()
+        d = self.lease_file().parent
+        work = self.work_module()
+        log = work.run_log(d, "push:feat@1")
+        try:  # 出力を消せない（置き場に書けない）。ロックも消せないが、op_step の結果を保ち、次の操作は数えない
+            rc, r = self.run_op(tok, "push:feat@1", "--reviewed", self.head(), *self.script(f"import os; print('x'); os.chmod({str(d)!r}, 0o555)"))
+        finally:
+            os.chmod(d, 0o755)
+        self.assertEqual((rc, r["op"]["state"]), (0, "done"))
+        self.assertIn("出力のファイルを消せない", (d / "supervise.err").read_text())
+        os.chmod(d, 0o555)
+        try:  # 既に終わった操作の op done で、出力を消せなくても、4 と結果を返す
+            rc, r = self.w("op", "done", "--dir", str(self.wt), "--token", tok, "--key", "push:feat@1", "--result", "x")
+        finally:
+            os.chmod(d, 0o755)
+        self.assertEqual(rc, 4)
+        self.assertIn("消せない", r["warning"])
+        self.assertTrue(log.is_file())
+
     def test_a_supervisor_that_cannot_start_closes_the_op(self):
         tok = self.claim()
         (self.lease_file().parent / "supervise.err").mkdir()  # 監督役の stderr を開けない

@@ -690,7 +690,10 @@ def run_holder(r: Path):
                 if held is None and done.get(text, {}).get("state") != "done":  # done を書いた直後に監督役が殺されたロックは数えない
                     held = text or "?"  # 鍵はそのまま比べる（空白を落とすと、記録の鍵と食い違う）
                 continue
-            f.unlink(missing_ok=True)  # 外れたロック。記録されないままの出力は、照合に使えるよう残す（op done で閉じたら消す）
+            try:
+                f.unlink(missing_ok=True)  # 外れたロック。記録されないままの出力は、照合に使えるよう残す（op done で閉じたら消す）
+            except OSError:  # 片付けなので、消せなくても続ける（外れているので数えない）
+                pass
         finally:
             os.close(fd)
     return held
@@ -955,7 +958,10 @@ def supervise(spec: dict, argv: list) -> int:
         with locked(r):
             res, code = op_step(a, r, read(r / "lease.json"), time.time(), "done")  # 期限が切れても、token が同じなら書く
             if not code:  # 記録できた。全体の出力は残さない（秘密が出ていても、記録の末尾 20 行より長く残さない）
-                run_log(r, spec["key"]).unlink(missing_ok=True)
+                try:
+                    run_log(r, spec["key"]).unlink(missing_ok=True)
+                except OSError as e:  # 消せなくても、ロックは明け渡す
+                    warn(f"出力のファイルを消せない: {e!r}")
             finish(r, spec)
     except (OSError, ValueError, KeyError, TypeError, AttributeError) as e:  # 書けなくても結果は出す。begun は残るので照合で閉じる
         if code is not None:  # op_step は終えた（done を書けた、または担当を失った）。ロックのファイルを消せなかっただけ
@@ -1077,7 +1083,10 @@ def main() -> int:
             return out({"ok": False, "reason": f"この作業場所で、op run の外部操作がまだ動いている: {held}。終わるのを待つ（終われば監督役が done を書く）"}, 4)
         res, code = op_step(a, r, live, now, a.action)
         if a.action == "done" and (not code or (code == 4 and res.get("op", {}).get("state") == "done")):
-            run_log(r, a.key).unlink(missing_ok=True)  # 閉じた（または既に終わっていた）。残しておいた出力はもう要らない
+            try:
+                run_log(r, a.key).unlink(missing_ok=True)  # 閉じた（または既に終わっていた）。残しておいた出力はもう要らない
+            except OSError as e:
+                res = {**res, "warning": f"出力のファイルを消せない: {e!r}"}
         return out(res, code)
 
 
