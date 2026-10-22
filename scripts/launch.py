@@ -18,6 +18,7 @@ import re
 import shutil
 import signal
 import secrets
+import stat
 import subprocess
 import sys
 import tempfile
@@ -171,6 +172,21 @@ def commit_dirs(own: Path, common: Path) -> list[Path]:
     return dirs
 
 
+def read_head(f: Path) -> str:
+    """作業場所の HEAD。書く子が書き換えうる（FIFO・/dev/zero への symlink にすると、読みで止まるか尽きる）ので、
+    通常のファイルだけを、symlink をたどらず止まらずに読む。末尾の空白の変化も見るので整えない。"""
+    st = os.lstat(f)
+    if not stat.S_ISREG(st.st_mode):
+        return f"（通常のファイルでない: {stat.filemode(st.st_mode)}）"
+    fd = os.open(f, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):  # 確かめた後に置き換えられた
+            return "（通常のファイルでない）"
+        return os.read(fd, 1 << 16).decode("utf-8", "surrogateescape")
+    finally:
+        os.close(fd)
+
+
 def git_snapshot(own: Path, common: Path, cwd: Path) -> dict:
     """書く子の前後で比べる Git の管理情報。子の書いた .git ファイルを読まないよう、共通ディレクトリを明示して読む。"""
     refs = subprocess.run(["git", "--git-dir", str(common), "for-each-ref", "--format=%(refname) %(objectname)"],
@@ -181,13 +197,14 @@ def git_snapshot(own: Path, common: Path, cwd: Path) -> dict:
         files += sorted(f for f in d.rglob("*") if f.is_file()) if d.is_dir() else []
     return {"refs": dict(r.split(" ", 1) for r in refs if " " in r),
             "files": {str(f): hashlib.sha256(f.read_bytes()).hexdigest() if f.is_file() else None for f in files},
-            "head": (own / "HEAD").read_bytes().decode("utf-8", "surrogateescape").strip()}  # 書く子が書き換えうる
+            "head": read_head(own / "HEAD")}
 
 
 def git_changes(before: dict, after: dict, common: Path) -> list[str]:
     """子が変えてよいのは、起動時に checkout していたブランチの ref と、その作業場所の HEAD・index だけ。
     ref は前後の値と戻すコマンドを添える（自動では戻さない。子の実行中に親や別のタスクが正当に動かしたかもしれない）。"""
-    mine = before["head"][len("ref: "):] if before["head"].startswith("ref: ") else None
+    head = before["head"].strip()
+    mine = head[len("ref: "):] if head.startswith("ref: ") else None
     out = []
     for r in sorted(set(before["refs"]) | set(after["refs"])):
         old, new = before["refs"].get(r), after["refs"].get(r)
@@ -196,7 +213,7 @@ def git_changes(before: dict, after: dict, common: Path) -> list[str]:
             out.append(f"{r}: {old or '(無し)'} → {new or '(削除)'}（戻すなら: {undo}）")
     out += sorted(f for f in set(before["files"]) | set(after["files"]) if before["files"].get(f) != after["files"].get(f))
     if after["head"] != before["head"]:
-        out.append(f"HEAD: {before['head']} → {after['head']}")
+        out.append(f"HEAD: {before['head']!r} → {after['head']!r}")
     return out
 
 
@@ -354,7 +371,8 @@ def parse_codex(out: str) -> dict:
         elif e.get("type") in ("error", "turn.failed"):
             errors.append(str(e.get("message") or obj(e.get("error")).get("message") or "")[:300])
     eff = None
-    if session and re.fullmatch(r"[0-9A-Za-z_-]+", session):  # 実効値は記録の turn_context から（メタデータだけを読む）。glob に記号を渡さない
+    # 実効値は記録の turn_context から（メタデータだけを読む）。session は UUID の形のときだけ探す（glob に記号を渡さず、別の記録の末尾に当たらない）
+    if session and re.fullmatch(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}", session):
         for f in (config_dir() / "codex-home" / "sessions").glob(f"**/rollout-*-{session}.jsonl"):
             for line in f.read_bytes().split(b"\n"):  # 区切りは \n だけ（json_lines と同じ理由）
                 try:
@@ -394,7 +412,7 @@ def check_report(text: str, cwd: Path) -> tuple[dict | None, list[str]]:
     try:  # 記録（indent 付きは Python の encoder で、C の decoder より浅い深さで落ちる）に書けるか
         json.dumps(r, indent=1)
     except (RecursionError, ValueError) as e:
-        return None, [f"報告の JSON が深すぎて記録に書けない: {e!r}"[:300]]
+        return None, [f"報告の JSON が深すぎて記録に書けない: {e!r}"]
     problems = []
     if not str(r.get("conclusion") or "").strip():
         problems.append("conclusion が空")
@@ -513,23 +531,33 @@ def main() -> int:
             what = "子を起動できない" if child is None else "子の結果を読めない"
             rec.update(status="failed", problems=[f"{what}: {e!r}"[:300], f"詳細: {launcher_error(out_dir)}"])
         finally:
+            # 後処理は、子が書き換えた場所を触る。どの段が失敗しても、記録は書き、失敗として返す
             if snapshot:
-                # Claude Code の sandbox は、worktree の管理ディレクトリに保護のための空の config.worktree を作る（2.1.302）。
-                # 起動前に無く空のままのファイルは、中身が無く git の動きを変えないので、消してから照合する
-                for f, h in snapshot[2]["files"].items():
-                    if h is None and Path(f).is_file() and not Path(f).is_symlink() and Path(f).stat().st_size == 0:
-                        Path(f).unlink()
                 try:
+                    # Claude Code の sandbox は、worktree の管理ディレクトリに保護のための空の config.worktree を作る（2.1.302）。
+                    # 起動前に無く空のままのファイルは、中身が無く git の動きを変えないので、消してから照合する
+                    for f, h in snapshot[2]["files"].items():
+                        if h is None and Path(f).is_file() and not Path(f).is_symlink() and Path(f).stat().st_size == 0:
+                            Path(f).unlink()
                     changed = git_changes(snapshot[2], git_snapshot(*snapshot[:2], a.cwd), snapshot[1])
                 except Exception as e:  # 子が管理情報を壊したかもしれない。黙らず、照合できなかったことを返す
                     changed = [f"Git の管理情報を読めない（子が壊したかもしれない）: {e!r}"[:300], f"詳細: {launcher_error(out_dir)}"]
                 if changed:
                     rec.update(status="failed", problems=["子が、自分のブランチ以外の Git の管理情報を変えた。この作業場所で git を動かす前に、"
                                                           "下の場所を確かめる（偽の設定が sandbox の外で動きうる）"] + changed[:20])
-            for d in reversed(made):
-                if d.is_dir() and not d.is_symlink() and not any(d.iterdir()):
-                    d.rmdir()
-            rec["home_residue"] = sorted(home_entries(skip)[1] - home_before)
+            try:
+                for d in reversed(made):
+                    if d.is_dir() and not d.is_symlink() and not any(d.iterdir()):
+                        d.rmdir()
+            except Exception as e:  # 子が権限を変えたなど。残ったものは task cleanup が未保存の変更とみなす
+                rec.update(status="failed", problems=[f"子の起動で作られた空の .claude を片付けられない: {e!r}"[:300],
+                                                      f"詳細: {launcher_error(out_dir)}"] + rec.get("problems", []))
+            try:
+                rec["home_residue"] = sorted(home_entries(skip)[1] - home_before)
+            except Exception as e:
+                rec["home_residue"] = []
+                rec.update(status="failed", problems=[f"ホームの残りを確かめられない: {e!r}"[:300], f"詳細: {launcher_error(out_dir)}"]
+                           + rec.get("problems", []))
             if rec["home_residue"]:
                 rec.update(status="failed", problems=["子の起動の後、ホームに空のファイル・ディレクトリが新しく残った。中身を確かめて消す"
                                                       "（空の ~/.bash_profile があると、ログインシェルが ~/.profile と ~/.bashrc を読まない）"]

@@ -36,12 +36,14 @@ FAKE_CODEX = textwrap.dedent(r'''
     if mode == "shapes":  # 形の違う行（オブジェクトでない行、item が文字列、深すぎる行）
         print("1"); print(json.dumps({"type": "item.completed", "item": "x"})); print(json.dumps({"type": "error", "error": "x"}))
         print("[" * 100000 + "]" * 100000)
-    print(json.dumps({"type": "thread.started", "thread_id": "**" if mode == "glob-session" else "t-1"}, ensure_ascii=raw))
+    print(json.dumps({"type": "thread.started", "thread_id": "**" if mode == "glob-session" else os.environ.get("FAKE_THREAD", "t-1")}, ensure_ascii=raw))
     print(json.dumps({"type": "item.completed", "item": {"type": "agent_message", "text": text}}, ensure_ascii=raw))
     if mode == "deep-usage":  # 読めるが、記録（indent 付き）には書けない深さ
         print('{"type": "turn.completed", "usage": ' + "[" * 3000 + "]" * 3000 + "}")
     else:
         print(json.dumps({"type": "turn.completed", "usage": {"input_tokens": 5}}, ensure_ascii=raw))
+    if mode == "shapes":  # 文字列でない thread_id（後の行が勝つ）
+        print(json.dumps({"type": "thread.started", "thread_id": ["t"]}))
     if mode == "badbytes":  # UTF-8 でないバイト（途中で切れた多バイト文字）
         sys.stdout.flush(); sys.stdout.buffer.write(b"\xe3\x81\n"); sys.stderr.buffer.write(b"warn \xff\n")
 ''').lstrip()
@@ -81,9 +83,24 @@ FAKE_CLAUDE = textwrap.dedent(r'''
         import subprocess
         common = subprocess.run(["git", "rev-parse", "--path-format=absolute", "--git-common-dir"], capture_output=True, text=True).stdout.strip()
         os.makedirs(os.path.join(os.path.dirname(common), ".claude", ".cc-writes"), exist_ok=True)
+    if mode == "lock-claude-dir":  # 後片付けの場所を読めなくする
+        os.chmod(".claude", 0)
     if mode == "bad-head":  # 自分の作業場所の HEAD を UTF-8 でない中身にする
         gd = subprocess.run(["git", "rev-parse", "--path-format=absolute", "--git-dir"], capture_output=True, text=True).stdout.strip()
         open(os.path.join(gd, "HEAD"), "wb").write(b"ref: refs/heads/bb-writ/\xff\n")
+    if mode in ("head-fifo", "head-dir", "head-zero"):  # HEAD を通常のファイルでないものにする
+        gd = subprocess.run(["git", "rev-parse", "--path-format=absolute", "--git-dir"], capture_output=True, text=True).stdout.strip()
+        os.unlink(os.path.join(gd, "HEAD"))
+        {"head-fifo": os.mkfifo, "head-dir": os.mkdir, "head-zero": lambda p: os.symlink("/dev/zero", p)}[mode](os.path.join(gd, "HEAD"))
+    if mode == "lock-git-dir":  # 自分の管理ディレクトリを読めなくする（空の config.worktree を残して）
+        gd = subprocess.run(["git", "rev-parse", "--path-format=absolute", "--git-dir"], capture_output=True, text=True).stdout.strip()
+        open(os.path.join(gd, "config.worktree"), "w").close()
+        open(os.environ["FAKE_ARGS"] + ".gitdir", "w").write(gd)
+        os.chmod(gd, 0)
+    if mode == "head-space":  # HEAD の末尾だけを変える
+        gd = subprocess.run(["git", "rev-parse", "--path-format=absolute", "--git-dir"], capture_output=True, text=True).stdout.strip()
+        h = open(os.path.join(gd, "HEAD"), "rb").read()
+        open(os.path.join(gd, "HEAD"), "wb").write(h.rstrip(b"\n") + b" \n")
     if mode == "shapes":  # 深すぎる行
         print('{"a": ' + "[" * 100000 + "]" * 100000 + "}")
     result = os.environ["FAKE_TEXT"]
@@ -91,7 +108,7 @@ FAKE_CLAUDE = textwrap.dedent(r'''
         result = result.replace('"conclusion": "', '"z": ' + "[" * 3000 + "]" * 3000 + ', "conclusion": "')
     if mode == "surrogate":  # JS の JSON.stringify は単独のサロゲートを \ud83d の形で出す。本文と、報告の JSON の中の両方
         result = "\ud83d" + result.replace('"conclusion": "', '"conclusion": "\\ud83d')
-    print(json.dumps({"type": "result", "result": result, "session_id": "s-1", "is_error": False,
+    print(json.dumps({"type": "result", "result": result, "session_id": ["s"] if mode == "shapes" else "s-1", "is_error": False,
                       "modelUsage": "x" if mode == "shapes" else {"claude-sonnet-5-5": {}}, "total_cost_usd": 0.01, "num_turns": 2},
                      ensure_ascii=not os.environ.get("FAKE_RAW")))
 ''').lstrip()
@@ -116,7 +133,8 @@ FAKE_GROK = textwrap.dedent(r'''
         os.unlink(auth)
         open(auth, "w").write('{"refreshed": true}')
     print(json.dumps({"text": os.environ["FAKE_TEXT"], "stopReason": "end_turn", "sessionId": "g-1",
-                      "modelUsage": "x" if mode == "shapes" else {"grok-4.7-build": {}}, "total_cost_usd": 0.02, "num_turns": 3}))
+                      "modelUsage": "x" if mode == "shapes" else {"grok-4.7-build": {}}, "total_cost_usd": 0.02, "num_turns": 3,
+                      **({"sessionId": ["g"]} if mode == "shapes" else {})}))
 ''').lstrip()
 
 FAKE_DOTENVX = textwrap.dedent(r'''
@@ -163,7 +181,7 @@ class TestLaunch(unittest.TestCase):
                "FAKE_TEXT": GOOD.encode().decode("unicode_escape"), **(env_extra or {})}
         (self.bin / "fake_env.json").write_text(json.dumps({k: v for k, v in env.items() if k.startswith("FAKE_")}))
         p = subprocess.run([sys.executable, str(LAUNCH), "--host", host, "--cwd", str(cwd or self.cwd), "--prompt-file", str(self.prompt), *extra],
-                           env=env, capture_output=True, text=True)
+                           env=env, capture_output=True, text=True, timeout=120)  # launcher が止まったら、試験ごと止まらずに落とす
         return p.returncode, json.loads(p.stdout)
 
     def test_launch_leaves_no_bytecode_in_the_plugin(self):
@@ -174,20 +192,22 @@ class TestLaunch(unittest.TestCase):
     def test_reports_with_unicode_line_separators_are_read(self):
         text = GOOD.encode().decode("unicode_escape").replace('"conclusion": "', '"conclusion": "\u2028\x85\u2029')
         self.assertIn("\u2028", text)
-        rollout = self.cfg / "codex-home" / "sessions" / "2026" / "rollout-1-t-1.jsonl"
+        rollout = self.cfg / "codex-home" / "sessions" / "2026" / "rollout-1-0199aaaa-bbbb-7ccc-8ddd-eeeeffff0001.jsonl"
         rollout.parent.mkdir(parents=True)
         rollout.write_bytes((json.dumps({"type": "event", "payload": {"output": "a\u2028b"}}, ensure_ascii=False) + "\n"
                              + '{"type": "tu\n1\n{"type": "turn_context", "payload": "x"}\n'  # 書きかけの行、形の違う行は飛ばして続ける
+                             + json.dumps({"type": "turn_context", "payload": {"model": "m0", "sandbox_policy": "x"}}) + "\n"
                              + json.dumps({"type": "turn_context", "payload": {"model": "m", "effort": "e\u2028", "cwd": "a\u2028b",
-                                                                               "sandbox_policy": "x"}}, ensure_ascii=False)
+                                                                               "sandbox_policy": {"type": [1]}}}, ensure_ascii=False)
                              + "\n").encode()
                             + b'{"type": "turn_context", "payload": {"model": "gpt-\xff"}}\n')  # UTF-8 として読めない行は使わない
         for host in ("codex", "claude"):
             with self.subTest(host=host):
-                rc, rec = self.run_launch(host, env_extra={"FAKE_RAW": "1", "FAKE_TEXT": text})
+                rc, rec = self.run_launch(host, env_extra={"FAKE_RAW": "1", "FAKE_TEXT": text, "FAKE_THREAD": "0199aaaa-bbbb-7ccc-8ddd-eeeeffff0001"})
                 self.assertEqual((rc, rec["status"]), (0, "ok"), rec)  # 報告を失わない
                 if host == "codex":
                     self.assertEqual(rec["model_effective"]["model"], "m")  # 記録の行を割らずに読む
+                    self.assertIsNone(rec["model_effective"]["sandbox"])  # 文字列でない値は記録しない
                     self.assertNotIn("\u2028", (self.state / "delegations.jsonl").read_text())  # 委任の記録は 1 行 1 件のまま
 
     def test_unexpected_child_output_still_writes_the_record(self):
@@ -197,6 +217,8 @@ class TestLaunch(unittest.TestCase):
                 before = (self.state / "delegations.jsonl").read_text().count("\n") if (self.state / "delegations.jsonl").exists() else 0
                 rc, rec = self.run_launch(host, mode=mode, cwd=self.grok_target() if host == "grok" else None)
                 self.assertEqual((rc, rec["status"]), (0, "ok"), rec)  # 報告は読め、落ちない
+                if mode == "shapes":
+                    self.assertIsNone(rec["session"])  # 文字列でない session は記録しない
                 out = Path(rec["out"])
                 self.assertTrue((out / "record.json").is_file())
                 lines = (self.state / "delegations.jsonl").read_text().split("\n")
@@ -219,11 +241,30 @@ class TestLaunch(unittest.TestCase):
                 self.assertIn(rec["out"], (self.state / "delegations.jsonl").read_text())
 
     def test_a_write_child_breaking_its_head_is_reported(self):
-        _, wt = self.worktree("bad-head")
-        rc, rec = self.run_launch("claude", "bad-head", extra=["--write"], cwd=wt)
+        for mode in ("bad-head", "head-space", "head-fifo", "head-dir", "head-zero", "lock-git-dir"):
+            if mode == "lock-git-dir" and os.geteuid() == 0:
+                continue  # root は権限で止められない
+            with self.subTest(mode=mode):
+                _, wt = self.worktree(mode)
+                try:
+                    rc, rec = self.run_launch("claude", mode, extra=["--write"], cwd=wt)
+                finally:
+                    if mode == "lock-git-dir":
+                        os.chmod(Path(str(self.args_file) + ".gitdir").read_text(), 0o755)
+                self.assertEqual(rec["status"], "failed", rec)
+                self.assertIn("git を動かす前に", rec["problems"][0])
+                if mode == "lock-git-dir":  # 照合できなかったことを返す
+                    self.assertTrue([p for p in rec["problems"] if "Git の管理情報を読めない" in p], rec)
+                else:
+                    self.assertTrue([p for p in rec["problems"] if p.startswith("HEAD: ")], rec)
+                self.assertIn(rec["out"], (self.state / "delegations.jsonl").read_text())
+
+    @unittest.skipIf(os.geteuid() == 0, "root は権限で止められない")
+    def test_a_child_locking_its_leftovers_still_writes_the_record(self):
+        rc, rec = self.run_launch("claude", "lock-claude-dir")
+        os.chmod(self.cwd / ".claude", 0o755)
         self.assertEqual(rec["status"], "failed", rec)
-        self.assertIn("git を動かす前に", rec["problems"][0])
-        self.assertTrue([p for p in rec["problems"] if p.startswith("HEAD: ")], rec)
+        self.assertIn("片付けられない", rec["problems"][0])
         self.assertIn(rec["out"], (self.state / "delegations.jsonl").read_text())
 
     def test_a_child_that_cannot_be_started_is_recorded(self):
@@ -245,11 +286,14 @@ class TestLaunch(unittest.TestCase):
     def test_report_check_does_not_crash_on_odd_reports(self):
         launch = load_launch()
         for text, problem in (('```json\n{"conclusion": "c", "evidence": ["a.txt:1"]}', "where の無い証拠"),
-                              ("```json\n" + "[" * 100000 + "]" * 100000, "読めない"),
+                              ('```json\n{"a": ' + "[" * 100000 + "]" * 100000 + "}", "深"),
                               ('```json\n{"conclusion": "c", "evidence": [{"where": "' + "x" * 5000 + ':1"}]}', "証拠のファイルが無い")):
             with self.subTest(problem=problem):
-                _, problems = launch.check_report(text, self.cwd)
-                self.assertTrue([p for p in problems if problem in p], problems)
+                r, problems = launch.check_report(text, self.cwd)
+                if problem == "深":  # 読めないか、記録に書けない（Python の版で深さの上限が違う。3.15 の decoder は読める）
+                    self.assertTrue([p for p in problems if "読めない" in p or "深すぎて" in p] or r is not None and json.dumps(r, indent=1), problems)
+                else:
+                    self.assertTrue([p for p in problems if problem in p], problems)
                 self.assertTrue(all(len(p) <= 400 for p in problems))  # 子の長い文を、そのまま記録に積まない
 
     def test_git_snapshot_reads_refs_that_are_not_utf8(self):
@@ -259,14 +303,20 @@ class TestLaunch(unittest.TestCase):
         g = ["git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@example.invalid"]
         subprocess.run(g + ["init", "-q"], check=True)
         subprocess.run(g + ["commit", "-q", "--allow-empty", "-m", "x"], check=True)
-        subprocess.run([b"git", b"-C", os.fsencode(repo), b"update-ref", b"refs/heads/bb-writ/a\xff", b"HEAD"], check=True)
+        head = subprocess.run(g + ["rev-parse", "HEAD"], capture_output=True, text=True, check=True).stdout.strip()
+        # macOS（APFS）は UTF-8 でないファイル名を拒むので、ref のファイルでなく packed-refs に書く
+        (repo / ".git" / "packed-refs").write_bytes(b"# pack-refs with: peeled fully-peeled sorted \n" + head.encode() + b" refs/heads/bb-writ/a\xff\n")
         snap = launch.git_snapshot(repo / ".git", repo / ".git", repo)
         self.assertEqual(len(snap["refs"]), 2)
 
     def test_codex_ok_is_read_only_by_default(self):
+        other = self.cfg / "codex-home" / "sessions" / "rollout-1-zz-t-1.jsonl"  # 別の記録（名前の末尾が session と同じ）
+        other.parent.mkdir(parents=True)
+        other.write_text(json.dumps({"type": "turn_context", "payload": {"model": "other"}}) + "\n")
         rc, rec = self.run_launch("codex")
         self.assertEqual((rc, rec["status"]), (0, "ok"), rec)
         self.assertEqual(rec["session"], "t-1")
+        self.assertIsNone(rec["model_effective"])  # UUID の形でない session では探さない
         argv = json.loads(self.args_file.read_text())
         self.assertIn("read-only", argv)
         self.assertIn("報告の形", argv[-1])  # 報告の約束を子に渡す
