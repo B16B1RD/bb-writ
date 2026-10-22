@@ -198,7 +198,8 @@ class TestLaunch(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         t = Path(self.tmp.name)
         self.bin, self.cfg, self.state, self.cwd = t / "bin", t / "cfg", t / "state", t / "repo"
-        for d in (self.bin, self.cfg / "codex-home", self.cfg / "grok-auth", self.state, self.cwd):
+        self.home = t / "default-home"  # 実物のホームを見ると、同じ時刻に別の道具が作った空のファイル（~/.claude.json.lock）を残りと数えて落ちる
+        for d in (self.bin, self.cfg / "codex-home", self.cfg / "grok-auth", self.state, self.cwd, self.home):
             d.mkdir(parents=True)
         (self.cwd / "a.txt").write_text("x\n")
         (self.cfg / "codex-home" / "auth.json").write_text("{}")
@@ -216,7 +217,7 @@ class TestLaunch(unittest.TestCase):
         self.tmp.cleanup()
 
     def run_launch(self, host, mode="good", extra=(), path=None, cwd=None, env_extra=None):
-        env = {**os.environ, "PATH": path if path is not None else f"{self.bin}:/usr/bin:/bin", "BB_WRIT_CONFIG_DIR": str(self.cfg),
+        env = {**os.environ, "HOME": str(self.home), "PATH": path if path is not None else f"{self.bin}:/usr/bin:/bin", "BB_WRIT_CONFIG_DIR": str(self.cfg),
                "BB_WRIT_STATE_DIR": str(self.state), "FAKE_MODE": mode, "FAKE_ARGS": str(self.args_file),
                "FAKE_TEXT": GOOD.encode().decode("unicode_escape"), **(env_extra or {})}
         (self.bin / "fake_env.json").write_text(json.dumps({k: v for k, v in env.items() if k.startswith("FAKE_")}))
@@ -463,6 +464,9 @@ class TestLaunch(unittest.TestCase):
         self.assertTrue((self.state / "delegations.jsonl").read_text().strip())
 
     def test_claude_ok_and_read_only_uses_dont_ask(self):
+        for d in (".config/gh", ".config/git", ".ssh", ".claude", ".codex"):  # 守る置き場が実際にあるホーム
+            (self.home / d).mkdir(parents=True)
+            (self.home / d / "x").write_text("x")
         rc, rec = self.run_launch("claude")
         self.assertEqual((rc, rec["status"]), (0, "ok"), rec)
         self.assertEqual(rec["model_effective"], ["claude-sonnet-5-5"])
@@ -476,11 +480,11 @@ class TestLaunch(unittest.TestCase):
         sandbox = json.loads(argv[argv.index("--settings") + 1])["sandbox"]
         self.assertEqual((sandbox["enabled"], sandbox["allowUnsandboxedCommands"], sandbox["failIfUnavailable"]), (True, False, True))
         fs = sandbox["filesystem"]
-        self.assertTrue({str(self.cwd.resolve()), str(Path.home())} <= set(fs["denyWrite"]))
-        home = Path.home().resolve()
+        self.assertTrue({str(self.cwd.resolve()), str(self.home)} <= set(fs["denyWrite"]))
+        home = self.home.resolve()
         for secret in (home / ".config" / "gh", home / ".ssh", home / ".claude", home / ".codex", self.cfg):  # gh のトークン・鍵・各 CLI のログイン
             covered = any(str(secret) == r or str(secret).startswith(r + "/") for r in fs["denyRead"])
-            self.assertTrue(covered or not secret.exists(), secret)
+            self.assertTrue(covered, secret)
         self.assertFalse(any(str(home / ".config" / "git").startswith(r + "/") or str(home / ".config" / "git") == r for r in fs["denyRead"]))
         self.assertIn("AGENTS.md・CLAUDE.md", argv[argv.index("-p") + 1])  # 自動で読まれない対象の指示を、資料として読ませる
 
@@ -764,9 +768,9 @@ class TestLaunch(unittest.TestCase):
         self.assertNotIn("MY_SERVICE_TOKEN", passed)  # 読み取り専用の子の環境は最小限。プロキシは残す
         self.assertTrue({"PATH", "HOME", "HTTPS_PROXY", "CLAUDE_CONFIG_DIR"} <= passed)
         reads = sandbox["filesystem"]["denyRead"]
-        self.assertNotIn(str(Path.home()), reads)  # ホーム全体は拒否しない（bwrap が起動しない）
+        self.assertNotIn(str(self.home), reads)  # ホーム全体は拒否しない（bwrap が起動しない）
         self.assertFalse(any(str(wt).startswith(r + "/") or str(wt) == r for r in reads))  # 対象に至る経路は読める
-        self.assertIn(str(Path.home()), sandbox["filesystem"]["denyWrite"])
+        self.assertIn(str(self.home), sandbox["filesystem"]["denyWrite"])
         self.assertEqual(Path(str(self.args_file) + ".scrub").read_text(), "")  # SCRUB は許可の方針を default に戻すので使わない
 
     def grok_target(self):
