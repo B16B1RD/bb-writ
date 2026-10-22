@@ -15,7 +15,7 @@ Claude Code 同士・Codex 同士・混在を区別しない。作業の単位�
 
 ## 始める
 
-1. 元の checkout の規則、ローカルの指示、現在のブランチ・差分を読む。規則が worktree やタスクブランチを許さなければ勝手に書き換えない。元の checkout の未 commit 変更を stash・コピー・commit しない。依頼がその変更を対象とするなら、分離して見えなくなる変更を示して扱いを確認する。
+1. 元の checkout の規則、ローカルの指示、現在のブランチ・差分を読む。規則に届ける手順（push・Release）があり、依頼が届けるかに触れていなければ、ここで利用者への発言で 1 回聞いてから task start に進む（記録に書くだけにしない。答えを待たずに進めてよい）。規則が worktree やタスクブランチを許さなければ勝手に書き換えない。元の checkout の未 commit 変更を stash・コピー・commit しない。依頼がその変更を対象とするなら、分離して見えなくなる変更を示して扱いを確認する。
 2. 新規なら `python3 <work.py> task start --dir <元の checkout> --holder "<ホスト> <session>"`。基点は統合先の commit、統合先は呼び出し場所のブランチ（既存タスク内ならそのタスクの統合先）。依頼に別の基点・統合先があれば `--base <commit等> --target <ローカルブランチ>` を付ける。状態ディレクトリの `worktrees/` に作業場所が作られる。呼び出し場所に変更を書かず、返された `dir` で以後の読み書き・検査・commit を行う。
 3. `task`・`branch`・`base`・`target`・`token` を記録し、`note.path` に目的・制約・検証条件・session ID を追記する。`task start` は担当も取るので、同じ場所で重ねて `claim` しない。単位ごとに `renew --dir <dir> --token <token>`。拒否されたら書くのをやめる。
 4. worktree では gitignore した設定や依存が存在しないことがある。対象の通常の準備手順を使い、認証情報や利用者の設定を複製しない。DB・ポート・生成先なども共有するなら、対象の仕組みで分ける。commit 前に元の checkout と作業場所の実効 author・committer と Git 設定の適用元を確認する。違いを `--author` や一時の環境変数で隠さない。
