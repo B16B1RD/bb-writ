@@ -893,16 +893,6 @@ class TestOpRun(unittest.TestCase):
         self.assertEqual(self.w("op", "run", *args, *self.script(f"open({str(marker)!r}, 'w')"))[0], 3)  # 期限切れの担当は走らせない
         self.assertFalse(marker.exists())
 
-    def test_a_takeover_while_running_is_not_overwritten(self):
-        tok = self.claim()
-        take = ("import json, pathlib, subprocess, sys, time; f = pathlib.Path(" + repr(str(self.lease_file())) + "); "
-                "d = json.loads(f.read_text()); d['expires_at'] = time.time() - 1; f.write_text(json.dumps(d)); "
-                f"subprocess.run([sys.executable, {str(WORK)!r}, 'claim', '--dir', {str(self.wt)!r}, '--holder', 'B'], check=True, capture_output=True)")
-        rc, r = self.run_op(tok, "push:feat@1", "--reviewed", self.head(), *self.script(take))
-        self.assertEqual(rc, 3)
-        self.assertEqual(self.pending(), ["push:feat@1"])
-        self.assertNotIn(b'"state": "done"', self.ops_file())
-
     def test_a_file_that_cannot_be_executed_is_recorded_as_failed(self):
         tok = self.claim()
         f = Path(self.tmp.name) / "not-executable"
@@ -957,15 +947,28 @@ class TestOpRun(unittest.TestCase):
             self.assertGreater(v, 19 * 60, lefts)
         self.assertIn("claim 3", r["op"]["result"])
 
-    def test_the_lease_of_a_new_holder_is_not_extended(self):
+    def test_no_one_can_claim_while_the_command_runs_even_after_release_or_expiry(self):
         tok = self.claim()
-        body = ("import json, subprocess, sys, time; f = " + repr(str(self.lease_file())) + "; "
+        claim = f"subprocess.run([sys.executable, {str(WORK)!r}, 'claim', '--dir', {str(self.wt)!r}, '--holder', 'B'], capture_output=True).returncode"
+        body = ("import json, os, subprocess, sys, time; f = " + repr(str(self.lease_file())) + "; "
                 f"subprocess.run([sys.executable, {str(WORK)!r}, 'release', '--dir', {str(self.wt)!r}, '--token', {tok!r}], check=True, capture_output=True); "
-                f"subprocess.run([sys.executable, {str(WORK)!r}, 'claim', '--dir', {str(self.wt)!r}, '--holder', 'A', '--lease', '1'], check=True, capture_output=True); "
+                f"print('after release', {claim}); "
+                "open(f + '.t', 'w').write(json.dumps({'token': 'x', 'holder': 'X', 'expires_at': time.time() - 1})); os.replace(f + '.t', f); "
+                f"print('after expiry', {claim})")
+        rc, r = self.run_op(tok, "push:feat@1", "--reviewed", self.head(), *self.script(body))
+        self.assertIn("after release 3", r["output"] if "output" in r else r["op"]["result"])
+        self.assertIn("after expiry 3", r["output"] if "output" in r else r["op"]["result"])
+        self.assertEqual(self.w("claim", "--dir", str(self.wt), "--holder", "B")[0], 0)  # 終われば取れる
+
+    def test_the_lease_of_another_token_is_not_extended(self):
+        tok = self.claim()
+        body = ("import json, os, time; f = " + repr(str(self.lease_file())) + "; "
+                "open(f + '.t', 'w').write(json.dumps({'token': 'other', 'holder': 'A', 'expires_at': time.time() + 60})); os.replace(f + '.t', f); "
                 "time.sleep(2.5); print('left', int(json.load(open(f))['expires_at'] - time.time()))")
         rc, r = self.run_op(tok, "push:feat@1", "--reviewed", self.head(), *self.script(body))
-        self.assertEqual(rc, 3)
-        self.assertLess(int(r["output"].split("left ")[1].split()[0]), 60)  # 同じ名前で取り直した 1 分の担当も延ばさない
+        self.assertEqual(rc, 3)  # token が違うので done も書かない
+        self.assertLess(int(r["output"].split("left ")[1].split()[0]), 61)  # 同じ名前でも、別の token の担当は延ばさない
+        self.assertEqual(self.pending(), ["push:feat@1"])
 
     def test_stopping_op_run_leaves_the_command_and_its_record_to_the_supervisor(self):
         """op run が止められても、監督役がコマンドを最後まで動かし、担当を保ち、done を書く。その間、外部操作と手での done は止める。"""

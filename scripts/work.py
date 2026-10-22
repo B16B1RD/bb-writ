@@ -326,6 +326,10 @@ def claim_at(r, d, holder, minutes):
     if alive(old, now):
         return {'ok': False, 'reason': '生きた担当がいる。二重に書かない',
                 'holder': old['holder'], 'expires_in_s': round(old['expires_at'] - now)}, 3
+    held = run_holder(r)
+    if held:  # 担当の期限が切れても（手放されても）、op run のコマンドが動いている間は取らせない。取ると、終わっていない操作をやり直せる
+        return {'ok': False, 'reason': f'op run の外部操作がまだ動いている: {held}。終わるのを待つ（終われば監督役が done を書く）',
+                'holder': old and old.get('holder'), 'pending_ops': pending(r)}, 3
     new = {'token': secrets.token_hex(8), 'holder': holder, 'dir': str(d.resolve()),
            'claimed_at': now, 'expires_at': now + minutes * 60,
            'previous': old and {'holder': old.get('holder'), 'expired_at': old.get('expires_at')}}
@@ -656,6 +660,20 @@ def run_holder(r: Path):
         os.close(fd)
 
 
+def run_log(r: Path, key: str) -> Path:
+    """op run の出力の置き場。操作ごとに分ける（作業場所に 1 つだと、次の実行が前の出力を上書きする）。"""
+    return r / f"run-{hashlib.sha256(key.encode('utf-8')).hexdigest()[:16]}.log"
+
+
+def tail(f: Path, size: int = 64 * 1024) -> str:
+    """出力の末尾だけを読む（大きな出力を丸ごとメモリに載せない）。"""
+    if not f.is_file():
+        return ""
+    with open(f, "rb") as fh:
+        fh.seek(max(0, f.stat().st_size - size))
+        return fh.read().decode("utf-8", "replace").strip()
+
+
 def keep_lease(r: Path, token: str):
     """コマンドが動いている間、担当の期限を 20 分先に保つ。引き継がれていれば触らない。
     期限が切れていても、token が同じ（誰も取っていない）なら延ばす。コマンドはまだ動いているので。"""
@@ -698,13 +716,15 @@ def op_run(a, r: Path, argv: list) -> int:
             sup = subprocess.Popen([sys.executable, "-B", str(Path(__file__).resolve()), "_supervise", spec, "--", *argv],
                                    pass_fds=[fd], start_new_session=True, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                                    stderr=subprocess.DEVNULL)
-        except OSError as e:  # 監督役を起こせなければ、コマンドも走っていない。begun は残るので照合で閉じる
-            return out({"ok": False, "reason": f"監督役を起動できない: {e}"}, 1)
+        except OSError as e:  # 監督役を起こせなければ、コマンドも走っていない。そう記録して閉じる
+            a.result = f"exit 127: 監督役を起動できない（コマンドは走っていない）: {e}"
+            with locked(r):
+                res, _ = op_step(a, r, read(r / "lease.json"), time.time(), "done")
+            return out({"ok": False, "exit": 127, "op": res.get("op"), "reason": a.result}, 127)
     finally:
         os.close(fd)  # ロックは監督役が持ち続ける
     result = sup.communicate()[0].decode("utf-8", "replace").strip()
-    log = r / "run.log"
-    output = log.read_bytes().decode("utf-8", "replace").strip() if log.is_file() else ""
+    output = tail(run_log(r, a.key))
     sys.stderr.write(output + "\n" if output else "")
     if not result:
         return out({"ok": False, "reason": f"監督役が結果を返さずに終わった（{sup.returncode}）。op pending と外部の状態で照合する"}, 1)
@@ -718,7 +738,7 @@ def supervise(spec: dict, argv: list) -> int:
     d = Path(spec["dir"])
     r = root(d)
     try:
-        with open(r / "run.log", "wb") as logf:
+        with open(run_log(r, spec["key"]), "wb") as logf:
             # 出力はファイルへ。op run が止められても、パイプの相手を失って書けなくならない
             p = subprocess.Popen(argv, cwd=spec["cwd"], stdin=subprocess.DEVNULL, stdout=logf, stderr=subprocess.STDOUT,
                                  env={**os.environ, "GIT_TERMINAL_PROMPT": "0"})
@@ -732,10 +752,10 @@ def supervise(spec: dict, argv: list) -> int:
                 except (OSError, ValueError, KeyError) as e:  # 延ばせなくても、監督役は止まらない（止まるとロックが外れ、やり直しが通る）
                     sys.stderr.write(f"担当の期限を延ばせない: {e}\n")
         rc = p.returncode
-        output = (r / "run.log").read_bytes().decode("utf-8", "replace").strip()
+        output = tail(run_log(r, spec["key"]))
     except OSError as e:
         rc, output = 127, f"起動できない: {e}"
-        (r / "run.log").write_text(output, encoding="utf-8")
+        run_log(r, spec["key"]).write_text(output, encoding="utf-8")
     if rc < 0:  # シグナルで止まった。シェルと同じ 128+N にする
         rc = 128 - rc
     a = argparse.Namespace(key=spec["key"], token=spec["token"], dir=d, frm=None, verified=None, reviewed=None, what="",
