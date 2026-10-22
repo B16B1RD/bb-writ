@@ -1990,12 +1990,21 @@ class TestOpRun(unittest.TestCase):
         self.assertIn("1 行目", r["reason"])
         self.assertFalse(lease.exists())  # 誰も token を受け取らない担当を残さない
 
+    def test_output_with_unicode_line_separators_keeps_the_record_readable(self):
+        tok = self.claim()
+        rc, r = self.run_op(tok, "push:feat@1", "--reviewed", self.head(), *self.script("print('a\\u2028b\\x85c\\x1cd\\u2029e')"))
+        self.assertEqual(rc, 0, r)
+        rc, p = self.w("op", "pending", "--dir", str(self.wt))
+        self.assertEqual((rc, p["pending_ops"]), (0, []))  # 記録を 1 行として読める
+        rc, r = self.run_op(tok, "push:feat@2", "--reviewed", self.head(), *self.script("print(1)"))
+        self.assertEqual(rc, 0, r)  # 次の操作も通る
+
     def test_a_malformed_record_is_refused_with_the_line_number(self):
         tok = self.claim()
         f = self.lease_file().parent / "ops.jsonl"
-        for bad in ('{"key": ["a"], "state": "begun"}', '{"key": 1}', "[1]", "{broken"):
+        for bad in ('{"key": ["a"], "state": "begun"}', '{"key": 1}', "[1]", "{broken", '{"key": "push:\xff"}'):
             with self.subTest(bad=bad):
-                f.write_text(json.dumps({"key": "push:ok", "state": "begun"}) + "\n" + bad + "\n")
+                f.write_bytes((json.dumps({"key": "push:ok", "state": "begun"}) + "\n" + bad + "\n").encode("latin-1"))
                 for args in (["op", "done", "--token", tok, "--key", "push:ok", "--result", "x"], ["op", "pending"], ["status"]):
                     rc, r = self.w(*args[:1 + (args[0] == "op")], "--dir", str(self.wt), *args[1 + (args[0] == "op"):])
                     self.assertEqual(rc, 1, args)  # 黙って続けず、直す場所を返す（トレースバックでなく JSON）

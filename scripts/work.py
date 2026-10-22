@@ -113,10 +113,13 @@ def ops(r: Path) -> dict:
     out = {}
     f = r / "ops.jsonl"
     if f.is_file():
-        for n, line in enumerate(f.read_text(encoding="utf-8").splitlines(), 1):
+        # 区切りは書いた側の \n だけ。splitlines は出力に入った U+2028・U+0085 などでも行を割る
+        for n, line in enumerate(f.read_bytes().split(b"\n"), 1):
+            if not line.strip():  # 末尾の改行の後と、空の行
+                continue
             try:
-                e = json.loads(line)
-            except (ValueError, RecursionError) as x:
+                e = json.loads(line.decode("utf-8"))
+            except (ValueError, RecursionError) as x:  # UnicodeDecodeError も ValueError
                 raise RecordError(f"記録 {f} の {n} 行目を読めない: {x}") from None
             if not isinstance(e, dict) or not isinstance(e.get("key"), str):
                 raise RecordError(f"記録 {f} の {n} 行目の形が違う（key が文字列のオブジェクトでない）")
@@ -870,7 +873,7 @@ def op_run(a, r: Path, argv: list) -> int:
         if fd is not None:
             os.close(fd)  # ロックは監督役が持ち続ける
     # 監督役は 2 回目の fork の先で動く（この op run の子孫から外れる）。結果は、その標準出力の 1 行目に終了コード、2 行目に JSON
-    lines = sup.communicate()[0].decode("utf-8", "replace").strip().splitlines()
+    lines = sup.communicate()[0].decode("utf-8", "replace").strip().split("\n")  # 結果の JSON は 1 行。splitlines は出力の U+2028 などでも割る
     with shown:  # 監督役が消していても、開いたファイルから読める
         try:
             show(shown)
