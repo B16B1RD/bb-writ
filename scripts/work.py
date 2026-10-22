@@ -674,6 +674,12 @@ def run_holder(r: Path):
     数えない。そのファイルは、持つ者が居なくなったときに消す（それまで、呼ぶたびに記録を読む）。"""
     held = None
     done = None
+
+    def records():  # 読めなければ空（鍵を引けず、done とも分からないので、動いているとみなす側に倒れる）
+        try:
+            return ops(r)
+        except (OSError, ValueError, KeyError, TypeError, AttributeError):
+            return {}
     for f in sorted(r.glob("running*.lock")):  # running.lock は 0.11.12 の名前
         fd = None
         try:
@@ -686,7 +692,7 @@ def run_holder(r: Path):
         except OSError:  # 開けない・読めない。動いているかが分からないので、動いているとみなす。鍵は始めた記録から引く
             if fd is not None:
                 os.close(fd)
-            done = ops(r) if done is None else done
+            done = records() if done is None else done
             if any(e.get("state") == "done" and run_lock(r, k).name == f.name for k, e in done.items()):
                 continue  # 鍵がもう done（flock で見るときと同じく数えない）
             keys = [k for k, e in done.items() if e.get("state") == "begun" and run_lock(r, k).name == f.name]
@@ -696,7 +702,7 @@ def run_holder(r: Path):
             try:
                 fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
             except BlockingIOError:
-                done = ops(r) if done is None else done
+                done = records() if done is None else done
                 if held is None and done.get(text, {}).get("state") != "done":  # done を書いた直後に監督役が殺されたロックは数えない
                     held = text or "?"  # 鍵はそのまま比べる（空白を落とすと、記録の鍵と食い違う）
                 continue

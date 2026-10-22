@@ -1878,6 +1878,24 @@ class TestOpRun(unittest.TestCase):
         self.assertIsNone(r["exit"])  # 終了コードをこしらえない
         self.assertEqual(p.returncode, 1)
 
+    def test_locks_still_count_when_the_record_cannot_be_read(self):
+        work, r = self.work_module(), Path(self.tmp.name) / "rh4"
+        r.mkdir()
+        (r / "ops.jsonl").write_text("{broken\n")
+        (r / "running-u.lock").mkdir()  # 読めないロック。鍵も引けない
+        self.assertEqual(work.run_holder(r), "running-u.lock")
+        (r / "running-u.lock").rmdir()
+        lock = r / "running-h.lock"
+        lock.write_text("push:h")
+        holder = subprocess.Popen([sys.executable, "-c", f"import fcntl, os, time; fd = os.open({str(lock)!r}, os.O_RDWR); "
+                                   "fcntl.flock(fd, fcntl.LOCK_EX); print('held', flush=True); time.sleep(60)"], stdout=subprocess.PIPE, text=True)
+        try:
+            self.assertEqual(holder.stdout.readline().strip(), "held")
+            self.assertEqual(work.run_holder(r), "push:h")  # 取られているロックは、記録が読めなくても数える
+        finally:
+            holder.kill()
+            holder.wait()
+
     def test_a_supervisor_that_cannot_start_closes_the_op(self):
         tok = self.claim()
         (self.lease_file().parent / "supervise.err").mkdir()  # 監督役の stderr を開けない
