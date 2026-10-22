@@ -11,7 +11,7 @@
                      シェルを通さず標準入力なしで実行し、終了コードと出力（stderr を含む）の末尾 20 行を done に記録する。
                      終了コードはコマンドのもの（シグナルは 128+N、起動できなければ 127、begin の拒否は begin の値、実行中に引き継がれたら 3）。
                      実行と記録は別のセッションの監督役が行い、コマンドが終わるまで担当を保つ。op run が止められても続く。
-                     監督役が動いている間は、その作業場所の op run と、外部操作の op begin・手での op done を拒否する（4）
+                     監督役が動いている間は、その作業場所の op run と外部操作の op begin、動いている操作の op done を拒否する（4）
   work.py op done    --dir <作業場所> --token <t> --key <操作の鍵> --result <結果>    → 照合で見つけた結果を閉じるとき
   work.py op pending --dir <作業場所>                                 → 始めたが終わりの記録が無い操作（監督役が動かしている操作は running: true）
   work.py check   --dir <作業場所> --from <外部操作を実行する場所>      → そこで使われる GitHub のアカウントと、push 先の origin への書き込み権限（書けない・アカウントが分からなければ 5）
@@ -61,6 +61,7 @@ import json
 import os
 import re
 import secrets
+import signal
 import subprocess
 import sys
 import time
@@ -660,6 +661,9 @@ def run_holder(r: Path):
         os.close(fd)
 
 
+STOP_SIGNALS = {signal.SIGTERM, signal.SIGHUP, signal.SIGINT}  # 監督役が受けてコマンドに伝えるシグナル
+
+
 def run_log(r: Path, key: str) -> Path:
     """op run の出力の置き場。操作ごとに分ける（作業場所に 1 つだと、次の実行が前の出力を上書きする）。"""
     return r / f"run-{hashlib.sha256(key.encode('utf-8')).hexdigest()[:16]}.log"
@@ -712,36 +716,56 @@ def op_run(a, r: Path, argv: list) -> int:
         if code:
             return out(res, code)
         spec = json.dumps({"dir": str(a.dir), "token": a.token, "key": a.key, "cwd": str(a.frm or a.dir)})
+        # 監督役がシグナルの扱いを登録するまでの間に止められないよう、塞いだまま起こす（監督役が登録してから外す）
+        blocked = signal.pthread_sigmask(signal.SIG_BLOCK, STOP_SIGNALS)
         try:
             sup = subprocess.Popen([sys.executable, "-B", str(Path(__file__).resolve()), "_supervise", spec, "--", *argv],
                                    pass_fds=[fd], start_new_session=True, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                                   stderr=subprocess.DEVNULL)
+                                   stderr=open(r / "supervise.err", "ab"))
         except OSError as e:  # 監督役を起こせなければ、コマンドも走っていない。そう記録して閉じる
             a.result = f"exit 127: 監督役を起動できない（コマンドは走っていない）: {e}"
             with locked(r):
                 res, _ = op_step(a, r, read(r / "lease.json"), time.time(), "done")
             return out({"ok": False, "exit": 127, "op": res.get("op"), "reason": a.result}, 127)
+        finally:
+            signal.pthread_sigmask(signal.SIG_SETMASK, blocked)
     finally:
         os.close(fd)  # ロックは監督役が持ち続ける
-    result = sup.communicate()[0].decode("utf-8", "replace").strip()
+    # 監督役は 2 回目の fork の先で動く（この op run の子孫から外れる）。結果は、その標準出力の 1 行目に終了コード、2 行目に JSON
+    lines = sup.communicate()[0].decode("utf-8", "replace").strip().splitlines()
     output = tail(run_log(r, a.key))
     sys.stderr.write(output + "\n" if output else "")
-    if not result:
-        return out({"ok": False, "reason": f"監督役が結果を返さずに終わった（{sup.returncode}）。op pending と外部の状態で照合する"}, 1)
-    print(result)
-    return sup.returncode
+    if len(lines) < 2:
+        return out({"ok": False, "reason": f"監督役が結果を返さずに終わった。{r / 'supervise.err'} を読み、op pending と外部の状態で照合する"}, 1)
+    run_log(r, a.key).unlink(missing_ok=True)  # 出力を読んだら消す（秘密が出ていても、記録の末尾 20 行より長く残さない）
+    print(lines[1])
+    return int(lines[0])
 
 
 def supervise(spec: dict, argv: list) -> int:
     """op run の監督役。コマンドを実行し、動いている間は担当を保ち、終わったら done を書いて結果を出す。
     running.lock は op run から受け継いだ fd で持ち、この監督役が終わると外れる（コマンドには渡さない）。"""
+    if os.fork():  # 2 回目の fork。op run の子孫の木から外れ、木ごと止めるハーネスに巻き込まれない
+        os._exit(0)
     d = Path(spec["dir"])
     r = root(d)
+    p = None
+    caught = []
+
+    def forward(sig, _frame):  # 監督役は止まらず、コマンドに伝えて終わりを待つ（止まるとロックが外れ、やり直しが通る）
+        caught.append(sig)
+        if p is not None and p.poll() is None:
+            p.send_signal(sig)
+    for sig in STOP_SIGNALS:
+        signal.signal(sig, forward)
+    signal.pthread_sigmask(signal.SIG_UNBLOCK, STOP_SIGNALS)  # op run が塞いで起こした。コマンドには塞がずに渡す
     try:
         with open(run_log(r, spec["key"]), "wb") as logf:
             # 出力はファイルへ。op run が止められても、パイプの相手を失って書けなくならない
             p = subprocess.Popen(argv, cwd=spec["cwd"], stdin=subprocess.DEVNULL, stdout=logf, stderr=subprocess.STDOUT,
                                  env={**os.environ, "GIT_TERMINAL_PROMPT": "0"})
+        if caught:
+            p.send_signal(caught[0])
         while True:
             try:
                 p.wait(timeout=1)
@@ -749,8 +773,8 @@ def supervise(spec: dict, argv: list) -> int:
             except subprocess.TimeoutExpired:
                 try:
                     keep_lease(r, spec["token"])
-                except (OSError, ValueError, KeyError) as e:  # 延ばせなくても、監督役は止まらない（止まるとロックが外れ、やり直しが通る）
-                    sys.stderr.write(f"担当の期限を延ばせない: {e}\n")
+                except Exception as e:  # 延ばせなくても、監督役は止まらない
+                    sys.stderr.write(f"{spec['key']}: 担当の期限を延ばせない: {e!r}\n")
         rc = p.returncode
         output = tail(run_log(r, spec["key"]))
     except OSError as e:
@@ -760,17 +784,22 @@ def supervise(spec: dict, argv: list) -> int:
         rc = 128 - rc
     a = argparse.Namespace(key=spec["key"], token=spec["token"], dir=d, frm=None, verified=None, reviewed=None, what="",
                            result=f"exit {rc}: " + "\n".join(output.splitlines()[-20:]))
-    with locked(r):
-        res, code = op_step(a, r, read(r / "lease.json"), time.time(), "done")  # 期限が切れても、token が同じなら書く
+    try:
+        with locked(r):
+            res, code = op_step(a, r, read(r / "lease.json"), time.time(), "done")  # 期限が切れても、token が同じなら書く
+    except Exception as e:  # 書けなくても、結果は出す。begun は残るので照合で閉じる
+        sys.stderr.write(f"{spec['key']}: done を書けない: {e!r}\n")
+        res, code = {"ok": False, "reason": f"done を書けない: {e!r}"}, 1
     if code:  # 実行の間に引き継がれた・解放された。begun のまま残るので、次の担当が照合する
         res, rc = {**res, "exit": rc, "output": output[-2000:]}, code
     else:
         res = {"ok": rc == 0, "exit": rc, "op": res["op"]}
     try:
+        print(rc if rc < 256 else 1)
         print(json.dumps(res, ensure_ascii=False), flush=True)
     except BrokenPipeError:  # op run が止められた。結果は記録にある
         pass
-    return rc if rc < 256 else 1
+    return 0
 
 
 def main() -> int:
@@ -862,7 +891,7 @@ def main() -> int:
         if a.action == "pending":
             return out({"pending_ops": pending(r)})
         held = run_holder(r)
-        if held and (a.action == "done" or (a.key or "").split(":")[0] in EXTERNAL):
+        if held and ((a.action == "done" and a.key == held) or (a.action == "begin" and (a.key or "").split(":")[0] in EXTERNAL)):
             return out({"ok": False, "reason": f"この作業場所で、op run の外部操作がまだ動いている: {held}。終わるのを待つ（終われば監督役が done を書く）"}, 4)
         return out(*op_step(a, r, live, now, a.action))
 

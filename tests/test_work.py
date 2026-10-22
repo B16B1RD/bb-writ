@@ -717,8 +717,7 @@ class TestReviewedCommit(unittest.TestCase):
 class TestOpRun(unittest.TestCase):
     """op run は、begin の照合を通ったときだけコマンドを実行し、実際の終了コードと出力を done に記録する。
     begin とコマンドを手で並べると、begin が拒否されてもコマンドが走り、結果に打った文字（ok）が残った。"""
-    setUp, tearDown, w, claim, head = (TestAccountCheck.setUp, TestAccountCheck.tearDown, TestAccountCheck.w,
-                                       TestAccountCheck.claim, TestVerifiedCommit.head)
+    setUp, w, claim, head = (TestAccountCheck.setUp, TestAccountCheck.w, TestAccountCheck.claim, TestVerifiedCommit.head)
     pending = TestReviewedCommit.pending
 
     def run_op(self, tok, key, *flags_and_cmd):
@@ -976,7 +975,7 @@ class TestOpRun(unittest.TestCase):
             with self.subTest(sig=sig):
                 tok = self.claim() if sig == signal.SIGKILL else self.tok2
                 key = f"push:feat@{int(sig)}"
-                go, done = Path(self.tmp.name) / f"go{int(sig)}", Path(self.tmp.name) / f"done{int(sig)}"
+                go, done = self.go_file(f"go{int(sig)}"), Path(self.tmp.name) / f"done{int(sig)}"
                 body = (f"import os, sys, time\nwhile not os.path.exists({str(go)!r}): time.sleep(0.05)\n"
                         "for i in range(2000): print('late output', i)\n"  # 親が止められた後に書く（パイプなら SIGPIPE で死んだ）
                         f"open({str(done)!r}, 'w')\nsys.exit(3)")
@@ -1025,6 +1024,162 @@ class TestOpRun(unittest.TestCase):
         rc, r = self.run_op(tok, "push:feat@1", "--reviewed", self.head(), *self.script(body))
         self.assertEqual(rc, 0, r)
         self.assertIn("restored", r["op"]["result"])
+
+    def tearDown(self):
+        for go in getattr(self, "gos", []):  # 途中で落ちても、待っているコマンドを残さない（一時ディレクトリを消す前に）
+            go.exists() or go.write_text("")
+        if getattr(self, "gos", []):
+            time.sleep(0.5)
+        self.tmp.cleanup()
+
+    def go_file(self, name="go"):
+        go = Path(self.tmp.name) / name
+        self.gos = [*getattr(self, "gos", []), go]
+        return go
+
+    def start_run(self, tok, key, body, **kw):
+        return subprocess.Popen([sys.executable, str(WORK), "op", "run", "--dir", str(self.wt), "--token", tok, "--key", key,
+                                 "--what", "x", "--from", str(self.repo), "--verified", self.head(), "--reviewed", self.head(),
+                                 *self.script(body)], env=self.env, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, **kw)
+
+    def wait_running(self, key):
+        for _ in range(200):
+            if [o for o in self.w("op", "pending", "--dir", str(self.wt))[1]["pending_ops"] if o["key"] == key and o.get("running")]:
+                return
+            time.sleep(0.05)
+        self.fail(f"{key} が running にならない")
+
+    def wait_done(self, key):
+        for _ in range(200):
+            recs = [json.loads(x) for x in self.ops_file().decode().splitlines() if json.loads(x)["key"] == key]
+            if recs and recs[-1]["state"] == "done":
+                return recs[-1]
+            time.sleep(0.05)
+        self.fail(f"{key} の done が書かれない")
+
+    def test_a_signal_to_the_supervisor_is_passed_on_and_the_result_still_recorded(self):
+        """監督役が止められると、ロックが外れて、動いているコマンドの横で次の op run が通った。"""
+        tok = self.claim()
+        go = self.go_file()
+        body = (f"import os, signal, sys, time\nsignal.signal(signal.SIGTERM, lambda *_: print('got TERM', flush=True))\n"
+                f"while not os.path.exists({str(go)!r}): time.sleep(0.05)\nsys.exit(5)")
+        p = self.start_run(tok, "push:feat@1", body)
+        self.wait_running("push:feat@1")
+        for _ in range(200):  # running はロックを取った時点で付く。コマンドが起きるまで待つ
+            procs = subprocess.run(["ps", "-eo", "pid=,args="], capture_output=True, text=True).stdout.splitlines()
+            cmd = [x.split()[0] for x in procs if str(go) in x and "_supervise" not in x and " op run " not in x]
+            if cmd:
+                break
+            time.sleep(0.05)
+        self.assertEqual(len(cmd), 1, cmd)
+        time.sleep(0.3)  # コマンドが SIGTERM の扱いを登録するまで
+        sup = subprocess.run(["ps", "-o", "ppid=", "-p", cmd[0]], capture_output=True, text=True).stdout.strip()  # コマンドの親が監督役
+        self.assertIn("_supervise", subprocess.run(["ps", "-o", "args=", "-p", sup], capture_output=True, text=True).stdout)
+        os.kill(int(sup), signal.SIGTERM)
+        time.sleep(0.5)
+        self.assertEqual(self.run_op(tok, "pr:feat", "--reviewed", "none:x", *self.script("print(1)"))[0], 4)  # まだ動いている
+        go.write_text("")
+        rec = self.wait_done("push:feat@1")
+        self.assertIn("exit 5", rec["result"])
+        self.assertIn("got TERM", rec["result"])  # コマンドに伝えた
+        self.assertEqual(p.wait(), 5)
+
+    def test_killing_the_whole_group_of_op_run_leaves_the_supervisor(self):
+        tok = self.claim()
+        go = self.go_file()
+        p = self.start_run(tok, "push:feat@1", f"import os, sys, time\nwhile not os.path.exists({str(go)!r}): time.sleep(0.05)\nsys.exit(4)",
+                           start_new_session=True)
+        self.wait_running("push:feat@1")
+        os.killpg(p.pid, signal.SIGKILL)  # 子孫ごと止めるハーネスの代わり
+        p.wait()
+        time.sleep(0.3)
+        self.wait_running("push:feat@1")
+        go.write_text("")
+        self.assertIn("exit 4", self.wait_done("push:feat@1")["result"])
+
+    def test_killing_op_run_and_all_its_descendants_leaves_the_supervisor(self):
+        """ハーネスは、止めるプロセスの子孫を木ごと止める（Claude Code の TaskStop で、監督役もコマンドも死んだ）。"""
+        tok = self.claim()
+        go = self.go_file()
+        p = self.start_run(tok, "push:feat@1", f"import os, sys, time\nwhile not os.path.exists({str(go)!r}): time.sleep(0.05)\nsys.exit(6)")
+        self.wait_running("push:feat@1")
+        time.sleep(0.5)
+        rows = [x.split() for x in subprocess.run(["ps", "-eo", "pid=,ppid="], capture_output=True, text=True).stdout.splitlines()]
+        tree, grew = {p.pid}, True
+        while grew:
+            more = {int(pid) for pid, ppid in rows if int(ppid) in tree}
+            grew = bool(more - tree)
+            tree |= more
+        for pid in tree:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        p.wait()
+        time.sleep(0.3)
+        self.wait_running("push:feat@1")
+        go.write_text("")
+        self.assertIn("exit 6", self.wait_done("push:feat@1")["result"])
+
+    def test_a_broken_lease_file_at_the_end_is_reported_not_silent(self):
+        tok = self.claim()
+        good = self.lease_file().read_text()
+        body = "import os; f = " + repr(str(self.lease_file())) + "; open(f + '.t', 'w').write('{'); os.replace(f + '.t', f)"
+        rc, r = self.run_op(tok, "push:feat@1", "--reviewed", self.head(), *self.script(body))
+        self.assertEqual(rc, 1)
+        self.assertIn("done を書けない", r["reason"])  # 監督役は黙って落ちず、理由を返す
+        self.lease_file().write_text(good)
+        self.assertEqual(self.pending(), ["push:feat@1"])  # 照合で閉じる
+
+    def test_only_external_begin_and_the_running_done_are_refused_while_running(self):
+        tok = self.claim()
+        self.assertEqual(self.w("op", "begin", "--dir", str(self.wt), "--token", tok, "--key", "local:old", "--what", "x")[0], 0)
+        go = self.go_file()
+        p = self.start_run(tok, "push:feat@1", f"import os, time\nwhile not os.path.exists({str(go)!r}): time.sleep(0.05)")
+        self.wait_running("push:feat@1")
+        got = {o["key"]: o.get("running") for o in self.w("op", "pending", "--dir", str(self.wt))[1]["pending_ops"]}
+        self.assertEqual(got, {"local:old": None, "push:feat@1": True})  # 動いているのは監督役の操作だけ
+        self.assertEqual(self.w("op", "begin", "--dir", str(self.wt), "--token", tok, "--key", "local:y", "--what", "x")[0], 0)
+        self.assertEqual(self.w("op", "done", "--dir", str(self.wt), "--token", tok, "--key", "push:feat@1", "--result", "x")[0], 4)
+        self.assertEqual(self.w("op", "done", "--dir", str(self.wt), "--token", tok, "--key", "local:old", "--result", "x")[0], 0)  # 動いていない操作は閉じてよい
+        go.write_text("")
+        p.wait()
+
+    def test_the_lock_is_not_left_with_a_process_the_command_leaves_behind(self):
+        tok = self.claim()
+        rc, r = self.run_op(tok, "push:feat@1", "--reviewed", self.head(),
+                            *self.script("import subprocess; subprocess.Popen(['sleep', '5'], start_new_session=True)"))
+        self.assertEqual(rc, 0)
+        self.assertEqual(self.run_op(tok, "pr:feat", "--reviewed", "none:x", *self.script("print(1)"))[0], 0)  # git の gc のような残りに縛られない
+
+    def test_the_lease_is_extended_below_19_minutes_and_after_expiry_with_the_same_token(self):
+        tok = self.claim()
+        for shift in (5 * 60, -1):
+            with self.subTest(shift=shift):
+                body = ("import json, os, time; f = " + repr(str(self.lease_file())) + "; d = json.load(open(f)); "
+                        f"d['expires_at'] = time.time() + {shift}; open(f + '.t', 'w').write(json.dumps(d)); os.replace(f + '.t', f); "
+                        "time.sleep(2.5); print('left', int(json.load(open(f))['expires_at'] - time.time()))")
+                rc, r = self.run_op(tok, f"push:feat@{shift}", "--reviewed", self.head(), *self.script(body))
+                self.assertEqual(rc, 0, r)
+                self.assertGreater(int(r["op"]["result"].split("left ")[1].split()[0]), 20 * 60 - 5)  # 20 分先まで
+
+    def test_the_output_file_is_removed_after_it_is_read(self):
+        tok = self.claim()
+        self.run_op(tok, "push:feat@1", "--reviewed", self.head(), *self.script("print('first secret')"))
+        self.assertEqual(list(self.lease_file().parent.glob("run-*.log")), [])
+        p = self.raw("op", "run", "--dir", str(self.wt), "--token", tok, "--key", "push:feat@2", "--what", "x", "--from", str(self.repo),
+                     "--verified", self.head(), "--reviewed", self.head(), *self.script("print('second')"))
+        self.assertIn("second", p.stderr)
+        self.assertNotIn("first secret", p.stderr)
+
+    def test_a_lease_file_without_an_expiry_does_not_stop_the_supervisor(self):
+        tok = self.claim()
+        body = ("import json, os, time; f = " + repr(str(self.lease_file())) + "; good = open(f).read(); d = json.loads(good); "
+                "d['expires_at'] = None; open(f + '.t', 'w').write(json.dumps(d)); os.replace(f + '.t', f); time.sleep(2.5); "
+                "open(f + '.t', 'w').write(good); os.replace(f + '.t', f)")
+        rc, r = self.run_op(tok, "push:feat@1", "--reviewed", self.head(), *self.script(body))
+        self.assertEqual(rc, 0, r)
+        self.assertIn("担当の期限を延ばせない", (self.lease_file().parent / "supervise.err").read_text(encoding="utf-8"))
 
     def test_command_runs_in_the_from_directory_without_a_shell(self):
         tok = self.claim()
