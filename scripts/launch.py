@@ -108,8 +108,10 @@ def home_entries(skip: list[Path]) -> tuple[set[str], set[str], set[str]]:
     def scan(d: Path, depth: int):
         try:
             entries = list(os.scandir(d))
-        except OSError:
+        except PermissionError:  # 権限で読めない場所だけを数える（走査の途中で消えた一時ファイルは数えない）
             unreadable.add(str(d))
+            return
+        except OSError:
             return
         for e in entries:
             p = Path(e.path)
@@ -126,8 +128,10 @@ def home_entries(skip: list[Path]) -> tuple[set[str], set[str], set[str]]:
                         scan(p, depth + 1)
                 elif e.is_file() and e.stat().st_size == 0:
                     empty.add(e.path)
-            except OSError:
+            except PermissionError:
                 unreadable.add(e.path)
+            except OSError:
+                continue
 
     scan(Path.home(), 1)
     return every, empty, unreadable
@@ -167,7 +171,7 @@ def worktree_dirs(cwd: Path) -> tuple[Path | None, Path | None, str | None]:
 def commit_dirs(own: Path, common: Path) -> list[Path]:
     """worktree で commit するのに要る、共通ディレクトリの中の場所。共通ディレクトリの直下・config・hooks と、
     他のブランチの ref は渡さない（書けると、利用者が次に git を動かしたとき sandbox の外でコードが動くか、統合先が動く）。"""
-    head = read_head(own / "HEAD").strip()  # 前の子が残した FIFO などで止まらない
+    head = (own / "HEAD").read_text(encoding="utf-8").strip()
     dirs = [common / "objects", own]
     if head.startswith("ref: refs/heads/"):
         parent = Path(head[len("ref: "):]).parent  # refs/heads/bb-writ。ref の lock はこのディレクトリに作られる
@@ -180,43 +184,46 @@ def commit_dirs(own: Path, common: Path) -> list[Path]:
 def read_child_file(f: Path, keep: int = 0):
     """書く子が書き換えうるファイルを読む。FIFO・/dev/zero への symlink・巨大なファイルにされても止まらず尽きないよう、
     symlink はたどらず（中身でなく行き先で表す）、通常のファイルだけを止まらずに開き、決まった大きさずつハッシュする。
-    無ければ None。(表し, 先頭 keep バイト) を返す。表しは中身全体の変化を映す。"""
+    無ければ None。(表し, 先頭 keep バイト, 通常のファイルか) を返す。表しは中身全体の変化を映す。"""
     try:
         st = os.lstat(f)
     except FileNotFoundError:
-        return None, b""
+        return None, b"", False
     if stat.S_ISLNK(st.st_mode):  # 行き先の変化も差分にする
-        return f"symlink: {os.readlink(f)!r}", b""
+        return f"symlink: {os.readlink(f)!r}", b"", False
     fd = os.open(f, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)  # FIFO でも開くところで止まらない
     try:
         mode = os.fstat(fd).st_mode  # 開いたものの種類（lstat の後に置き換えられても）
         if not stat.S_ISREG(mode):
-            return f"（通常のファイルでない: {stat.filemode(mode)}）", b""
+            return f"（通常のファイルでない: {stat.filemode(mode)}）", b"", False
         h, head = hashlib.sha256(), b""
         while chunk := os.read(fd, 1 << 20):
             h.update(chunk)
             head += chunk[:max(0, keep - len(head))]
-        return h.hexdigest(), head
+        return f"sha256: {h.hexdigest()}", head, True
     finally:
         os.close(fd)
 
 
 def read_head(f: Path) -> str:
     """作業場所の HEAD。小さければ中身（末尾の空白の変化も見るので整えない）、大きければ大きさとハッシュで表す。"""
-    digest, head = read_child_file(f, 4097)
+    digest, head, regular = read_child_file(f, 4097)
     if digest is None:
         return "（無い）"
-    if len(digest) != 64:  # symlink・通常のファイルでない
+    if not regular:  # symlink・通常のファイルでない
         return digest
-    return head.decode("utf-8", "surrogateescape") if len(head) <= 4096 else f"（4 KiB を超える。sha256 {digest}）"
+    return head.decode("utf-8", "surrogateescape") if len(head) <= 4096 else f"（4 KiB を超える。{digest}）"
 
 
 def git_snapshot(own: Path, common: Path, cwd: Path) -> dict:
     """書く子の前後で比べる Git の管理情報。子の書いた .git ファイルを読まないよう、共通ディレクトリを明示して読む。"""
-    for f in (common / "config", common / "packed-refs"):  # git が開いたまま止まる・尽きるものを渡さない
-        digest = read_child_file(f)[0]
-        if digest is not None and len(digest) != 64:
-            raise ValueError(f"{f} が通常のファイルでない: {digest}")
+    for f in (common / "config", common / "packed-refs"):  # git が開いたまま止まる・尽きるもの（FIFO・デバイス）を渡さない
+        try:
+            mode = os.stat(f).st_mode  # git と同じく symlink はたどる（symlink の config は普段の使い方でありうる）
+        except FileNotFoundError:
+            continue
+        if not stat.S_ISREG(mode):
+            raise ValueError(f"{f} が通常のファイルでない: {stat.filemode(mode)}")
     refs = subprocess.run(["git", "--git-dir", str(common), "for-each-ref", "--format=%(refname) %(objectname)"],
                           capture_output=True, check=True, timeout=GIT_TIMEOUT).stdout.decode("utf-8", "surrogateescape").split("\n")  # ref の名前は UTF-8 とは限らない（比べるだけ）
     files = [cwd / ".git", own / "commondir", own / "gitdir", own / "config.worktree", common / "config",
@@ -390,9 +397,10 @@ def rollout_lines(f: Path, limit: int = 256 << 20):
         fd = os.open(f, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     except OSError:
         return
+    if not stat.S_ISREG(os.fstat(fd).st_mode):  # fdopen はディレクトリを拒むので、その前に見る
+        os.close(fd)
+        return
     with os.fdopen(fd, "rb") as fh:
-        if not stat.S_ISREG(os.fstat(fd).st_mode):
-            return
         read = 0
         while line := fh.readline(1 << 20):
             read += len(line)
@@ -542,7 +550,7 @@ def main() -> int:
             skip = [config_dir(), state_dir(), out_dir, a.cwd, Path.home() / ".cache"]
             home_before, _, unreadable_before = home_entries(skip)
     except Exception as e:
-        prep = [f"起動の前の準備ができない（前の子が残したものかもしれない）: {e!r}"[:300], f"詳細: {launcher_error(out_dir)}"]
+        prep = [f"起動の前の準備ができない: {e!r}"[:300], f"詳細: {launcher_error(out_dir)}"]
     t0 = time.time()
     if prep:
         rec.update(status="failed", problems=prep)

@@ -83,10 +83,15 @@ FAKE_CLAUDE = textwrap.dedent(r'''
         import subprocess
         common = subprocess.run(["git", "rev-parse", "--path-format=absolute", "--git-common-dir"], capture_output=True, text=True).stdout.strip()
         os.makedirs(os.path.join(os.path.dirname(common), ".claude", ".cc-writes"), exist_ok=True)
+    if mode == "home-residue-lock":  # 空のファイルを残し、別の場所を読めなくする
+        open(os.path.join(os.environ["HOME"], ".netrc"), "w").close()
+        os.chmod(os.path.join(os.environ["HOME"], ".locked-later"), 0)
     if mode == "home-lock":  # ホームの場所を読めなくする
         os.chmod(os.path.join(os.environ["HOME"], ".config"), 0)
     if mode == "home-lock-root":  # ホームそのものを読めなくする
         os.chmod(os.environ["HOME"], 0)
+    if mode == "hook-symlink":  # 行き先の無い symlink を hooks に足す
+        os.symlink("/nonexistent/hook", os.path.join(common(), "hooks", "pre-commit"))
     if mode == "config-include-fifo":  # 設定は通常のファイルのまま、git に FIFO を読ませる
         fifo = os.path.join(common(), "evil-include")
         os.mkfifo(fifo)
@@ -257,7 +262,7 @@ class TestLaunch(unittest.TestCase):
 
     def test_a_write_child_breaking_its_head_is_reported(self):
         for mode in ("bad-head", "head-space", "head-fifo", "head-dir", "head-zero", "lock-git-dir", "packed-fifo", "config-fifo",
-                     "config-include-fifo"):
+                     "config-include-fifo", "hook-symlink"):
             if mode == "lock-git-dir" and os.geteuid() == 0:
                 continue  # root は権限で止められない
             with self.subTest(mode=mode):
@@ -276,6 +281,8 @@ class TestLaunch(unittest.TestCase):
                             "config-include-fifo": "TimeoutExpired"}.get(mode)  # git が止まっても、時間で切る
                     if sign:
                         self.assertTrue([p for p in rec["problems"] if sign in p], rec)
+                elif mode == "hook-symlink":
+                    self.assertTrue([p for p in rec["problems"] if p.endswith("hooks/pre-commit")], rec)
                 else:
                     self.assertTrue([p for p in rec["problems"] if p.startswith("HEAD: ")], rec)
                 self.assertIn(rec["out"], (self.state / "delegations.jsonl").read_text())
@@ -295,11 +302,19 @@ class TestLaunch(unittest.TestCase):
         self.assertIn("子を起動できない", rec["problems"][0])
         self.assertIn(rec["out"], (self.state / "delegations.jsonl").read_text())
 
+    def test_a_symlinked_shared_config_is_not_refused(self):
+        repo, wt = self.worktree("linked-config")
+        real = Path(self.tmp.name) / "real-config"
+        (repo / ".git" / "config").rename(real)
+        (repo / ".git" / "config").symlink_to(real)  # 普段の使い方でありうる
+        rc, rec = self.run_launch("claude", "own-commit", extra=["--write"], cwd=wt)
+        self.assertEqual(rec["status"], "ok", rec)
+
     @unittest.skipIf(os.geteuid() == 0, "root は権限で止められない")
     def test_leftovers_from_a_previous_child_are_recorded_before_launch(self):
-        for host, leftover in (("claude", "locked-config-worktree"), ("codex", "head-fifo")):
-            with self.subTest(leftover=leftover):
-                _, wt = self.worktree(leftover)
+        for host, leftover, write in (("claude", "locked-config-worktree", True), ("codex", "head-fifo", True), ("claude", "head-fifo", False)):
+            with self.subTest(leftover=leftover, write=write):
+                _, wt = self.worktree(leftover + str(write))
                 gd = Path(subprocess.run(["git", "-C", str(wt), "rev-parse", "--path-format=absolute", "--git-dir"],
                                          capture_output=True, text=True, check=True).stdout.strip())
                 if leftover == "head-fifo":
@@ -309,7 +324,7 @@ class TestLaunch(unittest.TestCase):
                     (gd / "config.worktree").write_text("")
                     (gd / "config.worktree").chmod(0)
                 try:
-                    rc, rec = self.run_launch(host, extra=["--write"], cwd=wt, env_extra={"BB_WRIT_GIT_TIMEOUT": "2"})
+                    rc, rec = self.run_launch(host, extra=["--write"] if write else [], cwd=wt, env_extra={"BB_WRIT_GIT_TIMEOUT": "2"})
                 finally:
                     if leftover != "head-fifo":
                         (gd / "config.worktree").chmod(0o644)
@@ -472,6 +487,34 @@ class TestLaunch(unittest.TestCase):
             home.chmod(0o755)
         self.assertEqual(rec["status"], "failed", rec)
         self.assertIn("ホームの残りを確かめられない", rec["problems"][0])
+        (home / ".locked-later").mkdir()
+        try:
+            rc, rec = self.run_launch("claude", "home-residue-lock", env_extra={"HOME": str(home)})
+        finally:
+            (home / ".locked-later").chmod(0o755)
+        self.assertEqual(rec["home_residue"], [str(home / ".netrc")], rec)  # 読めない場所が増えても、残りの一覧は消さない
+        self.assertTrue([p for p in rec["problems"] if "ホームの残りを確かめられない" in p], rec)
+
+    def test_files_vanishing_during_the_home_scan_are_not_unreadable(self):
+        launch, home = load_launch(), Path(self.tmp.name) / "vanish"
+        (home / ".claude").mkdir(parents=True)
+        (home / ".claude" / "x").write_text("x")
+        real_scandir, seen = os.scandir, []
+
+        def flaky(d):  # 別のセッションが一時ディレクトリを消した（空かを見た後、降りる前に無くなった）
+            if str(d).endswith(".claude"):
+                seen.append(d)
+                if len(seen) == 2:
+                    raise FileNotFoundError(d)
+            return real_scandir(d)
+        old_home = os.environ.get("HOME")
+        os.environ["HOME"], launch.os.scandir = str(home), flaky
+        try:
+            _, _, unreadable = launch.home_entries([])
+        finally:
+            launch.os.scandir = real_scandir
+            os.environ["HOME"] = old_home
+        self.assertEqual((len(seen), unreadable), (2, set()))
 
     def test_child_files_are_read_without_blocking_or_exhausting_memory(self):
         launch, d = load_launch(), Path(self.tmp.name) / "cf"
@@ -483,10 +526,13 @@ class TestLaunch(unittest.TestCase):
                     f"m = importlib.util.module_from_spec(s); s.loader.exec_module(m); print(m.read_child_file(__import__('pathlib').Path({str(d / name)!r}))[0])")
             p = subprocess.run([sys.executable, "-B", "-c", code], capture_output=True, text=True, timeout=20)  # 開くところで止まらない
             self.assertEqual(p.returncode, 0, p.stderr[-300:])
-            self.assertNotEqual(len(p.stdout.strip()), 64, p.stdout)  # 読まずに種類で表す
+            self.assertFalse(p.stdout.startswith("sha256:"), p.stdout)  # 読まずに種類で表す
         (d / "l1").symlink_to("a-target")
         (d / "l2").symlink_to("b-target")
         self.assertNotEqual(launch.read_child_file(d / "l1")[0], launch.read_child_file(d / "l2")[0])  # 行き先の変化も差分
+        (d / "l3").symlink_to("x" * 53)  # 表しの長さがハッシュと同じになる行き先
+        self.assertFalse(launch.read_child_file(d / "l3")[2])
+        self.assertTrue(launch.read_head(d / "l3").startswith("symlink: "))  # 空の HEAD と読み違えない
         a, b = d / "a", d / "b"
         a.write_bytes(b"x" * 70000 + b"1")
         b.write_bytes(b"x" * 70000 + b"2")
@@ -500,7 +546,7 @@ class TestLaunch(unittest.TestCase):
                     f"s = importlib.util.spec_from_file_location('l', {str(LAUNCH)!r}); m = importlib.util.module_from_spec(s); "
                     f"s.loader.exec_module(m); print(len(m.read_child_file(__import__('pathlib').Path({str(big)!r}))[0]))")
             p = subprocess.run([sys.executable, "-B", "-c", code], capture_output=True, text=True, timeout=120)
-            self.assertEqual(p.stdout.strip(), "64", p.stderr[-500:])
+            self.assertEqual(p.stdout.strip(), str(len("sha256: ") + 64), p.stderr[-500:])
 
     def test_rollout_reading_is_bounded(self):
         launch, d = load_launch(), Path(self.tmp.name) / "ro"
@@ -512,6 +558,21 @@ class TestLaunch(unittest.TestCase):
         self.assertEqual(list(launch.rollout_lines(f, limit=200))[-1], b'{"type": "turn_context", "payload": {}}')  # 上限で実効値を不明にする
         os.mkfifo(d / "fifo")
         self.assertEqual(list(launch.rollout_lines(d / "fifo")), [])  # 止まらない
+        if sys.platform.startswith("linux"):  # 書き手のいる FIFO でも止まらない（O_RDWR で書き手を持つのは Linux の振る舞い）
+            w = os.open(d / "fifo", os.O_RDWR)
+            try:
+                code = (f"import importlib.util; s = importlib.util.spec_from_file_location('l', {str(LAUNCH)!r}); m = importlib.util.module_from_spec(s); "
+                        f"s.loader.exec_module(m); print(list(m.rollout_lines(__import__('pathlib').Path({str(d / 'fifo')!r}))))")
+                p = subprocess.run([sys.executable, "-B", "-c", code], capture_output=True, text=True, timeout=20)
+                self.assertEqual(p.stdout.strip(), "[]", p.stderr[-300:])
+            finally:
+                os.close(w)
+        (d / "dir.jsonl").mkdir()
+        self.assertEqual(list(launch.rollout_lines(d / "dir.jsonl")), [])  # 通常のファイルだけを読む
+        big = d / "big.jsonl"
+        with open(big, "wb") as fh:
+            fh.truncate(300 << 20)  # 疎なファイル。既定の上限（256 MiB）を越える
+        self.assertEqual(list(launch.rollout_lines(big))[-1], b'{"type": "turn_context", "payload": {}}')
 
     def test_claude_in_worktree_leaves_no_empty_cc_writes_in_checkout(self):
         repo, wt = self.cwd / "repo", self.cwd / "wt"
