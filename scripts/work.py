@@ -11,7 +11,8 @@
                      シェルを通さず標準入力なしで実行し、終了コードと出力（stderr を含む）の末尾 20 行を done に記録する。
                      終了コードはコマンドのもの（シグナルは 128+N、起動できなければ 127、begin の拒否は begin の値、担当を失って
                      done を書けなければ 3、done の書き込みに失敗したら 1、監督役が結果を返さずに終わったら、記録に終了コードが
-                     あればそれ、無ければ（読めなければ）1 で exit は null。記録はあるが終了コードが無ければ、op を添える）。出力は全体を表示する。
+                     あればそれ（監督役が書いた記録だけ読む。255 を超えればプロセスの終了コードは 1）、無ければ 1 で exit は null。
+                     記録（done でも begun でも）が読めれば op を添える）。出力は全体を表示する。
                      コマンドが終わるまでは、コマンドとそれが残したもの（シェルの & など）もロックを持つ。終わった後は（done を
                      書けたかに関わらず）、残したものは数えない（外部操作を & で背景に回すと、終わる前に明け渡すので、そうしない）
                      実行と記録は別のセッションの監督役が行い、コマンドが終わるまで担当を保つ。op run が止められても続く
@@ -645,6 +646,8 @@ def op_step(a, r: Path, live, now: float, action: str):
         return ({"ok": False, "reason": "この操作は既に終わりを記録している", "op": known}, 4)
     e = {"key": a.key, "state": "begun" if action == "begin" else "done", "at": now, "holder": live["holder"]}
     e.update({"what": a.what} if action == "begin" else {"result": a.result})
+    if action == "done":  # 書いた者の印。手で閉じた記録は None（監督役の記録の印を上書きして、終了コードと読まれないように）
+        e["by"] = getattr(a, "by", None)
     if acct:
         e.update({"from": acct["at"], "account": acct.get("login")})
     if verified:
@@ -678,8 +681,8 @@ def run_holder(r: Path):
 
     def records():  # 読めなければ空（鍵を引けず、done とも分からないので、動いているとみなす側に倒れる）
         try:
-            return ops(r)
-        except (OSError, ValueError, KeyError, TypeError, AttributeError):
+            return {k: e for k, e in ops(r).items() if isinstance(k, str) and isinstance(e, dict)}
+        except Exception:  # 手で壊した記録（形の違い、深い入れ子の RecursionError など）でも落ちない
             return {}
     for f in sorted(r.glob("running*.lock")):  # running.lock は 0.11.12 の名前
         fd = None
@@ -863,17 +866,19 @@ def op_run(a, r: Path, argv: list) -> int:
     if len(lines) < 2:  # 監督役が結果を返さなかった。記録を読む（読めなければ、書けていないとみなす）
         try:
             rec = ops(r).get(a.key, {})
-        except (OSError, ValueError, KeyError, TypeError, AttributeError):
+            rec = rec if isinstance(rec, dict) else {}
+        except Exception:  # 手で壊した記録（形の違い、深い入れ子の RecursionError など）でも落ちない
             rec = {}
     if len(lines) < 2 and rec.get("state") == "done":  # done を書いた後に監督役が居なくなった。結果は記録にある
         result = rec.get("result")
-        m = re.match(r"exit ([0-9]+):", result) if isinstance(result, str) else None  # 監督役が書く ASCII の形だけ
+        m = re.match(r"exit ([0-9]{1,10}):", result) if isinstance(result, str) and rec.get("by") == "supervise" else None  # 監督役が書いた記録だけ
         if not m:  # 手で閉じた記録など。走ったかは記録の result で判断する
             return out({"ok": False, "exit": None, "op": rec, "reason": "監督役が結果を返さずに終わった。記録の result で判断する"}, 1)
         rc = int(m.group(1))
         return out({"ok": rc == 0, "exit": rc, "op": rec, "reason": "監督役が結果を返さずに終わったが、結果は記録済み"}, rc if rc < 256 else 1)
-    if len(lines) < 2:  # コマンドは走ったかもしれない（exit は分からない）
-        return out({"ok": False, "exit": None, "reason": f"監督役が結果を返さずに終わった。{r / 'supervise.err'} を読み、"
+    if len(lines) < 2:  # コマンドは走ったかもしれない（exit は分からない）。始めた記録があれば添える
+        return out({"ok": False, "exit": None, **({"op": rec} if rec else {}),
+                    "reason": f"監督役が結果を返さずに終わった。{r / 'supervise.err'} を読み、"
                     "op pending の running が消えるのを待ってから、外部の状態で照合する"}, 1)
     print(lines[1])
     return int(lines[0])
@@ -979,7 +984,7 @@ def supervise(spec: dict, argv: list) -> int:
             except OSError as e:
                 output = f"（出力を読めない: {e!r}）"
     a = argparse.Namespace(key=spec["key"], token=spec["token"], dir=d, frm=None, verified=None, reviewed=None, what="",
-                           result=f"exit {rc}: " + output)  # output は tail で末尾 20 行・8 KiB にしてある
+                           result=f"exit {rc}: " + output, by="supervise")  # output は tail で末尾 20 行・8 KiB にしてある
     gate("before-done")
     code = None
     try:

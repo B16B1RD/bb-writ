@@ -1817,19 +1817,24 @@ class TestOpRun(unittest.TestCase):
                     f.write_text(good + json.dumps({"key": key, "state": "done", "result": None}) + "\n")
                 else:
                     f.write_text(broken)
-                os.kill(int((gate / "at-before-print").read_text()), signal.SIGKILL)
-                r = json.loads(p.communicate()[0])  # 落ちずに JSON を返す
-                self.assertIsNone(r["exit"])
-                f.write_text(good)
+                try:
+                    os.kill(int((gate / "at-before-print").read_text()), signal.SIGKILL)
+                    r = json.loads(p.communicate()[0])  # 落ちずに JSON を返す
+                    self.assertIsNone(r["exit"])
+                    if broken is None:  # 読めた記録は op に添える
+                        self.assertEqual(r["op"]["state"], "done")
+                finally:
+                    f.write_text(good)  # 1 つ落ちても、後の subTest を道連れにしない
 
+    @unittest.skipUnless(Path("/dev/fd").is_dir(), "開いた fd を数えられない")
     def test_run_holder_does_not_leak_fds_on_unreadable_locks(self):
         work, r = self.work_module(), Path(self.tmp.name) / "rh3"
         r.mkdir()
         (r / "running-d.lock").mkdir()  # 開けるが読めない
-        before = len(os.listdir("/proc/self/fd"))
+        before = len(os.listdir("/dev/fd"))
         for _ in range(50):
             work.run_holder(r)
-        self.assertLessEqual(len(os.listdir("/proc/self/fd")), before + 1)
+        self.assertLessEqual(len(os.listdir("/dev/fd")), before + 1)
 
     def test_an_unreadable_lock_of_a_done_op_is_not_counted(self):
         tok = self.claim()
@@ -1901,7 +1906,7 @@ class TestOpRun(unittest.TestCase):
                              stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
         self.wait_file(gate / "at-before-print")
         with open(f, "a", encoding="utf-8") as fh:  # 別の人が照合の文で閉じ直した記録
-            fh.write(json.dumps({"key": "push:feat@1", "state": "done", "result": "照合した: exit 0: 外部に出ていた"}, ensure_ascii=False) + "\n")
+            fh.write(json.dumps({"key": "push:feat@1", "state": "done", "result": "照合した: exit 0: 外部に出ていた", "by": None}, ensure_ascii=False) + "\n")
         os.kill(int((gate / "at-before-print").read_text()), signal.SIGKILL)
         r = json.loads(p.communicate()[0])
         self.assertIsNone(r["exit"])  # 終了コードをこしらえない
@@ -1912,9 +1917,11 @@ class TestOpRun(unittest.TestCase):
     def test_locks_still_count_when_the_record_cannot_be_read(self):
         work, r = self.work_module(), Path(self.tmp.name) / "rh4"
         r.mkdir()
-        (r / "ops.jsonl").write_text("{broken\n")
         (r / "running-u.lock").mkdir()  # 読めないロック。鍵も引けない
-        self.assertEqual(work.run_holder(r), "running-u.lock")
+        for bad in ("{broken\n", '{"x": 1}\n', "[1]\n", "null\n", '{"key": ["a"]}\n', '{"key": 1, "state": "begun"}\n', "[" * 200000 + "\n"):
+            (r / "ops.jsonl").write_text(bad)
+            self.assertEqual(work.run_holder(r), "running-u.lock", bad[:20])
+        (r / "ops.jsonl").write_text("{broken\n")
         (r / "running-u.lock").rmdir()
         lock = r / "running-h.lock"
         lock.write_text("push:h")
@@ -1941,10 +1948,49 @@ class TestOpRun(unittest.TestCase):
                              stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
         self.wait_file(gate / "at-before-print")
         with open(f, "a", encoding="utf-8") as fh:
-            fh.write(json.dumps({"key": "push:feat@1", "state": "done", "result": "exit ０: 照合した"}, ensure_ascii=False) + "\n")
+            fh.write(json.dumps({"key": "push:feat@1", "state": "done", "result": "exit ０: 照合した", "by": None}, ensure_ascii=False) + "\n")
         os.kill(int((gate / "at-before-print").read_text()), signal.SIGKILL)
         r = json.loads(p.communicate()[0])
         self.assertIsNone(r["exit"])  # 全角の数字は終了コードと読まない
+
+    def test_hand_written_results_that_look_like_exit_codes_are_not_read(self):
+        tok = self.claim()
+        f = self.lease_file().parent / "ops.jsonl"
+        for n, result in enumerate(("exit 12abc", "exit " + "9" * 5000 + ": x", "exit 0: 照合で、外部に無かった", "exit 0 照合した", " exit 0: x")):
+            with self.subTest(result=result[:12]):
+                gate = Path(self.tmp.name) / f"gate16-{n}"
+                gate.mkdir()
+                self.gos = [*getattr(self, "gos", []), gate / "before-print"]
+                for name in ("after-begin", "relay", "relay-told", "before-check", "before-start", "before-done"):
+                    (gate / name).write_text("")
+                key = f"push:feat@{n}"
+                p = subprocess.Popen([sys.executable, str(WORK), "op", "run", "--dir", str(self.wt), "--token", tok, "--key", key,
+                                      "--what", "x", "--from", str(self.repo), "--verified", self.head(), "--reviewed", self.head(),
+                                      *self.script("print(1)")], env={**self.env, "BB_WRIT_SUPERVISE_GATE": str(gate)},
+                                     stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+                self.wait_file(gate / "at-before-print")
+                with open(f, "a", encoding="utf-8") as fh:
+                    fh.write(json.dumps({"key": key, "state": "done", "result": result, "by": None}) + "\n")  # op done が書く形
+                os.kill(int((gate / "at-before-print").read_text()), signal.SIGKILL)
+                r = json.loads(p.communicate()[0])
+                self.assertIsNone(r["exit"])
+
+    def test_a_supervisor_lost_while_running_returns_the_begun_record(self):
+        tok = self.claim()
+        gate = Path(self.tmp.name) / "gate17"
+        gate.mkdir()
+        self.gos = [*getattr(self, "gos", []), gate / "before-done"]
+        for name in ("after-begin", "relay", "relay-told", "before-check", "before-start"):
+            (gate / name).write_text("")
+        p = subprocess.Popen([sys.executable, str(WORK), "op", "run", "--dir", str(self.wt), "--token", tok, "--key", "push:feat@1",
+                              "--what", "x", "--from", str(self.repo), "--verified", self.head(), "--reviewed", self.head(),
+                              *self.script("print(1)")], env={**self.env, "BB_WRIT_SUPERVISE_GATE": str(gate)},
+                             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+        self.wait_file(gate / "at-before-done")
+        os.kill(int((gate / "at-before-done").read_text()), signal.SIGKILL)
+        r = json.loads(p.communicate()[0])
+        self.assertIsNone(r["exit"])
+        self.assertEqual(r["op"]["state"], "begun")  # 始めた記録を添える（壊れたのではない）
 
     def test_a_supervisor_that_cannot_start_closes_the_op(self):
         tok = self.claim()
