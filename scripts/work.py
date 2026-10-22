@@ -7,7 +7,9 @@
   work.py status  --dir <作業場所>
   work.py op begin   --dir <作業場所> --token <t> --key <操作の鍵> --what <何をするか> [--from <場所>] [--verified <c>] [--reviewed <c>|none:<理由>]
                      → 同じ鍵が既にあれば拒否（4）
-  work.py op done    --dir <作業場所> --token <t> --key <操作の鍵> --result <結果>
+  work.py op run     （op begin と同じ引数） -- <コマンド>              → begin が通ったときだけ --from（無ければ作業場所）でコマンドを
+                     シェルを通さずに実行し、終了コードと出力の末尾を done に記録する。終了コードはコマンドのもの（begin の拒否は begin の値）
+  work.py op done    --dir <作業場所> --token <t> --key <操作の鍵> --result <結果>    → 照合で見つけた結果を閉じるとき
   work.py op pending --dir <作業場所>                                 → 始めたが終わりの記録が無い操作
   work.py check   --dir <作業場所> --from <外部操作を実行する場所>      → そこで使われる GitHub のアカウントと、push 先の origin への書き込み権限（書けない・アカウントが分からなければ 5）
   work.py task start --dir <checkout> --holder <誰か> [--base <commit等>] [--target <ブランチ>] → 専用 worktree と担当を作る
@@ -23,7 +25,7 @@ task と integrate の照合拒否は終了コード 6、担当の拒否は 3。
 push・pr には --reviewed も要る（初回の push も）。届ける前の審査（入口の条件 (5)・(6)）を通した commit の ID（16 進）か、
 要らない理由を none:<理由> で書く。無い・形が違う・commit が見つからない・ID でなく参照に解決されたら拒否し（2）、作業場所の HEAD と違えば拒否する（6）。
 HEAD と違うときは審査の後に変えたファイルを、ほかの拒否と通ったときは、この作業場所の記録で最後に終えた push・pr（ブランチを問わない）から変えたファイルを示す（材料で、保証ではない）。
-op begin を通さない git push には効かない。
+op run・op begin を通さない git push には効かない。
 審査を通したかどうかは確かめない。短い往復で審査を忘れたまま出すのを、宣言を求めて止める。
 検証の後に成果物が変わったら、証拠を取り直してから出す（plan-v3 6.2）。merge は、GitHub 側でも gh pr merge --match-head-commit <同じ commit> で止める。
 
@@ -555,6 +557,110 @@ def integrate(a):
         return out({'ok': True, 'commit': head, 'target': ref})
 
 
+def op_step(a, r: Path, live, now: float, action: str):
+    """op の begin・done を 1 件記録する。(結果, 終了コード) を返す。呼ぶ側が r の排他を持つ。"""
+    why = check_token(live, a.token)
+    if why:
+        return ({"ok": False, "reason": why}, 3)
+    if not a.key:
+        return ({"ok": False, "reason": "--key が要る"}, 2)
+    known = ops(r).get(a.key)
+    acct = None
+    kind = a.key.split(":")[0] if ":" in a.key else None
+    # 書き間違い・言い換えを列挙して止めると漏れる（push/…・pr#12・pull-request）ので、外部に出ない操作の記録を明示させる
+    if action == "begin" and kind not in EXTERNAL and kind != "local" and not (kind or "").startswith("local-"):
+        return ({"ok": False, "reason": f"鍵 {a.key!r} の種類が分からない。鍵は <種類:対象> で、種類は外部操作なら "
+                    "push・pr・comment・merge・release・issue のどれか（小文字）、外部に出ない操作の記録なら local（または local- で始まる名前）"}, 2)
+    if action == "begin" and kind in EXTERNAL:
+        if not a.frm:
+            return ({"ok": False, "reason": f"外部操作には --from <実行する場所> が要る。元の checkout は {checkout_of(a.dir)}"}, 2)
+        res, code = check(a.dir, a.frm, a.key.split(":")[0])
+        if code:
+            return (res, code)
+        acct = res["from"]
+    verified = None
+    if action == "begin" and a.key.split(":")[0] in PUBLISH:
+        head = commit_of(a.dir, "HEAD")
+        if not head:
+            return ({"ok": False, "reason": f"作業場所 {a.dir} の HEAD を解決できない"}, 2)
+        if not a.verified:
+            return ({"ok": False, "reason": f"公開する操作には --verified <検証した commit> が要る。作業場所の HEAD は {head}"}, 2)
+        verified = commit_of(a.dir, a.verified)
+        if verified != head:
+            return ({"ok": False, "reason": f"検証した commit {verified or a.verified} と作業場所の HEAD {head} が違う。"
+                        "検証の後に成果物が変わった。今の HEAD で証拠を取り直してから出す"}, 6)
+    reviewed = None
+    if action == "begin" and a.key.split(":")[0] in REVIEWED:
+        if not a.reviewed:
+            return ({"ok": False, "reason": "push・pr には --reviewed <届ける前の審査を通した commit> か --reviewed none:<要らない理由> が要る。"
+                        "試験・検査を足した・変えたなら、入口の条件 (5)・(6) をこの commit で通す。" + changed_since_publish(r, a.dir, head)}, 2)
+        if a.reviewed.startswith("none:"):
+            if not a.reviewed[5:].strip():
+                return ({"ok": False, "reason": "--reviewed none: の後に、審査が要らない理由を書く。" + changed_since_publish(r, a.dir, head)}, 2)
+            reviewed = "none: " + a.reviewed[5:].strip()
+        else:
+            # HEAD・ブランチ名のような動く参照は、審査した commit を書いた宣言と見分けられないので受けない
+            if not re.fullmatch(r"[0-9a-f]{7,64}", a.reviewed):
+                return ({"ok": False, "reason": f"--reviewed {a.reviewed!r} は commit の ID（16 進）でも none:<理由> でもない。"
+                            + changed_since_publish(r, a.dir, head)}, 2)
+            reviewed = commit_of(a.dir, a.reviewed)
+            if not reviewed:
+                return ({"ok": False, "reason": f"--reviewed の commit {a.reviewed} が見つからない。" + changed_since_publish(r, a.dir, head)}, 2)
+            if not reviewed.startswith(a.reviewed):  # 16 進だけの名前のブランチ・タグは、git が ID より先に解決する
+                return ({"ok": False, "reason": f"--reviewed {a.reviewed} は ID でなく参照（{reviewed[:12]}）に解決された。完全な ID を書く。"
+                            + changed_since_publish(r, a.dir, head)}, 2)
+            if reviewed != head:
+                rc, files, err = sh(["git", "diff", "--name-only", f"{reviewed}..{head}"], a.dir)
+                after = (", ".join(files.splitlines()) or "なし") if rc == 0 else f"（差分を出せない: {err}）"
+                return ({"ok": False, "reason": f"審査を通した commit {reviewed} と作業場所の HEAD {head} が違う。"
+                            f"審査の後に変えた。直した commit で審査を通し直してから出す。審査の後に変えたファイル: {after}"}, 6)
+    if action == "begin" and known:
+        return ({"ok": False, "reason": "同じ鍵の操作が既にある。外部の状態を照合してから進める（やり直さない）", "op": known}, 4)
+    if action == "done" and not known:
+        return ({"ok": False, "reason": "begin の記録が無い"}, 2)
+    e = {"key": a.key, "state": "begun" if action == "begin" else "done", "at": now, "holder": live["holder"]}
+    e.update({"what": a.what} if action == "begin" else {"result": a.result})
+    if acct:
+        e.update({"from": acct["at"], "account": acct.get("login")})
+    if verified:
+        e["verified"] = verified
+    if reviewed:
+        e["reviewed"] = reviewed
+    with open(r / "ops.jsonl", "a", encoding="utf-8") as f:
+        f.write(json.dumps(e, ensure_ascii=False) + "\n")
+    res = {"ok": True, "op": ops(r)[a.key]}
+    if reviewed:
+        res["changed"] = changed_since_publish(r, a.dir, head)
+    return res, 0
+
+
+def op_run(a, r: Path, argv: list) -> int:
+    """begin の照合を通ったときだけ argv を --from（無ければ作業場所）で実行し、終了コードと出力の末尾を done に記録する。
+    begin とコマンドを手で並べると、begin が拒否されてもコマンドが走り、done には打った文字が残ったため。"""
+    if not argv:
+        return out({"ok": False, "reason": "op run には、-- の後に実行するコマンドが要る（例: -- git push origin <ブランチ>）"}, 2)
+    with locked(r):
+        lease = read(r / "lease.json")
+        now = time.time()
+        res, code = op_step(a, r, lease if alive(lease, now) else None, now, "begin")
+    if code:
+        return out(res, code)
+    try:
+        p = subprocess.run(argv, cwd=a.frm or a.dir, stdin=subprocess.DEVNULL, capture_output=True, text=True)
+        rc, output = p.returncode, (p.stdout + p.stderr).strip()
+    except OSError as e:
+        rc, output = 127, str(e)
+    sys.stderr.write(output + "\n" if output else "")
+    a.result = f"exit {rc}: " + "\n".join(output.splitlines()[-20:])
+    with locked(r):
+        lease = read(r / "lease.json")
+        now = time.time()
+        res, code = op_step(a, r, lease if alive(lease, now) else None, now, "done")
+    if code:  # 実行の間に担当が引き継がれた。begin のまま残るので、次の担当が照合する
+        return out({**res, "exit": rc, "output": output[-2000:]}, code)
+    return out({"ok": rc == 0, "exit": rc, "op": res["op"]}, rc if 0 <= rc < 256 else 1)  # シグナルで止まると負になる
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -589,7 +695,7 @@ def main() -> int:
         if name == "claim":
             s.add_argument("--holder", default=os.environ.get("USER", "?"))
     o = sub.add_parser("op")
-    o.add_argument("action", choices=("begin", "done", "pending"))
+    o.add_argument("action", choices=("begin", "done", "pending", "run"))
     o.add_argument("--dir", type=Path, required=True)
     o.add_argument("--token")
     o.add_argument("--key")
@@ -601,7 +707,11 @@ def main() -> int:
     c = sub.add_parser("check")
     c.add_argument("--dir", type=Path, required=True)
     c.add_argument("--from", dest="frm", type=Path, required=True)
-    a = ap.parse_args()
+    argv, run_argv = sys.argv[1:], []
+    if argv[:2] == ["op", "run"] and "--" in argv:  # op run は -- の後ろを、シェルを通さずに実行するコマンドとして受け取る
+        i = argv.index("--")
+        argv, run_argv = argv[:i], argv[i + 1:]
+    a = ap.parse_args(argv)
     if a.cmd in ('task', 'integrate'):
         try:
             return task_command(a) if a.cmd == 'task' else integrate(a)
@@ -613,6 +723,8 @@ def main() -> int:
         res, code = check(a.dir, a.frm)
         return out(res, code)
     r = root(a.dir)
+    if a.cmd == "op" and a.action == "run":
+        return op_run(a, r, run_argv)
     with locked(r):
         now = time.time()
         lease = read(r / "lease.json")
@@ -635,79 +747,7 @@ def main() -> int:
             return out({"ok": True})
         if a.action == "pending":
             return out({"pending_ops": pending(r)})
-        why = check_token(live, a.token)
-        if why:
-            return out({"ok": False, "reason": why}, 3)
-        if not a.key:
-            return out({"ok": False, "reason": "--key が要る"}, 2)
-        known = ops(r).get(a.key)
-        acct = None
-        kind = a.key.split(":")[0] if ":" in a.key else None
-        # 書き間違い・言い換えを列挙して止めると漏れる（push/…・pr#12・pull-request）ので、外部に出ない操作の記録を明示させる
-        if a.action == "begin" and kind not in EXTERNAL and kind != "local" and not (kind or "").startswith("local-"):
-            return out({"ok": False, "reason": f"鍵 {a.key!r} の種類が分からない。鍵は <種類:対象> で、種類は外部操作なら "
-                        "push・pr・comment・merge・release・issue のどれか（小文字）、外部に出ない操作の記録なら local（または local- で始まる名前）"}, 2)
-        if a.action == "begin" and kind in EXTERNAL:
-            if not a.frm:
-                return out({"ok": False, "reason": f"外部操作には --from <実行する場所> が要る。元の checkout は {checkout_of(a.dir)}"}, 2)
-            res, code = check(a.dir, a.frm, a.key.split(":")[0])
-            if code:
-                return out(res, code)
-            acct = res["from"]
-        verified = None
-        if a.action == "begin" and a.key.split(":")[0] in PUBLISH:
-            head = commit_of(a.dir, "HEAD")
-            if not head:
-                return out({"ok": False, "reason": f"作業場所 {a.dir} の HEAD を解決できない"}, 2)
-            if not a.verified:
-                return out({"ok": False, "reason": f"公開する操作には --verified <検証した commit> が要る。作業場所の HEAD は {head}"}, 2)
-            verified = commit_of(a.dir, a.verified)
-            if verified != head:
-                return out({"ok": False, "reason": f"検証した commit {verified or a.verified} と作業場所の HEAD {head} が違う。"
-                            "検証の後に成果物が変わった。今の HEAD で証拠を取り直してから出す"}, 6)
-        reviewed = None
-        if a.action == "begin" and a.key.split(":")[0] in REVIEWED:
-            if not a.reviewed:
-                return out({"ok": False, "reason": "push・pr には --reviewed <届ける前の審査を通した commit> か --reviewed none:<要らない理由> が要る。"
-                            "試験・検査を足した・変えたなら、入口の条件 (5)・(6) をこの commit で通す。" + changed_since_publish(r, a.dir, head)}, 2)
-            if a.reviewed.startswith("none:"):
-                if not a.reviewed[5:].strip():
-                    return out({"ok": False, "reason": "--reviewed none: の後に、審査が要らない理由を書く。" + changed_since_publish(r, a.dir, head)}, 2)
-                reviewed = "none: " + a.reviewed[5:].strip()
-            else:
-                # HEAD・ブランチ名のような動く参照は、審査した commit を書いた宣言と見分けられないので受けない
-                if not re.fullmatch(r"[0-9a-f]{7,64}", a.reviewed):
-                    return out({"ok": False, "reason": f"--reviewed {a.reviewed!r} は commit の ID（16 進）でも none:<理由> でもない。"
-                                + changed_since_publish(r, a.dir, head)}, 2)
-                reviewed = commit_of(a.dir, a.reviewed)
-                if not reviewed:
-                    return out({"ok": False, "reason": f"--reviewed の commit {a.reviewed} が見つからない。" + changed_since_publish(r, a.dir, head)}, 2)
-                if not reviewed.startswith(a.reviewed):  # 16 進だけの名前のブランチ・タグは、git が ID より先に解決する
-                    return out({"ok": False, "reason": f"--reviewed {a.reviewed} は ID でなく参照（{reviewed[:12]}）に解決された。完全な ID を書く。"
-                                + changed_since_publish(r, a.dir, head)}, 2)
-                if reviewed != head:
-                    rc, files, err = sh(["git", "diff", "--name-only", f"{reviewed}..{head}"], a.dir)
-                    after = (", ".join(files.splitlines()) or "なし") if rc == 0 else f"（差分を出せない: {err}）"
-                    return out({"ok": False, "reason": f"審査を通した commit {reviewed} と作業場所の HEAD {head} が違う。"
-                                f"審査の後に変えた。直した commit で審査を通し直してから出す。審査の後に変えたファイル: {after}"}, 6)
-        if a.action == "begin" and known:
-            return out({"ok": False, "reason": "同じ鍵の操作が既にある。外部の状態を照合してから進める（やり直さない）", "op": known}, 4)
-        if a.action == "done" and not known:
-            return out({"ok": False, "reason": "begin の記録が無い"}, 2)
-        e = {"key": a.key, "state": "begun" if a.action == "begin" else "done", "at": now, "holder": live["holder"]}
-        e.update({"what": a.what} if a.action == "begin" else {"result": a.result})
-        if acct:
-            e.update({"from": acct["at"], "account": acct.get("login")})
-        if verified:
-            e["verified"] = verified
-        if reviewed:
-            e["reviewed"] = reviewed
-        with open(r / "ops.jsonl", "a", encoding="utf-8") as f:
-            f.write(json.dumps(e, ensure_ascii=False) + "\n")
-        res = {"ok": True, "op": ops(r)[a.key]}
-        if reviewed:
-            res["changed"] = changed_since_publish(r, a.dir, head)
-        return out(res)
+        return out(*op_step(a, r, live, now, a.action))
 
 
 if __name__ == "__main__":
