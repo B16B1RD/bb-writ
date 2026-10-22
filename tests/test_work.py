@@ -713,5 +713,65 @@ class TestReviewedCommit(unittest.TestCase):
         for key in ("comment:pr-1", "issue:new"):
             self.assertEqual(self.begin(tok, key, "--from", str(self.repo))[0], 0, key)
 
+class TestOpRun(unittest.TestCase):
+    """op run は、begin の照合を通ったときだけコマンドを実行し、実際の終了コードと出力を done に記録する。
+    begin とコマンドを手で並べると、begin が拒否されてもコマンドが走り、結果に打った文字（ok）が残った。"""
+    setUp, tearDown, w, claim, head = (TestAccountCheck.setUp, TestAccountCheck.tearDown, TestAccountCheck.w,
+                                       TestAccountCheck.claim, TestVerifiedCommit.head)
+    pending = TestReviewedCommit.pending
+
+    def run_op(self, tok, key, *flags_and_cmd):
+        return self.w("op", "run", "--dir", str(self.wt), "--token", tok, "--key", key, "--what", "x",
+                      "--from", str(self.repo), "--verified", self.head(), *flags_and_cmd)
+
+    def script(self, body):
+        return ["--", sys.executable, "-c", body]
+
+    def test_refused_begin_does_not_run_the_command(self):
+        tok = self.claim()
+        marker = Path(self.tmp.name) / "ran"
+        rc, r = self.run_op(tok, "push:feat@1", *self.script(f"open({str(marker)!r}, 'w')"))  # --reviewed が無い
+        self.assertEqual(rc, 2)
+        self.assertIn("--reviewed", r["reason"])
+        self.assertFalse(marker.exists())
+        self.assertEqual(self.pending(), [])
+
+    def test_failed_command_is_recorded_with_its_exit_code(self):
+        tok = self.claim()
+        rc, r = self.run_op(tok, "push:feat@1", "--reviewed", self.head(),
+                            *self.script("import sys; print('rejected by remote'); sys.exit(3)"))
+        self.assertEqual(rc, 3)
+        self.assertFalse(r["ok"])
+        self.assertEqual(r["op"]["state"], "done")
+        self.assertIn("exit 3", r["op"]["result"])
+        self.assertIn("rejected by remote", r["op"]["result"])
+        self.assertEqual(self.pending(), [])
+
+    def test_successful_command_records_its_output(self):
+        tok = self.claim()
+        rc, r = self.run_op(tok, "pr:feat", "--reviewed", "none:文書だけ", *self.script("print('https://example.test/pull/7')"))
+        self.assertEqual(rc, 0)
+        self.assertTrue(r["ok"])
+        self.assertIn("exit 0", r["op"]["result"])
+        self.assertIn("https://example.test/pull/7", r["op"]["result"])
+        self.assertEqual(self.w("op", "run", "--dir", str(self.wt), "--token", tok, "--key", "pr:feat", "--what", "x",
+                                "--from", str(self.repo), "--verified", self.head(), "--reviewed", "none:文書だけ",
+                                *self.script("print('again')"))[0], 4)  # 同じ鍵は二重に実行しない
+
+    def test_command_runs_in_the_from_directory_without_a_shell(self):
+        tok = self.claim()
+        rc, r = self.run_op(tok, "push:feat@1", "--reviewed", self.head(), "--", "echo", "a | false")
+        self.assertEqual(rc, 0)
+        self.assertIn("a | false", r["op"]["result"])
+        rc, r = self.run_op(tok, "push:feat@2", "--reviewed", self.head(), *self.script("import os; print(os.getcwd())"))
+        self.assertIn(str(self.repo.resolve()), r["op"]["result"])
+
+    def test_missing_command_is_refused_before_begin(self):
+        tok = self.claim()
+        rc, r = self.run_op(tok, "push:feat@1", "--reviewed", self.head())
+        self.assertEqual(rc, 2)
+        self.assertEqual(self.pending(), [])
+
+
 if __name__ == "__main__":
     unittest.main()
