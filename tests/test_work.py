@@ -727,14 +727,35 @@ class TestOpRun(unittest.TestCase):
     def script(self, body):
         return ["--", sys.executable, "-c", body]
 
+    ops_file = TestReviewedCommit.ops_file
+
+    def op(self, tok, key, *args):
+        return self.w("op", "run", "--dir", str(self.wt), "--token", tok, "--key", key, "--what", "x", *args)
+
     def test_refused_begin_does_not_run_the_command(self):
         tok = self.claim()
         marker = Path(self.tmp.name) / "ran"
-        rc, r = self.run_op(tok, "push:feat@1", *self.script(f"open({str(marker)!r}, 'w')"))  # --reviewed が無い
+        touch = self.script(f"open({str(marker)!r}, 'w')")
+        before = self.ops_file()
+        rc, r = self.run_op(tok, "push:feat@1", *touch)  # --reviewed が無い
         self.assertEqual(rc, 2)
         self.assertIn("--reviewed", r["reason"])
+        verified = self.head()
+        subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "after"],
+                       env=self.env, cwd=self.wt, check=True)
+        refusals = (
+            (3, self.op("bad-token", "push:feat@1", "--from", str(self.repo), "--verified", self.head(), "--reviewed", self.head(), *touch)),
+            (5, self.op(tok, "push:feat@1", "--from", str(self.wt), "--verified", self.head(), "--reviewed", self.head(), *touch)),
+            (6, self.op(tok, "push:feat@1", "--from", str(self.repo), "--verified", verified, "--reviewed", self.head(), *touch)),
+        )
+        for want, (rc, r) in refusals:
+            self.assertEqual(rc, want, r)
         self.assertFalse(marker.exists())
-        self.assertEqual(self.pending(), [])
+        self.assertEqual(self.ops_file(), before)  # 拒否は何も記録しない
+        self.assertEqual(self.run_op(tok, "pr:feat", "--reviewed", "none:文書だけ", *self.script("print(1)"))[0], 0)
+        rc, r = self.run_op(tok, "pr:feat", "--reviewed", "none:文書だけ", *touch)
+        self.assertEqual(rc, 4)
+        self.assertFalse(marker.exists())
 
     def test_failed_command_is_recorded_with_its_exit_code(self):
         tok = self.claim()
@@ -758,6 +779,65 @@ class TestOpRun(unittest.TestCase):
                                 "--from", str(self.repo), "--verified", self.head(), "--reviewed", "none:文書だけ",
                                 *self.script("print('again')"))[0], 4)  # 同じ鍵は二重に実行しない
 
+    def test_stderr_and_the_last_lines_are_recorded(self):
+        tok = self.claim()
+        body = "import sys\nfor i in range(30): print('line', i)\nsys.stdout.flush()\nsys.stderr.write('remote rejected\\n')\nsys.exit(1)"
+        rc, r = self.run_op(tok, "push:feat@1", "--reviewed", self.head(), *self.script(body))
+        self.assertEqual(rc, 1)
+        self.assertIn("remote rejected", r["op"]["result"])
+        self.assertIn("line 29", r["op"]["result"])
+        self.assertNotIn("line 0\n", r["op"]["result"] + "\n")
+
+    def test_undecodable_output_is_still_recorded(self):
+        tok = self.claim()
+        rc, r = self.run_op(tok, "push:feat@1", "--reviewed", self.head(),
+                            *self.script("import os, sys; os.write(1, bytes([255]) + b' done'); sys.exit(2)"))
+        self.assertEqual(rc, 2)
+        self.assertIn("exit 2", r["op"]["result"])
+        self.assertIn("done", r["op"]["result"])
+        self.assertEqual(self.pending(), [])
+
+    def test_exit_codes_and_signals_are_kept(self):
+        tok = self.claim()
+        rc, r = self.run_op(tok, "push:feat@1", "--reviewed", self.head(), *self.script("import sys; sys.exit(7)"))
+        self.assertEqual((rc, r["ok"]), (7, False))
+        rc, r = self.run_op(tok, "push:feat@2", "--reviewed", self.head(),
+                            *self.script("import os, signal; os.kill(os.getpid(), signal.SIGTERM)"))
+        self.assertEqual((rc, r["ok"]), (143, False))
+        self.assertIn("exit 143", r["op"]["result"])
+
+    def test_a_command_that_cannot_start_is_recorded_as_failed(self):
+        tok = self.claim()
+        rc, r = self.run_op(tok, "push:feat@1", "--reviewed", self.head(), "--", str(Path(self.tmp.name) / "no-such-command"))
+        self.assertEqual(rc, 127)
+        self.assertIn("exit 127", r["op"]["result"])
+        self.assertEqual(self.pending(), [])
+
+    def test_losing_the_lease_while_running_leaves_the_op_pending(self):
+        tok = self.claim()
+        release = f"import subprocess, sys; subprocess.run([sys.executable, {str(WORK)!r}, 'release', '--dir', {str(self.wt)!r}, '--token', {tok!r}], check=True)"
+        rc, r = self.run_op(tok, "push:feat@1", "--reviewed", self.head(), *self.script(release))
+        self.assertEqual(rc, 3)
+        self.assertEqual(r["exit"], 0)
+        self.assertEqual(self.pending(), ["push:feat@1"])  # 次の担当が外部の状態と照合する
+
+    def test_an_expired_lease_not_taken_over_still_records_the_result(self):
+        tok = self.claim()
+        expire = ("import json, pathlib, time; f = next(pathlib.Path(" + repr(str(Path(self.tmp.name).resolve() / "state" / "work"))
+                  + ").glob('*/lease.json')); d = json.loads(f.read_text()); d['expires_at'] = time.time() - 1; f.write_text(json.dumps(d))")
+        rc, r = self.run_op(tok, "push:feat@1", "--reviewed", self.head(), *self.script(expire))
+        self.assertEqual(rc, 0)
+        self.assertEqual(r["op"]["state"], "done")
+
+    def test_a_short_lease_is_extended_before_the_command_runs(self):
+        tok = self.claim()
+        self.assertEqual(self.w("renew", "--dir", str(self.wt), "--token", tok, "--lease", "0.05")[0], 0)  # 3 秒
+        left = ("import json, pathlib, time; f = next(pathlib.Path(" + repr(str(Path(self.tmp.name).resolve() / "state" / "work"))
+                + ").glob('*/lease.json')); print('left', int(json.loads(f.read_text())['expires_at'] - time.time()))")
+        rc, r = self.run_op(tok, "push:feat@1", "--reviewed", self.head(), *self.script(left))
+        self.assertEqual(rc, 0)
+        self.assertGreater(int(r["op"]["result"].split("left ")[1].split()[0]), 600)
+
     def test_command_runs_in_the_from_directory_without_a_shell(self):
         tok = self.claim()
         rc, r = self.run_op(tok, "push:feat@1", "--reviewed", self.head(), "--", "echo", "a | false")
@@ -768,9 +848,17 @@ class TestOpRun(unittest.TestCase):
 
     def test_missing_command_is_refused_before_begin(self):
         tok = self.claim()
-        rc, r = self.run_op(tok, "push:feat@1", "--reviewed", self.head())
-        self.assertEqual(rc, 2)
-        self.assertEqual(self.pending(), [])
+        before = self.ops_file()
+        for tail in ((), ("--",)):
+            rc, r = self.run_op(tok, "push:feat@1", "--reviewed", self.head(), *tail)
+            self.assertEqual(rc, 2, tail)
+        self.assertEqual(self.ops_file(), before)
+
+    def test_a_local_key_without_from_runs_in_the_workspace(self):
+        tok = self.claim()
+        rc, r = self.op(tok, "local:probe", *self.script("import os; print(os.getcwd())"))
+        self.assertEqual(rc, 0)
+        self.assertIn(str(self.wt.resolve()), r["op"]["result"])
 
 
 if __name__ == "__main__":

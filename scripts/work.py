@@ -8,7 +8,8 @@
   work.py op begin   --dir <作業場所> --token <t> --key <操作の鍵> --what <何をするか> [--from <場所>] [--verified <c>] [--reviewed <c>|none:<理由>]
                      → 同じ鍵が既にあれば拒否（4）
   work.py op run     （op begin と同じ引数） -- <コマンド>              → begin が通ったときだけ --from（無ければ作業場所）でコマンドを
-                     シェルを通さずに実行し、終了コードと出力の末尾を done に記録する。終了コードはコマンドのもの（begin の拒否は begin の値）
+                     シェルを通さず標準入力なしで実行し、終了コードと出力（stderr を含む）の末尾 20 行を done に記録する。
+                     終了コードはコマンドのもの（シグナルは 128+N、起動できなければ 127、begin の拒否は begin の値、実行中に引き継がれたら 3）
   work.py op done    --dir <作業場所> --token <t> --key <操作の鍵> --result <結果>    → 照合で見つけた結果を閉じるとき
   work.py op pending --dir <作業場所>                                 → 始めたが終わりの記録が無い操作
   work.py check   --dir <作業場所> --from <外部操作を実行する場所>      → そこで使われる GitHub のアカウントと、push 先の origin への書き込み権限（書けない・アカウントが分からなければ 5）
@@ -643,22 +644,30 @@ def op_run(a, r: Path, argv: list) -> int:
         lease = read(r / "lease.json")
         now = time.time()
         res, code = op_step(a, r, lease if alive(lease, now) else None, now, "begin")
+        if not code and float(lease["expires_at"]) < now + 20 * 60:
+            # 実行の間に期限が切れると、別の担当が取って begun を照合し、終わっていない操作をやり直しうる
+            lease["expires_at"] = now + 20 * 60
+            write(r / "lease.json", lease)
     if code:
         return out(res, code)
     try:
-        p = subprocess.run(argv, cwd=a.frm or a.dir, stdin=subprocess.DEVNULL, capture_output=True, text=True)
-        rc, output = p.returncode, (p.stdout + p.stderr).strip()
+        # stderr を同じ流れに混ぜる（git push の拒否理由は stderr に出る）。非 UTF-8 の出力でも記録を落とさない
+        p = subprocess.run(argv, cwd=a.frm or a.dir, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        rc, output = p.returncode, p.stdout.decode("utf-8", "replace").strip()
     except OSError as e:
-        rc, output = 127, str(e)
+        rc, output = 127, f"起動できない: {e}"
+    if rc < 0:  # シグナルで止まった。シェルと同じ 128+N にする
+        rc = 128 - rc
     sys.stderr.write(output + "\n" if output else "")
     a.result = f"exit {rc}: " + "\n".join(output.splitlines()[-20:])
     with locked(r):
         lease = read(r / "lease.json")
         now = time.time()
-        res, code = op_step(a, r, lease if alive(lease, now) else None, now, "done")
-    if code:  # 実行の間に担当が引き継がれた。begin のまま残るので、次の担当が照合する
+        # 実行の間に期限が切れただけなら（引き継がれていなければ）同じ担当として結果を書く
+        res, code = op_step(a, r, lease if alive(lease, now) or (lease or {}).get("token") == a.token else None, now, "done")
+    if code:  # 実行の間に引き継がれた・解放された。begin のまま残るので、次の担当が照合する
         return out({**res, "exit": rc, "output": output[-2000:]}, code)
-    return out({"ok": rc == 0, "exit": rc, "op": res["op"]}, rc if 0 <= rc < 256 else 1)  # シグナルで止まると負になる
+    return out({"ok": rc == 0, "exit": rc, "op": res["op"]}, rc if rc < 256 else 1)
 
 
 def main() -> int:
