@@ -652,7 +652,9 @@ def op_run(a, r: Path, argv: list) -> int:
         return out(res, code)
     try:
         # stderr を同じ流れに混ぜる（git push の拒否理由は stderr に出る）。非 UTF-8 の出力でも記録を落とさない
-        p = subprocess.run(argv, cwd=a.frm or a.dir, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        # 端末からも切り離し、git の認証の問い合わせで待ち続けない（その間に担当の期限が切れる）
+        p = subprocess.run(argv, cwd=a.frm or a.dir, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                           start_new_session=True, env={**os.environ, "GIT_TERMINAL_PROMPT": "0"})
         rc, output = p.returncode, p.stdout.decode("utf-8", "replace").strip()
     except OSError as e:
         rc, output = 127, f"起動できない: {e}"
@@ -663,8 +665,8 @@ def op_run(a, r: Path, argv: list) -> int:
     with locked(r):
         lease = read(r / "lease.json")
         now = time.time()
-        # 実行の間に期限が切れただけなら（引き継がれていなければ）同じ担当として結果を書く
-        res, code = op_step(a, r, lease if alive(lease, now) or (lease or {}).get("token") == a.token else None, now, "done")
+        # token が同じなら、実行の間に期限が切れていても書く（引き継がれたかは op_step の check_token が見る）
+        res, code = op_step(a, r, lease, now, "done")
     if code:  # 実行の間に引き継がれた・解放された。begin のまま残るので、次の担当が照合する
         return out({**res, "exit": rc, "output": output[-2000:]}, code)
     return out({"ok": rc == 0, "exit": rc, "op": res["op"]}, rc if rc < 256 else 1)

@@ -794,7 +794,7 @@ class TestOpRun(unittest.TestCase):
                             *self.script("import os, sys; os.write(1, bytes([255]) + b' done'); sys.exit(2)"))
         self.assertEqual(rc, 2)
         self.assertIn("exit 2", r["op"]["result"])
-        self.assertIn("done", r["op"]["result"])
+        self.assertIn("\ufffd done", r["op"]["result"])  # 復号できないバイトは置き換えて残す
         self.assertEqual(self.pending(), [])
 
     def test_exit_codes_and_signals_are_kept(self):
@@ -834,7 +834,7 @@ class TestOpRun(unittest.TestCase):
 
     def test_a_short_lease_is_extended_before_the_command_runs(self):
         tok = self.claim()
-        self.assertEqual(self.w("renew", "--dir", str(self.wt), "--token", tok, "--lease", "0.05")[0], 0)  # 3 秒
+        self.assertEqual(self.w("renew", "--dir", str(self.wt), "--token", tok, "--lease", "19")[0], 0)  # 20 分を切っている
         left = ("import json, pathlib, time; f = next(pathlib.Path(" + repr(str(Path(self.tmp.name).resolve() / "state" / "work"))
                 + ").glob('*/lease.json')); print('left', int(json.loads(f.read_text())['expires_at'] - time.time()))")
         rc, r = self.run_op(tok, "push:feat@1", "--reviewed", self.head(), *self.script(left))
@@ -878,9 +878,10 @@ class TestOpRun(unittest.TestCase):
         for token, key, *flags in cases:
             base = ["op", "{}", "--dir", str(self.wt), "--token", token, "--key", key, "--what", "x", *flags]
             begin = self.w(*[x.format("begin") if x == "{}" else x for x in base])[0]
-            run = self.w(*[x.format("run") if x == "{}" else x for x in base], *self.script(f"open({str(marker)!r}, 'w')"))[0]
+            run = self.w(*[x.format("run") if x == "{}" else x for x in base], *self.script(f"open({str(marker)!r}, 'w')"))
             self.assertNotEqual(begin, 0, (key, flags))
-            self.assertEqual(run, begin, (key, flags))
+            self.assertEqual(run[0], begin, (key, flags))
+            self.assertNotIn("exit", run[1], (key, flags))  # exit が無いことで、コマンドが走らなかったと分かる
         self.assertFalse(marker.exists())
         self.assertEqual(self.ops_file(), before)
         self.assertEqual(self.lease_file().read_bytes(), lease)  # 拒否は担当の期限も延ばさない
@@ -918,6 +919,18 @@ class TestOpRun(unittest.TestCase):
         self.assertIn("stdin 0", json.loads(p.stdout)["op"]["result"])
         self.assertIn("shown", p.stderr)  # 出力の全体は stderr に出す
 
+    def test_the_command_cannot_prompt_on_the_terminal(self):
+        tok = self.claim()
+        rc, r = self.run_op(tok, "push:feat@1", "--reviewed", self.head(),
+                            *self.script("import os; print('prompt', os.environ.get('GIT_TERMINAL_PROMPT'), 'sid', os.getsid(0) == os.getpid())"))
+        self.assertIn("prompt 0 sid True", r["op"]["result"])
+
+    def test_only_op_run_takes_a_command_after_double_dash(self):
+        tok = self.claim()
+        p = self.raw("op", "begin", "--dir", str(self.wt), "--token", tok, "--key", "local:x", "--what", "x", "--", "echo", "hi")
+        self.assertEqual(p.returncode, 2)  # begin は -- の後ろを黙って捨てずに止まる
+        self.assertEqual(self.pending(), [])
+
     def test_a_local_key_runs_where_from_points(self):
         tok = self.claim()
         rc, r = self.op(tok, "local:probe", "--from", str(self.repo), *self.script("import os; print(os.getcwd())"))
@@ -926,9 +939,9 @@ class TestOpRun(unittest.TestCase):
 
     def test_command_runs_in_the_from_directory_without_a_shell(self):
         tok = self.claim()
-        rc, r = self.run_op(tok, "push:feat@1", "--reviewed", self.head(), "--", "echo", "a | false")
+        rc, r = self.run_op(tok, "push:feat@1", "--reviewed", self.head(), "--", "echo", "a | false", "--", "b")
         self.assertEqual(rc, 0)
-        self.assertIn("a | false", r["op"]["result"])
+        self.assertIn("a | false -- b", r["op"]["result"])  # 最初の -- だけで切る
         rc, r = self.run_op(tok, "push:feat@2", "--reviewed", self.head(), *self.script("import os; print(os.getcwd())"))
         self.assertIn(str(self.repo.resolve()), r["op"]["result"])
 
