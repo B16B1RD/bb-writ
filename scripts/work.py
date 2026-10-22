@@ -114,9 +114,8 @@ def ops(r: Path) -> dict:
     f = r / "ops.jsonl"
     if f.is_file():
         # 区切りは書いた側の \n だけ。splitlines は出力に入った U+2028・U+0085 などでも行を割る
-        for n, line in enumerate(f.read_bytes().split(b"\n"), 1):
-            if not line.strip():  # 末尾の改行の後と、空の行
-                continue
+        rows = f.read_bytes().split(b"\n")
+        for n, line in enumerate(rows[:-1] if rows[-1] == b"" else rows, 1):  # 末尾の改行の後だけ除く。途中の空行は壊れた印
             try:
                 e = json.loads(line.decode("utf-8"))
             except (ValueError, RecursionError) as x:  # UnicodeDecodeError も ValueError

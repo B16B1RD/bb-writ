@@ -30,9 +30,10 @@ FAKE_CODEX = textwrap.dedent(r'''
     text = {"good": os.environ["FAKE_TEXT"], "nojson": "結論だけ", "badpath": os.environ["FAKE_TEXT"].replace("a.txt", "missing.txt"),
             "absent": os.environ["FAKE_TEXT"].replace("a.txt:1", "missing.txt"),
             "nofence": os.environ["FAKE_TEXT"].rstrip("`").rstrip()}[mode]
-    print(json.dumps({"type": "thread.started", "thread_id": "t-1"}))
-    print(json.dumps({"type": "item.completed", "item": {"type": "agent_message", "text": text}}))
-    print(json.dumps({"type": "turn.completed", "usage": {"input_tokens": 5}}))
+    raw = not os.environ.get("FAKE_RAW")  # 本物の CLI は U+2028 などをエスケープせずに出す
+    print(json.dumps({"type": "thread.started", "thread_id": "t-1"}, ensure_ascii=raw))
+    print(json.dumps({"type": "item.completed", "item": {"type": "agent_message", "text": text}}, ensure_ascii=raw))
+    print(json.dumps({"type": "turn.completed", "usage": {"input_tokens": 5}}, ensure_ascii=raw))
 ''').lstrip()
 
 FAKE_CLAUDE = textwrap.dedent(r'''
@@ -71,7 +72,7 @@ FAKE_CLAUDE = textwrap.dedent(r'''
         common = subprocess.run(["git", "rev-parse", "--path-format=absolute", "--git-common-dir"], capture_output=True, text=True).stdout.strip()
         os.makedirs(os.path.join(os.path.dirname(common), ".claude", ".cc-writes"), exist_ok=True)
     print(json.dumps({"type": "result", "result": os.environ["FAKE_TEXT"], "session_id": "s-1", "is_error": False,
-                      "modelUsage": {"claude-sonnet-5-5": {}}, "total_cost_usd": 0.01, "num_turns": 2}))
+                      "modelUsage": {"claude-sonnet-5-5": {}}, "total_cost_usd": 0.01, "num_turns": 2}, ensure_ascii=not os.environ.get("FAKE_RAW")))
 ''').lstrip()
 
 FAKE_GROK = textwrap.dedent(r'''
@@ -140,6 +141,20 @@ class TestLaunch(unittest.TestCase):
         subprocess.run(["rm", "-rf", str(ROOT / "scripts" / "__pycache__")], check=True)
         self.run_launch("codex")  # 試験の外と同じく -B なしで起動する
         self.assertFalse((ROOT / "scripts" / "__pycache__").exists())
+
+    def test_reports_with_unicode_line_separators_are_read(self):
+        text = GOOD.encode().decode("unicode_escape").replace('"conclusion": "', '"conclusion": "\u2028\x85\u2029')
+        self.assertIn("\u2028", text)
+        rollout = self.cfg / "codex-home" / "sessions" / "2026" / "rollout-1-t-1.jsonl"
+        rollout.parent.mkdir(parents=True)
+        rollout.write_text(json.dumps({"type": "event", "payload": {"output": "a\u2028b"}}, ensure_ascii=False) + "\n"
+                           + json.dumps({"type": "turn_context", "payload": {"model": "m", "effort": "e"}}) + "\n", encoding="utf-8")
+        for host in ("codex", "claude"):
+            with self.subTest(host=host):
+                rc, rec = self.run_launch(host, env_extra={"FAKE_RAW": "1", "FAKE_TEXT": text})
+                self.assertEqual((rc, rec["status"]), (0, "ok"), rec)  # 報告を失わない
+                if host == "codex":
+                    self.assertEqual(rec["model_effective"]["model"], "m")  # 記録の行を割らずに読む
 
     def test_codex_ok_is_read_only_by_default(self):
         rc, rec = self.run_launch("codex")

@@ -309,9 +309,14 @@ def command(a, prompt: str) -> tuple[list[str], dict, str | None]:
     return cmd, env, None
 
 
+def json_lines(out: str) -> list:
+    """JSON Lines の行。区切りは \n だけ（CLI は文字列の中の U+2028・U+0085 をエスケープせずに出し、splitlines はそこでも割る）。"""
+    return out.split("\n")
+
+
 def parse_claude(out: str) -> dict:
     d = {}
-    for line in out.splitlines():
+    for line in json_lines(out):
         if line.startswith("{"):
             try:
                 d = json.loads(line)
@@ -325,7 +330,7 @@ def parse_claude(out: str) -> dict:
 
 def parse_codex(out: str) -> dict:
     text, session, usage, errors = "", None, None, []
-    for line in out.splitlines():
+    for line in json_lines(out):
         try:
             e = json.loads(line)
         except json.JSONDecodeError:
@@ -342,9 +347,12 @@ def parse_codex(out: str) -> dict:
     eff = None
     if session:  # 実効値は記録の turn_context から（メタデータだけを読む）
         for f in (config_dir() / "codex-home" / "sessions").glob(f"**/rollout-*-{session}.jsonl"):
-            for line in f.read_text(encoding="utf-8").splitlines():
-                e = json.loads(line)
-                if e.get("type") == "turn_context":
+            for line in json_lines(f.read_text(encoding="utf-8", errors="replace")):
+                try:
+                    e = json.loads(line)
+                except json.JSONDecodeError:  # 書きかけの行など。実効値は取れなければ null
+                    continue
+                if isinstance(e, dict) and e.get("type") == "turn_context":
                     p = e.get("payload") or {}
                     eff = {"model": p.get("model"), "effort": p.get("effort"), "sandbox": (p.get("sandbox_policy") or {}).get("type")}
     return {"text": text, "session": session, "model_effective": eff, "usage": usage, "errors": errors}

@@ -2031,7 +2031,7 @@ class TestOpRun(unittest.TestCase):
     def test_a_malformed_record_is_refused_with_the_line_number(self):
         tok = self.claim()
         f = self.lease_file().parent / "ops.jsonl"
-        for bad in ('{"key": ["a"], "state": "begun"}', '{"key": 1}', "[1]", "{broken", '{"key": "push:\xff"}'):
+        for bad in ('{"key": ["a"], "state": "begun"}', '{"key": 1}', "[1]", "{broken", '{"key": "push:\xff"}', "", "   "):
             with self.subTest(bad=bad):
                 f.write_bytes((json.dumps({"key": "push:ok", "state": "begun"}) + "\n" + bad + "\n").encode("latin-1"))
                 for args in (["op", "done", "--token", tok, "--key", "push:ok", "--result", "x"], ["op", "pending"], ["status"]):
