@@ -1799,7 +1799,7 @@ class TestOpRun(unittest.TestCase):
     def test_a_lost_supervisor_and_an_unreadable_record_still_return_json(self):
         tok = self.claim()
         f = self.lease_file().parent / "ops.jsonl"
-        for n, broken in enumerate(("{broken\n", '{"x": 1}\n', "[1]\n", None)):
+        for n, broken in enumerate(("{broken\n", '{"x": 1}\n', "[1]\n", '{"key": 1, "state": "begun"}\n', '{"key": ["a"]}\n', "[" * 200000 + "\n", None)):
             with self.subTest(broken=broken):
                 gate = Path(self.tmp.name) / f"gate12-{n}"
                 gate.mkdir()
@@ -1823,6 +1823,8 @@ class TestOpRun(unittest.TestCase):
                     self.assertIsNone(r["exit"])
                     if broken is None:  # 読めた記録は op に添える
                         self.assertEqual(r["op"]["state"], "done")
+                    else:  # 読めなければ、直す行を案内する
+                        self.assertIn("行目", r["reason"])
                 finally:
                     f.write_text(good)  # 1 つ落ちても、後の subTest を道連れにしない
 
@@ -1956,8 +1958,11 @@ class TestOpRun(unittest.TestCase):
     def test_hand_written_results_that_look_like_exit_codes_are_not_read(self):
         tok = self.claim()
         f = self.lease_file().parent / "ops.jsonl"
-        for n, result in enumerate(("exit 12abc", "exit " + "9" * 5000 + ": x", "exit 0: 照合で、外部に無かった", "exit 0 照合した", " exit 0: x")):
-            with self.subTest(result=result[:12]):
+        cases = [(r, {"by": None}) for r in ("exit 12abc", "exit " + "9" * 5000 + ": x", "exit 0: 照合で、外部に無かった", "exit 0 照合した", " exit 0: x")]
+        cases += [("exit 0: 手で書いた", {})]  # by の無い行。前の行（監督役）の印を引き継がない
+        cases += [(r, {"by": "supervise"}) for r in ("exit 256: x", "exit 1000: x", "exit " + "9" * 5000 + ": x")]  # 終了コードの値域の外
+        for n, (result, by) in enumerate(cases):
+            with self.subTest(result=result[:12], by=by):
                 gate = Path(self.tmp.name) / f"gate16-{n}"
                 gate.mkdir()
                 self.gos = [*getattr(self, "gos", []), gate / "before-print"]
@@ -1970,10 +1975,31 @@ class TestOpRun(unittest.TestCase):
                                      stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
                 self.wait_file(gate / "at-before-print")
                 with open(f, "a", encoding="utf-8") as fh:
-                    fh.write(json.dumps({"key": key, "state": "done", "result": result, "by": None}) + "\n")  # op done が書く形
+                    fh.write(json.dumps({"key": key, "state": "done", "result": result, **by}) + "\n")
                 os.kill(int((gate / "at-before-print").read_text()), signal.SIGKILL)
                 r = json.loads(p.communicate()[0])
                 self.assertIsNone(r["exit"])
+
+    def test_a_claim_does_not_leave_a_lease_when_the_record_is_broken(self):
+        tok = self.claim()
+        lease = self.lease_file()
+        self.assertEqual(self.w("release", "--dir", str(self.wt), "--token", tok)[0], 0)
+        (lease.parent / "ops.jsonl").write_text('{"key": 1, "state": "begun"}\n')
+        rc, r = self.w("claim", "--dir", str(self.wt), "--holder", "B")
+        self.assertEqual(rc, 1)
+        self.assertIn("1 行目", r["reason"])
+        self.assertFalse(lease.exists())  # 誰も token を受け取らない担当を残さない
+
+    def test_a_malformed_record_is_refused_with_the_line_number(self):
+        tok = self.claim()
+        f = self.lease_file().parent / "ops.jsonl"
+        for bad in ('{"key": ["a"], "state": "begun"}', '{"key": 1}', "[1]", "{broken"):
+            with self.subTest(bad=bad):
+                f.write_text(json.dumps({"key": "push:ok", "state": "begun"}) + "\n" + bad + "\n")
+                for args in (["op", "done", "--token", tok, "--key", "push:ok", "--result", "x"], ["op", "pending"], ["status"]):
+                    rc, r = self.w(*args[:1 + (args[0] == "op")], "--dir", str(self.wt), *args[1 + (args[0] == "op"):])
+                    self.assertEqual(rc, 1, args)  # 黙って続けず、直す場所を返す（トレースバックでなく JSON）
+                    self.assertIn("2 行目", r["reason"])
 
     def test_a_supervisor_lost_while_running_returns_the_begun_record(self):
         tok = self.claim()
@@ -2004,8 +2030,9 @@ class TestOpRun(unittest.TestCase):
         try:
             f.write_text("{broken\n")
             rc, r = self.w("claim", "--dir", str(self.wt), "--holder", "B")
-            self.assertEqual(rc, 3)  # 拒否は返す
-            self.assertIn("記録を読めない", r["pending_ops"])
+            self.assertEqual(rc, 1)  # 落ちずに、直す行を返す
+            self.assertIn("1 行目", r["reason"])
+            self.assertNotEqual(json.loads(self.lease_file().read_text())["holder"], "B")
         finally:
             f.write_text(good)
             go.write_text("")

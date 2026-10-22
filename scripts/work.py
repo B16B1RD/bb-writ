@@ -11,7 +11,7 @@
                      シェルを通さず標準入力なしで実行し、終了コードと出力（stderr を含む）の末尾 20 行を done に記録する。
                      終了コードはコマンドのもの（シグナルは 128+N、起動できなければ 127、begin の拒否は begin の値、担当を失って
                      done を書けなければ 3、done の書き込みに失敗したら 1、監督役が結果を返さずに終わったら、記録に終了コードが
-                     あればそれ（監督役が書いた記録だけ読む。255 を超えればプロセスの終了コードは 1）、無ければ 1 で exit は null。
+                     あればそれ（監督役が書いた記録の 0〜255 だけ読む）、無ければ 1 で exit は null。
                      記録（done でも begun でも）が読めれば op を添える）。出力は全体を表示する。
                      コマンドが終わるまでは、コマンドとそれが残したもの（シェルの & など）もロックを持つ。終わった後は（done を
                      書けたかに関わらず）、残したものは数えない（外部操作を & で背景に回すと、終わる前に明け渡すので、そうしない）
@@ -28,7 +28,8 @@
   work.py integrate --dir <worktree> --token <t> --expected <統合先commit> --verified <検証済みcommit> → 排他・照合して fast-forward
   work.py task cleanup --dir <worktree> --token <t> --saved <別のブランチかタグ> → 変更が保存先に入っていれば片付け（squash・rebase の統合も可）
 
-task と integrate の照合拒否は終了コード 6、担当の拒否は 3。統合のロックは期限では奪わず、子の Git にも渡す。
+task と integrate の照合拒否は終了コード 6、担当の拒否は 3。記録（ops.jsonl）の行が読めないか形が違えば 1 で、何行目かを示す。
+統合のロックは期限では奪わず、子の Git にも渡す。
 統合の記録はリポジトリ共通。中断後は前回の候補を含む統合先から完了を復元するか、新しく検証した候補で再開する。
 
 公開する操作（鍵の種類が push・pr・merge・release）の op begin には --verified <検証した commit> が要る。作業場所の HEAD と違えば拒否する（6）。
@@ -103,13 +104,25 @@ def write(p: Path, obj):
     os.replace(tmp, p)
 
 
+class RecordError(ValueError):
+    """記録（ops.jsonl）の行の形が違う。"""
+
+
 def ops(r: Path) -> dict:
+    """鍵ごとに行を重ねた記録。形の違う行は、行番号を添えた RecordError で止める（手で直す材料）。"""
     out = {}
     f = r / "ops.jsonl"
     if f.is_file():
-        for line in f.read_text(encoding="utf-8").splitlines():
-            e = json.loads(line)
-            out.setdefault(e["key"], {}).update(e)
+        for n, line in enumerate(f.read_text(encoding="utf-8").splitlines(), 1):
+            try:
+                e = json.loads(line)
+            except (ValueError, RecursionError) as x:
+                raise RecordError(f"記録 {f} の {n} 行目を読めない: {x}") from None
+            if not isinstance(e, dict) or not isinstance(e.get("key"), str):
+                raise RecordError(f"記録 {f} の {n} 行目の形が違う（key が文字列のオブジェクトでない）")
+            cur = out.setdefault(e["key"], {})
+            cur.pop("by", None)  # 誰が書いたかは、その行だけのこと（前の行の印を引き継がない）
+            cur.update(e)
     return out
 
 
@@ -332,14 +345,6 @@ def check_token(lease, token):
     return None
 
 
-def pending_or_note(r: Path):
-    """拒否の応答に添える pending_ops。記録を読めなくても拒否は返す（添える情報なので）。"""
-    try:
-        return pending(r)
-    except Exception as e:
-        return f"記録を読めない: {e!r}"
-
-
 def claim_at(r, d, holder, minutes):
     now = time.time()
     old = read(r / 'lease.json')
@@ -349,13 +354,14 @@ def claim_at(r, d, holder, minutes):
     held = run_holder(r)
     if held:  # 担当の期限が切れても（手放されても）、op run のコマンドが動いている間は取らせない。取ると、終わっていない操作をやり直せる
         return {'ok': False, 'reason': f'op run の外部操作がまだ動いている: {held}。終わるのを待つ（終われば監督役が done を書く）',
-                'holder': old and old.get('holder'), 'pending_ops': pending_or_note(r)}, 3
+                'holder': old and old.get('holder'), 'pending_ops': pending(r)}, 3
+    waiting = pending(r)  # 記録が壊れていれば、担当を書く前に止める（書いた後に落ちると、誰も token を受け取らない担当が残る）
     new = {'token': secrets.token_hex(8), 'holder': holder, 'dir': str(d.resolve()),
            'claimed_at': now, 'expires_at': now + minutes * 60,
            'previous': old and {'holder': old.get('holder'), 'expired_at': old.get('expires_at')}}
     write(r / 'lease.json', new)
     return {'ok': True, 'token': new['token'], 'previous': new['previous'],
-            'pending_ops': pending(r), 'note': note(r)}, 0
+            'pending_ops': waiting, 'note': note(r)}, 0
 
 
 def git(d, *args, fds=()):
@@ -870,23 +876,22 @@ def op_run(a, r: Path, argv: list) -> int:
             show(shown)
         except OSError as e:
             sys.stderr.write(f"（出力を読めない: {e!r}）\n")
-    rec = {}
+    rec, unreadable = {}, ""
     if len(lines) < 2:  # 監督役が結果を返さなかった。記録を読む（読めなければ、書けていないとみなす）
         try:
             rec = ops(r).get(a.key, {})
-            rec = rec if isinstance(rec, dict) else {}
-        except Exception:  # 手で壊した記録（形の違い、深い入れ子の RecursionError など）でも落ちない
-            rec = {}
+        except Exception as e:  # 手で壊した記録（形の違い、深い入れ子の RecursionError など）でも落ちない
+            unreadable = f"{e}。その行を直してから、"
     if len(lines) < 2 and rec.get("state") == "done":  # done を書いた後に監督役が居なくなった。結果は記録にある
         result = rec.get("result")
-        m = re.match(r"exit ([0-9]{1,10}):", result) if isinstance(result, str) and rec.get("by") == "supervise" else None  # 監督役が書いた記録だけ
-        if not m:  # 手で閉じた記録など。走ったかは記録の result で判断する
+        m = re.match(r"exit ([0-9]{1,3}):", result) if isinstance(result, str) and rec.get("by") == "supervise" else None  # 監督役が書いた記録だけ
+        if not m or int(m.group(1)) > 255:  # 手で閉じた記録など。走ったかは記録の result で判断する
             return out({"ok": False, "exit": None, "op": rec, "reason": "監督役が結果を返さずに終わった。記録の result で判断する"}, 1)
         rc = int(m.group(1))
-        return out({"ok": rc == 0, "exit": rc, "op": rec, "reason": "監督役が結果を返さずに終わったが、結果は記録済み"}, rc if rc < 256 else 1)
+        return out({"ok": rc == 0, "exit": rc, "op": rec, "reason": "監督役が結果を返さずに終わったが、結果は記録済み"}, rc)
     if len(lines) < 2:  # コマンドは走ったかもしれない（exit は分からない）。始めた記録があれば添える
         return out({"ok": False, "exit": None, **({"op": rec} if rec else {}),
-                    "reason": f"監督役が結果を返さずに終わった。{r / 'supervise.err'} を読み、"
+                    "reason": f"監督役が結果を返さずに終わった。{r / 'supervise.err'} を読み、{unreadable}"
                     "op pending の running が消えるのを待ってから、外部の状態で照合する"}, 1)
     print(lines[1])
     return int(lines[0])
@@ -1092,6 +1097,13 @@ def main() -> int:
         res, code = check(a.dir, a.frm)
         return out(res, code)
     r = root(a.dir)
+    try:
+        return dispatch(a, r, run_argv)
+    except RecordError as e:  # 形の違う記録。黙って続けず、どこを直すかを返す
+        return out({"ok": False, "reason": str(e)}, 1)
+
+
+def dispatch(a, r: Path, run_argv):
     if a.cmd == "op" and a.action == "run":
         return op_run(a, r, run_argv)
     with locked(r):
