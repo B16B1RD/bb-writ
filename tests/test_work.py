@@ -1131,6 +1131,31 @@ class TestOpRun(unittest.TestCase):
         self.lease_file().write_text(good)
         self.assertEqual(self.pending(), ["push:feat@1"])  # 照合で閉じる
 
+    def test_a_key_with_spaces_is_matched_as_written(self):
+        tok = self.claim()
+        go = self.go_file()
+        key = "push:x "
+        p = self.start_run(tok, key, f"import os, time\nwhile not os.path.exists({str(go)!r}): time.sleep(0.05)")
+        self.wait_running(key)
+        self.assertEqual(self.w("op", "done", "--dir", str(self.wt), "--token", tok, "--key", key, "--result", "x")[0], 4)
+        go.write_text("")
+        p.wait()
+
+    def test_the_output_is_removed_when_op_run_was_stopped(self):
+        tok = self.claim()
+        go = self.go_file()
+        p = self.start_run(tok, "push:feat@1", f"import os, time\nwhile not os.path.exists({str(go)!r}): time.sleep(0.05)\nprint('secret')")
+        self.wait_running("push:feat@1")
+        p.kill()
+        p.wait()
+        go.write_text("")
+        self.assertIn("secret", self.wait_done("push:feat@1")["result"])  # 末尾は記録に残る
+        for _ in range(40):
+            if not list(self.lease_file().parent.glob("run-*.log")):
+                break
+            time.sleep(0.05)
+        self.assertEqual(list(self.lease_file().parent.glob("run-*.log")), [])
+
     def test_only_external_begin_and_the_running_done_are_refused_while_running(self):
         tok = self.claim()
         self.assertEqual(self.w("op", "begin", "--dir", str(self.wt), "--token", tok, "--key", "local:old", "--what", "x")[0], 0)
@@ -1148,9 +1173,16 @@ class TestOpRun(unittest.TestCase):
     def test_the_lock_is_not_left_with_a_process_the_command_leaves_behind(self):
         tok = self.claim()
         rc, r = self.run_op(tok, "push:feat@1", "--reviewed", self.head(),
-                            *self.script("import subprocess; subprocess.Popen(['sleep', '5'], start_new_session=True)"))
+                            *self.script("import subprocess; print('left', subprocess.Popen(['sleep', '2'], start_new_session=True).pid)"))
         self.assertEqual(rc, 0)
+        left = int(r["op"]["result"].split("left ")[1].split()[0])
         self.assertEqual(self.run_op(tok, "pr:feat", "--reviewed", "none:x", *self.script("print(1)"))[0], 0)  # git の gc のような残りに縛られない
+        for _ in range(60):  # 残した sleep の終わりを待つ（試験の後にプロセスを残さない）
+            try:
+                os.kill(left, 0)
+            except ProcessLookupError:
+                break
+            time.sleep(0.1)
 
     def test_the_lease_is_extended_below_19_minutes_and_after_expiry_with_the_same_token(self):
         tok = self.claim()

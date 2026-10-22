@@ -656,7 +656,7 @@ def run_holder(r: Path):
         fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
         return None
     except BlockingIOError:
-        return f.read_text(encoding="utf-8").strip() or "?"
+        return f.read_text(encoding="utf-8") or "?"  # 鍵はそのまま比べる（空白を落とすと、記録の鍵と食い違う）
     finally:
         os.close(fd)
 
@@ -799,6 +799,7 @@ def supervise(spec: dict, argv: list) -> int:
         print(json.dumps(res, ensure_ascii=False), flush=True)
     except BrokenPipeError:  # op run が止められた。結果は記録にある。終わり際の flush でも出さない
         os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+        run_log(r, spec["key"]).unlink(missing_ok=True)  # 読む相手が居ない出力を残さない（記録の末尾 20 行が残る）
     return 0
 
 
