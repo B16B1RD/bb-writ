@@ -62,6 +62,10 @@ FAKE_CLAUDE = textwrap.dedent(r'''
     os.makedirs(".claude/.cc-writes", exist_ok=True)  # 2.1.302 の --restricted が対象に作る空のディレクトリ
     import subprocess
     mode = os.environ.get("FAKE_MODE")
+    if mode in ("home-ssh", "home-ssh-used"):  # 2.1.309 の sandbox がホームに作る空のディレクトリ
+        os.makedirs(os.path.join(os.environ["HOME"], ".claude", "ssh"), mode=0o700, exist_ok=True)
+        if mode == "home-ssh-used":
+            open(os.path.join(os.environ["HOME"], ".claude", "ssh", "x"), "w").write("x")
     git = ["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid"]
     common = lambda: subprocess.run(["git", "rev-parse", "--path-format=absolute", "--git-common-dir"], capture_output=True, text=True).stdout.strip()
     if mode == "own-commit":  # 自分のブランチに commit するのは正当。sandbox が作る空の config.worktree も残る
@@ -516,6 +520,23 @@ class TestLaunch(unittest.TestCase):
                 Path(f).unlink() if Path(f).is_file() else Path(f).rmdir()
         rc, rec = self.run_launch("claude", env_extra={"HOME": str(home)})
         self.assertEqual((rc, rec["status"], rec.get("home_residue")), (0, "ok", []), rec)  # 前からある空のファイルは数えない
+
+    def test_claude_child_leaves_no_ssh_dir_it_made_in_home(self):
+        # 2.1.309 の sandbox は、子を起こすたびにホームへ空の .claude/ssh を作り、残りとして委任が毎回 failed になった
+        home = Path(self.tmp.name) / "home"
+        (home / ".config").mkdir(parents=True)
+        for extra in ((), ("--write",)):
+            rc, rec = self.run_launch("claude", "home-ssh", extra=extra, env_extra={"HOME": str(home)})
+            self.assertEqual((rec["status"], rec["home_residue"]), ("ok", []), rec)
+            self.assertFalse((home / ".claude").exists())  # この起動で作られた .claude ごと消す
+        (home / ".claude" / "ssh").mkdir(parents=True)  # 前からある空の .claude/ssh は消さない
+        rc, rec = self.run_launch("claude", "home-ssh", env_extra={"HOME": str(home)})
+        self.assertEqual(rec["status"], "ok", rec)
+        self.assertTrue((home / ".claude" / "ssh").is_dir())
+        (home / ".claude" / "ssh").rmdir()
+        rc, rec = self.run_launch("claude", "home-ssh-used", env_extra={"HOME": str(home)})
+        self.assertEqual(rec["status"], "ok", rec)
+        self.assertEqual((home / ".claude" / "ssh" / "x").read_text(), "x")  # 中身があれば消さない
 
     @unittest.skipIf(os.geteuid() == 0, "root は権限で止められない")
     def test_a_child_hiding_part_of_home_fails(self):

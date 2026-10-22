@@ -563,6 +563,8 @@ def main() -> int:
                 git_dir, _ = grok_git_dir(a.cwd)
                 for top in {a.cwd, *([git_dir.parent] if git_dir and git_dir.name == ".git" else [])}:
                     made += [d for d in (top / ".claude", top / ".claude" / ".cc-writes") if not d.exists()]
+                # 2.1.309 の sandbox は、CLAUDE_CONFIG_DIR に関わらずホームに空の .claude/ssh（0700）を作って書ける場所に足す
+                made += [d for d in (Path.home() / ".claude", Path.home() / ".claude" / "ssh") if not d.exists()]
             # 子の前後でホームを比べ、新しくできて空のままの場所を残りとして報告する。黙って消さない（同じ時刻に別の道具が作ったものかもしれない）
             skip = [config_dir(), state_dir(), out_dir, a.cwd, Path.home() / ".cache"]
             home_before, _, unreadable_before = home_entries(skip)
