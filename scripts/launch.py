@@ -99,15 +99,17 @@ def secret_reads(cfg: Path) -> dict:
     return {"denyRead": [str(Path.home() / p) for p in SECRET_PLACES] + [str(cfg)], "allowRead": [str(Path.home() / ".config" / "git")]}
 
 
-def home_entries(skip: list[Path]) -> tuple[set[str], set[str]]:
-    """ホームの 2 段目までの (すべての場所, 空のファイルと空のディレクトリ)。skip とその下は見ない。
+def home_entries(skip: list[Path]) -> tuple[set[str], set[str], set[str]]:
+    """ホームの 2 段目までの (すべての場所, 空のファイルと空のディレクトリ, 読めない場所)。skip とその下は見ない。
+    読めない場所を黙って飛ばすと、子が権限を落とした場所の残りを見逃すので、呼ぶ側が前後で比べる。
     子の CLI の sandbox は、守る対象のうち無いものを空のファイルで作り、残すことがある（.bash_profile が残ると、ログインシェルが .bashrc を読まなくなった。2.1.302）。"""
-    every, empty = set(), set()
+    every, empty, unreadable = set(), set(), set()
 
     def scan(d: Path, depth: int):
         try:
             entries = list(os.scandir(d))
         except OSError:
+            unreadable.add(str(d))
             return
         for e in entries:
             p = Path(e.path)
@@ -125,10 +127,10 @@ def home_entries(skip: list[Path]) -> tuple[set[str], set[str]]:
                 elif e.is_file() and e.stat().st_size == 0:
                     empty.add(e.path)
             except OSError:
-                continue
+                unreadable.add(e.path)
 
     scan(Path.home(), 1)
-    return every, empty
+    return every, empty, unreadable
 
 
 def grok_ro_writable(home: Path) -> list[Path]:
@@ -137,9 +139,12 @@ def grok_ro_writable(home: Path) -> list[Path]:
     return sorted({p.resolve() for p in roots})
 
 
+GIT_TIMEOUT = float(os.environ.get("BB_WRIT_GIT_TIMEOUT") or 60)  # 子が管理ファイルを FIFO にすると、git はそれを開いたまま止まる（環境変数は試験だけが使う）
+
+
 def grok_git_dir(cwd: Path) -> tuple[Path | None, str | None]:
     """worktree の commit が書く Git の共通ディレクトリ。Git の外なら None。"""
-    g = subprocess.run(["git", "-C", str(cwd), "rev-parse", "--git-common-dir"], capture_output=True, text=True)
+    g = subprocess.run(["git", "-C", str(cwd), "rev-parse", "--git-common-dir"], capture_output=True, text=True, timeout=GIT_TIMEOUT)
     if g.returncode == 0:
         return (cwd / g.stdout.strip()).resolve(), None
     if "not a git repository" in g.stderr:
@@ -150,7 +155,7 @@ def grok_git_dir(cwd: Path) -> tuple[Path | None, str | None]:
 def worktree_dirs(cwd: Path) -> tuple[Path | None, Path | None, str | None]:
     """(その作業場所の管理ディレクトリ, 共通ディレクトリ, 理由)。Git の外なら (None, None, None)。"""
     g = subprocess.run(["git", "-C", str(cwd), "rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir"],
-                       capture_output=True, text=True)
+                       capture_output=True, text=True, timeout=GIT_TIMEOUT)
     if g.returncode == 0:
         own, common = g.stdout.split()
         return Path(own).resolve(), Path(common).resolve(), None
@@ -162,7 +167,7 @@ def worktree_dirs(cwd: Path) -> tuple[Path | None, Path | None, str | None]:
 def commit_dirs(own: Path, common: Path) -> list[Path]:
     """worktree で commit するのに要る、共通ディレクトリの中の場所。共通ディレクトリの直下・config・hooks と、
     他のブランチの ref は渡さない（書けると、利用者が次に git を動かしたとき sandbox の外でコードが動くか、統合先が動く）。"""
-    head = (own / "HEAD").read_text(encoding="utf-8").strip()
+    head = read_head(own / "HEAD").strip()  # 前の子が残した FIFO などで止まらない
     dirs = [common / "objects", own]
     if head.startswith("ref: refs/heads/"):
         parent = Path(head[len("ref: "):]).parent  # refs/heads/bb-writ。ref の lock はこのディレクトリに作られる
@@ -172,31 +177,54 @@ def commit_dirs(own: Path, common: Path) -> list[Path]:
     return dirs
 
 
-def read_head(f: Path) -> str:
-    """作業場所の HEAD。書く子が書き換えうる（FIFO・/dev/zero への symlink にすると、読みで止まるか尽きる）ので、
-    通常のファイルだけを、symlink をたどらず止まらずに読む。末尾の空白の変化も見るので整えない。"""
-    st = os.lstat(f)
-    if not stat.S_ISREG(st.st_mode):
-        return f"（通常のファイルでない: {stat.filemode(st.st_mode)}）"
-    fd = os.open(f, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+def read_child_file(f: Path, keep: int = 0):
+    """書く子が書き換えうるファイルを読む。FIFO・/dev/zero への symlink・巨大なファイルにされても止まらず尽きないよう、
+    symlink はたどらず（中身でなく行き先で表す）、通常のファイルだけを止まらずに開き、決まった大きさずつハッシュする。
+    無ければ None。(表し, 先頭 keep バイト) を返す。表しは中身全体の変化を映す。"""
     try:
-        if not stat.S_ISREG(os.fstat(fd).st_mode):  # 確かめた後に置き換えられた
-            return "（通常のファイルでない）"
-        return os.read(fd, 1 << 16).decode("utf-8", "surrogateescape")
+        st = os.lstat(f)
+    except FileNotFoundError:
+        return None, b""
+    if stat.S_ISLNK(st.st_mode):  # 行き先の変化も差分にする
+        return f"symlink: {os.readlink(f)!r}", b""
+    fd = os.open(f, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)  # FIFO でも開くところで止まらない
+    try:
+        mode = os.fstat(fd).st_mode  # 開いたものの種類（lstat の後に置き換えられても）
+        if not stat.S_ISREG(mode):
+            return f"（通常のファイルでない: {stat.filemode(mode)}）", b""
+        h, head = hashlib.sha256(), b""
+        while chunk := os.read(fd, 1 << 20):
+            h.update(chunk)
+            head += chunk[:max(0, keep - len(head))]
+        return h.hexdigest(), head
     finally:
         os.close(fd)
 
 
+def read_head(f: Path) -> str:
+    """作業場所の HEAD。小さければ中身（末尾の空白の変化も見るので整えない）、大きければ大きさとハッシュで表す。"""
+    digest, head = read_child_file(f, 4097)
+    if digest is None:
+        return "（無い）"
+    if len(digest) != 64:  # symlink・通常のファイルでない
+        return digest
+    return head.decode("utf-8", "surrogateescape") if len(head) <= 4096 else f"（4 KiB を超える。sha256 {digest}）"
+
+
 def git_snapshot(own: Path, common: Path, cwd: Path) -> dict:
     """書く子の前後で比べる Git の管理情報。子の書いた .git ファイルを読まないよう、共通ディレクトリを明示して読む。"""
+    for f in (common / "config", common / "packed-refs"):  # git が開いたまま止まる・尽きるものを渡さない
+        digest = read_child_file(f)[0]
+        if digest is not None and len(digest) != 64:
+            raise ValueError(f"{f} が通常のファイルでない: {digest}")
     refs = subprocess.run(["git", "--git-dir", str(common), "for-each-ref", "--format=%(refname) %(objectname)"],
-                          capture_output=True, check=True).stdout.decode("utf-8", "surrogateescape").split("\n")  # ref の名前は UTF-8 とは限らない（比べるだけ）
+                          capture_output=True, check=True, timeout=GIT_TIMEOUT).stdout.decode("utf-8", "surrogateescape").split("\n")  # ref の名前は UTF-8 とは限らない（比べるだけ）
     files = [cwd / ".git", own / "commondir", own / "gitdir", own / "config.worktree", common / "config",
              common / "objects" / "info" / "alternates"]
     for d in (common / "hooks", common / "info"):
-        files += sorted(f for f in d.rglob("*") if f.is_file()) if d.is_dir() else []
+        files += sorted(f for f in d.rglob("*") if f.is_file() or f.is_symlink()) if d.is_dir() else []
     return {"refs": dict(r.split(" ", 1) for r in refs if " " in r),
-            "files": {str(f): hashlib.sha256(f.read_bytes()).hexdigest() if f.is_file() else None for f in files},
+            "files": {str(f): read_child_file(f)[0] for f in files},
             "head": read_head(own / "HEAD")}
 
 
@@ -354,6 +382,26 @@ def parse_claude(out: str) -> dict:
             "usage": {"cost_usd": d.get("total_cost_usd"), "turns": d.get("num_turns")}}
 
 
+def rollout_lines(f: Path, limit: int = 256 << 20):
+    """Codex の記録の行（\n だけで分ける。json_lines と同じ理由）。子が書きうるので、通常のファイルだけを、
+    1 行 1 MiB・全体 limit までで読む（巨大な行は割れて読めない行になり、飛ばされる）。全体の上限を越えたら、
+    途中までの実効値を使わないよう、読めない行を 1 つ返して終える。"""
+    try:
+        fd = os.open(f, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError:
+        return
+    with os.fdopen(fd, "rb") as fh:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return
+        read = 0
+        while line := fh.readline(1 << 20):
+            read += len(line)
+            if read > limit:
+                yield b'{"type": "turn_context", "payload": {}}'  # 上限を越えた。実効値は不明（各値を null にする）
+                return
+            yield line.rstrip(b"\n")
+
+
 def parse_codex(out: str) -> dict:
     text, session, usage, errors = "", None, None, []
     for line in json_lines(out):
@@ -374,7 +422,7 @@ def parse_codex(out: str) -> dict:
     # 実効値は記録の turn_context から（メタデータだけを読む）。session は UUID の形のときだけ探す（glob に記号を渡さず、別の記録の末尾に当たらない）
     if session and re.fullmatch(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}", session):
         for f in (config_dir() / "codex-home" / "sessions").glob(f"**/rollout-*-{session}.jsonl"):
-            for line in f.read_bytes().split(b"\n"):  # 区切りは \n だけ（json_lines と同じ理由）
+            for line in rollout_lines(f):
                 try:
                     e = obj(json.loads(line.decode("utf-8")))
                 except (ValueError, RecursionError):  # 書きかけの行、UTF-8 として読めない行（置き換えた文字を実効値にしない）。取れなければ null
@@ -469,32 +517,38 @@ def main() -> int:
     rec = {"host": a.host, "cwd": str(a.cwd), "model_requested": a.model, "effort_requested": a.effort,
            "write": a.write, "out": str(out_dir)}
 
-    snapshot = None
-    if a.write:
-        own, common, why = worktree_dirs(a.cwd)
-        if not why and own and own == common:
-            # 元の checkout（とその下・submodule）の記録の置き場にはタスクの一覧があり、Grok の子には .git 全体が渡る
-            why = "書く子は task start の作業場所（worktree）で起動する。元の checkout とその下では起動しない"
-        if not why and own:
-            snapshot = (own, common, git_snapshot(own, common, a.cwd))
-    if not (a.write and why):
-        cmd, env, why = command(a, a.prompt_file.read_text(encoding="utf-8") + CONTRACT)
-    if a.host == "grok" and not why:
-        rec["grok_home"] = env["GROK_HOME"]  # 再開（grok -r）はこの home で
+    snapshot, why, prep = None, None, None
+    try:  # 起動の前の準備も、前の子が残したもの（FIFO・権限・壊れた HEAD）に当たりうる。止まらず落ちずに記録して返す
+        if a.write:
+            own, common, why = worktree_dirs(a.cwd)
+            if not why and own and own == common:
+                # 元の checkout（とその下・submodule）の記録の置き場にはタスクの一覧があり、Grok の子には .git 全体が渡る
+                why = "書く子は task start の作業場所（worktree）で起動する。元の checkout とその下では起動しない"
+            if not why and own:
+                snapshot = (own, common, git_snapshot(own, common, a.cwd))
+        if not (a.write and why):
+            cmd, env, why = command(a, a.prompt_file.read_text(encoding="utf-8") + CONTRACT)
+        if a.host == "grok" and not why:
+            rec["grok_home"] = env["GROK_HOME"]  # 再開（grok -r）はこの home で
+        if not why:
+            # --restricted の Claude Code は、対象と（worktree なら）元の checkout に空の .claude/.cc-writes を作る（2.1.302）。
+            # 残すと task cleanup が未保存の変更とみなすので、この起動で新しくでき、空のままのものだけを後で消す
+            made = []
+            if a.host == "claude":
+                git_dir, _ = grok_git_dir(a.cwd)
+                for top in {a.cwd, *([git_dir.parent] if git_dir and git_dir.name == ".git" else [])}:
+                    made += [d for d in (top / ".claude", top / ".claude" / ".cc-writes") if not d.exists()]
+            # 子の前後でホームを比べ、新しくできて空のままの場所を残りとして報告する。黙って消さない（同じ時刻に別の道具が作ったものかもしれない）
+            skip = [config_dir(), state_dir(), out_dir, a.cwd, Path.home() / ".cache"]
+            home_before, _, unreadable_before = home_entries(skip)
+    except Exception as e:
+        prep = [f"起動の前の準備ができない（前の子が残したものかもしれない）: {e!r}"[:300], f"詳細: {launcher_error(out_dir)}"]
     t0 = time.time()
-    if why:
+    if prep:
+        rec.update(status="failed", problems=prep)
+    elif why:
         rec.update(status="unavailable", problems=[why])
     else:
-        # --restricted の Claude Code は、対象と（worktree なら）元の checkout に空の .claude/.cc-writes を作る（2.1.302）。
-        # 残すと task cleanup が未保存の変更とみなすので、この起動で新しくでき、空のままのものだけを後で消す
-        made = []
-        if a.host == "claude":
-            git_dir, _ = grok_git_dir(a.cwd)
-            for top in {a.cwd, *([git_dir.parent] if git_dir and git_dir.name == ".git" else [])}:
-                made += [d for d in (top / ".claude", top / ".claude" / ".cc-writes") if not d.exists()]
-        # 子の前後でホームを比べ、新しくできて空のままの場所を残りとして報告する。黙って消さない（同じ時刻に別の道具が作ったものかもしれない）
-        skip = [config_dir(), state_dir(), out_dir, a.cwd, Path.home() / ".cache"]
-        home_before, _ = home_entries(skip)
         child = None
         try:
             # 子が残した背景のプロセスが、終了後の照合の後に書き換えないよう、プロセスグループごと止める
@@ -540,11 +594,13 @@ def main() -> int:
                         if h is None and Path(f).is_file() and not Path(f).is_symlink() and Path(f).stat().st_size == 0:
                             Path(f).unlink()
                     changed = git_changes(snapshot[2], git_snapshot(*snapshot[:2], a.cwd), snapshot[1])
+                    headline = "子が、自分のブランチ以外の Git の管理情報を変えた。"
                 except Exception as e:  # 子が管理情報を壊したかもしれない。黙らず、照合できなかったことを返す
                     changed = [f"Git の管理情報を読めない（子が壊したかもしれない）: {e!r}"[:300], f"詳細: {launcher_error(out_dir)}"]
+                    headline = "子の後に Git の管理情報を照合できない。"
                 if changed:
-                    rec.update(status="failed", problems=["子が、自分のブランチ以外の Git の管理情報を変えた。この作業場所で git を動かす前に、"
-                                                          "下の場所を確かめる（偽の設定が sandbox の外で動きうる）"] + changed[:20])
+                    rec.update(status="failed", problems=[headline + "この作業場所で git を動かす前に、下の場所を確かめる（偽の設定が sandbox の外で動きうる）"]
+                               + changed[:20] + rec.get("problems", []))
             try:
                 for d in reversed(made):
                     if d.is_dir() and not d.is_symlink() and not any(d.iterdir()):
@@ -553,10 +609,13 @@ def main() -> int:
                 rec.update(status="failed", problems=[f"子の起動で作られた空の .claude を片付けられない: {e!r}"[:300],
                                                       f"詳細: {launcher_error(out_dir)}"] + rec.get("problems", []))
             try:
-                rec["home_residue"] = sorted(home_entries(skip)[1] - home_before)
+                _, empty, unreadable = home_entries(skip)
+                rec["home_residue"] = sorted(empty - home_before)
+                if unreadable - unreadable_before:  # 子が権限を落とした場所は、残りを確かめられない
+                    raise PermissionError(f"読めない場所が増えた: {sorted(unreadable - unreadable_before)[:20]}")
             except Exception as e:
-                rec["home_residue"] = []
-                rec.update(status="failed", problems=[f"ホームの残りを確かめられない: {e!r}"[:300], f"詳細: {launcher_error(out_dir)}"]
+                rec.setdefault("home_residue", [])
+                rec.update(status="failed", problems=[f"ホームの残りを確かめられない: {e!r}"[:600], f"詳細: {launcher_error(out_dir)}"]
                            + rec.get("problems", []))
             if rec["home_residue"]:
                 rec.update(status="failed", problems=["子の起動の後、ホームに空のファイル・ディレクトリが新しく残った。中身を確かめて消す"
