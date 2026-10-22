@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """同じ作業場所への二重書き込みを防ぐ担当の貸し出し（lease）と、結果が分からない外部操作の記録（plan-v3 4.2・6.3）。
 
-  work.py claim   --dir <作業場所> [--holder <誰か>] [--lease <分>]   → token を返す。生きた担当がいるか、結果を記録していない op run があれば拒否（終了コード 3）
+  work.py claim   --dir <作業場所> [--holder <誰か>] [--lease <分>]   → token を返す。生きた担当がいるか、コマンドが終わっていない op run があれば拒否（終了コード 3）
   work.py renew   --dir <作業場所> --token <t> [--lease <分>]          → 引き継がれていれば拒否（3）。旧担当はここで止まる
-  work.py release --dir <作業場所> --token <t>                         → 結果を記録していない op run があれば拒否（4）
+  work.py release --dir <作業場所> --token <t>                         → コマンドが終わっていない op run があれば拒否（4）
   work.py status  --dir <作業場所>
   work.py op begin   --dir <作業場所> --token <t> --key <操作の鍵> --what <何をするか> [--from <場所>] [--verified <c>] [--reviewed <c>|none:<理由>]
                      → 同じ鍵が既にあれば拒否（4）
@@ -18,7 +18,7 @@
                      コマンドが終わるまで（監督役が強制終了されたら、コマンドとそれが残したものが終わるまで）、その作業場所の op run と
                      外部操作の op begin、その操作の op done を拒否する（4）
   work.py op done    --dir <作業場所> --token <t> --key <操作の鍵> --result <結果>    → 照合で見つけた結果を閉じるとき
-  work.py op pending --dir <作業場所>                                 → 始めたが終わりの記録が無い操作（結果を記録していない op run の操作は running: true）
+  work.py op pending --dir <作業場所>                                 → 始めたが終わりの記録が無い操作（コマンドが終わっていない op run の操作は running: true。done を書けなかった出力は output）
   work.py check   --dir <作業場所> --from <外部操作を実行する場所>      → そこで使われる GitHub のアカウントと、push 先の origin への書き込み権限（書けない・アカウントが分からなければ 5）
   work.py task start --dir <checkout> --holder <誰か> [--base <commit等>] [--target <ブランチ>] → 専用 worktree と担当を作る
   work.py task list --dir <checkout>                               → タスク、担当、未完了の統合
@@ -54,7 +54,7 @@ https の push に使われる git の credential helper のアカウントは�
 （persistent-https::…）は github.com とみなさない。
 
 担当の生死はプロセスで判定しない（Codex の sandbox の中は別の pid 名前空間で、外の CLI が見えない。2026-10-17 の実測）。
-op run が結果を記録していないかも pid では見ず、操作ごとのロック（running-<鍵のハッシュ>.lock）の flock と、記録の印で見る
+op run のコマンドが終わっていないかも pid では見ず、操作ごとのロック（running-<鍵のハッシュ>.lock）の flock で見る
 （ロックは監督役・コマンド・それが残したものが持ち、プロセスが死ねば OS が外す）。
 環境変数 BB_WRIT_SUPERVISE_GATE は試験だけが使う（op run と監督役の中の止まり所。設定されていても 60 秒で先へ進み、コマンドには渡さない）。
 claim は作業場所ごとの記録 note.md の雛形と証拠の置き場 evidence/ を作り、その場所と（書かれていれば）記録の中身を返す。後任は claim の出力だけで記録にたどり着く。
@@ -671,14 +671,19 @@ def run_holder(r: Path):
     消えたファイルを持っていても数えない。監督役が強制終了されて消されなかったロックは、コマンドとそれが残したものが
     終わるまで数える（外部操作を続けているかもしれない）。"""
     held = None
+    done = None
     for f in sorted(r.glob("running*.lock")):  # running.lock は 0.11.12 の名前
-        fd = os.open(f, os.O_RDONLY)
+        try:
+            fd = os.open(f, os.O_RDONLY)
+        except FileNotFoundError:  # 監督役が消した
+            continue
         try:
             text = os.read(fd, 4096).decode("utf-8", "replace")  # 鍵は 1024 バイトまで（op_step が拒否する）
             try:
                 fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
             except BlockingIOError:
-                if held is None:
+                done = ops(r) if done is None else done
+                if held is None and done.get(text, {}).get("state") != "done":  # done を書いた直後に監督役が殺されたロックは数えない
                     held = text or "?"  # 鍵はそのまま比べる（空白を落とすと、記録の鍵と食い違う）
                 continue
             f.unlink(missing_ok=True)  # 外れたロック。記録されないままの出力は、照合に使えるよう残す（op done で閉じたら消す）
@@ -709,15 +714,18 @@ def tail(f: Path, lines: int = 20, budget: int = MAX_TAIL) -> str:
             fh.seek(max(0, end - 64 * 1024))
             block = fh.read(end - max(0, end - 64 * 1024))
             if block.strip() or end <= 64 * 1024:
-                end = max(0, end - 64 * 1024) + len(block.rstrip())
+                nl = block.find(b"\n", len(block.rstrip()))  # 最後の意味のある行の終わりまで（その行の空白は残す）
+                end = max(0, end - 64 * 1024) + (nl if nl != -1 else len(block))
                 break
             end -= len(block)
         else:
             return ""
         start = max(0, end - 64 * 1024)
         fh.seek(start)
-        data = fh.read(end - start).strip()
-    text = b"\n".join(data.split(b"\n")[-lines:]).decode("utf-8", "replace")  # 行は改行だけで数える（\r の進捗表示で行を割らない）
+        rows = fh.read(end - start).split(b"\n")  # 行は改行だけで数える（\r の進捗表示で行を割らない）
+    while rows and not rows[-1].strip():  # 末尾の空白だけの行を除く。残す行の中身（前後の空白も）は変えない
+        rows.pop()
+    text = b"\n".join(rows[-lines:]).decode("utf-8", "replace")
     cut = False
 
     def size(s):  # ops.jsonl に書かれる形（ensure_ascii=False）での大きさ
@@ -734,13 +742,10 @@ def tail(f: Path, lines: int = 20, budget: int = MAX_TAIL) -> str:
     return ("（先頭を省いた）" if cut else "") + text
 
 
-def show(f: Path):
-    """出力の全体を、少しずつ stderr に写す。"""
-    if not f.is_file():
-        return
-    with open(f, "rb") as fh:
-        for chunk in iter(lambda: fh.read(64 * 1024), b""):
-            sys.stderr.buffer.write(chunk)
+def show(fh):
+    """開いた出力の全体を、少しずつ stderr に写す。"""
+    for chunk in iter(lambda: fh.read(64 * 1024), b""):
+        sys.stderr.buffer.write(chunk)
     sys.stderr.buffer.flush()
 
 
@@ -807,22 +812,24 @@ def op_run(a, r: Path, argv: list) -> int:
             os.close(fd)  # ロックは監督役が持ち続ける
     # 監督役は 2 回目の fork の先で動く（この op run の子孫から外れる）。結果は、その標準出力の 1 行目に終了コード、2 行目に JSON
     lines = sup.communicate()[0].decode("utf-8", "replace").strip().splitlines()
+    # done を書けていたら、出力は記録の末尾で足りる。表示の前に消し、開いたファイルから流す（表示の途中で止められても残さない）。
+    # 書けなかったなら、照合の材料として残す
+    recorded = ops(r).get(a.key, {}).get("state") == "done"
     try:
-        show(run_log(r, a.key))
+        with open(run_log(r, a.key), "rb") as fh:
+            if recorded:
+                try:
+                    run_log(r, a.key).unlink()
+                except OSError as e:
+                    sys.stderr.write(f"（出力のファイルを消せない: {e!r}）\n")
+            show(fh)
+    except FileNotFoundError:
+        pass
     except OSError as e:
         sys.stderr.write(f"（出力を読めない: {e!r}）\n")
     if len(lines) < 2:  # コマンドは走ったかもしれない（exit は分からない）
         return out({"ok": False, "exit": None, "reason": f"監督役が結果を返さずに終わった。{r / 'supervise.err'} を読み、"
                     "op pending の running が消えるのを待ってから、外部の状態で照合する"}, 1)
-    try:
-        recorded = json.loads(lines[1]).get("op", {}).get("state") == "done"
-    except ValueError:
-        recorded = False
-    if recorded:  # 出力を読んだら消す（秘密が出ていても、記録の末尾 20 行より長く残さない）。記録できなかったなら照合の材料として残す
-        try:
-            run_log(r, a.key).unlink(missing_ok=True)
-        except OSError as e:
-            sys.stderr.write(f"（出力のファイルを消せない: {e!r}）\n")
     print(lines[1])
     return int(lines[0])
 
@@ -850,7 +857,7 @@ def gate(name: str):
 
 def supervise(spec: dict, argv: list) -> int:
     """op run の監督役。コマンドを実行し、動いている間は担当を保ち、終わったら done を書いて結果を出す。
-    操作のロックは op run から受け継いだ fd で持ち、コマンドにも渡す。結果を記録したらロックに印を付ける。"""
+    操作のロックは op run から受け継いだ fd で持ち、コマンドにも渡す。コマンドが終わったらロックのファイルを消す。"""
     # 2 回目の fork。op run の子孫の木から外れ、木ごと止めるハーネスに巻き込まれない。保留中のシグナルは fork の子に
     # 受け継がれないので、中継（親）が fork の後に見て、パイプで子に渡す。子はそれを受け取るまで起こさない。
     # ここが「起こす前」の決め所で、これより後に中継へ届いたものは、起こした後に op run を止めたのと同じ扱い（コマンドは続く）
@@ -921,30 +928,30 @@ def supervise(spec: dict, argv: list) -> int:
                         keep_lease(r, spec["token"])
                     except (OSError, ValueError, KeyError, TypeError, AttributeError) as e:  # 延ばせなくても止まらない
                         warn(f"担当の期限を延ばせない: {e!r}")
-            rc = p.returncode
+            rc = p.returncode if p.returncode >= 0 else 128 - p.returncode  # シグナルで止まった。シェルと同じ 128+N にする
             try:
-                output = tail(run_log(r, spec["key"]), budget=MAX_TAIL - len(f"exit {p.returncode}: ".encode()))
+                output = tail(run_log(r, spec["key"]), budget=MAX_TAIL - len(f"exit {rc}: ".encode()))
             except OSError as e:
                 output = f"（出力を読めない: {e!r}）"
-    if rc < 0:  # シグナルで止まった。シェルと同じ 128+N にする
-        rc = 128 - rc
     a = argparse.Namespace(key=spec["key"], token=spec["token"], dir=d, frm=None, verified=None, reviewed=None, what="",
                            result=f"exit {rc}: " + output)  # output は tail で末尾 20 行・8 KiB にしてある
     gate("before-done")
+    code = None
     try:
         with locked(r):
             res, code = op_step(a, r, read(r / "lease.json"), time.time(), "done")  # 期限が切れても、token が同じなら書く
             finish(r, spec)
     except (OSError, ValueError, KeyError, TypeError, AttributeError) as e:  # 書けなくても結果は出す。begun は残るので照合で閉じる
-        if "code" in locals() and code == 0:  # done は書けた。ロックのファイルを消せなかっただけ（監督役が終わればロックは外れる）
+        if code is not None:  # op_step は終えた（done を書けた、または担当を失った）。ロックのファイルを消せなかっただけ
             warn(f"ロックのファイルを消せない: {e!r}")
         else:
             warn(f"done を書けない: {e!r}")
             res, code = {"ok": False, "reason": f"done を書けない: {e!r}"}, 1
             try:
-                finish(r, spec)  # 排他が取れなくても消してよい（コマンドは終わっている）
+                finish(r, spec)  # 排他は取らない（取れないこともある）。コマンドは終わっていて、run_holder は消えたファイルを飛ばす
             except OSError:
                 pass
+    gate("before-print")
     os.close(spec["lock_fd"])  # 記録を書いたら、すぐ次の担当・操作に明け渡す
     if code:  # 実行の間に引き継がれた・解放された。begun のまま残るので、次の担当が照合する
         res, rc = {**res, "exit": rc, "output": output[-2000:]}, code
@@ -1055,8 +1062,8 @@ def main() -> int:
         if held and ((a.action == "done" and a.key == held) or (a.action == "begin" and (a.key or "").split(":")[0] in EXTERNAL)):
             return out({"ok": False, "reason": f"この作業場所で、op run の外部操作がまだ動いている: {held}。終わるのを待つ（終われば監督役が done を書く）"}, 4)
         res, code = op_step(a, r, live, now, a.action)
-        if a.action == "done" and not code:  # 照合で閉じた。残しておいた出力はもう要らない
-            run_log(r, a.key).unlink(missing_ok=True)
+        if a.action == "done" and (not code or (code == 4 and res.get("op", {}).get("state") == "done")):
+            run_log(r, a.key).unlink(missing_ok=True)  # 閉じた（または既に終わっていた）。残しておいた出力はもう要らない
         return out(res, code)
 
 

@@ -1238,7 +1238,7 @@ class TestOpRun(unittest.TestCase):
         gate.mkdir(exist_ok=True)
         self.gos = [*getattr(self, "gos", []), gate / "before-check", gate / "before-start"]  # 落ちても監督役を待たせたままにしない
         key = f"push:{at}"
-        for name in ("after-begin", "relay", "relay-told", "before-done", *(["before-check"] if at == "before-start" else [])):
+        for name in ("after-begin", "relay", "relay-told", "before-done", "before-print", *(["before-check"] if at == "before-start" else [])):
             (gate / name).write_text("")  # 手前の止まり所は通す
         p = self.start_run(tok, key, f"import sys, time\n{extra}open({str(ran)!r}, 'w')\ntime.sleep(1)", env={"BB_WRIT_SUPERVISE_GATE": str(gate)})
         self.wait_file(gate / f"at-{at}")
@@ -1274,7 +1274,7 @@ class TestOpRun(unittest.TestCase):
         os.kill(int((gate / "at-relay").read_text()), signal.SIGKILL)
         os.killpg(p.pid, signal.SIGKILL)
         p.wait()
-        for name in ("relay-told", "before-check", "before-start", "before-done"):
+        for name in ("relay-told", "before-check", "before-start", "before-done", "before-print"):
             (gate / name).write_text("")
         rec = self.wait_done("push:feat@1")["result"]
         self.assertIn("exit 137", rec)
@@ -1339,15 +1339,18 @@ class TestOpRun(unittest.TestCase):
         self.assertLessEqual(stored(r["op"]["result"]), 8 * 1024)  # 「exit N: 」と省いた注記を含めて 8 KiB
         rc, r = self.run_op(tok, "push:feat@3", "--reviewed", self.head(), *self.script("print('あ' * 20000)"))
         self.assertLessEqual(stored(r["op"]["result"]), 8 * 1024)
-        self.assertGreater(stored(r["op"]["result"]), 8 * 1024 - 16)  # 日本語でも 8 KiB 近くまで使う
+        self.assertGreater(stored(r["op"]["result"]), 7 * 1024)  # 日本語でも 8 KiB 近くまで使う（ちょうどは test_the_trim_keeps_the_longest_tail_that_fits）
         rc, r = self.run_op(tok, "push:feat@4", "--reviewed", self.head(), *self.script("print('z' * 20000)"))
         self.assertLessEqual(stored(r["op"]["result"]), 8 * 1024)  # 「exit 0: 」を含めて上限に収める
+        rc, r = self.run_op(tok, "push:feat@5", "--reviewed", self.head(),
+                            *self.script("import os, signal; print('z' * 20000, flush=True); os.kill(os.getpid(), signal.SIGKILL)"))
+        self.assertLessEqual(stored(r["op"]["result"]), 8 * 1024)  # シグナルで終わっても（exit 137: の幅で数える）
 
     def test_the_test_gate_is_not_passed_to_the_command(self):
         tok = self.claim()
         gate = Path(self.tmp.name) / "gate4"
         gate.mkdir()
-        for name in ("after-begin", "relay", "relay-told", "before-check", "before-start", "before-done"):
+        for name in ("after-begin", "relay", "relay-told", "before-check", "before-start", "before-done", "before-print"):
             (gate / name).write_text("")
         p = self.start_run(tok, "push:feat@1", "import os; print('gate', os.environ.get('BB_WRIT_SUPERVISE_GATE'))", env={"BB_WRIT_SUPERVISE_GATE": str(gate)})
         p.wait()
@@ -1359,7 +1362,7 @@ class TestOpRun(unittest.TestCase):
         gate = Path(self.tmp.name) / "gate5"
         gate.mkdir()
         self.gos = [*getattr(self, "gos", []), gate / "after-begin"]
-        for name in ("relay", "relay-told", "before-check", "before-start", "before-done"):
+        for name in ("relay", "relay-told", "before-check", "before-start", "before-done", "before-print"):
             (gate / name).write_text("")
         p = self.start_run(tok, "push:feat@1", "print(1)", env={"BB_WRIT_SUPERVISE_GATE": str(gate)})
         self.wait_file(gate / "at-after-begin")
@@ -1373,7 +1376,7 @@ class TestOpRun(unittest.TestCase):
         gate = Path(self.tmp.name) / "gate6"
         gate.mkdir()
         self.gos = [*getattr(self, "gos", []), gate / "before-done"]
-        for name in ("after-begin", "relay", "relay-told", "before-check", "before-start"):
+        for name in ("after-begin", "relay", "relay-told", "before-check", "before-start", "before-print"):
             (gate / name).write_text("")
         p = self.start_run(tok, "push:feat@1", "print('real result')", env={"BB_WRIT_SUPERVISE_GATE": str(gate)})
         self.wait_file(gate / "at-before-done")
@@ -1396,11 +1399,13 @@ class TestOpRun(unittest.TestCase):
         p.kill()
         p.wait()
         go.write_text("")
-        for _ in range(100):
+        for _ in range(200):
             pend = self.w("op", "pending", "--dir", str(self.wt))[1]["pending_ops"]
             if pend and not pend[0].get("running"):
                 break
             time.sleep(0.05)
+        else:
+            self.fail("監督役が終わらない")
         self.assertIn("SECRET-EVIDENCE", Path(pend[0]["output"]).read_text())
 
     def test_unrecorded_output_is_kept_when_op_run_is_alive(self):
@@ -1433,6 +1438,7 @@ class TestOpRun(unittest.TestCase):
         self.addCleanup(os.environ.pop, "BB_WRIT_SUPERVISE_GATE", None)
         work.gate("never")  # 60 秒（偽の時計）で先へ進む
         self.assertTrue((gate / "at-never").is_file())
+        self.assertLessEqual(next(clock), 80)  # 60 秒を少し過ぎたところで諦めた
         os.environ["BB_WRIT_SUPERVISE_GATE"] = str(gate / "missing")
         work.gate("x")  # 無い場所なら、すぐ進む
 
@@ -1456,6 +1462,128 @@ class TestOpRun(unittest.TestCase):
         finally:
             os.environ.pop("BB_WRIT_SUPERVISE_GATE", None)
             os.chmod(gate, 0o755)
+
+    def test_a_failed_command_with_a_recorded_result_leaves_no_output(self):
+        tok = self.claim()
+        rc, r = self.run_op(tok, "push:feat@1", "--reviewed", self.head(), *self.script("print('SECRET'); raise SystemExit(1)"))
+        self.assertEqual((rc, r["op"]["state"]), (1, "done"))
+        self.assertEqual(self.outputs(), [])  # 失敗しても、記録できたなら全体の出力は残さない
+        p = self.start_run(tok, "push:feat@2", "import time; time.sleep(1); print('SECRET'); raise SystemExit(1)")
+        time.sleep(0.3)
+        p.kill()
+        p.wait()
+        self.wait_done("push:feat@2")
+        for _ in range(100):
+            if not self.outputs():
+                break
+            time.sleep(0.05)
+        self.assertEqual(self.outputs(), [])  # op run が居なくても、記録できたなら監督役が消す
+
+    def test_output_is_removed_before_it_is_shown(self):
+        """表示の途中で op run が止められても、記録できた出力の全体を残さない。"""
+        tok = self.claim()
+        p = subprocess.Popen([sys.executable, str(WORK), "op", "run", "--dir", str(self.wt), "--token", tok, "--key", "push:feat@1",
+                              "--what", "x", "--from", str(self.repo), "--verified", self.head(), "--reviewed", self.head(),
+                              *self.script("print('SECRET' * 2_000_000)")], env=self.env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        p.stderr.read(1024)  # 表示が始まった
+        p.kill()
+        p.wait()
+        self.wait_done("push:feat@1")
+        self.assertEqual(self.outputs(), [])
+
+    def test_the_supervisor_survives_when_the_mutex_cannot_be_opened(self):
+        tok = self.claim()
+        m = self.lease_file().parent / ".mutex"
+        try:
+            rc, r = self.run_op(tok, "push:feat@1", "--reviewed", self.head(), *self.script(f"import os; os.chmod({str(m)!r}, 0)"))
+        finally:
+            os.chmod(m, 0o644)
+        self.assertEqual(rc, 1, r)
+        self.assertIn("done を書けない", r["reason"])  # 黙って落ちず、理由を返す
+
+    def test_losing_the_lease_and_failing_to_remove_the_lock_still_says_3(self):
+        tok = self.claim()
+        d = self.lease_file().parent
+        body = ("import json, os; f = " + repr(str(self.lease_file())) + "; "
+                "open(f + '.t', 'w').write(json.dumps({**json.load(open(f)), 'token': 'other'})); os.replace(f + '.t', f); "
+                f"os.chmod({str(d)!r}, 0o555)")
+        try:
+            rc, r = self.run_op(tok, "push:feat@1", "--reviewed", self.head(), *self.script(body))
+        finally:
+            os.chmod(d, 0o755)
+        self.assertEqual(rc, 3, r)  # 担当を失った（書くのをやめる）を「done を書けない」に化けさせない
+
+    def test_a_lock_left_after_done_is_not_counted(self):
+        """done を書いた直後に監督役が殺され、ロックのファイルが残っても、その操作は終わっている。"""
+        tok = self.claim()
+        self.assertEqual(self.run_op(tok, "push:feat@1", "--reviewed", self.head(), *self.script("print(1)"))[0], 0)
+        work = self.work_module()
+        lock = work.run_lock(self.lease_file().parent, "push:feat@1")
+        holder = subprocess.Popen([sys.executable, "-c", f"import fcntl, os, time; fd = os.open({str(lock)!r}, os.O_RDWR | os.O_CREAT); "
+                                   "os.write(fd, b'push:feat@1'); fcntl.flock(fd, fcntl.LOCK_EX); print('held', flush=True); time.sleep(3)"],
+                                  stdout=subprocess.PIPE, text=True)
+        self.assertEqual(holder.stdout.readline().strip(), "held")
+        self.assertEqual(self.run_op(tok, "pr:feat", "--reviewed", "none:x", *self.script("print(2)"))[0], 0)
+        holder.kill()
+        holder.wait()
+
+    def test_the_key_limit_is_exactly_1024_bytes(self):
+        tok = self.claim()
+        self.assertEqual(self.w("op", "begin", "--dir", str(self.wt), "--token", tok, "--key", "local:" + "x" * 1018, "--what", "x")[0], 0)
+        self.assertEqual(self.w("op", "begin", "--dir", str(self.wt), "--token", tok, "--key", "local:" + "x" * 1019, "--what", "x")[0], 2)
+
+    def test_the_trim_keeps_the_longest_tail_that_fits(self):
+        work, f = self.work_module(), Path(self.tmp.name) / "o.log"
+        f.write_text("".join(chr(0x3042 + i % 80) for i in range(5000)))
+        size = lambda s: len(json.dumps(s, ensure_ascii=False).encode()) - 2
+        for budget in (1000, 2047, 4096):
+            got = work.tail(f, budget=budget)
+            body = got.removeprefix("（先頭を省いた）")
+            self.assertLessEqual(size(got), budget)
+            longer = f.read_text()[-(len(body) + 1):]
+            self.assertGreater(size("（先頭を省いた）" + longer), budget)  # もう 1 字足すと超える
+
+    def test_tail_gives_up_after_16_mib_of_blank_lines(self):
+        work, f = self.work_module(), Path(self.tmp.name) / "blank.log"
+        f.write_bytes(b"A\n" + b"\n" * (16 * 1024 * 1024 + 30 * 1024))  # 16 MiB 遡った先の 64 KiB には A が入る
+        self.assertEqual(work.tail(f), "")  # 16 MiB で諦めたら、その先は読まない
+
+    def test_spaces_inside_kept_lines_are_kept(self):
+        work, f = self.work_module(), Path(self.tmp.name) / "sp.log"
+        f.write_bytes(b"  first  \n  CODE  \n \n\t\n")
+        self.assertEqual(work.tail(f), "  first  \n  CODE  ")
+
+    def test_a_lock_file_that_vanishes_while_checking_is_skipped(self):
+        work, r = self.work_module(), Path(self.tmp.name) / "rh"
+        r.mkdir()
+        (r / "running-x.lock").write_text("push:x")
+        real = work.os.open
+
+        def vanish(path, *a, **kw):  # glob の後、開く前に監督役が消した
+            if str(path).endswith(".lock"):
+                raise FileNotFoundError(path)
+            return real(path, *a, **kw)
+        work.os = type("O", (), {**{k: getattr(os, k) for k in dir(os) if not k.startswith("__")}, "open": staticmethod(vanish)})
+        self.assertIsNone(work.run_holder(r))
+
+    def test_the_supervisor_survives_when_neither_done_nor_the_lock_removal_works(self):
+        tok = self.claim()
+        d, m = self.lease_file().parent, self.lease_file().parent / ".mutex"
+        try:
+            rc, r = self.run_op(tok, "push:feat@1", "--reviewed", self.head(), *self.script(f"import os; os.chmod({str(m)!r}, 0); os.chmod({str(d)!r}, 0o555)"))
+        finally:
+            os.chmod(d, 0o755)
+            os.chmod(m, 0o644)
+        self.assertEqual(rc, 1, r)
+        self.assertIn("done を書けない", r["reason"])
+
+    def test_closing_an_already_finished_op_removes_its_output(self):
+        tok = self.claim()
+        self.assertEqual(self.run_op(tok, "push:feat@1", "--reviewed", self.head(), *self.script("print(1)"))[0], 0)
+        log = self.work_module().run_log(self.lease_file().parent, "push:feat@1")
+        log.write_text("left by a stopped op run")
+        self.assertEqual(self.w("op", "done", "--dir", str(self.wt), "--token", tok, "--key", "push:feat@1", "--result", "x")[0], 4)
+        self.assertFalse(log.is_file())  # 既に終わっていた。誰も消さない出力を残さない
 
     def test_a_supervisor_that_cannot_start_closes_the_op(self):
         tok = self.claim()
