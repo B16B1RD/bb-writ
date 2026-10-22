@@ -189,20 +189,36 @@ def read_child_file(f: Path, keep: int = 0):
         st = os.lstat(f)
     except FileNotFoundError:
         return None, b"", False
-    if stat.S_ISLNK(st.st_mode):  # 行き先の変化も差分にする
-        return f"symlink: {os.readlink(f)!r}", b"", False
+    if stat.S_ISLNK(st.st_mode):  # 行き先と、行き先が通常のファイルならその中身の変化も差分にする（symlink の config は普段の使い方でありうる）
+        try:
+            fd = os.open(f, os.O_RDONLY | os.O_NONBLOCK)
+        except OSError as e:
+            return f"symlink: {os.readlink(f)!r}（開けない: {e.strerror}）", b"", False
+        try:
+            mode = os.fstat(fd).st_mode
+            return f"symlink: {os.readlink(f)!r} " + (digest_of(fd) if stat.S_ISREG(mode) else f"（{stat.filemode(mode)}）"), b"", False
+        finally:
+            os.close(fd)
     fd = os.open(f, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)  # FIFO でも開くところで止まらない
     try:
         mode = os.fstat(fd).st_mode  # 開いたものの種類（lstat の後に置き換えられても）
         if not stat.S_ISREG(mode):
             return f"（通常のファイルでない: {stat.filemode(mode)}）", b"", False
-        h, head = hashlib.sha256(), b""
-        while chunk := os.read(fd, 1 << 20):
-            h.update(chunk)
-            head += chunk[:max(0, keep - len(head))]
-        return f"sha256: {h.hexdigest()}", head, True
+        head = []
+        return digest_of(fd, keep, head), b"".join(head), True
     finally:
         os.close(fd)
+
+
+def digest_of(fd: int, keep: int = 0, head: list | None = None) -> str:
+    """開いた通常のファイルを区切って読み、ハッシュを返す（大きくてもメモリは一定）。head に先頭 keep バイトを足す。"""
+    h, kept = hashlib.sha256(), 0
+    while chunk := os.read(fd, 1 << 20):
+        h.update(chunk)
+        if head is not None and kept < keep:
+            head.append(chunk[:keep - kept])
+            kept += len(head[-1])
+    return f"sha256: {h.hexdigest()}"
 
 
 def read_head(f: Path) -> str:

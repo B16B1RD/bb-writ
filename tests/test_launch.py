@@ -255,8 +255,14 @@ class TestLaunch(unittest.TestCase):
                                             ("codex", "deep-usage", "failed", "子の結果を記録に書けない")):
             with self.subTest(mode=mode):
                 rc, rec = self.run_launch(host, mode=mode)
+                try:  # 書ける深さは Python の版で違う（3.15 は深さ 3000 も書ける）。書けるなら ok が正しい
+                    json.dumps(json.loads("[" * 3000 + "]" * 3000), indent=1)
+                    status, problem = "ok", None
+                except RecursionError:
+                    pass
                 self.assertEqual(rec["status"], status, rec)
-                self.assertTrue([p for p in rec["problems"] if problem in p], rec)
+                if problem:
+                    self.assertTrue([p for p in rec["problems"] if problem in p], rec)
                 self.assertTrue((Path(rec["out"]) / "record.json").is_file())
                 self.assertIn(rec["out"], (self.state / "delegations.jsonl").read_text())
 
@@ -285,6 +291,8 @@ class TestLaunch(unittest.TestCase):
                     self.assertTrue([p for p in rec["problems"] if p.endswith("hooks/pre-commit")], rec)
                 else:
                     self.assertTrue([p for p in rec["problems"] if p.startswith("HEAD: ")], rec)
+                    if mode in ("head-fifo", "head-dir"):  # 空の HEAD と見分けられる表し
+                        self.assertTrue([p for p in rec["problems"] if p.startswith("HEAD: ") and "通常のファイルでない" in p], rec)
                 self.assertIn(rec["out"], (self.state / "delegations.jsonl").read_text())
 
     @unittest.skipIf(os.geteuid() == 0, "root は権限で止められない")
@@ -303,12 +311,16 @@ class TestLaunch(unittest.TestCase):
         self.assertIn(rec["out"], (self.state / "delegations.jsonl").read_text())
 
     def test_a_symlinked_shared_config_is_not_refused(self):
-        repo, wt = self.worktree("linked-config")
-        real = Path(self.tmp.name) / "real-config"
-        (repo / ".git" / "config").rename(real)
-        (repo / ".git" / "config").symlink_to(real)  # 普段の使い方でありうる
-        rc, rec = self.run_launch("claude", "own-commit", extra=["--write"], cwd=wt)
-        self.assertEqual(rec["status"], "ok", rec)
+        for mode, status in (("own-commit", "ok"), ("tamper-config", "failed")):
+            with self.subTest(mode=mode):
+                repo, wt = self.worktree("linked-config-" + mode)
+                real = Path(self.tmp.name) / ("real-config-" + mode)
+                (repo / ".git" / "config").rename(real)
+                (repo / ".git" / "config").symlink_to(real)  # 普段の使い方でありうる
+                rc, rec = self.run_launch("claude", mode, extra=["--write"], cwd=wt)
+                self.assertEqual(rec["status"], status, rec)  # 行き先の中身の変化も見る
+                if status == "failed":
+                    self.assertTrue([p for p in rec["problems"] if p.endswith("/config")], rec)
 
     @unittest.skipIf(os.geteuid() == 0, "root は権限で止められない")
     def test_leftovers_from_a_previous_child_are_recorded_before_launch(self):
@@ -499,22 +511,25 @@ class TestLaunch(unittest.TestCase):
         launch, home = load_launch(), Path(self.tmp.name) / "vanish"
         (home / ".claude").mkdir(parents=True)
         (home / ".claude" / "x").write_text("x")
-        real_scandir, seen = os.scandir, []
+        real_scandir = os.scandir
+        for when in (1, 2):  # 空かを見るとき、降りるとき
+            with self.subTest(when=when):
+                seen = []
 
-        def flaky(d):  # 別のセッションが一時ディレクトリを消した（空かを見た後、降りる前に無くなった）
-            if str(d).endswith(".claude"):
-                seen.append(d)
-                if len(seen) == 2:
-                    raise FileNotFoundError(d)
-            return real_scandir(d)
-        old_home = os.environ.get("HOME")
-        os.environ["HOME"], launch.os.scandir = str(home), flaky
-        try:
-            _, _, unreadable = launch.home_entries([])
-        finally:
-            launch.os.scandir = real_scandir
-            os.environ["HOME"] = old_home
-        self.assertEqual((len(seen), unreadable), (2, set()))
+                def flaky(d):  # 別のセッションが一時ディレクトリを消した（走査の途中で無くなった）
+                    if str(d).endswith(".claude"):
+                        seen.append(d)
+                        if len(seen) == when:
+                            raise FileNotFoundError(d)
+                    return real_scandir(d)
+                old_home = os.environ.get("HOME")
+                os.environ["HOME"], launch.os.scandir = str(home), flaky
+                try:
+                    _, _, unreadable = launch.home_entries([])
+                finally:
+                    launch.os.scandir = real_scandir
+                    os.environ["HOME"] = old_home
+                self.assertEqual((len(seen), unreadable), (when, set()))
 
     def test_child_files_are_read_without_blocking_or_exhausting_memory(self):
         launch, d = load_launch(), Path(self.tmp.name) / "cf"
