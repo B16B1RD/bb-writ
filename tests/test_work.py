@@ -2028,6 +2028,12 @@ class TestOpRun(unittest.TestCase):
         rc, r = self.run_op(tok, "push:feat@2", "--reviewed", self.head(), *self.script("print(1)"))
         self.assertEqual(rc, 0, r)  # 次の操作も通る
 
+    def test_a_last_record_line_without_a_newline_is_read(self):
+        self.claim()
+        (self.lease_file().parent / "ops.jsonl").write_text(json.dumps({"key": "push:x", "state": "begun"}))  # 改行で終わらない
+        rc, r = self.w("op", "pending", "--dir", str(self.wt))
+        self.assertEqual((rc, [o["key"] for o in r["pending_ops"]]), (0, ["push:x"]))  # 黙って捨てない
+
     def test_a_malformed_record_is_refused_with_the_line_number(self):
         tok = self.claim()
         f = self.lease_file().parent / "ops.jsonl"

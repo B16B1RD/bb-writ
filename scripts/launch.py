@@ -174,7 +174,7 @@ def commit_dirs(own: Path, common: Path) -> list[Path]:
 def git_snapshot(own: Path, common: Path, cwd: Path) -> dict:
     """書く子の前後で比べる Git の管理情報。子の書いた .git ファイルを読まないよう、共通ディレクトリを明示して読む。"""
     refs = subprocess.run(["git", "--git-dir", str(common), "for-each-ref", "--format=%(refname) %(objectname)"],
-                          capture_output=True, text=True, check=True).stdout.splitlines()
+                          capture_output=True, check=True).stdout.decode("utf-8", "surrogateescape").split("\n")  # ref の名前は UTF-8 とは限らない（比べるだけ）
     files = [cwd / ".git", own / "commondir", own / "gitdir", own / "config.worktree", common / "config",
              common / "objects" / "info" / "alternates"]
     for d in (common / "hooks", common / "info"):
@@ -309,6 +309,15 @@ def command(a, prompt: str) -> tuple[list[str], dict, str | None]:
     return cmd, env, None
 
 
+def obj(v) -> dict:
+    """子の JSON の値。オブジェクトでなければ空として扱う（子の出力は外からの入力）。"""
+    return v if isinstance(v, dict) else {}
+
+
+def text_of(v) -> str:
+    return v if isinstance(v, str) else ""
+
+
 def json_lines(out: str) -> list:
     """JSON Lines の行。区切りは \n だけ（CLI は文字列の中の U+2028・U+0085 をエスケープせずに出し、splitlines はそこでも割る）。"""
     return out.split("\n")
@@ -319,12 +328,12 @@ def parse_claude(out: str) -> dict:
     for line in json_lines(out):
         if line.startswith("{"):
             try:
-                d = json.loads(line)
-            except json.JSONDecodeError:
+                d = obj(json.loads(line))
+            except (ValueError, RecursionError):
                 continue
-    return {"text": d.get("result") or "", "session": d.get("session_id"), "is_error": d.get("is_error"),
+    return {"text": text_of(d.get("result")), "session": d.get("session_id"), "is_error": d.get("is_error"),
             "errors": [str(d.get("result"))[:300]] if d.get("is_error") else [],
-            "model_effective": sorted((d.get("modelUsage") or {}).keys()) or None,
+            "model_effective": sorted(obj(d.get("modelUsage")).keys()) or None,
             "usage": {"cost_usd": d.get("total_cost_usd"), "turns": d.get("num_turns")}}
 
 
@@ -332,43 +341,42 @@ def parse_codex(out: str) -> dict:
     text, session, usage, errors = "", None, None, []
     for line in json_lines(out):
         try:
-            e = json.loads(line)
-        except json.JSONDecodeError:
+            e = obj(json.loads(line))
+        except (ValueError, RecursionError):
             continue
-        item = e.get("item") or {}
+        item = obj(e.get("item"))
         if e.get("type") == "thread.started":
             session = e.get("thread_id")
         elif e.get("type") == "item.completed" and item.get("type") == "agent_message":
-            text = item.get("text") or ""
+            text = text_of(item.get("text"))
         elif e.get("type") == "turn.completed":
             usage = e.get("usage")
         elif e.get("type") in ("error", "turn.failed"):
-            errors.append(str(e.get("message") or (e.get("error") or {}).get("message") or "")[:300])
+            errors.append(str(e.get("message") or obj(e.get("error")).get("message") or "")[:300])
     eff = None
     if session:  # 実効値は記録の turn_context から（メタデータだけを読む）
         for f in (config_dir() / "codex-home" / "sessions").glob(f"**/rollout-*-{session}.jsonl"):
-            for line in json_lines(f.read_text(encoding="utf-8", errors="replace")):
+            for line in f.read_bytes().split(b"\n"):  # 区切りは \n だけ（json_lines と同じ理由）
                 try:
-                    e = json.loads(line)
-                except json.JSONDecodeError:  # 書きかけの行など。実効値は取れなければ null
+                    e = obj(json.loads(line.decode("utf-8")))
+                except (ValueError, RecursionError):  # 書きかけの行、UTF-8 として読めない行（置き換えた文字を実効値にしない）。取れなければ null
                     continue
-                if isinstance(e, dict) and e.get("type") == "turn_context":
-                    p = e.get("payload") or {}
-                    eff = {"model": p.get("model"), "effort": p.get("effort"), "sandbox": (p.get("sandbox_policy") or {}).get("type")}
+                if e.get("type") == "turn_context":
+                    p = obj(e.get("payload"))
+                    eff = {"model": p.get("model"), "effort": p.get("effort"), "sandbox": obj(p.get("sandbox_policy")).get("type")}
     return {"text": text, "session": session, "model_effective": eff, "usage": usage, "errors": errors}
 
 
 def parse_grok(out: str) -> dict:
     try:
         d = json.loads(out.strip() or "{}")
-    except json.JSONDecodeError:
+    except (ValueError, RecursionError):
         d = {}
-    if not isinstance(d, dict):
-        d = {}
+    d = obj(d)
     error = d.get("type") == "error"
-    return {"text": "" if error else d.get("text") or "", "session": d.get("sessionId"), "is_error": error,
+    return {"text": "" if error else text_of(d.get("text")), "session": d.get("sessionId"), "is_error": error,
             "errors": [str(d.get("message") or "")[:300]] if error else [],
-            "model_effective": sorted((d.get("modelUsage") or {}).keys()) or None,  # effort は結果に出ない
+            "model_effective": sorted(obj(d.get("modelUsage")).keys()) or None,  # effort は結果に出ない
             "usage": {"cost_usd": d.get("total_cost_usd"), "turns": d.get("num_turns")}}
 
 
@@ -378,8 +386,8 @@ def check_report(text: str, cwd: Path) -> tuple[dict | None, list[str]]:
         return None, ["報告の JSON ブロックが無い"]
     try:  # 閉じのフェンスが無くても、最後のブロックの JSON を読む
         r, _ = json.JSONDecoder().raw_decode(text[i + len("```json"):].lstrip())
-    except json.JSONDecodeError as e:
-        return None, [f"報告の JSON が読めない: {e}"]
+    except (ValueError, RecursionError) as e:  # 深い入れ子も、読めない報告
+        return None, [f"報告の JSON が読めない: {e!r}"[:300]]
     if not isinstance(r, dict):
         return None, ["報告の JSON がオブジェクトでない"]
     problems = []
@@ -390,7 +398,7 @@ def check_report(text: str, cwd: Path) -> tuple[dict | None, list[str]]:
         problems.append("evidence が無い")
         ev = []
     for item in ev:
-        where = str((item or {}).get("where") or "").strip()
+        where = str(obj(item).get("where") or "").strip()
         if not where:
             problems.append("where の無い証拠がある")
             continue
@@ -398,8 +406,12 @@ def check_report(text: str, cwd: Path) -> tuple[dict | None, list[str]]:
         if m and not m.group(1).startswith("http"):
             path = m.group(1)
             p = Path(path) if Path(path).is_absolute() else cwd / path
-            if not p.is_file():
-                problems.append(f"証拠のファイルが無い: {path}")
+            try:
+                found = p.is_file()
+            except OSError:  # 長すぎる名前など（3.12 の is_file は ENAMETOOLONG を投げる）
+                found = False
+            if not found:
+                problems.append(f"証拠のファイルが無い: {path[:300]}")
     return r, problems
 
 
@@ -451,7 +463,7 @@ def main() -> int:
         try:
             # 子が残した背景のプロセスが、終了後の照合の後に書き換えないよう、プロセスグループごと止める
             child = subprocess.Popen(cmd, cwd=a.cwd, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                     text=True, start_new_session=True)
+                                     start_new_session=True)  # バイトで受ける（子の出力は UTF-8 とは限らない）
             try:
                 stdout, stderr = child.communicate(timeout=a.timeout)
             finally:
@@ -459,9 +471,9 @@ def main() -> int:
                     os.killpg(child.pid, signal.SIGKILL)
                 except ProcessLookupError:
                     pass
-            p = subprocess.CompletedProcess(cmd, child.wait(), stdout, stderr)
-            (out_dir / "stdout.jsonl").write_text(p.stdout, encoding="utf-8")
-            (out_dir / "stderr.log").write_text(p.stderr, encoding="utf-8")
+            (out_dir / "stdout.jsonl").write_bytes(stdout)  # 照合の材料は生のまま残す
+            (out_dir / "stderr.log").write_bytes(stderr)
+            p = subprocess.CompletedProcess(cmd, child.wait(), stdout.decode("utf-8", "replace"), stderr.decode("utf-8", "replace"))
             got = {"claude": parse_claude, "codex": parse_codex, "grok": parse_grok}[a.host](p.stdout)
             # 警告の行（sandbox の適用失敗、効かなかった引数）があれば、権限の約束どおりに動いたか分からないので結果を使わない
             unsafe = [l for l in p.stderr.splitlines() if a.host == "grok" and GROK_WARNING.search(l)][-5:]
@@ -476,9 +488,11 @@ def main() -> int:
             else:
                 report, problems = check_report(got["text"], a.cwd)
                 rec.update(status="invalid-report" if problems else "ok", report=report, problems=problems)
-                (out_dir / "report.md").write_text(got["text"], encoding="utf-8")
+                (out_dir / "report.md").write_text(got["text"], encoding="utf-8", errors="backslashreplace")  # 単独のサロゲート
         except subprocess.TimeoutExpired:
             rec.update(status="failed", problems=[f"{a.timeout} 秒で終わらなかった"])
+        except Exception as e:  # 子の結果を読む途中の想定外。委任の記録は書き、失敗として返す
+            rec.update(status="failed", problems=[f"子の結果を読めない: {e!r}"[:300]])
         finally:
             if snapshot:
                 # Claude Code の sandbox は、worktree の管理ディレクトリに保護のための空の config.worktree を作る（2.1.302）。
@@ -499,9 +513,11 @@ def main() -> int:
                                                       "（空の ~/.bash_profile があると、ログインシェルが ~/.profile と ~/.bashrc を読まない）"]
                            + rec["home_residue"][:20] + rec.get("problems", []))
     rec["duration_s"] = round(time.time() - t0, 1)
-    (out_dir / "record.json").write_text(json.dumps(rec, ensure_ascii=False, indent=1), encoding="utf-8")
-    with open(state_dir() / "delegations.jsonl", "a", encoding="utf-8") as f:
-        f.write(json.dumps({k: v for k, v in rec.items() if k != "report"}, ensure_ascii=False) + "\n")
+    # 子の文字列には単独のサロゲートがありうる（JS の JSON.stringify が出す）。書き出しで落ちず、\udXXX の形で残す
+    (out_dir / "record.json").write_text(json.dumps(rec, ensure_ascii=False, indent=1), encoding="utf-8", errors="backslashreplace")
+    with open(state_dir() / "delegations.jsonl", "a", encoding="utf-8") as f:  # 1 行 1 件。U+2028 なども生で入れない
+        f.write(json.dumps({k: v for k, v in rec.items() if k != "report"}) + "\n")
+    sys.stdout.reconfigure(errors="backslashreplace")
     print(json.dumps(rec, ensure_ascii=False))
     return 0 if rec["status"] == "ok" else 2
 

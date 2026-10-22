@@ -29,11 +29,17 @@ FAKE_CODEX = textwrap.dedent(r'''
         print(json.dumps({"type": "turn.failed", "error": {"message": "model is not supported"}})); sys.exit(1)
     text = {"good": os.environ["FAKE_TEXT"], "nojson": "結論だけ", "badpath": os.environ["FAKE_TEXT"].replace("a.txt", "missing.txt"),
             "absent": os.environ["FAKE_TEXT"].replace("a.txt:1", "missing.txt"),
-            "nofence": os.environ["FAKE_TEXT"].rstrip("`").rstrip()}[mode]
+            "nofence": os.environ["FAKE_TEXT"].rstrip("`").rstrip()}.get(mode, os.environ["FAKE_TEXT"])
     raw = not os.environ.get("FAKE_RAW")  # 本物の CLI は U+2028 などをエスケープせずに出す
+    if mode == "blockout":  # 結果の置き場をふさぐ（launcher の想定外の失敗を起こす）
+        os.makedirs(os.path.join(os.environ["FAKE_OUT"], "stdout.jsonl"))
+    if mode == "shapes":  # 形の違う行（オブジェクトでない行、item が文字列）
+        print("1"); print(json.dumps({"type": "item.completed", "item": "x"})); print(json.dumps({"type": "error", "error": "x"}))
     print(json.dumps({"type": "thread.started", "thread_id": "t-1"}, ensure_ascii=raw))
     print(json.dumps({"type": "item.completed", "item": {"type": "agent_message", "text": text}}, ensure_ascii=raw))
     print(json.dumps({"type": "turn.completed", "usage": {"input_tokens": 5}}, ensure_ascii=raw))
+    if mode == "badbytes":  # UTF-8 でないバイト（途中で切れた多バイト文字）
+        sys.stdout.flush(); sys.stdout.buffer.write(b"\xe3\x81\n"); sys.stderr.buffer.write(b"warn \xff\n")
 ''').lstrip()
 
 FAKE_CLAUDE = textwrap.dedent(r'''
@@ -71,7 +77,10 @@ FAKE_CLAUDE = textwrap.dedent(r'''
         import subprocess
         common = subprocess.run(["git", "rev-parse", "--path-format=absolute", "--git-common-dir"], capture_output=True, text=True).stdout.strip()
         os.makedirs(os.path.join(os.path.dirname(common), ".claude", ".cc-writes"), exist_ok=True)
-    print(json.dumps({"type": "result", "result": os.environ["FAKE_TEXT"], "session_id": "s-1", "is_error": False,
+    result = os.environ["FAKE_TEXT"]
+    if mode == "surrogate":  # JS の JSON.stringify は単独のサロゲートを \ud83d の形で出す。本文と、報告の JSON の中の両方
+        result = "\ud83d" + result.replace('"conclusion": "', '"conclusion": "\\ud83d')
+    print(json.dumps({"type": "result", "result": result, "session_id": "s-1", "is_error": False,
                       "modelUsage": {"claude-sonnet-5-5": {}}, "total_cost_usd": 0.01, "num_turns": 2}, ensure_ascii=not os.environ.get("FAKE_RAW")))
 ''').lstrip()
 
@@ -104,6 +113,14 @@ FAKE_DOTENVX = textwrap.dedent(r'''
     args = sys.argv[1:]
     os.execvp(args[args.index("--") + 1], args[args.index("--") + 1:])
 ''').lstrip()
+
+
+def load_launch():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("launch_under_test", LAUNCH)
+    launch = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(launch)  # launch.py は読み込みで sys.dont_write_bytecode を立てる
+    return launch
 
 
 class TestLaunch(unittest.TestCase):
@@ -147,14 +164,61 @@ class TestLaunch(unittest.TestCase):
         self.assertIn("\u2028", text)
         rollout = self.cfg / "codex-home" / "sessions" / "2026" / "rollout-1-t-1.jsonl"
         rollout.parent.mkdir(parents=True)
-        rollout.write_text(json.dumps({"type": "event", "payload": {"output": "a\u2028b"}}, ensure_ascii=False) + "\n"
-                           + json.dumps({"type": "turn_context", "payload": {"model": "m", "effort": "e"}}) + "\n", encoding="utf-8")
+        rollout.write_bytes((json.dumps({"type": "event", "payload": {"output": "a\u2028b"}}, ensure_ascii=False) + "\n"
+                             + '{"type": "tu\n1\n{"type": "turn_context", "payload": "x"}\n'  # 書きかけの行、形の違う行は飛ばして続ける
+                             + json.dumps({"type": "turn_context", "payload": {"model": "m", "effort": "e", "cwd": "a\u2028b"}}, ensure_ascii=False)
+                             + "\n").encode()
+                            + b'{"type": "turn_context", "payload": {"model": "gpt-\xff"}}\n')  # UTF-8 として読めない行は使わない
         for host in ("codex", "claude"):
             with self.subTest(host=host):
                 rc, rec = self.run_launch(host, env_extra={"FAKE_RAW": "1", "FAKE_TEXT": text})
                 self.assertEqual((rc, rec["status"]), (0, "ok"), rec)  # 報告を失わない
                 if host == "codex":
                     self.assertEqual(rec["model_effective"]["model"], "m")  # 記録の行を割らずに読む
+
+    def test_unexpected_child_output_still_writes_the_record(self):
+        for host, mode in (("codex", "badbytes"), ("codex", "shapes"), ("claude", "surrogate")):
+            with self.subTest(mode=mode):
+                before = (self.state / "delegations.jsonl").read_text().count("\n") if (self.state / "delegations.jsonl").exists() else 0
+                rc, rec = self.run_launch(host, mode=mode)
+                self.assertEqual((rc, rec["status"]), (0, "ok"), rec)  # 報告は読め、落ちない
+                out = Path(rec["out"])
+                self.assertTrue((out / "record.json").is_file())
+                lines = (self.state / "delegations.jsonl").read_text().split("\n")
+                self.assertEqual(len(lines) - 1, before + 1)  # 委任の記録を 1 行書く
+                json.loads(lines[-2])
+                if mode == "badbytes":
+                    self.assertTrue((out / "stdout.jsonl").read_bytes().endswith(b"\xe3\x81\n"))  # 生のまま残す
+                if mode == "surrogate":
+                    self.assertIn("\\ud83d", (out / "report.md").read_text())
+
+    def test_an_unexpected_failure_after_the_child_still_writes_the_record(self):
+        out = Path(self.tmp.name) / "out-blocked"
+        rc, rec = self.run_launch("codex", mode="blockout", extra=("--out", str(out)), env_extra={"FAKE_OUT": str(out)})
+        self.assertEqual((rc, rec["status"]), (2, "failed"), rec)
+        self.assertIn("子の結果を読めない", rec["problems"][0])
+        self.assertTrue((out / "record.json").is_file())
+        self.assertIn(str(out), (self.state / "delegations.jsonl").read_text())
+
+    def test_report_check_does_not_crash_on_odd_reports(self):
+        launch = load_launch()
+        for text, problem in (('```json\n{"conclusion": "c", "evidence": ["a.txt:1"]}', "where の無い証拠"),
+                              ("```json\n" + "[" * 100000 + "]" * 100000, "読めない"),
+                              ('```json\n{"conclusion": "c", "evidence": [{"where": "' + "x" * 5000 + ':1"}]}', "証拠のファイルが無い")):
+            with self.subTest(problem=problem):
+                _, problems = launch.check_report(text, self.cwd)
+                self.assertTrue([p for p in problems if problem in p], problems)
+
+    def test_git_snapshot_reads_refs_that_are_not_utf8(self):
+        launch = load_launch()
+        repo = Path(self.tmp.name) / "g"
+        repo.mkdir()
+        g = ["git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@example.invalid"]
+        subprocess.run(g + ["init", "-q"], check=True)
+        subprocess.run(g + ["commit", "-q", "--allow-empty", "-m", "x"], check=True)
+        subprocess.run([b"git", b"-C", os.fsencode(repo), b"update-ref", b"refs/heads/bb-writ/a\xff", b"HEAD"], check=True)
+        snap = launch.git_snapshot(repo / ".git", repo / ".git", repo)
+        self.assertEqual(len(snap["refs"]), 2)
 
     def test_codex_ok_is_read_only_by_default(self):
         rc, rec = self.run_launch("codex")
