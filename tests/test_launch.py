@@ -40,6 +40,8 @@ FAKE_CODEX = textwrap.dedent(r'''
     print(json.dumps({"type": "item.completed", "item": {"type": "agent_message", "text": text}}, ensure_ascii=raw))
     if mode == "deep-usage":  # 読めるが、記録（indent 付き）には書けない深さ
         print('{"type": "turn.completed", "usage": ' + "[" * 3000 + "]" * 3000 + "}")
+    elif mode == "unwritable-usage":  # 試験の sitecustomize が書き出しを失敗させる印
+        print(json.dumps({"type": "turn.completed", "usage": {"__unwritable__": 1}}))
     else:
         print(json.dumps({"type": "turn.completed", "usage": {"input_tokens": 5}}, ensure_ascii=raw))
     if mode == "shapes":  # 文字列でない thread_id（後の行が勝つ）
@@ -122,6 +124,8 @@ FAKE_CLAUDE = textwrap.dedent(r'''
     if mode == "shapes":  # 深すぎる行
         print('{"a": ' + "[" * 100000 + "]" * 100000 + "}")
     result = os.environ["FAKE_TEXT"]
+    if mode == "unwritable-report":  # 試験の sitecustomize が書き出しを失敗させる印
+        result = result.replace('"conclusion": "', '"__unwritable__": 1, "conclusion": "')
     if mode == "deep":  # 読めるが、記録（indent 付き）には書けない深さの報告
         result = result.replace('"conclusion": "', '"z": ' + "[" * 3000 + "]" * 3000 + ', "conclusion": "')
     if mode == "surrogate":  # JS の JSON.stringify は単独のサロゲートを \ud83d の形で出す。本文と、報告の JSON の中の両方
@@ -255,7 +259,7 @@ class TestLaunch(unittest.TestCase):
                                             ("codex", "deep-usage", "failed", "子の結果を記録に書けない")):
             with self.subTest(mode=mode):
                 rc, rec = self.run_launch(host, mode=mode)
-                try:  # 書ける深さは Python の版で違う（3.15 は深さ 3000 も書ける）。書けるなら ok が正しい
+                try:  # 書ける深さは Python の版で違う（3.13 以降は深さ 3000 も書ける）。書けるなら ok が正しい
                     json.dumps(json.loads("[" * 3000 + "]" * 3000), indent=1)
                     status, problem = "ok", None
                 except RecursionError:
@@ -263,6 +267,28 @@ class TestLaunch(unittest.TestCase):
                 self.assertEqual(rec["status"], status, rec)
                 if problem:
                     self.assertTrue([p for p in rec["problems"] if problem in p], rec)
+                self.assertTrue((Path(rec["out"]) / "record.json").is_file())
+                self.assertIn(rec["out"], (self.state / "delegations.jsonl").read_text())
+
+    def test_values_that_cannot_be_written_still_write_the_record(self):
+        # Python の版によらず受け皿を通す: 印の付いた値だけ、indent 付きの書き出しを失敗させる（試験だけが読む sitecustomize）
+        site = Path(self.tmp.name) / "site"
+        site.mkdir()
+        (site / "sitecustomize.py").write_text(textwrap.dedent('''
+            import json
+            _dumps = json.dumps
+            def dumps(o, *a, **k):
+                if k.get("indent") and "__unwritable__" in _dumps(o):
+                    raise RecursionError("maximum recursion depth exceeded")
+                return _dumps(o, *a, **k)
+            json.dumps = dumps
+        '''))
+        for host, mode, status, problem in (("claude", "unwritable-report", "invalid-report", "深すぎて記録に書けない"),
+                                            ("codex", "unwritable-usage", "failed", "子の結果を記録に書けない")):
+            with self.subTest(mode=mode):
+                rc, rec = self.run_launch(host, mode=mode, env_extra={"PYTHONPATH": str(site)})
+                self.assertEqual(rec["status"], status, rec)
+                self.assertTrue([p for p in rec["problems"] if problem in p], rec)
                 self.assertTrue((Path(rec["out"]) / "record.json").is_file())
                 self.assertIn(rec["out"], (self.state / "delegations.jsonl").read_text())
 
@@ -536,7 +562,8 @@ class TestLaunch(unittest.TestCase):
         d.mkdir()
         os.mkfifo(d / "fifo")
         (d / "zero").symlink_to("/dev/zero")
-        for name in ("fifo", "zero"):
+        (d / "lfifo").symlink_to(d / "fifo")  # FIFO を指す symlink も、開くところで止まらない
+        for name in ("fifo", "zero", "lfifo"):
             code = (f"import importlib.util; s = importlib.util.spec_from_file_location('l', {str(LAUNCH)!r}); "
                     f"m = importlib.util.module_from_spec(s); s.loader.exec_module(m); print(m.read_child_file(__import__('pathlib').Path({str(d / name)!r}))[0])")
             p = subprocess.run([sys.executable, "-B", "-c", code], capture_output=True, text=True, timeout=20)  # 開くところで止まらない
