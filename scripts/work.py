@@ -771,9 +771,20 @@ def op_run(a, r: Path, argv: list) -> int:
 def supervise(spec: dict, argv: list) -> int:
     """op run の監督役。コマンドを実行し、動いている間は担当を保ち、終わったら done を書いて結果を出す。
     running.lock は op run から受け継いだ fd で持ち、この監督役が終わると外れる（コマンドには渡さない）。"""
-    early = signal.sigpending() & STOP_SIGNALS  # 保留中のシグナルは fork の子に受け継がれないので、先に見ておく
-    if os.fork():  # 2 回目の fork。op run の子孫の木から外れ、木ごと止めるハーネスに巻き込まれない
+    # 2 回目の fork。op run の子孫の木から外れ、木ごと止めるハーネスに巻き込まれない。保留中のシグナルは fork の子に
+    # 受け継がれないので、中継（親）が fork の後に見て、パイプで子に渡す。子はそれを受け取るまで起こさない。
+    # ここが「起こす前」の決め所で、これより後に中継へ届いたものは、起こした後に op run を止めたのと同じ扱い（コマンドは続く）
+    rfd, wfd = os.pipe()
+    if os.fork():
+        os.close(rfd)
+        os.write(wfd, (",".join(str(int(s)) for s in signal.sigpending() & STOP_SIGNALS) or "-").encode())
         os._exit(0)
+    os.close(wfd)
+    told = b""
+    while chunk := os.read(rfd, 64):
+        told += chunk
+    os.close(rfd)
+    early = {signal.Signals(int(x)) for x in told.decode().split(",") if x.isdigit()}
     d = Path(spec["dir"])
     r = root(d)
     p = None
