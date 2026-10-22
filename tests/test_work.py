@@ -785,8 +785,8 @@ class TestOpRun(unittest.TestCase):
         rc, r = self.run_op(tok, "push:feat@1", "--reviewed", self.head(), *self.script(body))
         self.assertEqual(rc, 1)
         self.assertIn("remote rejected", r["op"]["result"])
-        self.assertIn("line 29", r["op"]["result"])
-        self.assertNotIn("line 0\n", r["op"]["result"] + "\n")
+        self.assertIn("line 11\n", r["op"]["result"])  # stderr の 1 行と合わせて、末尾のちょうど 20 行
+        self.assertNotIn("line 10\n", r["op"]["result"])
 
     def test_undecodable_output_is_still_recorded(self):
         tok = self.claim()
@@ -805,6 +805,9 @@ class TestOpRun(unittest.TestCase):
                             *self.script("import os, signal; os.kill(os.getpid(), signal.SIGTERM)"))
         self.assertEqual((rc, r["ok"]), (143, False))
         self.assertIn("exit 143", r["op"]["result"])
+        rc, r = self.run_op(tok, "push:feat@3", "--reviewed", self.head(),
+                            *self.script("import os, signal; os.kill(os.getpid(), signal.SIGKILL)"))
+        self.assertEqual(rc, 137)
 
     def test_a_command_that_cannot_start_is_recorded_as_failed(self):
         tok = self.claim()
@@ -836,7 +839,90 @@ class TestOpRun(unittest.TestCase):
                 + ").glob('*/lease.json')); print('left', int(json.loads(f.read_text())['expires_at'] - time.time()))")
         rc, r = self.run_op(tok, "push:feat@1", "--reviewed", self.head(), *self.script(left))
         self.assertEqual(rc, 0)
-        self.assertGreater(int(r["op"]["result"].split("left ")[1].split()[0]), 600)
+        self.assertGreater(int(r["op"]["result"].split("left ")[1].split()[0]), 20 * 60 - 30)
+
+    def lease_file(self):
+        return next((Path(self.tmp.name).resolve() / "state" / "work").glob("*/lease.json"))
+
+    def raw(self, *args, stdin=None):
+        return subprocess.run([sys.executable, str(WORK), *args], env=self.env, capture_output=True, text=True, input=stdin)
+
+    def test_every_refusal_of_begin_refuses_run_the_same_way(self):
+        """op run の照合は op begin と同じ。拒否の理由を手で選んで試すと、試していない拒否の後だけコマンドを走らせる退行が通った。"""
+        tok = self.claim()
+        old = self.head()
+        subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "after"],
+                       env=self.env, cwd=self.wt, check=True)
+        h = self.head()
+        other = Path(self.tmp.name).resolve() / "personal" / "other"
+        other.mkdir()
+        subprocess.run(["git", "init", "-q"], env=self.env, cwd=other, check=True)
+        subprocess.run(["git", "remote", "add", "origin", "https://github.com/B16B1RD/demo.git"], env=self.env, cwd=other, check=True)
+        repo = str(self.repo)
+        cases = [
+            (tok, "Push:feat", "--from", repo, "--verified", h, "--reviewed", h),
+            (tok, "push:feat@1", "--verified", h, "--reviewed", h),
+            (tok, "push:feat@1", "--from", str(other), "--verified", h, "--reviewed", h),
+            (tok, "push:feat@1", "--from", str(self.wt), "--verified", h, "--reviewed", h),
+            (tok, "push:feat@1", "--from", repo, "--reviewed", h),
+            (tok, "push:feat@1", "--from", repo, "--verified", old, "--reviewed", h),
+            (tok, "push:feat@1", "--from", repo, "--verified", h),
+            (tok, "push:feat@1", "--from", repo, "--verified", h, "--reviewed", "HEAD"),
+            (tok, "push:feat@1", "--from", repo, "--verified", h, "--reviewed", "deadbeef"),
+            (tok, "push:feat@1", "--from", repo, "--verified", h, "--reviewed", "none:"),
+            (tok, "push:feat@1", "--from", repo, "--verified", h, "--reviewed", old),
+            ("bad-token", "push:feat@1", "--from", repo, "--verified", h, "--reviewed", h),
+        ]
+        marker = Path(self.tmp.name) / "ran"
+        lease, before = self.lease_file().read_bytes(), self.ops_file()
+        for token, key, *flags in cases:
+            base = ["op", "{}", "--dir", str(self.wt), "--token", token, "--key", key, "--what", "x", *flags]
+            begin = self.w(*[x.format("begin") if x == "{}" else x for x in base])[0]
+            run = self.w(*[x.format("run") if x == "{}" else x for x in base], *self.script(f"open({str(marker)!r}, 'w')"))[0]
+            self.assertNotEqual(begin, 0, (key, flags))
+            self.assertEqual(run, begin, (key, flags))
+        self.assertFalse(marker.exists())
+        self.assertEqual(self.ops_file(), before)
+        self.assertEqual(self.lease_file().read_bytes(), lease)  # 拒否は担当の期限も延ばさない
+        d = json.loads(lease)
+        self.lease_file().write_text(json.dumps({**d, "expires_at": time.time() - 1}))
+        args = ["--dir", str(self.wt), "--token", tok, "--key", "pr:feat", "--what", "x", "--from", repo, "--verified", h, "--reviewed", h]
+        self.assertEqual(self.w("op", "begin", *args)[0], 3)
+        self.assertEqual(self.w("op", "run", *args, *self.script(f"open({str(marker)!r}, 'w')"))[0], 3)  # 期限切れの担当は走らせない
+        self.assertFalse(marker.exists())
+
+    def test_a_takeover_while_running_is_not_overwritten(self):
+        tok = self.claim()
+        take = ("import json, pathlib, subprocess, sys, time; f = pathlib.Path(" + repr(str(self.lease_file())) + "); "
+                "d = json.loads(f.read_text()); d['expires_at'] = time.time() - 1; f.write_text(json.dumps(d)); "
+                f"subprocess.run([sys.executable, {str(WORK)!r}, 'claim', '--dir', {str(self.wt)!r}, '--holder', 'B'], check=True, capture_output=True)")
+        rc, r = self.run_op(tok, "push:feat@1", "--reviewed", self.head(), *self.script(take))
+        self.assertEqual(rc, 3)
+        self.assertEqual(self.pending(), ["push:feat@1"])
+        self.assertNotIn(b'"state": "done"', self.ops_file())
+
+    def test_a_file_that_cannot_be_executed_is_recorded_as_failed(self):
+        tok = self.claim()
+        f = Path(self.tmp.name) / "not-executable"
+        f.write_text("#!/bin/sh\n")
+        rc, r = self.run_op(tok, "push:feat@1", "--reviewed", self.head(), "--", str(f))
+        self.assertEqual(rc, 127)
+        self.assertEqual(r["op"]["state"], "done")
+
+    def test_the_command_gets_no_stdin_and_its_output_is_shown(self):
+        tok = self.claim()
+        p = self.raw("op", "run", "--dir", str(self.wt), "--token", tok, "--key", "push:feat@1", "--what", "x", "--from", str(self.repo),
+                     "--verified", self.head(), "--reviewed", self.head(),
+                     *self.script("import sys; print('stdin', len(sys.stdin.read())); print('shown')"), stdin="secret\n")
+        self.assertEqual(p.returncode, 0)
+        self.assertIn("stdin 0", json.loads(p.stdout)["op"]["result"])
+        self.assertIn("shown", p.stderr)  # 出力の全体は stderr に出す
+
+    def test_a_local_key_runs_where_from_points(self):
+        tok = self.claim()
+        rc, r = self.op(tok, "local:probe", "--from", str(self.repo), *self.script("import os; print(os.getcwd())"))
+        self.assertEqual(rc, 0)
+        self.assertIn(str(self.repo.resolve()), r["op"]["result"])
 
     def test_command_runs_in_the_from_directory_without_a_shell(self):
         tok = self.claim()
