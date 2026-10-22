@@ -563,14 +563,6 @@ def main() -> int:
                 git_dir, _ = grok_git_dir(a.cwd)
                 for top in {a.cwd, *([git_dir.parent] if git_dir and git_dir.name == ".git" else [])}:
                     made += [d for d in (top / ".claude", top / ".claude" / ".cc-writes") if not d.exists()]
-                # 2.1.309 の sandbox は、起動して設定を組むときに、CLAUDE_CONFIG_DIR に関わらずホームに空の .claude/ssh（0700）を作り、
-                # 守る場所に足す（サーバー側の機能フラグが有効なとき）。子の後に空の実ディレクトリなら、前からあっても消す（並行する別の
-                # launcher の子が作ったものを、その launcher は前からあると数える）。走っている子の ssh を消しても、その子の Bash は動き、
-                # 作り直されない（2026-10-23 の実測）。中身のあるもの・symlink（消す側で見る）と、symlink の .claude の下（行き先は利用者の持ち物）は触らない。
-                # HOME が空のときは子（Node）がホームを空と読み、対象の中に .claude/ssh を作る。それは見ない（HOME が無いか設定されているときだけ一致する）
-                cc = Path.home() / ".claude"
-                if not cc.is_symlink():
-                    made += ([] if cc.exists() else [cc]) + [cc / "ssh"]
             # 子の前後でホームを比べ、新しくできて空のままの場所を残りとして報告する。黙って消さない（同じ時刻に別の道具が作ったものかもしれない）
             skip = [config_dir(), state_dir(), out_dir, a.cwd, Path.home() / ".cache"]
             home_before, _, unreadable_before = home_entries(skip)
@@ -634,20 +626,20 @@ def main() -> int:
                 if changed:
                     rec.update(status="failed", problems=[headline + "この作業場所で git を動かす前に、下の場所を確かめる（偽の設定が sandbox の外で動きうる）"]
                                + changed[:20] + rec.get("problems", []))
-            left = []
-            for d in reversed(made):  # 1 つが失敗しても、ほかは片付ける（ホームの失敗で対象の .cc-writes を残さない）
-                try:
+            try:
+                for d in reversed(made):
                     if d.is_dir() and not d.is_symlink() and not any(d.iterdir()):
                         d.rmdir()
-                except Exception as e:  # 子が権限を変えたなど
-                    left.append(f"{d}: {e!r}"[:300])
-                    log = launcher_error(out_dir)
-            if left:  # 対象に残った .claude は、task cleanup が未保存の変更とみなす
-                rec.update(status="failed", problems=["子の起動で作られた空のディレクトリを片付けられない"] + left[:20] + [f"詳細: {log}"]
-                           + rec.get("problems", []))
+            except Exception as e:  # 子が権限を変えたなど。残ったものは task cleanup が未保存の変更とみなす
+                rec.update(status="failed", problems=[f"子の起動で作られた空の .claude を片付けられない: {e!r}"[:300],
+                                                      f"詳細: {launcher_error(out_dir)}"] + rec.get("problems", []))
             try:
                 _, empty, unreadable = home_entries(skip)
-                rec["home_residue"] = sorted(empty - home_before)
+                # Claude Code 2.1.309 の sandbox は、起動のたびに CLAUDE_CONFIG_DIR に関わらずホームに空の .claude/ssh（0700）を作る
+                # （サーバー側の機能フラグが有効なとき）。CLI 自身の置き場で、ほかの道具の動きを変えないので数えない。消さない（消すと、
+                # 並行する別の委任の子と競う）。どのホストの委任でも数えない（並行する Claude Code の子が作ったものを、ほかの委任が見る）
+                ssh = Path.home() / ".claude" / "ssh"
+                rec["home_residue"] = sorted(empty - home_before - ({str(ssh)} if ssh.is_dir() and not ssh.is_symlink() else set()))
                 if unreadable - unreadable_before:  # 子が権限を落とした場所は、残りを確かめられない
                     raise PermissionError(f"読めない場所が増えた: {sorted(unreadable - unreadable_before)[:20]}")
             except Exception as e:
