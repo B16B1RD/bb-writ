@@ -797,8 +797,8 @@ def supervise(spec: dict, argv: list) -> int:
     try:
         print(rc if rc < 256 else 1)
         print(json.dumps(res, ensure_ascii=False), flush=True)
-    except BrokenPipeError:  # op run が止められた。結果は記録にある
-        pass
+    except BrokenPipeError:  # op run が止められた。結果は記録にある。終わり際の flush でも出さない
+        os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
     return 0
 
 
