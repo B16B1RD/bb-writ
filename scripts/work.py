@@ -630,6 +630,8 @@ def op_step(a, r: Path, live, now: float, action: str):
         return ({"ok": False, "reason": "同じ鍵の操作が既にある。外部の状態を照合してから進める（やり直さない）", "op": known}, 4)
     if action == "done" and not known:
         return ({"ok": False, "reason": "begin の記録が無い"}, 2)
+    if action == "done" and known.get("state") == "done":  # 記録した結果を、照合の文言で上書きしない
+        return ({"ok": False, "reason": "この操作は既に終わりを記録している", "op": known}, 4)
     e = {"key": a.key, "state": "begun" if action == "begin" else "done", "at": now, "holder": live["holder"]}
     e.update({"what": a.what} if action == "begin" else {"result": a.result})
     if acct:

@@ -1138,12 +1138,23 @@ class TestOpRun(unittest.TestCase):
     def test_a_broken_lease_file_at_the_end_is_reported_not_silent(self):
         tok = self.claim()
         good = self.lease_file().read_text()
-        body = "import os; f = " + repr(str(self.lease_file())) + "; open(f + '.t', 'w').write('{'); os.replace(f + '.t', f)"
-        rc, r = self.run_op(tok, "push:feat@1", "--reviewed", self.head(), *self.script(body))
+        for n, broken in enumerate(("'{'", "json.dumps([1])", "json.dumps({**json.loads(open(f).read()), 'token': None, 'holder': None})[:-1] + ', \"x\": 1}'")):
+            with self.subTest(broken=broken):
+                body = f"import json, os; f = {str(self.lease_file())!r}; s = {broken}; open(f + '.t', 'w').write(s); os.replace(f + '.t', f)"
+                rc, r = self.run_op(tok, f"push:feat@{n}", "--reviewed", self.head(), *self.script(body))
+                self.assertEqual(rc, 1 if n < 2 else 3, r)
+                if n < 2:
+                    self.assertIn("done を書けない", r["reason"])  # 監督役は黙って落ちず、理由を返す
+                self.lease_file().write_text(good)
+                self.assertIn(f"push:feat@{n}", self.pending())  # 照合で閉じる
+
+    def test_a_finished_op_cannot_be_closed_again(self):
+        tok = self.claim()
+        rc, r = self.run_op(tok, "push:feat@1", "--reviewed", self.head(), *self.script("import sys; print('rejected'); sys.exit(1)"))
         self.assertEqual(rc, 1)
-        self.assertIn("done を書けない", r["reason"])  # 監督役は黙って落ちず、理由を返す
-        self.lease_file().write_text(good)
-        self.assertEqual(self.pending(), ["push:feat@1"])  # 照合で閉じる
+        self.assertEqual(self.w("op", "done", "--dir", str(self.wt), "--token", tok, "--key", "push:feat@1", "--result", "照合した")[0], 4)
+        rec = [json.loads(x) for x in self.ops_file().decode().splitlines() if json.loads(x)["key"] == "push:feat@1"][-1]
+        self.assertIn("rejected", rec["result"])  # 本当の結果が残る
 
     def test_a_key_with_spaces_is_matched_as_written(self):
         tok = self.claim()
@@ -1268,6 +1279,8 @@ class TestOpRun(unittest.TestCase):
                     "open(f + '.t', 'w').write(good); os.replace(f + '.t', f)")
             rc, r = self.run_op(tok, f"push:feat@{n}", "--reviewed", self.head(), *self.script(body))
             self.assertEqual(rc, 0, (broken, r))
+        errs = (self.lease_file().parent / "supervise.err").read_text(encoding="utf-8").splitlines()
+        self.assertEqual(len(errs), len(set(errs)), errs)  # 毎秒の失敗でも、同じ文言は 1 回だけ
         self.assertIn("担当の期限を延ばせない", (self.lease_file().parent / "supervise.err").read_text(encoding="utf-8"))
 
     def test_command_runs_in_the_from_directory_without_a_shell(self):
