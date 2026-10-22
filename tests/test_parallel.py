@@ -107,6 +107,14 @@ class TestParallel(unittest.TestCase):
         self.assertEqual(self.git(b['dir'], 'rev-parse', 'HEAD'), head)
         self.assertEqual((Path(b['dir']) / 'saved-on-branch').read_text(), 'saved-on-branch\n')
 
+    def test_resume_with_a_broken_op_record_answers_with_the_line(self):
+        a = self.start()
+        ops = next(Path(self.env['BB_WRIT_STATE_DIR'], 'work').glob('*/lease.json')).parent / 'ops.jsonl'
+        self.w('release', '--dir', a['dir'], '--token', a['token'])
+        ops.write_text('{"key": 1}\n')
+        r = self.w('task', 'resume', '--dir', self.repo, '--task', a['task'], '--holder', 'Codex', code=1)  # 照合の拒否（6）でない
+        self.assertIn('1 行目', r['reason'])
+
     def test_resume_refuses_a_rewritten_record(self):
         # 記録の dir・branch・base を書き換えても、そのまま git に渡さない（行き先は state の外、ブランチは別、-B のオプション注入）
         a = self.start()

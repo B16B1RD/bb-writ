@@ -348,6 +348,13 @@ def check_token(lease, token):
     return None
 
 
+def pending_while(r: Path, held: str) -> list:
+    try:
+        return pending(r)
+    except RecordError as e:  # 直すのは、監督役が記録に書き足し終えてから（書き戻しで done を消さない）
+        raise RecordError(f"{e}。op run の外部操作がまだ動いている: {held}。終わってから直す") from None
+
+
 def claim_at(r, d, holder, minutes):
     now = time.time()
     old = read(r / 'lease.json')
@@ -357,7 +364,7 @@ def claim_at(r, d, holder, minutes):
     held = run_holder(r)
     if held:  # 担当の期限が切れても（手放されても）、op run のコマンドが動いている間は取らせない。取ると、終わっていない操作をやり直せる
         return {'ok': False, 'reason': f'op run の外部操作がまだ動いている: {held}。終わるのを待つ（終われば監督役が done を書く）',
-                'holder': old and old.get('holder'), 'pending_ops': pending(r)}, 3
+                'holder': old and old.get('holder'), 'pending_ops': pending_while(r, held)}, 3
     waiting = pending(r)  # 記録が壊れていれば、担当を書く前に止める（書いた後に落ちると、誰も token を受け取らない担当が残る）
     new = {'token': secrets.token_hex(8), 'holder': holder, 'dir': str(d.resolve()),
            'claimed_at': now, 'expires_at': now + minutes * 60,
@@ -883,8 +890,10 @@ def op_run(a, r: Path, argv: list) -> int:
     if len(lines) < 2:  # 監督役が結果を返さなかった。記録を読む（読めなければ、書けていないとみなす）
         try:
             rec = ops(r).get(a.key, {})
-        except Exception as e:  # 手で壊した記録（形の違い、深い入れ子の RecursionError など）でも落ちない
+        except RecordError as e:  # 手で壊した記録（形の違い、深い入れ子など）でも落ちない
             unreadable = f"{e}。その行を直してから、"
+        except Exception as e:  # 権限などで読めない
+            unreadable = f"記録を読めない: {e!r}。読めるようにしてから、"
     if len(lines) < 2 and rec.get("state") == "done":  # done を書いた後に監督役が居なくなった。結果は記録にある
         result = rec.get("result")
         m = re.match(r"exit ([0-9]{1,3}):", result) if isinstance(result, str) and rec.get("by") == "supervise" else None  # 監督役が書いた記録だけ
@@ -1094,6 +1103,8 @@ def main() -> int:
             return task_command(a) if a.cmd == 'task' else integrate(a)
         except PermissionError as e:
             return out({'ok': False, 'reason': str(e)}, 3)
+        except RecordError as e:  # 形の違う記録は照合の拒否（6）でない
+            return out({'ok': False, 'reason': str(e)}, 1)
         except (ValueError, OSError) as e:
             return out({'ok': False, 'reason': str(e)}, 6)
     if a.cmd == "check":
