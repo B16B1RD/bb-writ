@@ -563,8 +563,15 @@ def main() -> int:
                 git_dir, _ = grok_git_dir(a.cwd)
                 for top in {a.cwd, *([git_dir.parent] if git_dir and git_dir.name == ".git" else [])}:
                     made += [d for d in (top / ".claude", top / ".claude" / ".cc-writes") if not d.exists()]
-                # 2.1.309 の sandbox は、CLAUDE_CONFIG_DIR に関わらずホームに空の .claude/ssh（0700）を作って書ける場所に足す
-                made += [d for d in (Path.home() / ".claude", Path.home() / ".claude" / "ssh") if not d.exists()]
+                # 2.1.309 の sandbox は、CLAUDE_CONFIG_DIR に関わらずホームに空の .claude/ssh（0700）を作って書ける場所に足す。
+                # 子の後に空なら、前からあっても消す（並行する別の launcher の子が作ったものを、その launcher は前からあると数える）。
+                # 前から中身があるもの・symlink と、symlink の .claude（行き先は利用者の持ち物）の下は触らない
+                cc = Path.home() / ".claude"
+                if not cc.is_symlink():
+                    ssh = cc / "ssh"
+                    made += [] if cc.exists() else [cc]
+                    if not (ssh.is_symlink() or (ssh.exists() and (not ssh.is_dir() or any(ssh.iterdir())))):
+                        made.append(ssh)
             # 子の前後でホームを比べ、新しくできて空のままの場所を残りとして報告する。黙って消さない（同じ時刻に別の道具が作ったものかもしれない）
             skip = [config_dir(), state_dir(), out_dir, a.cwd, Path.home() / ".cache"]
             home_before, _, unreadable_before = home_entries(skip)
@@ -628,13 +635,15 @@ def main() -> int:
                 if changed:
                     rec.update(status="failed", problems=[headline + "この作業場所で git を動かす前に、下の場所を確かめる（偽の設定が sandbox の外で動きうる）"]
                                + changed[:20] + rec.get("problems", []))
-            try:
-                for d in reversed(made):
+            left = []
+            for d in reversed(made):  # 1 つが失敗しても、ほかは片付ける（ホームの失敗で対象の .cc-writes を残さない）
+                try:
                     if d.is_dir() and not d.is_symlink() and not any(d.iterdir()):
                         d.rmdir()
-            except Exception as e:  # 子が権限を変えたなど。残ったものは task cleanup が未保存の変更とみなす
-                rec.update(status="failed", problems=[f"子の起動で作られた空の .claude を片付けられない: {e!r}"[:300],
-                                                      f"詳細: {launcher_error(out_dir)}"] + rec.get("problems", []))
+                except Exception as e:  # 子が権限を変えたなど
+                    left += [f"{d}: {e!r}"[:300], f"詳細: {launcher_error(out_dir)}"]
+            if left:  # 対象に残った .claude は、task cleanup が未保存の変更とみなす
+                rec.update(status="failed", problems=["子の起動で作られた空のディレクトリを片付けられない"] + left[:20] + rec.get("problems", []))
             try:
                 _, empty, unreadable = home_entries(skip)
                 rec["home_residue"] = sorted(empty - home_before)
