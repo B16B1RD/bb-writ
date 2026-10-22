@@ -1165,13 +1165,16 @@ class TestOpRun(unittest.TestCase):
         good = self.lease_file().read_text()
         for n, broken in enumerate(("'{'", "json.dumps([1])", "json.dumps({**json.loads(open(f).read()), 'token': None, 'holder': None})[:-1] + ', \"x\": 1}'")):
             with self.subTest(broken=broken):
-                body = f"import json, os; f = {str(self.lease_file())!r}; s = {broken}; open(f + '.t', 'w').write(s); os.replace(f + '.t', f)"
+                body = (f"import json, os, subprocess; f = {str(self.lease_file())!r}; s = {broken}; open(f + '.t', 'w').write(s); os.replace(f + '.t', f); "
+                        "print('left', subprocess.Popen(['sleep', '2'], close_fds=False).pid)")  # ロックを受け継いだ残り
                 rc, r = self.run_op(tok, f"push:feat@{n}", "--reviewed", self.head(), *self.script(body))
                 self.assertEqual(rc, 1 if n < 2 else 3, r)
                 if n < 2:
                     self.assertIn("done を書けない", r["reason"])  # 監督役は黙って落ちず、理由を返す
                 self.lease_file().write_text(good)
-                self.assertIn(f"push:feat@{n}", self.pending())  # 照合で閉じる
+                pend = {o["key"]: o.get("running") for o in self.w("op", "pending", "--dir", str(self.wt))[1]["pending_ops"]}
+                self.assertEqual(pend.get(f"push:feat@{n}", "absent"), None)  # 照合で閉じる。コマンドは終わったので、残りがあっても動いているとは数えない
+                self.pid_gone(int(r["output"].split("left ")[1].split()[0]))
 
     def test_a_finished_op_cannot_be_closed_again(self):
         tok = self.claim()
@@ -1198,7 +1201,7 @@ class TestOpRun(unittest.TestCase):
     def outputs(self):
         return sorted(x.name for x in self.lease_file().parent.iterdir()
                       if x.name not in ("lease.json", "ops.jsonl", "note.md", "evidence", "supervise.err", ".mutex", "task.json")
-                      and not (x.name.startswith("running") and x.name.endswith(".lock")))
+                      and not x.name.endswith(".lock"))
 
     def test_a_stop_before_the_command_starts_does_not_start_it(self):
         """監督役が起こす前に止めろと言われたら、外部操作を始めない（起こしてから殺すと、結果の分からない push を作る）。"""
@@ -1229,8 +1232,8 @@ class TestOpRun(unittest.TestCase):
         gate.mkdir(exist_ok=True)
         self.gos = [*getattr(self, "gos", []), gate / "before-check", gate / "before-start"]  # 落ちても監督役を待たせたままにしない
         key = f"push:{at}"
-        if at == "before-start":
-            (gate / "before-check").write_text("")  # 手前の止まり所は通す
+        for name in ("after-begin", "relay", "relay-told", "before-done", *(["before-check"] if at == "before-start" else [])):
+            (gate / name).write_text("")  # 手前の止まり所は通す
         p = self.start_run(tok, key, f"import sys, time\n{extra}open({str(ran)!r}, 'w')\ntime.sleep(1)", env={"BB_WRIT_SUPERVISE_GATE": str(gate)})
         self.wait_file(gate / f"at-{at}")
         os.kill(int((gate / f"at-{at}").read_text()), signal.SIGTERM)  # 監督役に、窓の中で止めを送る
@@ -1252,6 +1255,118 @@ class TestOpRun(unittest.TestCase):
         rec = self.stop_at(Path(self.tmp.name) / "gate2", "before-start", ran)
         self.assertNotIn("exit 0", rec)  # 起こしたコマンドに伝わり、最後までは走らない
         self.assertIn("exit 143", rec)
+
+    def test_killing_the_relay_before_it_tells_does_not_start_the_command(self):
+        """中継が保留を渡す前に殺されたら、止めとみなす（空の報せを「止め無し」と読んで起こした）。"""
+        tok = self.claim()
+        gate, ran = Path(self.tmp.name) / "gate3", Path(self.tmp.name) / "ran3"
+        gate.mkdir()
+        self.gos = [*getattr(self, "gos", []), gate / "relay", gate / "relay-told", gate / "before-check", gate / "before-start"]
+        (gate / "after-begin").write_text("")
+        p = self.start_run(tok, "push:feat@1", f"open({str(ran)!r}, 'w')", env={"BB_WRIT_SUPERVISE_GATE": str(gate)}, start_new_session=True)
+        self.wait_file(gate / "at-relay")
+        os.kill(int((gate / "at-relay").read_text()), signal.SIGKILL)
+        os.killpg(p.pid, signal.SIGKILL)
+        p.wait()
+        for name in ("relay-told", "before-check", "before-start", "before-done"):
+            (gate / name).write_text("")
+        rec = self.wait_done("push:feat@1")["result"]
+        self.assertIn("exit 137", rec)
+        self.assertIn("起動の前に止められた", rec)
+        self.assertFalse(ran.exists())
+
+    def test_a_leftover_does_not_block_once_the_command_ended_even_if_not_recorded(self):
+        """done を書けなくても、コマンドが終われば二重に走るおそれは無い。残ったもの（credential daemon など）で 15 分止めない。"""
+        tok = self.claim()
+        body = ("import json, os, subprocess; f = " + repr(str(self.lease_file())) + "; "
+                "open(f + '.t', 'w').write(json.dumps({**json.load(open(f)), 'token': 'other'})); os.replace(f + '.t', f); "
+                "print('left', subprocess.Popen(['sleep', '2'], close_fds=False).pid)")
+        rc, r = self.run_op(tok, "push:feat@1", "--reviewed", self.head(), *self.script(body))
+        self.assertEqual(rc, 3)  # 担当を失って記録できなかった
+        left = int(r["output"].split("left ")[1].split()[0])
+        self.assertEqual([(o["key"], o.get("running")) for o in self.w("op", "pending", "--dir", str(self.wt))[1]["pending_ops"]],
+                         [("push:feat@1", None)])  # begun は照合のために残り、動いているとは数えない
+        self.assertEqual(self.w("claim", "--dir", str(self.wt), "--holder", "B")[0], 3)  # 担当 other が生きているだけ
+        self.pid_gone(left)
+
+    def test_the_lock_file_is_removed_once_recorded(self):
+        tok = self.claim()
+        self.assertEqual(self.run_op(tok, "push:feat@1", "--reviewed", self.head(), *self.script("print(1)"))[0], 0)
+        self.assertEqual(list(self.lease_file().parent.glob("running*.lock")), [])
+
+    def work_module(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("work_under_test", WORK)
+        work = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(work)
+        return work
+
+    def test_only_the_end_of_a_huge_output_is_read(self):
+        work, f, got = self.work_module(), Path(self.tmp.name) / "huge.log", []
+        f.write_bytes(b"x" * (4 * 1024 * 1024) + b"\nlast line\n" + b"\n" * 200_000)  # 末尾は改行だけの塊
+
+        def counting_open(path, mode="r", *a, **kw):  # 読んだバイト数を数える
+            fh = open(path, mode, *a, **kw)
+            real = fh.read
+            fh.read = lambda n=-1: got.append(len(b := real(n))) or b
+            return fh
+        work.open = counting_open
+        self.assertTrue(work.tail(f).endswith("last line"))  # 改行だけの塊を飛ばし、最後の意味のある行を残す
+        self.assertLess(sum(got), 1024 * 1024)  # 全体（4 MiB 余り）は読まない
+
+    def test_keys_with_newlines_or_too_long_are_refused(self):
+        tok = self.claim()
+        for key in ("local:x\nrecorded", "local:" + "x" * 1100):
+            self.assertEqual(self.w("op", "begin", "--dir", str(self.wt), "--token", tok, "--key", key, "--what", "x")[0], 2)
+        self.assertEqual(self.pending(), [])
+
+    def test_the_record_stays_small_after_json_escaping(self):
+        tok = self.claim()
+        rc, r = self.run_op(tok, "push:feat@1", "--reviewed", self.head(), *self.script("import sys; sys.stdout.write('\\x01' * 20000)"))
+        self.assertLessEqual(len(json.dumps(r["op"]["result"])), 8 * 1024 + 64)
+        rc, r = self.run_op(tok, "push:feat@2", "--reviewed", self.head(), *self.script("import os; os.write(1, b'\\xff' * 20000)"))
+        self.assertLessEqual(len(json.dumps(r["op"]["result"])), 8 * 1024 + 64)
+
+    def test_the_test_gate_is_not_passed_to_the_command(self):
+        tok = self.claim()
+        gate = Path(self.tmp.name) / "gate4"
+        gate.mkdir()
+        for name in ("after-begin", "relay", "relay-told", "before-check", "before-start", "before-done"):
+            (gate / name).write_text("")
+        p = self.start_run(tok, "push:feat@1", "import os; print('gate', os.environ.get('BB_WRIT_SUPERVISE_GATE'))", env={"BB_WRIT_SUPERVISE_GATE": str(gate)})
+        p.wait()
+        self.assertIn("gate None", self.wait_done("push:feat@1")["result"])
+
+    def test_a_second_op_run_right_after_the_first_begins_is_refused(self):
+        """ロックは begin と同じ排他の中で作る（外で作ると、その間に 2 本目が通った）。"""
+        tok = self.claim()
+        gate = Path(self.tmp.name) / "gate5"
+        gate.mkdir()
+        self.gos = [*getattr(self, "gos", []), gate / "after-begin"]
+        for name in ("relay", "relay-told", "before-check", "before-start", "before-done"):
+            (gate / name).write_text("")
+        p = self.start_run(tok, "push:feat@1", "print(1)", env={"BB_WRIT_SUPERVISE_GATE": str(gate)})
+        self.wait_file(gate / "at-after-begin")
+        self.assertEqual(self.run_op(tok, "pr:feat", "--reviewed", "none:x", *self.script("print(2)"))[0], 4)
+        (gate / "after-begin").write_text("")
+        p.wait()
+
+    def test_the_op_counts_as_running_until_done_is_written(self):
+        """終わった印は done と同じ排他の中で付ける。先に付けると、手での op done が監督役より先に閉じ、本当の結果を失う。"""
+        tok = self.claim()
+        gate = Path(self.tmp.name) / "gate6"
+        gate.mkdir()
+        self.gos = [*getattr(self, "gos", []), gate / "before-done"]
+        for name in ("after-begin", "relay", "relay-told", "before-check", "before-start"):
+            (gate / name).write_text("")
+        p = self.start_run(tok, "push:feat@1", "print('real result')", env={"BB_WRIT_SUPERVISE_GATE": str(gate)})
+        self.wait_file(gate / "at-before-done")
+        self.assertEqual([(o["key"], o.get("running")) for o in self.w("op", "pending", "--dir", str(self.wt))[1]["pending_ops"]],
+                         [("push:feat@1", True)])
+        self.assertEqual(self.w("op", "done", "--dir", str(self.wt), "--token", tok, "--key", "push:feat@1", "--result", "照合")[0], 4)
+        (gate / "before-done").write_text("")
+        p.wait()
+        self.assertIn("real result", self.wait_done("push:feat@1")["result"])
 
     def test_a_supervisor_that_cannot_start_closes_the_op(self):
         tok = self.claim()
@@ -1341,10 +1456,14 @@ class TestOpRun(unittest.TestCase):
             if not self.w("op", "pending", "--dir", str(self.wt))[1]["pending_ops"][0].get("running"):
                 break
             time.sleep(0.05)
-        self.assertEqual(self.outputs(), [])  # 記録されないまま残った出力も消す
-        self.assertEqual([(o["key"], o.get("running")) for o in self.w("op", "pending", "--dir", str(self.wt))[1]["pending_ops"]],
-                         [("push:feat@1", None)])  # 終われば、後任が外部の状態と照合する
-        self.assertEqual(self.w("claim", "--dir", str(self.wt), "--holder", "B")[0], 0)
+        pend = self.w("op", "pending", "--dir", str(self.wt))[1]["pending_ops"]
+        self.assertEqual([(o["key"], o.get("running")) for o in pend], [("push:feat@1", None)])  # 終われば、後任が外部の状態と照合する
+        self.assertTrue(Path(pend[0]["output"]).is_file())  # 照合の材料として出力を残す
+        d = json.loads(self.lease_file().read_text())
+        self.lease_file().write_text(json.dumps({**d, "expires_at": time.time() + 600}))
+        self.assertEqual(self.w("op", "done", "--dir", str(self.wt), "--token", tok, "--key", "push:feat@1", "--result", "照合した")[0], 0)
+        self.assertEqual(self.outputs(), [])  # 照合で閉じたら消す
+        self.assertEqual(list(self.lease_file().parent.glob("*.lock")), [])  # 外れたロックのファイルも残さない
 
     def test_the_lease_is_extended_below_19_minutes_and_after_expiry_with_the_same_token(self):
         tok = self.claim()
