@@ -162,6 +162,8 @@ FAKE_GROK = textwrap.dedent(r'''
     env = {k: v for k, v in os.environ.items() if k.startswith("GROK_") or k in ("XAI_API_KEY", "RUST_LOG")}
     open(os.environ["FAKE_ARGS"], "w").write(json.dumps(sys.argv[1:] + ["ENV=" + json.dumps(env, sort_keys=True)]))
     mode = os.environ.get("FAKE_MODE", "good")
+    if mode == "home-ssh":  # Claude Code の子でなければ、launcher は片付けない
+        os.makedirs(os.path.join(os.environ["HOME"], ".claude", "ssh"), mode=0o700)
     if mode == "signedout":
         print(json.dumps({"type": "error", "message": "Not signed in."})); sys.exit(1)
     if mode == "nosandbox":
@@ -553,6 +555,10 @@ class TestLaunch(unittest.TestCase):
         rc, rec = self.run_launch("claude", "home-ssh", env_extra={"HOME": str(home)})
         self.assertEqual(rec["status"], "ok", rec)
         self.assertFalse((home / ".claude" / "ssh").exists())
+        (home / ".claude" / "keep").rmdir()  # 前からある空の .claude は消さない
+        rc, rec = self.run_launch("claude", "home-ssh", env_extra={"HOME": str(home)})
+        self.assertEqual(rec["status"], "ok", rec)
+        self.assertEqual(list((home / ".claude").iterdir()), [])
 
     def test_ssh_dir_with_content_or_links_is_left_alone(self):
         home = Path(self.tmp.name) / "home"
@@ -569,6 +575,7 @@ class TestLaunch(unittest.TestCase):
         self.assertTrue((home / ".claude" / "ssh").is_symlink(), rec)  # symlink は消さない
         self.assertTrue((home / "elsewhere").is_dir(), rec)
         self.assertEqual(rec["home_residue"], [str(home / "elsewhere")], rec)  # 行き先の空のディレクトリは残りとして返す
+        self.assertNotIn("子の起動で作られた空のディレクトリを片付けられない", rec["problems"])  # symlink に rmdir しない
         (home / ".claude" / "ssh").unlink(); (home / "elsewhere").rmdir(); (home / ".claude").rmdir()
         (home / "dotfiles" / "claude").mkdir(parents=True)
         (home / ".claude").symlink_to(home / "dotfiles" / "claude")  # symlink の .claude の下（利用者の持ち物）は触らない
@@ -579,9 +586,11 @@ class TestLaunch(unittest.TestCase):
         rc, rec = self.run_launch("claude", "home-ssh-deep", env_extra={"HOME": str(home)})
         self.assertTrue((home / ".claude" / "ssh" / "sub").is_dir(), rec)  # 空でない ssh は消さない（3 段目の sub は home_entries の 2 段の外で、残りにも数えない）
         (home / ".claude" / "ssh" / "sub").rmdir(); (home / ".claude" / "ssh").rmdir(); (home / ".claude").rmdir()
-        rc, rec = self.run_launch("codex", "home-ssh", env_extra={"HOME": str(home)})  # Claude Code の子でなければ片付けない
-        self.assertEqual((rec["status"], rec["home_residue"]), ("failed", [str(home / ".claude" / "ssh")]), rec)
-        self.assertTrue((home / ".claude" / "ssh").is_dir())
+        for host, cwd in (("codex", None), ("grok", self.grok_target())):  # Claude Code の子でなければ片付けない
+            rc, rec = self.run_launch(host, "home-ssh", cwd=cwd, env_extra={"HOME": str(home), "XAI_API_KEY": "k"})
+            self.assertEqual((rec["status"], rec["home_residue"]), ("failed", [str(home / ".claude" / "ssh")]), (host, rec))
+            self.assertTrue((home / ".claude" / "ssh").is_dir())
+            (home / ".claude" / "ssh").rmdir(); (home / ".claude").rmdir()
 
     @unittest.skipIf(os.geteuid() == 0, "root は権限で止められない")
     def test_failing_to_clean_home_still_cleans_the_target(self):
@@ -593,7 +602,7 @@ class TestLaunch(unittest.TestCase):
             (home / ".claude").chmod(0o755)
         self.assertEqual(rec["status"], "failed", rec)
         self.assertIn("子の起動で作られた空のディレクトリを片付けられない", rec["problems"])
-        self.assertTrue(any(str(home / ".claude" / "ssh") in p for p in rec["problems"]), rec)
+        self.assertTrue(any(str(home / ".claude") in p for p in rec["problems"]), rec)  # ssh と .claude のどちらで止まるかは Python の版による
         self.assertFalse((self.cwd / ".claude").exists(), rec)  # 対象の空の .claude/.cc-writes は消えた
 
     @unittest.skipIf(os.geteuid() == 0, "root は権限で止められない")
@@ -774,7 +783,7 @@ class TestLaunch(unittest.TestCase):
         self.assertEqual(Path(str(self.args_file) + ".scrub").read_text(), "")  # SCRUB は許可の方針を default に戻すので使わない
 
     def grok_target(self):
-        """Grok の read-only は /tmp に書けるので、読み取り専用の試験の対象は /tmp の外に置く。"""
+        """Grok の read-only は /tmp に書けるので、読み取り専用の試験の対象は /tmp の外に置く（実物のホームの下。launcher が見るのは試験の一時のホーム）。"""
         d = tempfile.TemporaryDirectory(dir=Path.home())
         self.addCleanup(d.cleanup)
         (Path(d.name) / "a.txt").write_text("x\n")

@@ -38,7 +38,7 @@ bb-writ は、CLI ハーネス（Claude Code・Codex。Grok Build も同じ SKIL
 
 | 規則 | 強制するもの |
 |---|---|
-| 子の起動の後、ホームに空のファイル・ディレクトリを残さない（子の CLI の sandbox が作る。空の `.bash_profile` でログインシェルが `.bashrc` を読まなくなった） | `scripts/launch.py` の `home_entries` が `failed` にする。Claude Code 2.1.309 の sandbox が毎回作る空の `~/.claude/ssh` だけは launcher が消す。`tests/test_launch.py` の `test_child_leaving_empty_files_in_home_fails`・`test_claude_child_leaves_no_empty_ssh_dir_in_home`・`test_ssh_dir_with_content_or_links_is_left_alone`、`tests/verify_sandbox_live.py` の `no_home_residue` |
+| 子の起動の後、ホームに空のファイル・ディレクトリを残さない（子の CLI の sandbox が作る。空の `.bash_profile` でログインシェルが `.bashrc` を読まなくなった） | `scripts/launch.py` の `home_entries` が `failed` にする。Claude Code 2.1.309 の sandbox が起動のたびに作る空の `~/.claude/ssh`（サーバー側の機能フラグが有効なとき）だけは launcher が消す。`tests/test_launch.py` の `test_child_leaving_empty_files_in_home_fails`・`test_claude_child_leaves_no_empty_ssh_dir_in_home`・`test_ssh_dir_with_content_or_links_is_left_alone`、`tests/verify_sandbox_live.py` の `no_home_residue` |
 | launcher はプラグインの置き場に `__pycache__` を作らない | `tests/test_launch.py` の `test_launch_leaves_no_bytecode_in_the_plugin` |
 | Claude Code の子に `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB` を使わない（許可の方針を既定に戻し、空のファイルを残した） | 読み取り専用の子は `tests/test_launch.py` の `test_claude_read_only_in_worktree_denies_the_common_git_dir`。書く子は試験が無く、残った空のファイルを上の `home_entries` が捕まえる |
 | Claude Code の子に、親の `CLAUDE*`・`ANTHROPIC_*` の環境変数を渡さない | `tests/test_launch.py` の `test_claude_child_gets_no_parent_claude_env` |
