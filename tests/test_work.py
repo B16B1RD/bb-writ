@@ -1992,6 +1992,25 @@ class TestOpRun(unittest.TestCase):
         self.assertIsNone(r["exit"])
         self.assertEqual(r["op"]["state"], "begun")  # 始めた記録を添える（壊れたのではない）
 
+    def test_a_claim_refused_for_a_running_op_still_answers_when_the_record_is_broken(self):
+        tok = self.claim()
+        go = self.go_file("go-c")
+        p = self.start_run(tok, "push:feat@1", f"import os, time\nwhile not os.path.exists({str(go)!r}): time.sleep(0.05)")
+        self.wait_running("push:feat@1")
+        f = self.lease_file().parent / "ops.jsonl"
+        good = f.read_text()
+        d = json.loads(self.lease_file().read_text())
+        self.lease_file().write_text(json.dumps({**d, "expires_at": time.time() - 1}))
+        try:
+            f.write_text("{broken\n")
+            rc, r = self.w("claim", "--dir", str(self.wt), "--holder", "B")
+            self.assertEqual(rc, 3)  # 拒否は返す
+            self.assertIn("記録を読めない", r["pending_ops"])
+        finally:
+            f.write_text(good)
+            go.write_text("")
+            p.wait()
+
     def test_a_supervisor_that_cannot_start_closes_the_op(self):
         tok = self.claim()
         (self.lease_file().parent / "supervise.err").mkdir()  # 監督役の stderr を開けない

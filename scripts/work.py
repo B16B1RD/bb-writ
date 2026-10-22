@@ -332,6 +332,14 @@ def check_token(lease, token):
     return None
 
 
+def pending_or_note(r: Path):
+    """拒否の応答に添える pending_ops。記録を読めなくても拒否は返す（添える情報なので）。"""
+    try:
+        return pending(r)
+    except Exception as e:
+        return f"記録を読めない: {e!r}"
+
+
 def claim_at(r, d, holder, minutes):
     now = time.time()
     old = read(r / 'lease.json')
@@ -341,7 +349,7 @@ def claim_at(r, d, holder, minutes):
     held = run_holder(r)
     if held:  # 担当の期限が切れても（手放されても）、op run のコマンドが動いている間は取らせない。取ると、終わっていない操作をやり直せる
         return {'ok': False, 'reason': f'op run の外部操作がまだ動いている: {held}。終わるのを待つ（終われば監督役が done を書く）',
-                'holder': old and old.get('holder'), 'pending_ops': pending(r)}, 3
+                'holder': old and old.get('holder'), 'pending_ops': pending_or_note(r)}, 3
     new = {'token': secrets.token_hex(8), 'holder': holder, 'dir': str(d.resolve()),
            'claimed_at': now, 'expires_at': now + minutes * 60,
            'previous': old and {'holder': old.get('holder'), 'expired_at': old.get('expires_at')}}
