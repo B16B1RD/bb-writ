@@ -304,6 +304,23 @@ def codex_read_only(scratch: Path) -> list[str]:
             "-c", f'permissions.{CODEX_PROFILE}.filesystem={{":tmpdir"="write"}}']
 
 
+def repo_overlap(cwd: Path, out_dir: Path) -> str | None:
+    """出力の置き場が、対象のリポジトリ（対象・作業ツリーの最上位・Git の共通ディレクトリ・元の checkout）の中にあればその理由。
+    読み取り専用の Codex は置き場の tmp/ に書けるので、そこが共通ディレクトリの中なら ref も作れる（Git の前後比較はしない）。"""
+    places = [cwd]
+    g = subprocess.run(["git", "-C", str(cwd), "rev-parse", "--path-format=absolute", "--show-toplevel", "--git-common-dir"],
+                       capture_output=True, text=True, timeout=GIT_TIMEOUT)
+    if g.returncode == 0:
+        top, common = (Path(x).resolve() for x in g.stdout.split("\n")[:2])
+        places += [top, common] + ([common.parent] if common.name == ".git" else [])
+    elif "not a git repository" not in g.stderr:
+        return f"対象の Git の場所を取れない（git rev-parse: {g.stderr.strip()[:200]}）"
+    for place in places:
+        if out_dir == place or place in out_dir.parents:
+            return f"対象のリポジトリ（{place}）の中にある"
+    return None
+
+
 def codex_breach(eff) -> str | None:
     """読み取り専用の Codex の実効の権限（記録の turn_context）が、渡した profile と違えばその理由。
     読み込まれたどの設定の sandbox_mode も default_permissions より優先され（対象の .codex/config.toml・専用ログインの config.toml）、
@@ -311,7 +328,7 @@ def codex_breach(eff) -> str | None:
     実効の権限を記録から読めなければ、どちらとも確かめられないので理由にする。"""
     turns = obj(eff).get("turns") or []
     if not turns or any(t["writable"] is None or t["network"] is None for t in turns):
-        return "Codex の実効の権限を記録（turn_context の permission_profile）から確かめられない"
+        return "Codex の実効の権限を記録（turn_context の permission_profile）から確かめられない（記録が無い、読めない行がある、形が違う）"
     tmp = (":tmpdir",)
     for t in turns:  # どの turn も（合わせると、ある turn だけ書けないことが隠れる）
         wide = [w for w in t["writable"] if w not in tmp]
@@ -627,8 +644,8 @@ def main() -> int:
     a.cwd = a.cwd.resolve()
     # 絶対パスにし、symlink を解く（子は --cwd で動くので、相対の --out では子の TMPDIR が別の場所を指した。対象の中かは解いた形で見る）
     out_dir = (a.out or state_dir() / "delegations" / (time.strftime("%Y%m%d-%H%M%S") + '-' + secrets.token_hex(8))).resolve()
-    if a.host == "codex" and not a.write and (a.cwd == out_dir or a.cwd in out_dir.parents):  # 作る前に（作ってから拒むと、対象の中に置き場が残る）
-        ap.error(f"--out {out_dir} が対象の中にある。読み取り専用の Codex は出力の置き場の tmp/ に書けるので、対象の外に置く")
+    if a.host == "codex" and not a.write and (why := repo_overlap(a.cwd, out_dir)):  # 作る前に（作ってから拒むと、対象の中に置き場が残る）
+        ap.error(f"--out {out_dir}: {why}。読み取り専用の Codex は出力の置き場の tmp/ に書けるので、対象のリポジトリの外に置く")
     out_dir.mkdir(parents=True, exist_ok=False)
     rec = {"host": a.host, "cwd": str(a.cwd), "model_requested": a.model, "effort_requested": a.effort,
            "write": a.write, "out": str(out_dir)}

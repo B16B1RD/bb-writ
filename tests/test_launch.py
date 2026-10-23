@@ -103,19 +103,6 @@ FAKE_CODEX = textwrap.dedent(r'''
                  "fs-unknown-then-ok": [fs_unknown, perm], "net-unknown-then-ok": [net_unknown, perm]}.get(mode, [perm])
         open(os.path.join(sessions, "fake", f"rollout-1-{thread}.jsonl"), "w").write("".join(turn(x) for x in turns))
     open(os.environ["FAKE_ARGS"] + ".tmpdir", "w").write(os.environ.get("TMPDIR", ""))
-    if mode.startswith("ro-"):  # 読み取り専用の子が Git の管理情報を変えた（sandbox が守らなかったとき）
-        import subprocess
-        g = ["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid"]
-        if mode == "ro-config-worktree":  # 空の config.worktree（書く子の後片付けが消すもの）
-            gd = subprocess.run(["git", "rev-parse", "--path-format=absolute", "--git-dir"], capture_output=True, text=True).stdout.strip()
-            open(os.path.join(gd, "config.worktree"), "w").close()
-        elif mode == "ro-hook":
-            common = subprocess.run(["git", "rev-parse", "--path-format=absolute", "--git-common-dir"], capture_output=True, text=True).stdout.strip()
-            os.makedirs(os.path.join(common, "hooks"), exist_ok=True)
-            open(os.path.join(common, "hooks", "post-checkout"), "w").write("#!/bin/sh\n")
-        else:
-            subprocess.run(g + {"ro-branch": ["branch", "evil"], "ro-own-commit": ["commit", "-q", "--allow-empty", "-m", "x"],
-                                "ro-detach": ["checkout", "-q", "--detach"], "ro-index": ["add", "a.txt"]}[mode], check=True)
     if mode == "tmpdir":  # 書ける一時ディレクトリで試験を動かした
         import tempfile
         tempfile.mkdtemp()
@@ -191,8 +178,8 @@ FAKE_CLAUDE = textwrap.dedent(r'''
         os.chmod(os.path.join(os.environ["HOME"], ".config"), 0)
     if mode == "home-lock-root":  # ホームそのものを読めなくする
         os.chmod(os.environ["HOME"], 0)
-    if mode == "hook-chmod":  # 前からある実行できない hook に、実行権限だけを足す（中身は同じ）
-        os.chmod(os.path.join(common(), "hooks", "pre-commit"), 0o755)
+    if mode == "hook-chmod":  # 前からある実行できない hook に、実行権限だけを足す（中身は同じ。symlink なら行き先に）
+        os.chmod(os.path.realpath(os.path.join(common(), "hooks", "pre-commit")), 0o755)
     if mode == "hook-symlink":  # 行き先の無い symlink を hooks に足す
         os.symlink("/nonexistent/hook", os.path.join(common(), "hooks", "pre-commit"))
     if mode == "config-include-fifo":  # 設定は通常のファイルのまま、git に FIFO を読ませる
@@ -453,13 +440,18 @@ class TestLaunch(unittest.TestCase):
                 self.assertIn(rec["out"], (self.state / "delegations.jsonl").read_text())
 
     def test_a_write_child_making_a_hook_executable_is_reported(self):
-        repo, wt = self.worktree("hook-chmod")
-        hook = repo / ".git" / "hooks" / "pre-commit"
-        hook.write_text("#!/bin/sh\n")
-        hook.chmod(0o644)  # git は実行できない hook を動かさない
-        rc, rec = self.run_launch("claude", "hook-chmod", extra=["--write"], cwd=wt)
-        self.assertEqual(rec["status"], "failed", rec)
-        self.assertTrue([p for p in rec["problems"] if p.endswith("hooks/pre-commit")], rec)
+        for linked in (False, True):  # hook そのもの、作業ツリーの中のスクリプトを指す symlink の hook
+            with self.subTest(linked=linked):
+                repo, wt = self.worktree(f"hook-chmod-{linked}")
+                hook = repo / ".git" / "hooks" / "pre-commit"
+                script = (repo / "hook.sh") if linked else hook
+                script.write_text("#!/bin/sh\n")
+                script.chmod(0o644)  # git は実行できない hook を動かさない
+                if linked:
+                    hook.symlink_to(script)
+                rc, rec = self.run_launch("claude", "hook-chmod", extra=["--write"], cwd=wt)
+                self.assertEqual(rec["status"], "failed", rec)
+                self.assertTrue([p for p in rec["problems"] if p.endswith("hooks/pre-commit")], rec)
 
     @unittest.skipIf(os.geteuid() == 0, "root は権限で止められない")
     def test_a_child_locking_its_leftovers_still_writes_the_record(self):
@@ -608,15 +600,19 @@ class TestLaunch(unittest.TestCase):
         link = Path(self.tmp.name) / "link"
         link.symlink_to(self.cwd)
         (Path(self.tmp.name) / "sib").mkdir()
-        for out in (self.cwd, self.cwd / "out", link / "out", Path(self.tmp.name) / "sib" / ".." / "repo" / "out"):
-            with self.subTest(out=out):
-                p = subprocess.run([sys.executable, str(LAUNCH), "--host", "codex", "--cwd", str(self.cwd), "--prompt-file", str(self.prompt),
+        repo, wt = self.worktree("out-in-repo")  # 対象が worktree でも、元の checkout・共通ディレクトリの中は対象のリポジトリ
+        (wt / "sub").mkdir()
+        for cwd, out in ((self.cwd, self.cwd), (self.cwd, self.cwd / "out"), (self.cwd, link / "out"),
+                         (self.cwd, Path(self.tmp.name) / "sib" / ".." / "repo" / "out"),
+                         (wt, repo / "o"), (wt, repo / ".git" / "refs" / "heads" / "x"), (wt / "sub", wt / "o")):
+            with self.subTest(cwd=cwd, out=out):
+                p = subprocess.run([sys.executable, str(LAUNCH), "--host", "codex", "--cwd", str(cwd), "--prompt-file", str(self.prompt),
                                     "--out", str(out)], env={**os.environ, "PATH": f"{self.bin}:/usr/bin:/bin", "HOME": str(self.home),
                                                              "BB_WRIT_CONFIG_DIR": str(self.cfg), "BB_WRIT_STATE_DIR": str(self.state)},
                                    capture_output=True, text=True, timeout=120)
                 self.assertEqual(p.returncode, 2, p)
-                self.assertIn("対象の中", p.stderr)
-                self.assertFalse((self.cwd / "out").exists())
+                self.assertIn("対象のリポジトリ", p.stderr)
+                self.assertFalse(out.exists() and out != cwd, out)
                 self.assertNotIn("Traceback", p.stderr)
         # 対象の外を指す .. は通す
         rc, rec = self.run_launch("codex", mode="tmpdir", extra=("--out", str(self.cwd / ".." / "outside-out")))
