@@ -766,6 +766,16 @@ class TestLaunch(unittest.TestCase):
         a = str((cfg / "codex-home" / "auth.json").resolve())
         self.assertTrue([d for d, acc in rules.items() if acc == "deny" and (a == d or a.startswith(d + "/"))], rules)
 
+    def test_tests_run_under_a_process_limit(self):
+        # 試験が偽のコマンドで自分を呼び続けても、増えるのは試験の分だけ（利用者全体の上限を埋めて Claude Code を落とした）
+        if not sys.platform.startswith("linux") or os.geteuid() == 0:
+            self.skipTest("上限を掛けるのは Linux の一般の利用者だけ")
+        import resource
+        soft, _ = resource.getrlimit(resource.RLIMIT_NPROC)
+        self.assertNotEqual(soft, resource.RLIM_INFINITY)
+        tasks = int(subprocess.run(["sh", "-c", 'ps -L -u "$(id -u)" -o pid= | wc -l'], capture_output=True, text=True).stdout)
+        self.assertLess(soft, tasks + 1000)  # 今の数から大きく離れていない（+500 で掛けた）
+
     def test_skipping_unwritable_places_is_only_for_read_only_file_systems(self):
         from unittest import mock
         for code, skipped in ((errno.EROFS, True), (errno.EACCES, False), (errno.ENOSPC, False)):
@@ -792,6 +802,8 @@ class TestLaunch(unittest.TestCase):
         self.assertEqual(live.credentials_attempt(d), "other")
         (d / "s8").write_text("127\n")
         self.assertEqual(live.credentials_attempt(d), "other")
+        (d / "s8").write_text("126\n")  # 実行できない（コマンドが拒まれたのでなく、起動できなかった）
+        self.assertEqual(live.credentials_attempt(d), "other")
 
     def test_codex_read_only_child_keeps_tools_and_drops_secret_env(self):
         # nvm を ~/.config に入れると、codex は node のパッケージで、ネイティブの本体は vendor にある（補助が実行する）。PATH の道具も読ませる
@@ -808,6 +820,8 @@ class TestLaunch(unittest.TestCase):
         npm = pkg / "lib" / "node_modules" / "npm" / "bin"
         npm.mkdir(parents=True)
         (npm / "npm-cli.js").write_text("")
+        (npm.parent / "lib").mkdir()
+        (npm.parent / "lib" / "cli.js").write_text("")  # npm はパッケージの中のほかのファイルも読む
         (pkg / "bin" / "npm").symlink_to(npm / "npm-cli.js")
         (home / ".config" / "gh").mkdir()
         rc, rec = self.run_launch("codex", path=f"{pkg / 'bin'}:/usr/bin:/bin",
@@ -816,10 +830,27 @@ class TestLaunch(unittest.TestCase):
         self.assertEqual((rc, rec["status"]), (0, "ok"), rec)
         rules = fs_rules(json.loads(self.args_file.read_text()))
         h = str(home.resolve())
-        for kept in (pkg / "bin" / "node", pkg / "lib" / "node_modules" / "@openai" / "codex" / "vendor", npm / "npm-cli.js"):  # 覆う deny が無い
+        for kept in (pkg / "bin" / "node", pkg / "lib" / "node_modules" / "@openai" / "codex" / "vendor", npm / "npm-cli.js",
+                     npm.parent / "lib" / "cli.js"):  # 覆う deny が無い
             k = str(kept.resolve())
             self.assertFalse([d for d, acc in rules.items() if acc == "deny" and (k == d or k.startswith(d + "/"))], (kept, rules))
         self.assertEqual(rules.get(f"{h}/.config/gh"), "deny")
+        # ~/.local/bin の道具が ~/.config/dotfiles/bin を指しても、dotfiles を丸ごと残さない（行き先だけ）
+        dots = home / ".config" / "dotfiles"
+        (dots / "bin").mkdir(parents=True)
+        (dots / "bin" / "tool").write_text("")
+        (dots / "secrets.env").write_text("X=1\n")
+        (home / ".local" / "bin").mkdir(parents=True)
+        (home / ".local" / "bin" / "tool").symlink_to(dots / "bin" / "tool")
+        rc, rec = self.run_launch("codex", path=f"{home / '.local' / 'bin'}:{pkg / 'bin'}:/usr/bin:/bin")
+        rules = fs_rules(json.loads(self.args_file.read_text()))
+        sec = str((dots / "secrets.env").resolve())
+        self.assertTrue([d for d, acc in rules.items() if acc == "deny" and (sec == d or sec.startswith(d + "/"))], rules)
+        tool = str((dots / "bin" / "tool").resolve())
+        self.assertFalse([d for d, acc in rules.items() if acc == "deny" and (tool == d or tool.startswith(d + "/"))], rules)
+        rc, rec = self.run_launch("codex", path=f"{pkg / 'bin'}:/usr/bin:/bin",
+                                  env_extra={"GH_TOKEN": "ghp_fake", "AWS_SECRET_ACCESS_KEY": "x", "MY_API_KEY": "y",
+                                             "SSH_AUTH_SOCK": "/tmp/agent", "DBUS_SESSION_BUS_ADDRESS": "unix:path=/x", "GIT_DIR": "/x"})
         env = json.loads(Path(str(self.args_file) + ".allenv").read_text())
         for name in ("GH_TOKEN", "AWS_SECRET_ACCESS_KEY", "MY_API_KEY", "SSH_AUTH_SOCK", "DBUS_SESSION_BUS_ADDRESS", "GIT_DIR"):
             self.assertNotIn(name, env)  # 許可の一覧の外は子に渡さない

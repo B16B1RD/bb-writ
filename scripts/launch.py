@@ -334,16 +334,18 @@ def codex_read_only(scratch: Path, cwd: Path) -> tuple[list[str], list[str]]:
     roots = {Path(os.path.realpath(d)) for d in [Path.home(), config_dir(), *(Path.home() / p for p in SECRET_PLACES)]}
     binary = Path(os.path.realpath(shutil.which("codex") or "/"))
     tools = [Path(d) for d in os.environ.get("PATH", "").split(os.pathsep) if d.startswith(str(Path.home()) + os.sep)]
-    # PATH の道具が symlink なら、行き先とそのパッケージ（2 つ上。nvm の npm は bin から ../lib/node_modules/npm を指す）も残す
+    # PATH の道具が symlink なら、行き先を残す。行き先の 2 つ上（パッケージ。nvm の npm は bin から ../lib/node_modules/npm を指す）は、
+    # PATH のディレクトリの親の中にあるときだけ残す（~/.local/bin から ~/.config/dotfiles/bin を指すとき、dotfiles を丸ごと残さない）
     for d in list(tools):
         try:
             links = [Path(os.path.realpath(e.path)) for e in os.scandir(d) if e.is_symlink()]
         except OSError:
             continue
-        tools += [x for t in links for x in (t, t.parent.parent)]
+        top = Path(os.path.realpath(d)).parent
+        tools += [x for t in links for x in (t, *([t.parent.parent] if top in t.parent.parent.parents else []))]
     login = Path(os.path.realpath(config_dir()))  # 専用ログインの中は中身が認証情報（codex-home/auth.json など）なので、本体だけを残す
     keep = [binary, *(d for d in [binary.parent.parent, binary.parent, *tools]
-                      if (r := Path(os.path.realpath(d))) not in roots and r != login and login not in r.parents),
+                      if (r := Path(os.path.realpath(d))) not in roots and login not in r.parents),
             Path.home() / ".config" / "git", cwd, *([git_dir] if git_dir else [])]
     denies = secret_denies(keep)
     scratch.mkdir()
@@ -357,8 +359,7 @@ def codex_read_only(scratch: Path, cwd: Path) -> tuple[list[str], list[str]]:
 def detect_env() -> dict:
     """置き場の判定に使う git の環境。親の GIT_DIR・GIT_CEILING_DIRECTORIES などは、判定する場所と別のものを見せるので渡さない。
     文言で「Git の外」を見分けるので、翻訳しない（翻訳入りの git では、Git の外の置き場をすべて止めた）。"""
-    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_") and k != "LANGUAGE"}
-    return {**env, "LC_ALL": "C"}
+    return {**{k: v for k, v in os.environ.items() if not k.startswith("GIT_")}, "LC_ALL": "C"}  # LC_ALL=C では LANGUAGE も効かない
 
 
 # git が上へたどって見つけなかった（Git の外）。壊れた .git ファイルの「not a git repository: <場所>」はここに入れない（その上を探さずに止まる）
