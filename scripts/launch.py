@@ -328,7 +328,7 @@ def codex_read_only(scratch: Path, cwd: Path) -> tuple[list[str], list[str]]:
     -s read-only では mktemp -d も失敗し、試験を動かせない審査役が読んだだけの判定を返した（0.163.0）。
     -s（sandbox_mode）は default_permissions より優先されるので渡さない。ネットワークは read-only の既定のまま出られない。"""
     git_dir, _ = grok_git_dir(cwd)
-    # 残すものは、実機で要ると分かったものだけ: codex 本体とそのパッケージ（本体の 2 つ上。拒んだ ~/.codex の中の本体を、sandbox の補助が
+    # 残すものは、実機で要ると分かったものだけ: codex 本体とそのパッケージ（本体の 2 つ上。standalone の版で、拒んだ ~/.codex の中の本体を、sandbox の補助が
     # 実行できなかった）、Git の設定、対象とその共通ディレクトリ。PATH の道具などを足すと、そのたびに別の置き場を開けた（dotfiles など）。
     # 道具が名前を挙げた置き場の下にあれば拒まれ、子の試験は動かず not-run になる（読んだだけの報告として扱われる）。
     # 置き場の根・ホーム・専用ログインの中は、本体のパッケージでも残さない（~/.codex/bin/codex の 2 つ上は ~/.codex）
