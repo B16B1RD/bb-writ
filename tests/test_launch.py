@@ -243,6 +243,19 @@ FAKE_CLAUDE = textwrap.dedent(r'''
         open(os.path.join(gd, "HEAD"), "wb").write(h.rstrip(b"\n") + b" \n")
     if mode == "shapes":  # 深すぎる行
         print('{"a": ' + "[" * 100000 + "]" * 100000 + "}")
+    if mode in ("orphan", "orphan-hang"):  # Claude Code の Bash のように、新しいセッションで起こし、その下にもう 1 段起こす（2.1.309 は sh → bwrap → … → sleep）
+        late = "import os, subprocess, sys, time; s = subprocess.Popen([sys.argv[1], '600'], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL); " \
+               "open(sys.argv[2] + '.part', 'w').write(f'{os.getpid()} {s.pid}'); os.rename(sys.argv[2] + '.part', sys.argv[2]); " \
+               "time.sleep(1.5); open('late.txt', 'w').write('x'); time.sleep(600)"  # 子が終わった後に、作業場所へ書く
+        subprocess.Popen([sys.executable, "-c", late, os.environ["FAKE_SLEEP"], os.environ["FAKE_ARGS"] + ".orphan"], start_new_session=True,
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        import time
+        for _ in range(200):
+            if os.path.exists(os.environ["FAKE_ARGS"] + ".orphan"):
+                break
+            time.sleep(0.05)
+        if mode == "orphan-hang":  # 時間切れの経路
+            time.sleep(60)
     result = os.environ["FAKE_TEXT"]
     if mode == "unwritable-report":  # 試験の sitecustomize が書き出しを失敗させる印
         result = result.replace('"conclusion": "', '"__unwritable__": 1, "conclusion": "')
@@ -298,6 +311,15 @@ def fs_rules(argv: list) -> dict:
     import re
     table = next(argv[i + 1] for i, x in enumerate(argv[:-1]) if x in ("-c", "--config") and ".filesystem=" in argv[i + 1].split("{")[0])
     return dict(re.findall(r'"([^"]+)"\s*=\s*"(read|write|deny)"', table))
+
+
+def stop_leftover(pid: int):
+    """試験の偽の子が残した sleep 600 と回し役だけを止める（番号が別のプロセスに使い回されていたら触らない）。"""
+    try:
+        if b"600" in Path(f"/proc/{pid}/cmdline").read_bytes():
+            os.kill(pid, 9)
+    except (OSError, ProcessLookupError):
+        pass
 
 
 def load_launch():
@@ -1368,6 +1390,31 @@ class TestLaunch(unittest.TestCase):
             rc, rec = self.run_launch(host, "home-residue", cwd=cwd, env_extra={"HOME": str(home), "XAI_API_KEY": "k"})
             self.assertEqual((rec["status"], rec["home_residue"]), ("failed", [str(home / ".bash_profile")]), (host, rec))
             (home / ".bash_profile").unlink()
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "子の CLI が切り離した子孫を止めるのは Linux だけ（PR_SET_CHILD_SUBREAPER）")
+    def test_processes_the_child_detached_do_not_outlive_it(self):
+        # Claude Code 2.1.309 の Bash は、コマンドを新しいセッションで起こす。プロセスグループを止めるだけでは、子が終わった後も
+        # 試験を回し続け、作業場所にも書けた（Issue #20）。正常に終わったときも、時間切れのときも、照合の前に止める
+        sleep = shutil.which("sleep")  # PATH を偽の置き場に変える前に、本物を絶対パスで引く
+        orphan = Path(str(self.args_file) + ".orphan")
+        for mode, extra, status in (("orphan", (), "ok"), ("orphan", ("--write",), None), ("orphan-hang", ("--timeout", "3"), "failed")):
+            with self.subTest(mode=mode, extra=extra):
+                orphan.unlink(missing_ok=True)
+                (self.cwd / "late.txt").unlink(missing_ok=True)
+                rc, rec = self.run_launch("claude", mode, extra=extra, env_extra={"FAKE_SLEEP": sleep})
+                pids = [int(p) for p in orphan.read_text().split()]
+                self.addCleanup(lambda pids=pids: [stop_leftover(p) for p in pids])  # 落ちても sleep を残さない
+                if status:
+                    self.assertEqual(rec["status"], status, rec)
+                for pid in pids:
+                    with self.assertRaises(ProcessLookupError, msg=f"{pid} が残った: {rec}"):
+                        os.kill(pid, 0)  # 止めて刈ってある（ゾンビも残さない）
+                self.assertEqual(sorted(int(p.split()[0]) for p in rec["stopped_after_exit"]), sorted(pids), rec)
+                self.assertTrue(any(p.endswith(f"{sleep} 600") for p in rec["stopped_after_exit"]), rec)
+                time.sleep(2)  # 止めていなければ、ここまでに作業場所へ書く
+                self.assertFalse((self.cwd / "late.txt").exists())
+        rc, rec = self.run_launch("claude")
+        self.assertEqual((rc, rec["stopped_after_exit"]), (0, []), rec)
 
     def test_only_the_empty_ssh_dir_claude_code_makes_in_home_is_not_residue(self):
         # 2.1.309 の sandbox は、子を起こすたびにホームへ空の .claude/ssh を作り、残りとして委任が毎回 failed になった。
