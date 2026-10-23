@@ -194,6 +194,8 @@ class TestAccountCheck(unittest.TestCase):
         g("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "init", cwd=self.repo)
         g("remote", "add", "origin", "https://github.com/B16B1RD/demo.git", cwd=self.repo)
         g("worktree", "add", "-q", "-b", "feat", str(self.wt), cwd=self.repo)
+        # op run を w() を通さずに起こす試験のため、最初の HEAD を対象にした審査役の記録を置く（w() は渡した commit の分を置く）
+        TestAccountCheck.review_record(self, g("rev-parse", "HEAD", cwd=self.wt).stdout.decode().strip())
 
     def tearDown(self):
         self.tmp.cleanup()

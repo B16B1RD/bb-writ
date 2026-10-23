@@ -354,8 +354,10 @@ class TestLaunch(unittest.TestCase):
         unborn = Path(self.tmp.name) / "unborn"  # まだ commit が無い（ほかに変更の無い作業ツリー）
         unborn.mkdir()
         git("init", "-q", cwd=unborn)
+        (unborn / "a.txt").write_text("x\n")  # 偽の子の報告が証拠に指すファイル。除外して、変更に数えない
+        (unborn / ".git" / "info" / "exclude").write_text("a.txt\n")
         rc, rec = self.run_launch("claude", cwd=unborn)
-        self.assertEqual((rc, rec["head"]), (0, None))
+        self.assertEqual((rc, rec["head"]), (0, None), rec)
         git("init", "-q")
         (self.cwd / ".gitignore").write_text("ignored.txt\n")
         git("add", "a.txt", ".gitignore")

@@ -675,11 +675,11 @@ def clean_head(cwd: Path) -> str | None:
     親の GIT_DIR・GIT_WORK_TREE など（git rev-parse --local-env-vars）は外す（別の場所を見て、対象の変更を見落とす）。
     追跡外のファイルは設定（status.showUntrackedFiles=no）に関わらず数える。"""
     try:
-        local = subprocess.run(["git", "rev-parse", "--local-env-vars"], capture_output=True, text=True)
+        local = subprocess.run(["git", "rev-parse", "--local-env-vars"], capture_output=True, text=True, timeout=GIT_TIMEOUT)
         env = {k: v for k, v in os.environ.items() if k not in local.stdout.split()}
-        head = subprocess.run(["git", "rev-parse", "--verify", "HEAD^{commit}"], cwd=cwd, env=env, capture_output=True, text=True)
-        status = subprocess.run(["git", "status", "--porcelain", "--untracked-files=normal"], cwd=cwd, env=env, capture_output=True, text=True)
-    except OSError:  # git が無い・対象が無い
+        head = subprocess.run(["git", "rev-parse", "--verify", "HEAD^{commit}"], cwd=cwd, env=env, capture_output=True, text=True, timeout=GIT_TIMEOUT)
+        status = subprocess.run(["git", "status", "--porcelain", "--untracked-files=normal"], cwd=cwd, env=env, capture_output=True, text=True, timeout=GIT_TIMEOUT)
+    except (OSError, subprocess.TimeoutExpired):  # git が無い・対象が無い・管理ファイルが FIFO で止まる
         return None
     if local.returncode or head.returncode or status.returncode or status.stdout.strip():
         return None
