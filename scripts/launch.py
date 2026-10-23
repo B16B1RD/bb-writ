@@ -669,6 +669,19 @@ def check_report(text: str, cwd: Path) -> tuple[dict | None, list[str]]:
     return r, problems
 
 
+def clean_head(cwd: Path) -> str | None:
+    """対象の HEAD の commit。未 commit の変更（追跡外のファイルを含む。無視するものは除く）があるか、Git の作業ツリーでなければ None。
+    子が見たものを commit に結び付け、work.py の --reviewed がこの記録と照らす（Issue #14）。"""
+    try:
+        head = subprocess.run(["git", "rev-parse", "--verify", "HEAD^{commit}"], cwd=cwd, capture_output=True, text=True)
+        status = subprocess.run(["git", "status", "--porcelain"], cwd=cwd, capture_output=True, text=True)
+    except OSError:  # git が無い
+        return None
+    if head.returncode or status.returncode or status.stdout.strip():
+        return None
+    return head.stdout.strip()
+
+
 def launcher_error(out_dir: Path) -> str:
     """想定外の例外のトレースバックを out に残し、その場所を返す。"""
     import traceback
@@ -711,6 +724,7 @@ def main() -> int:
     out_dir.mkdir(parents=True, exist_ok=False)
     rec = {"host": a.host, "cwd": str(a.cwd), "model_requested": a.model, "effort_requested": a.effort,
            "write": a.write, "out": str(out_dir)}
+    rec["head"] = clean_head(a.cwd)  # 子を起こす前に（子が見る作業ツリー）
 
     snapshot, why, prep = None, None, None
     try:  # 起動の前の準備も、前の子が残したもの（FIFO・権限・壊れた HEAD）に当たりうる。止まらず落ちずに記録して返す

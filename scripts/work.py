@@ -37,7 +37,9 @@ push・pr には --reviewed も要る（初回の push も）。届ける前の�
 要らない理由を none:<理由> で書く。無い・形が違う・commit が見つからない・ID でなく参照に解決されたら拒否し（2）、作業場所の HEAD と違えば拒否する（6）。
 HEAD と違うときは審査の後に変えたファイルを、ほかの拒否と通ったときは、この作業場所の記録で最後に終えた push・pr（ブランチを問わない）から変えたファイルを示す（材料で、保証ではない）。
 op run・op begin を通さない git push には効かない。
-審査を通したかどうかは確かめない。短い往復で審査を忘れたまま出すのを、宣言を求めて止める。
+commit を書いたときは、launcher の委任の記録（delegations.jsonl）に、その commit を対象に起動して ok で返った読み取り専用の子が
+無ければ拒否する（6）。通ったら、その子の記録の場所を reviews に残す。審査の中身（子が十分に攻めたか）と none: の理由の真偽は確かめない。
+短い往復で審査を忘れたまま、または書き手が自分の確かめを審査の代わりにして出すのを止める。
 検証の後に成果物が変わったら、証拠を取り直してから出す（plan-v3 6.2）。merge は、GitHub 側でも gh pr merge --match-head-commit <同じ commit> で止める。
 
 外部に出る操作（鍵の種類が push・pr・comment・merge・release・issue）の op begin には --from が要り、check を通す。
@@ -79,8 +81,12 @@ from contextlib import contextmanager
 from pathlib import Path
 
 
+def state_dir() -> Path:
+    return Path(os.environ.get("BB_WRIT_STATE_DIR", Path.home() / ".local" / "state" / "bb-writ"))
+
+
 def root(d: Path) -> Path:
-    base = Path(os.environ.get("BB_WRIT_STATE_DIR", Path.home() / ".local" / "state" / "bb-writ")) / "work"
+    base = state_dir() / "work"
     real = str(d.resolve())
     r = base / (Path(real).name + "-" + hashlib.sha256(real.encode()).hexdigest()[:10])
     r.mkdir(parents=True, exist_ok=True)
@@ -140,6 +146,26 @@ def changed_since_publish(r: Path, d: Path, head: str) -> str:
     rc, _, err = sh(["git", "merge-base", "--is-ancestor", prev, head], d)
     note = {0: "", 1: "（前回の commit は HEAD の祖先でない。rebase などの後なので、取り込んだ変更も並ぶ）"}.get(rc, f"（祖先かを確かめられない: {err}）")
     return f" 前回の push・pr（{prev[:12]}）から変えたファイル{note}: " + (", ".join(files.splitlines()) or "なし")
+
+
+def reviews_of(commit: str) -> tuple:
+    """launcher の委任の記録（delegations.jsonl）のうち、その commit を対象に起動して ok で返った読み取り専用の子の記録の out と、
+    読めない行の数。head は launcher が起動の前に、対象の作業ツリーが commit と同じとき（未 commit の変更が無いとき）だけ書く。
+    審査の中身（子が十分に攻めたか）は見ない。"""
+    f = state_dir() / "delegations.jsonl"
+    found, broken = [], 0
+    if f.is_file():
+        for line in f.read_bytes().split(b"\n"):
+            if not line.strip():
+                continue
+            try:
+                e = json.loads(line.decode("utf-8"))
+            except (ValueError, RecursionError):
+                broken += 1
+                continue
+            if isinstance(e, dict) and e.get("head") == commit and e.get("status") == "ok" and e.get("write") is False:
+                found.append(e.get("out"))
+    return found, broken
 
 
 def pending(r: Path) -> list:
@@ -636,7 +662,7 @@ def op_step(a, r: Path, live, now: float, action: str):
         if verified != head:
             return ({"ok": False, "reason": f"検証した commit {verified or a.verified} と作業場所の HEAD {head} が違う。"
                         "検証の後に成果物が変わった。今の HEAD で証拠を取り直してから出す"}, 6)
-    reviewed = None
+    reviewed, reviews = None, None
     if action == "begin" and a.key.split(":")[0] in REVIEWED:
         if not a.reviewed:
             return ({"ok": False, "reason": "push・pr には --reviewed <届ける前の審査を通した commit> か --reviewed none:<要らない理由> が要る。"
@@ -661,6 +687,13 @@ def op_step(a, r: Path, live, now: float, action: str):
                 after = (", ".join(files.splitlines()) or "なし") if rc == 0 else f"（差分を出せない: {err}）"
                 return ({"ok": False, "reason": f"審査を通した commit {reviewed} と作業場所の HEAD {head} が違う。"
                             f"審査の後に変えた。直した commit で審査を通し直してから出す。審査の後に変えたファイル: {after}"}, 6)
+            found, broken = reviews_of(reviewed)
+            if not found:
+                return ({"ok": False, "reason": f"commit {reviewed} を対象にした審査役の記録が無い。launcher（launch.py、読み取り専用）で、"
+                            "この commit を checkout した未 commit の変更が無い場所を --cwd にして審査役を立て、status が ok で返った記録が要る"
+                            "（Agent ツールなど launcher を通らない子は記録に残らない）。審査が要らない変更なら none:<理由>"
+                            + (f"。委任の記録 {state_dir() / 'delegations.jsonl'} に読めない行が {broken} 行ある" if broken else "")}, 6)
+            reviews = found
     if action == "begin" and known:
         return ({"ok": False, "reason": "同じ鍵の操作が既にある。外部の状態を照合してから進める（やり直さない）", "op": known}, 4)
     if action == "done" and not known:
@@ -677,6 +710,8 @@ def op_step(a, r: Path, live, now: float, action: str):
         e["verified"] = verified
     if reviewed:
         e["reviewed"] = reviewed
+    if reviews:
+        e["reviews"] = reviews
     with open(r / "ops.jsonl", "a", encoding="utf-8") as f:
         f.write(json.dumps(e, ensure_ascii=False) + "\n")
     res = {"ok": True, "op": ops(r)[a.key]}
@@ -1088,7 +1123,7 @@ def main() -> int:
     o.add_argument("--result", default="")
     o.add_argument("--from", dest="frm", type=Path, help="外部操作を実行する場所（push・pr・comment・merge・release・issue で必須）")
     o.add_argument("--verified", help="検証した commit（push・pr・merge・release で必須。作業場所の HEAD と一致させる）")
-    o.add_argument("--reviewed", help="届ける前の審査を通した commit か none:<理由>（push・pr で必須。commit は作業場所の HEAD と一致させる）")
+    o.add_argument("--reviewed", help="届ける前の審査を通した commit か none:<理由>（push・pr で必須。commit は作業場所の HEAD と一致させ、launcher の審査役の記録が要る）")
     c = sub.add_parser("check")
     c.add_argument("--dir", type=Path, required=True)
     c.add_argument("--from", dest="frm", type=Path, required=True)

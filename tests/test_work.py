@@ -3,6 +3,7 @@
 import errno
 import json
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -198,8 +199,22 @@ class TestAccountCheck(unittest.TestCase):
         self.tmp.cleanup()
 
     def w(self, *args):
+        if "--reviewed" in args and getattr(self, "launcher_reviews", True):  # 審査役の記録との照合を試験しない試験では、記録を先に置く
+            TestAccountCheck.review_record(self, args[args.index("--reviewed") + 1])
         p = subprocess.run([sys.executable, str(WORK), *args], env=self.env, capture_output=True, text=True, errors="replace")
         return p.returncode, json.loads(p.stdout)
+
+    def review_record(self, commit, **over):
+        """launcher が読み取り専用の審査役を ok で返したときの、委任の記録の 1 行（launch.py の delegations.jsonl）。"""
+        p = subprocess.run(["git", "rev-parse", "--verify", "--quiet", commit + "^{commit}"], env=self.env, cwd=self.wt,
+                           capture_output=True, text=True)
+        if p.returncode or not re.fullmatch(r"[0-9a-f]{7,64}", commit):
+            return
+        rec = {"host": "claude", "cwd": str(self.wt), "write": False, "out": f"/delegations/{len(commit)}", "head": p.stdout.strip(),
+               "status": "ok", **over}
+        Path(self.env["BB_WRIT_STATE_DIR"]).mkdir(parents=True, exist_ok=True)
+        with open(Path(self.env["BB_WRIT_STATE_DIR"]) / "delegations.jsonl", "a", encoding="utf-8") as f:
+            f.write(json.dumps(rec) + "\n")
 
     def claim(self):
         return self.w("claim", "--dir", str(self.wt), "--holder", "A")[1]["token"]
@@ -578,6 +593,7 @@ class TestReviewedCommit(unittest.TestCase):
     """push・pr は、届ける前の審査を通した commit（か、要らない理由）を宣言しないと出せない。"""
     setUp, tearDown, w, claim, begin, head = (TestAccountCheck.setUp, TestAccountCheck.tearDown, TestAccountCheck.w,
                                               TestAccountCheck.claim, TestAccountCheck.begin, TestVerifiedCommit.head)
+    review_record = TestAccountCheck.review_record
 
     def commit(self, name):
         (self.wt / name).parent.mkdir(parents=True, exist_ok=True)
@@ -708,6 +724,48 @@ class TestReviewedCommit(unittest.TestCase):
         for key in ("push:feat@1", "pr:feat"):
             rc, r = self.publish(tok, key, "--reviewed", self.head()[:10])
             self.assertEqual((rc, r["op"]["reviewed"]), (0, self.head()), key)
+
+    def test_a_commit_no_reviewer_was_launched_on_is_refused(self):
+        """Issue #14: 子を立てずに、書き手が HEAD を --reviewed に書いても通さない。"""
+        self.launcher_reviews = False
+        tok = self.claim()
+        self.commit("tests/test_new.py")
+        before = self.ops_file()
+        for key in ("push:feat@1", "pr:feat"):
+            rc, r = self.publish(tok, key, "--reviewed", self.head())
+            self.assertEqual(rc, 6, key)
+            self.assertIn("審査役の記録が無い", r["reason"], key)
+        self.assertEqual(self.ops_file(), before)  # 拒否は何も記録しない
+
+    def test_a_commit_a_read_only_reviewer_returned_ok_on_is_allowed_and_the_record_is_kept(self):
+        self.launcher_reviews = False
+        tok = self.claim()
+        self.commit("tests/test_new.py")
+        self.review_record(self.head(), out="/delegations/the-review")
+        rc, r = self.publish(tok, "push:feat@1", "--reviewed", self.head()[:10])
+        self.assertEqual((rc, r["op"]["reviews"]), (0, ["/delegations/the-review"]), r)
+
+    def test_records_of_another_commit_a_failed_or_unrun_review_or_a_writing_child_do_not_count(self):
+        self.launcher_reviews = False
+        tok = self.claim()
+        before_fix = self.head()
+        self.commit("tests/test_new.py")
+        self.review_record(before_fix)  # 直す前の commit の審査
+        for over in ({"status": "not-run"}, {"status": "failed"}, {"status": "invalid-report"}, {"write": True}, {"head": None}):
+            self.review_record(self.head(), **over)
+        delegations = Path(self.env["BB_WRIT_STATE_DIR"]) / "delegations.jsonl"
+        with open(delegations, "a", encoding="utf-8") as f:
+            f.write('{"head": "' + self.head() + '", "status": "o\n')  # 書きかけの行
+        rc, r = self.publish(tok, "push:feat@1", "--reviewed", self.head())
+        self.assertEqual(rc, 6, r)
+        self.assertIn("読めない行が 1 行", r["reason"])
+        self.review_record(self.head())
+        self.assertEqual(self.publish(tok, "push:feat@1", "--reviewed", self.head())[0], 0)
+
+    def test_no_review_needs_no_reviewer_record(self):
+        self.launcher_reviews = False
+        tok = self.claim()
+        self.assertEqual(self.publish(tok, "push:feat@1", "--reviewed", "none: 文書だけ")[0], 0)
 
     def test_merge_release_comment_and_issue_need_no_declaration(self):
         tok = self.claim()

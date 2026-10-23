@@ -25,7 +25,7 @@ description: 変更・設計・計画を、独立した審査役（同じ系統�
 
 同じ依頼文を 2 人に渡す（入口の条件 (6) から通すときの人数は、5 の危険度で決める）。
 
-- **審査役 A（同じ系統・新しい文脈）:** Claude Code では `Agent` ツール（読み取り専用の探索型）。Codex では launcher の `--host codex`。Codex の workspace-write の sandbox の中では入れ子の `codex exec` が起動できず、非対話実行ではサブエージェントも起動されなかった（2026-10-17 の実測）。起動できなければ「同系統の審査は無い」と書き、B だけで判定する。
+- **審査役 A（同じ系統・新しい文脈）:** Claude Code では `Agent` ツール（読み取り専用の探索型）。入口の条件 (6) から通すとき（届ける前）は、launcher の `--host claude` で読み取り専用に立てる（`work.py` の `--reviewed` は、その commit を対象に launcher で立てて `ok` で返った審査役の記録が無ければ通さず、`Agent` ツールの子は記録に残らない）。Codex では launcher の `--host codex`。Codex の workspace-write の sandbox の中では入れ子の `codex exec` が起動できず、非対話実行ではサブエージェントも起動されなかった（2026-10-17 の実測）。起動できなければ「同系統の審査は無い」と書き、B だけで判定する。
 - **審査役 B（別系統）:** launcher で、自分と別の系統の CLI（Claude Code・Codex・Grok Build のどれか。`--host claude|codex|grok`）を bb-writ 専用のログインで、読み取り専用で起動する。
 
   ```bash
@@ -35,7 +35,7 @@ description: 変更・設計・計画を、独立した審査役（同じ系統�
   python3 <プラグインの置き場>/scripts/launch.py --host claude --cwd <対象> --prompt-file <依頼文のファイル>
   ```
 
-  launcher は 1 行の JSON を返す。報告を使うのは `status` が `ok` のときと、下の `not-run`（読んだだけの審査として）のときだけ。`invalid-report`（結論・証拠が無い、証拠のファイルが無い、実行の欄の形が違う）・`failed`・`quota`・`unavailable` は、その理由を判定の記録に書く。別系統が使えなければ、同じ系統の新しい文脈をもう 1 人立て、「別系統の審査は無い」と書く。利用枠が尽きても、別料金の API へ黙って切り替えない。
+  `--cwd` は、届ける commit を checkout して未 commit の変更が無い場所にする（launcher は、そのときだけ記録に `head` を書き、`--reviewed` はそれと照らす）。launcher は 1 行の JSON を返す。報告を使うのは `status` が `ok` のときと、下の `not-run`（読んだだけの審査として）のときだけ。`invalid-report`（結論・証拠が無い、証拠のファイルが無い、実行の欄の形が違う）・`failed`・`quota`・`unavailable` は、その理由を判定の記録に書く。別系統が使えなければ、同じ系統の新しい文脈をもう 1 人立て、「別系統の審査は無い」と書く。利用枠が尽きても、別料金の API へ黙って切り替えない。
 
   `not-run` は、報告に実行の欄（`execution`）が無いか、対象の試験・検査を実行できなかったと書いた報告。捨てずに、読んだだけの審査として使う。`status` の `ok` は「起動して、形の整った報告が返り、実行できたか要らないと申告した」までしか意味しない（launcher は申告の真偽を確かめない。主審は `execution.commands` を読む）。実行が要る審査（試験・検査を足す変更と、その期待値を変える変更）では、実行できなかった審査役（launcher の `not-run`、`execution` が `not-needed` の報告、自分で動かさなかった A）を審査役に数えない。B がそうなら「別系統の審査は無い」とし、同じ系統の新しい文脈をもう 1 人立てる。読み取り専用の Codex は、起動ごとの一時ディレクトリ（`$TMPDIR`）にだけ書ける（2026-10-23、0.163.0。`-s read-only` では `mktemp -d` も失敗し、2 回の審査が読んだだけの判定になった）。読み取り専用の Claude Code の子も、`$TMPDIR` に対象を写して試験を動かせた（同日、2.1.309）。
 

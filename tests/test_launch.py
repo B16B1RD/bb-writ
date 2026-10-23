@@ -344,6 +344,28 @@ class TestLaunch(unittest.TestCase):
         self.run_launch("codex")  # 試験の外と同じく -B なしで起動する
         self.assertFalse((ROOT / "scripts" / "__pycache__").exists())
 
+    def test_the_record_names_the_commit_the_child_saw_only_when_the_tree_matches_it(self):
+        """work.py の --reviewed は、この head と照らす（Issue #14）。未 commit の変更があれば、子が見たものは commit と違う。"""
+        rc, rec = self.run_launch("claude")
+        self.assertEqual((rc, rec["head"]), (0, None))  # Git の作業ツリーでない
+        git = lambda *a: subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", *a], cwd=self.cwd, check=True,
+                                        capture_output=True, text=True).stdout.strip()
+        git("init", "-q")
+        git("add", "a.txt")
+        git("commit", "-q", "-m", "a")
+        for host in ("claude", "codex"):  # 読み取り専用の Grok は /tmp の下の対象で起動しない
+            with self.subTest(host=host):
+                rc, rec = self.run_launch(host)
+                self.assertEqual((rc, rec["head"]), (0, git("rev-parse", "HEAD")), rec)
+                self.assertIn(f'"head": "{rec["head"]}"', (self.state / "delegations.jsonl").read_text().splitlines()[-1])
+        for dirty in ("a.txt", "new.txt"):  # 追跡しているファイルの変更、追跡外のファイル
+            with self.subTest(dirty=dirty):
+                (self.cwd / dirty).write_text("changed\n")
+                rc, rec = self.run_launch("claude")
+                self.assertEqual((rc, rec["head"]), (0, None), rec)
+                git("checkout", "-q", "--", "a.txt")
+                (self.cwd / "new.txt").unlink(missing_ok=True)
+
     def test_reports_with_unicode_line_separators_are_read(self):
         text = GOOD.encode().decode("unicode_escape").replace('"conclusion": "', '"conclusion": "\u2028\x85\u2029')
         self.assertIn("\u2028", text)
