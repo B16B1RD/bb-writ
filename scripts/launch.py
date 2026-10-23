@@ -241,7 +241,7 @@ def read_head(f: Path) -> str:
     return head.decode("utf-8", "surrogateescape") if len(head) <= 4096 else f"（4 KiB を超える。{digest}）"
 
 
-def git_snapshot(own: Path, common: Path, cwd: Path, index: bool = False) -> dict:
+def git_snapshot(own: Path, common: Path, cwd: Path) -> dict:
     """書く子の前後で比べる Git の管理情報。子の書いた .git ファイルを読まないよう、共通ディレクトリを明示して読む。"""
     for f in (common / "config", common / "packed-refs"):  # git が開いたまま止まる・尽きるもの（FIFO・デバイス）を渡さない
         try:
@@ -256,37 +256,26 @@ def git_snapshot(own: Path, common: Path, cwd: Path, index: bool = False) -> dic
              common / "objects" / "info" / "alternates"]
     for d in (common / "hooks", common / "info"):
         files += sorted(f for f in d.rglob("*") if f.is_file() or f.is_symlink()) if d.is_dir() else []
-    # index（読み取り専用の子だけ。書く子は変えてよい）は中身（stage の項目）で比べる。バイトで比べると、親の git status が書き直す stat の情報で変わる
-    staged = subprocess.run(["git", "--git-dir", str(own), "ls-files", "--stage", "-z"], cwd=cwd,
-                            capture_output=True, check=True, timeout=GIT_TIMEOUT).stdout if index else b""
     return {"refs": dict(r.split(" ", 1) for r in refs if " " in r),
             "files": {str(f): read_child_file(f)[0] for f in files},
-            "head": read_head(own / "HEAD"), "index": hashlib.sha256(staged).hexdigest()}
+            "head": read_head(own / "HEAD")}
 
 
-def git_changes(before: dict, after: dict, common: Path, own_branch: bool = True) -> list[str]:
-    """子が変えてよいのは、起動時に checkout していたブランチの ref と、その作業場所の HEAD・index だけ（own_branch が偽なら、どれも変えてはいけない）。
+def git_changes(before: dict, after: dict, common: Path) -> list[str]:
+    """子が変えてよいのは、起動時に checkout していたブランチの ref と、その作業場所の HEAD・index だけ。
     ref は前後の値と戻すコマンドを添える（自動では戻さない。子の実行中に親や別のタスクが正当に動かしたかもしれない）。"""
     head = before["head"].strip()
-    mine = head[len("ref: "):] if head.startswith("ref: ") and own_branch else None
+    mine = head[len("ref: "):] if head.startswith("ref: ") else None
     out = []
     for r in sorted(set(before["refs"]) | set(after["refs"])):
         old, new = before["refs"].get(r), after["refs"].get(r)
         if r != mine and old != new:
             undo = f"git --git-dir {common} update-ref {r} {old}" if old else f"git --git-dir {common} update-ref -d {r}"
             out.append(f"{r}: {old or '(無し)'} → {new or '(削除)'}（戻すなら: {undo}）")
-    out += file_changes(before, after)
+    out += sorted(f for f in set(before["files"]) | set(after["files"]) if before["files"].get(f) != after["files"].get(f))
     if after["head"] != before["head"]:
         out.append(f"HEAD: {before['head']!r} → {after['head']!r}")
-    if not own_branch and after["index"] != before["index"]:
-        out.append("index: stage の項目が変わった")
     return out
-
-
-def file_changes(before: dict, after: dict) -> list[str]:
-    """変わった管理ファイル（.git・commondir・gitdir・config・hooks・info・alternates）。どれも、利用者が次に git を動かしたとき
-    sandbox の外でコードを動かしうるもので、普段の作業では同時に変わらない。"""
-    return sorted(f for f in set(before["files"]) | set(after["files"]) if before["files"].get(f) != after["files"].get(f))
 
 
 def grok_home(login: Path, extends: str, read_write: list[Path]) -> tuple[Path, str]:
@@ -460,7 +449,7 @@ def parse_claude(out: str) -> dict:
 
 def rollout_lines(f: Path, limit: int = 256 << 20):
     """Codex の記録の行（\n だけで分ける。json_lines と同じ理由）。子が書きうるので、通常のファイルだけを、
-    1 行 1 MiB・全体 limit までで読む（巨大な行は割れて読めない行になり、飛ばされる）。全体の上限を越えたら、
+    1 行 1 MiB・全体 limit までで読む（巨大な行は割れて読めない行になり、権限は不明になる）。全体の上限を越えたら、
     途中までの実効値を使わないよう、読めない行を 1 つ返して終える。"""
     try:
         fd = os.open(f, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
@@ -513,6 +502,7 @@ def parse_codex(out: str) -> dict:
                 try:
                     e = obj(json.loads(line.decode("utf-8")))
                 except (ValueError, RecursionError):  # 書きかけの行、UTF-8 として読めない行（置き換えた文字を実効値にしない）。取れなければ null
+                    perms.append((None, None))  # turn_context だったかもしれない（1 MiB を超えて割れた行も）。権限は不明として閉じる
                     continue
                 if e.get("type") == "turn_context":
                     p = obj(e.get("payload"))
@@ -652,10 +642,6 @@ def main() -> int:
                 why = "書く子は task start の作業場所（worktree）で起動する。元の checkout とその下では起動しない"
             if not why and own:
                 snapshot = (own, common, git_snapshot(own, common, a.cwd))
-        elif a.host == "codex":  # 読み取り専用の Codex は一時ディレクトリに書ける。対象の Git の管理情報が変わらないことも比べる
-            own, common, why = worktree_dirs(a.cwd)
-            if not why and own:
-                snapshot = (own, common, git_snapshot(own, common, a.cwd, index=True))
         if not why:
             cmd, env, why = command(a, a.prompt_file.read_text(encoding="utf-8") + CONTRACT + ("" if a.write else READ_ONLY_CONTRACT),
                                     out_dir / "tmp")
@@ -729,20 +715,11 @@ def main() -> int:
                 try:
                     # Claude Code の sandbox は、worktree の管理ディレクトリに保護のための空の config.worktree を作る（2.1.302）。
                     # 起動前に無く空のままのファイルは、中身が無く git の動きを変えないので、消してから照合する
-                    for f, h in snapshot[2]["files"].items() if a.write else ():
+                    for f, h in snapshot[2]["files"].items():
                         if h is None and Path(f).is_file() and not Path(f).is_symlink() and Path(f).stat().st_size == 0:
                             Path(f).unlink()
-                    after = git_snapshot(*snapshot[:2], a.cwd, index=not a.write)
-                    if a.write:
-                        changed = git_changes(snapshot[2], after, snapshot[1])
-                        headline = "子が、自分のブランチ以外の Git の管理情報を変えた。"
-                    else:
-                        # 読み取り専用の審査は長く、その間に親の commit・並行するタスク・fetch が ref・HEAD・index を正当に動かす。
-                        # 誰が動かしたか区別できないので、それらは記録に並べるだけにする（子が書けないことは codex_breach の実効の権限で確かめる）。
-                        # sandbox の外でコードを動かしうる管理ファイルの変化だけを failed にする
-                        changed = file_changes(snapshot[2], after)
-                        rec["git_moved"] = [c for c in git_changes(snapshot[2], after, snapshot[1], own_branch=False) if c not in changed][:20]
-                        headline = "読み取り専用の子の起動の間に、Git の管理ファイルが変わった。"
+                    changed = git_changes(snapshot[2], git_snapshot(*snapshot[:2], a.cwd), snapshot[1])
+                    headline = "子が、自分のブランチ以外の Git の管理情報を変えた。"
                 except Exception as e:  # 子が管理情報を壊したかもしれない。黙らず、照合できなかったことを返す
                     changed = [f"Git の管理情報を読めない（子が壊したかもしれない）: {e!r}"[:300], f"詳細: {launcher_error(out_dir)}"]
                     headline = "子の後に Git の管理情報を照合できない。"

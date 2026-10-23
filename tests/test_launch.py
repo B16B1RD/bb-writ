@@ -85,6 +85,8 @@ FAKE_CODEX = textwrap.dedent(r'''
             del perm["network"]
         if mode == "net-odd":
             perm["network"] = "restricted-but-open"
+        if mode == "fs-odd-type":
+            perm["file_system"]["type"] = "something-else"
         if mode == "legacy-sandbox":  # 対象の設定の sandbox_mode が profile より優先された（root を読むだけ）
             perm["file_system"]["entries"] = entries[:1]
         os.makedirs(os.path.join(sessions, "fake"), exist_ok=True)
@@ -96,7 +98,8 @@ FAKE_CODEX = textwrap.dedent(r'''
         net_unknown = {k: v for k, v in perm.items() if k != "network"}
         # 1 つの記録に turn が 2 つ（どちらか一方だけが広い・狭い・読めない）
         net_open = {**perm, "network": "enabled"}
-        turns = {"net-open-then-ok": [net_open, perm], "ok-then-net-open": [perm, net_open], "wide-then-ok": [wide, perm], "ok-then-wide": [perm, wide], "narrow-then-ok": [narrow, perm], "ok-then-narrow": [perm, narrow],
+        big = {**perm, "user_instructions": "x" * (2 << 20)}  # 1 MiB を超える行（割れて読めない）
+        turns = {"big-wide-line": [perm, {**big, "file_system": wide["file_system"]}], "net-open-then-ok": [net_open, perm], "ok-then-net-open": [perm, net_open], "wide-then-ok": [wide, perm], "ok-then-wide": [perm, wide], "narrow-then-ok": [narrow, perm], "ok-then-narrow": [perm, narrow],
                  "fs-unknown-then-ok": [fs_unknown, perm], "net-unknown-then-ok": [net_unknown, perm]}.get(mode, [perm])
         open(os.path.join(sessions, "fake", f"rollout-1-{thread}.jsonl"), "w").write("".join(turn(x) for x in turns))
     open(os.environ["FAKE_ARGS"] + ".tmpdir", "w").write(os.environ.get("TMPDIR", ""))
@@ -566,10 +569,15 @@ class TestLaunch(unittest.TestCase):
         self.assertIn("報告の形", argv[-1])  # 報告の約束を子に渡す
         self.assertIn('"execution": {"completed"', argv[-1])  # 実行の欄と、写して動かす場所
         self.assertIn("$TMPDIR", argv[-1])
-        self.assertIn("試験のコマンドの終了コードに関わらず no", argv[-1])  # 環境で止まった試験を yes と申告させない
+        # 約束の意味を決める文は、文ごと固定する（語の有無だけでは、意味を逆にした書き換えが通った）
+        for sentence in ("yes は実行して、試験自身の合否を得た（試験が退行を見つけて落ちたのも yes）。",
+                         "試験が環境・権限で止まった（一時ディレクトリを作れない、Read-only file system、Permission denied、コマンドが無い）なら、試験のコマンドの終了コードに関わらず no。",
+                         "commands には実行したコマンドと終了コードを書く（yes なら 1 つ以上）。",
+                         "対象に書く試験・検査は、書ける一時ディレクトリ（$TMPDIR。無ければ /tmp）に対象を写して（cp -r など）、そこで動かす。"):
+            self.assertIn(sentence, argv[-1])
         # 権限を変える設定は、この 3 つだけ（sandbox_mode・-s を足すと profile より優先され、別の書ける場所を足すと広がる）
-        conf = [argv[i + 1] for i, x in enumerate(argv) if x == "-c" and not argv[i + 1].startswith("model_reasoning_effort")]
-        self.assertEqual(conf, ['default_permissions="bbwrit-read-only"', 'permissions.bbwrit-read-only.extends=":read-only"',
+        conf = [argv[i + 1] for i, x in enumerate(argv) if x in ("-c", "--config") and not argv[i + 1].startswith("model_reasoning_effort")]
+        self.assertCountEqual(conf, ['default_permissions="bbwrit-read-only"', 'permissions.bbwrit-read-only.extends=":read-only"',
                                 'permissions.bbwrit-read-only.filesystem={":tmpdir"="write"}'])
         self.assertTrue((self.state / "delegations.jsonl").read_text().strip())
 
@@ -589,7 +597,7 @@ class TestLaunch(unittest.TestCase):
         link = Path(self.tmp.name) / "link"
         link.symlink_to(self.cwd)
         (Path(self.tmp.name) / "sib").mkdir()
-        for out in (self.cwd / "out", link / "out", Path(self.tmp.name) / "sib" / ".." / "repo" / "out"):
+        for out in (self.cwd, self.cwd / "out", link / "out", Path(self.tmp.name) / "sib" / ".." / "repo" / "out"):
             with self.subTest(out=out):
                 p = subprocess.run([sys.executable, str(LAUNCH), "--host", "codex", "--cwd", str(self.cwd), "--prompt-file", str(self.prompt),
                                     "--out", str(out)], env={**os.environ, "PATH": f"{self.bin}:/usr/bin:/bin", "HOME": str(self.home),
@@ -598,6 +606,7 @@ class TestLaunch(unittest.TestCase):
                 self.assertEqual(p.returncode, 2, p)
                 self.assertIn("対象の中", p.stderr)
                 self.assertFalse((self.cwd / "out").exists())
+                self.assertNotIn("Traceback", p.stderr)
         # 対象の外を指す .. は通す
         rc, rec = self.run_launch("codex", mode="tmpdir", extra=("--out", str(self.cwd / ".." / "outside-out")))
         self.assertEqual((rc, rec["status"]), (0, "ok"), rec)
@@ -619,7 +628,8 @@ class TestLaunch(unittest.TestCase):
                                           ("wide-then-ok", "広い"), ("ok-then-wide", "広い"), ("narrow-then-ok", "書けない"),
                                           ("ok-then-narrow", "書けない"), ("fs-unknown-then-ok", "確かめられない"),
                                           ("net-unknown-then-ok", "確かめられない"), ("workspace-profile", "広い"), ("deny-tmp", "書けない"),
-                                          ("net-open-then-ok", "広い"), ("ok-then-net-open", "広い"))):
+                                          ("net-open-then-ok", "広い"), ("ok-then-net-open", "広い"),
+                                          ("big-wide-line", "確かめられない"), ("fs-odd-type", "確かめられない"))):
             with self.subTest(mode=mode):  # 記録は session ごと
                 rc, rec = self.run_launch("codex", mode=mode, env_extra={"FAKE_THREAD": f"0199aaaa-bbbb-7ccc-8ddd-eeeeffff{1000 + i}"})
                 self.assertEqual((rc, rec["status"]), (2, "failed"), rec)
@@ -640,28 +650,6 @@ class TestLaunch(unittest.TestCase):
                 (self.bin / "codex").write_text(wrapper)
                 rc, rec = self.run_launch("codex", env_extra={"FAKE_THREAD": f"0199aaaa-bbbb-7ccc-8ddd-eeeeffff{3000 + i}"})
                 self.assertEqual((rc, rec["status"]), (2, "failed"), rec)
-
-    def test_codex_read_only_child_changing_git_admin_files_is_failed(self):
-        # 読み取り専用の Codex は一時ディレクトリに書ける。sandbox が守らなくても、git が次に動かす管理ファイル（hooks など）の変化は捕まえる。
-        # ref・HEAD・index は審査の間に親や並行するタスクも正当に動かすので、failed にせず記録に並べる（worktree でも元の checkout でも）
-        for kind in ("worktree", "checkout"):
-            for mode, status, sign in (("ro-hook", "failed", "hooks/post-checkout"), ("ro-config-worktree", "failed", "config.worktree"), ("ro-branch", "ok", "refs/heads/evil:"),
-                                       ("ro-own-commit", "ok", "refs/heads/"), ("ro-detach", "ok", "HEAD: "), ("ro-index", "ok", "index: ")):
-                with self.subTest(kind=kind, mode=mode):
-                    repo, wt = self.worktree(kind + mode)
-                    if kind == "checkout":
-                        (repo / "a.txt").write_text("x\n")
-                    target = wt if kind == "worktree" else repo
-                    rc, rec = self.run_launch("codex", mode=mode, cwd=target)
-                    self.assertEqual(rec["status"], status, rec)
-                    if status == "failed":
-                        self.assertIn("Git の管理ファイルが変わった", rec["problems"][0])
-                        self.assertTrue([p for p in rec["problems"] if p.endswith(sign)], rec)
-                    else:
-                        self.assertTrue([m for m in rec["git_moved"] if m.startswith(sign)], rec)
-        _, wt = self.worktree("ro-good")
-        rc, rec = self.run_launch("codex", cwd=wt)
-        self.assertEqual((rc, rec["status"], rec["git_moved"]), (0, "ok", []), rec)
 
     def test_write_children_are_not_told_to_copy_and_are_not_not_run(self):
         # 写して動かすのは読み取り専用の子だけ。書く子は作業場所で試験を動かし、実行の欄が無くても「読んだだけ」にしない
@@ -696,6 +684,8 @@ class TestLaunch(unittest.TestCase):
             ({"completed": "yes", "commands": ["sh test.sh"]}, "invalid-report", "yes"),
             ({"completed": "yes", "commands": {"command": "sh test.sh", "exit": 0}}, "invalid-report", "yes"),
             ({"completed": "maybe"}, "invalid-report", None),
+            ({"completed": "yes", "commands": [{"command": "x", "exit": "0"}]}, "invalid-report", "yes"),
+            ({"completed": "yes"}, "invalid-report", "yes"),  # commands の鍵が無い
             ({"completed": "no", "commands": [{"command": 42, "exit": 2}]}, "invalid-report", "no"),
             ("yes", "invalid-report", None),
             ({"completed": "yes", "commands": [{"command": "bash tests/self-test.sh", "exit": 1}]}, "ok", "yes"),  # 試験が落ちたのも実行できた
