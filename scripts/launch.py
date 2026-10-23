@@ -298,10 +298,30 @@ CODEX_PROFILE = "bbwrit-read-only"
 def codex_read_only(scratch: Path) -> list[str]:
     """読み取り専用の Codex の権限。read-only を継ぎ、書けるのは起動ごとの一時ディレクトリ（$TMPDIR）だけ。
     -s read-only では mktemp -d も失敗し、試験を動かせない審査役が読んだだけの判定を返した（0.163.0）。
-    -s（sandbox_mode）は default_permissions より優先されるので渡さない。ネットワークは read-only の既定のまま出られない。"""
+    -s（sandbox_mode）は default_permissions より優先されるので渡さない。ネットワークは read-only の既定のまま出られない。
+    読み取り専用の Claude Code の子と同じく、認証情報の置き場（専用ログインを含む）は読ませない。Git の設定だけは読ませる
+    （より狭い指定が勝つ。公式文書）。-s read-only のころは、子が ~/.config の下を読めた（同日の実測）。"""
     scratch.mkdir()
+    # 無い場所や symlink の場所を書くと、bwrap がそこへ mount できずに起動しなかった（/mnt/c を指す ~/.aws。0.163.0）。
+    # あるものだけを、symlink を解いた行き先で書く（symlink を通した読み取りも行き先で止まる）。拒む場所の下の場所は書かない
+    # （拒んだ場所の中に mkdir できずに起動しなかった）。拒んだ場所の下に read を書いても、そこにある codex 本体を
+    # sandbox の補助が実行できなかったので、本体を含む置き場（~/.codex）は、本体の入った項目を除く中身を 1 つずつ拒む
+    binary = Path(os.path.realpath(shutil.which("codex") or "/"))
+    places = set()
+    for d in [Path.home() / place for place in SECRET_PLACES] + [config_dir()]:
+        if not os.path.exists(d):
+            continue
+        d = Path(os.path.realpath(d))
+        if d in binary.parents:
+            places |= {Path(os.path.realpath(c)) for c in d.iterdir() if os.path.exists(c) and c not in binary.parents and c != binary}
+        else:
+            places.add(d)
+    rules = {":tmpdir": "write", **{str(d): "deny" for d in sorted(places) if not any(o in d.parents for o in places)},
+             **{os.path.realpath(d): "read" for d in [Path.home() / ".config" / "git"]  # Git の設定は読ませる（より狭い指定が勝つ）
+                if os.path.exists(d) and any(o in Path(os.path.realpath(d)).parents for o in places)}}
+    table = ", ".join(f"{json.dumps(k)}={json.dumps(v)}" for k, v in rules.items())  # TOML の基本文字列（JSON と同じ逃がし方）
     return ["-c", f'default_permissions="{CODEX_PROFILE}"', "-c", f'permissions.{CODEX_PROFILE}.extends=":read-only"',
-            "-c", f'permissions.{CODEX_PROFILE}.filesystem={{":tmpdir"="write"}}']
+            "-c", f"permissions.{CODEX_PROFILE}.filesystem={{{table}}}"]
 
 
 def repo_overlap(cwd: Path, out_dir: Path) -> str | None:

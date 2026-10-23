@@ -576,7 +576,7 @@ class TestLaunch(unittest.TestCase):
         self.assertNotIn("--approve-for-me", argv)
         self.assertIn('default_permissions="bbwrit-read-only"', argv)
         self.assertIn('permissions.bbwrit-read-only.extends=":read-only"', argv)
-        self.assertIn('permissions.bbwrit-read-only.filesystem={":tmpdir"="write"}', argv)
+        self.assertTrue([x for x in argv if x.startswith('permissions.bbwrit-read-only.filesystem={":tmpdir"="write"')], argv)
         self.assertIn("報告の形", argv[-1])  # 報告の約束を子に渡す
         self.assertIn('"execution": {"completed"', argv[-1])  # 実行の欄と、写して動かす場所
         self.assertIn("$TMPDIR", argv[-1])
@@ -589,9 +589,48 @@ class TestLaunch(unittest.TestCase):
             self.assertIn(sentence, argv[-1])
         # 権限を変える設定は、この 3 つだけ（sandbox_mode・-s を足すと profile より優先され、別の書ける場所を足すと広がる）
         conf = [argv[i + 1] for i, x in enumerate(argv) if x in ("-c", "--config") and not argv[i + 1].startswith("model_reasoning_effort")]
-        self.assertCountEqual(conf, ['default_permissions="bbwrit-read-only"', 'permissions.bbwrit-read-only.extends=":read-only"',
-                                'permissions.bbwrit-read-only.filesystem={":tmpdir"="write"}'])
+        self.assertCountEqual([c.split("=", 1)[0] for c in conf], ["default_permissions", "permissions.bbwrit-read-only.extends",
+                                                                  "permissions.bbwrit-read-only.filesystem"])
         self.assertTrue((self.state / "delegations.jsonl").read_text().strip())
+
+    def test_codex_read_only_child_cannot_read_credential_places(self):
+        # 読み取り専用の Claude Code の子と同じく、認証情報の置き場と専用ログインは読ませない（-s read-only のころは読めた）。
+        # 無い場所・symlink・拒む場所の下の場所は書かない（bwrap が起動しなかった）。codex 本体を含む置き場は、本体の入った項目を除いて拒む
+        home = self.home
+        for d in (".ssh", ".config/gh", ".config/git", ".codex/packages/bin", ".codex/sessions", "elsewhere/aws"):
+            (home / d).mkdir(parents=True)
+        (home / ".codex" / "auth.json").write_text("{}")
+        (home / ".aws").symlink_to(home / "elsewhere" / "aws")
+        (home / ".gnupg").symlink_to(home / "missing")  # 行き先の無い symlink
+        real = home / ".codex" / "packages" / "bin" / "codex"
+        real.write_text(f"#!/bin/sh\nexec {self.bin / 'codex'} \"$@\"\n")  # 本体はホームの .codex の下にある
+        real.chmod(0o755)
+        rc, rec = self.run_launch("codex", path=f"{real.parent}:/usr/bin:/bin")
+        self.assertEqual((rc, rec["status"]), (0, "ok"), rec)
+        argv = json.loads(self.args_file.read_text())
+        table = next(argv[i + 1] for i, x in enumerate(argv) if x == "-c" and argv[i + 1].startswith("permissions.bbwrit-read-only.filesystem="))
+        import re
+        rules = dict(re.findall(r'"([^"]+)"="(read|write|deny)"', table))
+        h = str(home.resolve())
+        self.assertEqual(rules.get(":tmpdir"), "write")
+        for denied in (f"{h}/.ssh", f"{h}/.config", f"{h}/elsewhere/aws", f"{h}/.codex/auth.json", f"{h}/.codex/sessions"):
+            self.assertEqual(rules.get(denied), "deny", (denied, rules))
+        self.assertEqual(rules.get(f"{h}/.config/git"), "read")  # Git の設定は読ませる
+        for absent in (f"{h}/.config/gh", str(self.cfg.resolve()) if str(self.cfg.resolve()).startswith(f"{h}/.config") else None,
+                       f"{h}/.codex", f"{h}/.codex/packages", f"{h}/.gnupg", f"{h}/.aws", f"{h}/missing", f"{h}/.kube"):
+            if absent:
+                self.assertNotIn(absent, rules)
+        self.assertEqual(rules.get(str(self.cfg.resolve())), "deny")  # 専用ログイン（試験ではホームの外）
+        # 普段の専用ログインは ~/.config の下。拒む場所の下の場所は書かない
+        import shutil
+        nested = home / ".config" / "bb-writ"
+        shutil.copytree(self.cfg, nested)
+        rc, rec = self.run_launch("codex", path=f"{real.parent}:/usr/bin:/bin", env_extra={"BB_WRIT_CONFIG_DIR": str(nested)})
+        argv = json.loads(self.args_file.read_text())
+        table = next(argv[i + 1] for i, x in enumerate(argv) if x == "-c" and argv[i + 1].startswith("permissions.bbwrit-read-only.filesystem="))
+        rules = dict(re.findall(r'"([^"]+)"="(read|write|deny)"', table))
+        self.assertEqual(rules.get(f"{h}/.config"), "deny")
+        self.assertNotIn(f"{h}/.config/bb-writ", rules)
 
     def test_codex_read_only_child_gets_its_own_writable_tmpdir(self):
         # -s read-only では mktemp -d も失敗し、審査役が試験を動かせなかった。書けるのは起動ごとの一時ディレクトリだけ
