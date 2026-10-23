@@ -93,6 +93,9 @@ FAKE_CODEX = textwrap.dedent(r'''
             entries.append(entry(os.path.dirname(os.environ["CODEX_HOME"]) + "2", "read"))
         if mode == "deny-dropped":  # 渡した deny が記録に無い
             entries = [e for e in entries if e["access"] != "deny"]
+        if mode == "one-deny-dropped":  # 渡した deny のうち 1 つだけが記録に無い
+            first = next(i for i, e in enumerate(entries) if e["access"] == "deny")
+            entries = entries[:first] + entries[first + 1:]
         if mode == "deny-tmp-first":  # deny が write より前に並ぶ（同じ場所なら順に関わらず deny が勝つ）
             entries.insert(0, entry(":tmpdir", "deny"))
         perm = {"type": "managed", "file_system": {"type": "restricted", "entries": entries}, "network": network}
@@ -117,7 +120,8 @@ FAKE_CODEX = textwrap.dedent(r'''
         net_open = {**perm, "network": "enabled"}
         big = {**perm, "user_instructions": "x" * (2 << 20)}  # 1 MiB を超える行（割れて読めない）
         bad = {"bad-json-after": '{"type": "turn_context", "pay\n', "bad-utf8-after": '\udcff\n'}.get(mode)  # 正しい turn の後の、短い読めない行
-        turns = {"big-wide-line": [perm, {**big, "file_system": wide["file_system"]}], "net-open-then-ok": [net_open, perm], "ok-then-net-open": [perm, net_open], "wide-then-ok": [wide, perm], "ok-then-wide": [perm, wide], "narrow-then-ok": [narrow, perm], "ok-then-narrow": [perm, narrow],
+        undenied = {**perm, "file_system": {"type": "restricted", "entries": [e for e in entries if not (isinstance(e, dict) and e.get("access") == "deny")]}}
+        turns = {"undenied-then-ok": [undenied, perm], "ok-then-undenied": [perm, undenied], "big-wide-line": [perm, {**big, "file_system": wide["file_system"]}], "net-open-then-ok": [net_open, perm], "ok-then-net-open": [perm, net_open], "wide-then-ok": [wide, perm], "ok-then-wide": [perm, wide], "narrow-then-ok": [narrow, perm], "ok-then-narrow": [perm, narrow],
                  "fs-unknown-then-ok": [fs_unknown, perm], "net-unknown-then-ok": [net_unknown, perm]}.get(mode, [perm])
         open(os.path.join(sessions, "fake", f"rollout-1-{thread}.jsonl"), "w", errors="surrogateescape").write("".join(turn(x) for x in turns) + (bad or ""))
     if mode == "parent-moves-git":  # 子の実行中に、親や並行するタスクが ref と設定を正当に動かす（子は何もしない）
@@ -622,16 +626,15 @@ class TestLaunch(unittest.TestCase):
             (home / d).mkdir(parents=True)
         (home / ".codex" / "auth.json").write_text("{}")
         (home / ".aws").symlink_to(home / "elsewhere" / "aws")
-        (home / ".gnupg").symlink_to(home / "missing")  # 行き先の無い symlink
+        (home / ".gnupg").symlink_to(home / "missing")  # 行き先の無い symlink（後で実物に替える）
         real = home / ".codex" / "packages" / "bin" / "codex"
         real.write_text(f"#!/bin/sh\nexec {self.bin / 'codex'} \"$@\"\n")  # 本体はホームの .codex の下にある
         real.chmod(0o755)
         rc, rec = self.run_launch("codex", path=f"{real.parent}:/usr/bin:/bin")
         self.assertEqual((rc, rec["status"]), (0, "ok"), rec)
         argv = json.loads(self.args_file.read_text())
-        table = next(argv[i + 1] for i, x in enumerate(argv) if x == "-c" and argv[i + 1].startswith("permissions.bbwrit-read-only.filesystem="))
+        rules = fs_rules(argv)
         import re
-        rules = dict(re.findall(r'"([^"]+)"="(read|write|deny)"', table))
         h = str(home.resolve())
         self.assertEqual(rules.get(":tmpdir"), "write")
         for denied in (f"{h}/.ssh", f"{h}/.config/gh", f"{h}/elsewhere/aws", f"{h}/.codex/auth.json", f"{h}/.codex/sessions"):
@@ -670,6 +673,7 @@ class TestLaunch(unittest.TestCase):
         for absent in (f"{h}/.codex/current", f"{h}/.codex/packages", f"{h}/.codex/dangling", f"{h}/nowhere"):
             self.assertNotIn(absent, rules)
         launch = load_launch()
+        (home / ".gnupg").unlink()
         for place in launch.SECRET_PLACES:
             q = home / place
             if not os.path.lexists(q):
@@ -680,7 +684,7 @@ class TestLaunch(unittest.TestCase):
         argv = json.loads(self.args_file.read_text())
         rules = fs_rules(argv)
         for place in launch.SECRET_PLACES:
-            if place in (".config", ".aws", ".gnupg"):  # Git の設定を含むので中身ごと、symlink は行き先で、行き先の無い symlink は書かない
+            if place in (".config", ".aws"):  # Git の設定を含むので中身ごと、symlink は行き先で
                 continue
             with self.subTest(place=place):
                 self.assertEqual(rules.get(str((home / place).resolve())), "deny", (place, rules))
@@ -742,9 +746,36 @@ class TestLaunch(unittest.TestCase):
         rc, rec = self.run_launch("codex", cwd=wt2)
         self.assertEqual((rc, rec["status"]), (0, "ok"), rec)
         # HOME が空か / なら、ホームの置き場を拒めないので起動しない
-        for empty in ("", "/"):
+        for empty in ("", "/", "//", "/."):
             rc, rec = self.run_launch("codex", env_extra={"HOME": empty})
             self.assertEqual(rec["status"], "unavailable", rec)
+
+    def test_codex_read_only_child_keeps_tools_and_drops_secret_env(self):
+        # nvm を ~/.config に入れると、codex は node のパッケージで、ネイティブの本体は vendor にある（補助が実行する）。PATH の道具も読ませる
+        home = self.home
+        pkg = home / ".config" / "nvm" / "versions" / "node" / "v22"
+        (pkg / "lib" / "node_modules" / "@openai" / "codex" / "bin").mkdir(parents=True)
+        (pkg / "lib" / "node_modules" / "@openai" / "codex" / "vendor").mkdir()
+        (pkg / "bin").mkdir()
+        (pkg / "bin" / "node").write_text("")
+        js = pkg / "lib" / "node_modules" / "@openai" / "codex" / "bin" / "codex.js"
+        js.write_text(f"#!/bin/sh\nexec {self.bin / 'codex'} \"$@\"\n")
+        js.chmod(0o755)
+        (pkg / "bin" / "codex").symlink_to(js)
+        (home / ".config" / "gh").mkdir()
+        rc, rec = self.run_launch("codex", path=f"{pkg / 'bin'}:/usr/bin:/bin",
+                                  env_extra={"GH_TOKEN": "ghp_fake", "AWS_SECRET_ACCESS_KEY": "x", "MY_API_KEY": "y"})
+        self.assertEqual((rc, rec["status"]), (0, "ok"), rec)
+        rules = fs_rules(json.loads(self.args_file.read_text()))
+        h = str(home.resolve())
+        for kept in (pkg / "bin" / "node", pkg / "lib" / "node_modules" / "@openai" / "codex" / "vendor"):  # 覆う deny が無い
+            k = str(kept.resolve())
+            self.assertFalse([d for d, acc in rules.items() if acc == "deny" and (k == d or k.startswith(d + "/"))], (kept, rules))
+        self.assertEqual(rules.get(f"{h}/.config/gh"), "deny")
+        env = json.loads(Path(str(self.args_file) + ".allenv").read_text())
+        for name in ("GH_TOKEN", "AWS_SECRET_ACCESS_KEY", "MY_API_KEY"):  # 認証情報らしい変数は子に渡さない
+            self.assertNotIn(name, env)
+        self.assertIn("PATH", env)
 
     def test_codex_read_only_child_gets_its_own_writable_tmpdir(self):
         # -s read-only では mktemp -d も失敗し、審査役が試験を動かせなかった。書けるのは起動ごとの一時ディレクトリだけ
@@ -812,6 +843,7 @@ class TestLaunch(unittest.TestCase):
         self.assertTrue(rec["out"].startswith(str(real.resolve())))
 
     def test_codex_read_only_wider_than_the_profile_is_failed(self):
+        (self.home / ".ssh").mkdir()  # 渡す deny を 2 つ以上にする（1 つだけ欠けた記録を、全部欠けた記録と見分ける）
         # 対象の .codex/config.toml の sandbox_mode は default_permissions より優先され、同じ profile に書ける場所も足せる
         for i, (mode, sign) in enumerate((("wide-profile", "広い"), ("net-profile", "広い"), ("legacy-sandbox", "書けない"),
                                           ("no-rollout", "確かめられない"), ("odd-entry", "確かめられない"), ("no-network", "確かめられない"),
@@ -824,6 +856,7 @@ class TestLaunch(unittest.TestCase):
                                           ("big-wide-line", "確かめられない"), ("odd-deny-path", "確かめられない"), ("bad-json-after", "確かめられない"),
                                           ("bad-utf8-after", "確かめられない"), ("deny-tmp-first", "書けない"), ("path-like-special", "確かめられない"),
                                           ("read-under-deny", "拒めていない"), ("deny-dropped", "拒めていない"), ("arg0-nested", "拒めていない"),
+                                          ("one-deny-dropped", "拒めていない"), ("undenied-then-ok", "拒めていない"), ("ok-then-undenied", "拒めていない"),
                                           ("relative-path", "確かめられない"), ("fs-odd-type", "確かめられない"))):
             with self.subTest(mode=mode):  # 記録は session ごと
                 rc, rec = self.run_launch("codex", mode=mode, env_extra={"FAKE_THREAD": f"0199aaaa-bbbb-7ccc-8ddd-eeeeffff{1000 + i}"})

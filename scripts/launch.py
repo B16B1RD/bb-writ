@@ -296,7 +296,7 @@ CODEX_PROFILE = "bbwrit-read-only"
 
 
 def secret_denies(keep: list[Path]) -> list[str]:
-    """読み取り専用の Codex の子に読ませない場所（認証情報の置き場と専用ログイン。読み取り専用の Claude Code の子と同じ範囲）。
+    """読み取り専用の Codex の子に読ませない場所（名前を挙げた認証情報の置き場と専用ログイン。Claude Code の子の denyRead と同じ一覧）。
     -s read-only のころは、子が ~/.config の下を読めた（2026-10-23 の実測）。bwrap は、無い場所・symlink の場所・拒んだ場所の
     下の場所を書くと起動せず（~/.aws が /mnt/c を指す、~/.config の下の専用ログイン）、拒んだ ~/.codex の下に read を書いても
     codex 本体を実行できなかった（0.163.0、Linux）。そこで、あるものだけを symlink を解いた行き先で書き、入れ子は書かず、
@@ -328,7 +328,14 @@ def codex_read_only(scratch: Path, cwd: Path) -> tuple[list[str], list[str]]:
     -s read-only では mktemp -d も失敗し、試験を動かせない審査役が読んだだけの判定を返した（0.163.0）。
     -s（sandbox_mode）は default_permissions より優先されるので渡さない。ネットワークは read-only の既定のまま出られない。"""
     git_dir, _ = grok_git_dir(cwd)
-    keep = [Path(shutil.which("codex") or "/"), Path.home() / ".config" / "git", cwd, *([git_dir] if git_dir else [])]
+    # 残すもの: codex 本体のパッケージ（本体の 2 つ上。npm の版はネイティブの本体が vendor にあり、補助が実行する）、ホームの下の PATH の道具
+    # （nvm を ~/.config に入れた node など。Claude Code の子と同じく読ませる）、Git の設定、対象とその共通ディレクトリ
+    # 置き場の根やホームそのものは残すものに数えない（~/.codex/bin/codex の 2 つ上は ~/.codex で、丸ごと読めてしまう）
+    roots = {Path(os.path.realpath(d)) for d in [Path.home(), config_dir(), *(Path.home() / p for p in SECRET_PLACES)]}
+    binary = Path(os.path.realpath(shutil.which("codex") or "/"))
+    tools = [Path(d) for d in os.environ.get("PATH", "").split(os.pathsep) if d.startswith(str(Path.home()) + os.sep)]
+    keep = [binary, *(d for d in [binary.parent.parent, binary.parent, *tools] if Path(os.path.realpath(d)) not in roots),
+            Path.home() / ".config" / "git", cwd, *([git_dir] if git_dir else [])]
     denies = secret_denies(keep)
     scratch.mkdir()
     rules = {":tmpdir": "write", **{d: "deny" for d in denies}}
@@ -498,8 +505,11 @@ def command(a, prompt: str, scratch: Path) -> tuple[list[str], dict, str | None]
         for d in [work_record(a.cwd), *(commit_dirs(own, common) if own else [])]:
             mode += ["--add-dir", str(d)]
     else:
-        if os.environ.get("HOME", "") in ("", "/"):  # ホームの置き場の deny が 1 つも出ない（黙って開かない）
-            return [], env, "HOME が空か / なので、読み取り専用の Codex の子に認証情報の置き場を拒めない"
+        if not os.environ.get("HOME") or Path(os.environ["HOME"]).resolve() == Path("/"):  # ホームの置き場の deny が 1 つも出ない（黙って開かない）
+            return [], env, "HOME が無いか / を指すので、読み取り専用の Codex の子に認証情報の置き場を拒めない"
+        # 親の環境の認証情報らしい変数を渡さない（Codex は既定で KEY・SECRET・TOKEN を含む変数も子のコマンドに残す。読み取り専用の
+        # Claude Code の子と同じ名前の規則で外す）
+        env = {k: v for k, v in env.items() if k not in {e["name"] for e in secret_env(env)["envVars"]}}
         mode, a.codex_denies = codex_read_only(scratch, a.cwd)
         env["TMPDIR"] = str(scratch.resolve())
     cmd = ["codex", "exec", "--json", "-m", a.model, "-c", f'model_reasoning_effort="{a.effort}"',
