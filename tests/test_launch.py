@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 import textwrap
+import time
 import unittest
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent)); import process_limit  # noqa: E402,F401  試験に上限を掛ける（直に走らせても）
@@ -363,6 +364,12 @@ class TestLaunch(unittest.TestCase):
         git("add", "a.txt", ".gitignore")
         git("commit", "-q", "-m", "a")
         (self.cwd / "ignored.txt").write_text("x\n")  # 無視するファイルは変更に数えない
+        index = self.cwd / ".git" / "index"
+        before = (index.read_bytes(), index.stat().st_mtime_ns)
+        os.utime(self.cwd / "a.txt", (time.time() + 100, time.time() + 100))  # 中身はそのまま。git status は index を書き直したがる
+        rc, rec = self.run_launch("claude")
+        self.assertEqual((rc, rec["head"]), (0, git("rev-parse", "HEAD")), rec)
+        self.assertEqual((index.read_bytes(), index.stat().st_mtime_ns), before)  # 利用者の git と index のロックを競わない
         for host in ("claude", "codex"):  # 読み取り専用の Grok は /tmp の下の対象で起動しない
             with self.subTest(host=host):
                 rc, rec = self.run_launch(host)

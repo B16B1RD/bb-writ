@@ -204,7 +204,7 @@ class TestAccountCheck(unittest.TestCase):
         if "--reviewed" in args and getattr(self, "launcher_reviews", True):  # 審査役の記録との照合を試験しない試験では、記録を先に置く
             TestAccountCheck.review_record(self, args[args.index("--reviewed") + 1])
         p = subprocess.run([sys.executable, str(WORK), *args], env=self.env, capture_output=True, text=True, errors="replace",
-                           cwd=self.tmp.name)  # 相対の out を解く場所を決める
+                           cwd=self.tmp.name, timeout=300)  # 相対の out を解く場所を決める。止まる退行は止まらずに落とす
         return p.returncode, json.loads(p.stdout)
 
     def review_record(self, commit, record=None, **over):
