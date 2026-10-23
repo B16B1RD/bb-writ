@@ -157,8 +157,10 @@ def reviews_of(commit: str) -> tuple:
                        and isinstance(e.get("out"), str) and os.path.isabs(e["out"]))  # launcher は絶対パスを書く
     f = state_dir() / "delegations.jsonl"
     found, broken = [], 0
-    if f.exists():
+    if f.exists() or f.is_symlink():
         try:
+            if not f.is_file():  # ディレクトリ、FIFO（開くと止まる）など
+                raise OSError("通常のファイルでない")
             rows = f.read_bytes().split(b"\n")
         except OSError as x:  # 権限など。拒否の理由に出す
             return [], f"委任の記録 {f} を読めない: {x}"

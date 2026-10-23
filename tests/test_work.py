@@ -203,7 +203,8 @@ class TestAccountCheck(unittest.TestCase):
     def w(self, *args):
         if "--reviewed" in args and getattr(self, "launcher_reviews", True):  # 審査役の記録との照合を試験しない試験では、記録を先に置く
             TestAccountCheck.review_record(self, args[args.index("--reviewed") + 1])
-        p = subprocess.run([sys.executable, str(WORK), *args], env=self.env, capture_output=True, text=True, errors="replace")
+        p = subprocess.run([sys.executable, str(WORK), *args], env=self.env, capture_output=True, text=True, errors="replace",
+                           cwd=self.tmp.name)  # 相対の out を解く場所を決める
         return p.returncode, json.loads(p.stdout)
 
     def review_record(self, commit, record=None, **over):
@@ -778,7 +779,7 @@ class TestReviewedCommit(unittest.TestCase):
         self.assertIn("record.json を読めない行が 5 行", r["reason"])  # 書きかけ・UTF-8 でない・深すぎる行と、record.json の無い・FIFO の行
         rel = Path(self.tmp.name) / "rel"  # 相対の out（work.py の場所で解かれる。launcher は絶対パスを書く）
         rel.mkdir()
-        rel_out = os.path.relpath(rel)  # w() の work.py はこの試験と同じ場所で動く
+        rel_out = "rel"  # w() の work.py は self.tmp.name で動く
         (rel / "record.json").write_text(json.dumps({"head": h, "status": "ok", "write": False, "out": rel_out}))
         with open(delegations, "a", encoding="utf-8") as f:
             f.write(json.dumps({"head": h, "status": "ok", "write": False, "out": rel_out}) + "\n")
@@ -802,10 +803,15 @@ class TestReviewedCommit(unittest.TestCase):
         self.assertEqual(rc, 6, r)
         self.assertIn("審査役の記録が無い", r["reason"])
         self.assertNotIn("読めない", r["reason"])  # 無いのは壊れた印でない
-        (Path(self.env["BB_WRIT_STATE_DIR"]) / "delegations.jsonl").mkdir()  # 読めない形
-        rc, r = self.publish(tok, "push:feat@1", "--reviewed", self.head())
-        self.assertEqual(rc, 6, r)
-        self.assertIn("を読めない", r["reason"])
+        delegations = Path(self.env["BB_WRIT_STATE_DIR"]) / "delegations.jsonl"
+        broken_link = lambda p: os.symlink(Path(self.tmp.name) / "no-such-file", p)
+        for make in (os.mkfifo, Path.mkdir, broken_link):  # 読めない形。FIFO は開くと止まる
+            with self.subTest(make=getattr(make, "__name__", "")):
+                make(delegations)
+                rc, r = self.publish(tok, "push:feat@1", "--reviewed", self.head())
+                self.assertEqual(rc, 6, r)
+                self.assertIn("を読めない", r["reason"])
+                (delegations.rmdir if delegations.is_dir() else delegations.unlink)()
 
     def test_op_run_refuses_a_commit_no_reviewer_was_launched_on_and_does_not_run_the_command(self):
         self.launcher_reviews = False
