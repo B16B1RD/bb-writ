@@ -8,7 +8,7 @@ commit ごとの細かい変更は、各版の末尾の「commit の一覧」（
 
 ### 直したこと
 
-- 0.13.0 の読み取り専用の Codex の子が、macOS では照合でいつも `failed` になりうるのを直した。照合は、Codex 自身が専用ログインの一時ディレクトリに足す読み取り（`tmp/arg0-linux/codex-arg0*`）を例外にしていたが、Linux の名前に固定し、symlink を解いた道筋とだけ比べていた（macOS の一時ディレクトリ `/var/folders` は `/private/var` への symlink）。今は、解く前と解いた後の両方の道筋で、`tmp/arg0-<名前>/codex-arg0*` そのものの読み取りを例外にする。macOS の実物の Codex では、まだ確かめていない。
+- 0.13.0 の読み取り専用の Codex の子が、macOS では照合でいつも `failed` になりうるのを直した。照合は、Codex 自身が専用ログインの一時ディレクトリに足す読み取り（`tmp/arg0-linux/codex-arg0*`）を例外にしていたが、Linux の名前に固定し、symlink を解いた道筋とだけ比べていた（macOS の一時ディレクトリ `/var/folders` は `/private/var` への symlink）。今は、記録の場所の解く前の形と解いた後の形の両方が、専用ログインの `tmp/arg0-<名前>/codex-arg0*` そのものであるときだけ、その読み取りを例外にする（どちらか一方で許すと、その形の名前の symlink で `auth.json` を指させた）。macOS の実物の Codex では、まだ確かめていない。
 
 commit の一覧：https://github.com/B16B1RD/bb-writ/compare/bb-writ--v0.13.0...bb-writ--v0.13.1
 

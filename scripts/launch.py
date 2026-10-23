@@ -355,8 +355,8 @@ def codex_breach(turns: list, denies: list[str]) -> str | None:
     同じ profile に項目を足すこともできる。広ければ読み取り専用でなく、一時ディレクトリに書けなければ試験を動かせず、
     渡した deny が無いか、その下に read・write が足されていれば認証情報を読める（より狭い指定が勝つ。公式文書）。
     例外は Codex 自身が足す、専用ログインの tmp/arg0-<OS>/codex-arg0* そのものの read だけ（0.163.0 の Linux の実物の記録は arg0-linux。
-    記録の場所は解く前の形でも解いた後の形でも比べる。macOS の一時ディレクトリ /var/folders は /private/var への symlink で、解いた形とだけ
-    比べると、試験の Codex の子がいつも failed になった）。
+    記録の場所は、解く前の形と解いた後の形の両方がこの形のときだけ例外にする。macOS の一時ディレクトリ /var/folders は /private/var への
+    symlink で、解いた形とだけ比べると試験の Codex の子がいつも failed になり、どちらか一方で許すと symlink で auth.json を指させた）。
     実効の権限を記録から読めなければ、どれも確かめられないので理由にする。"""
     if not turns or any(t["writable"] is None or t["network"] is None for t in turns):
         return "Codex の実効の権限を記録（turn_context の permission_profile）から確かめられない（記録が無い、読めない行がある、形が違う）"
@@ -373,8 +373,8 @@ def codex_breach(turns: list, denies: list[str]) -> str | None:
         missing = [d for d in denies if d not in recorded]
         opened = [w for acc, w in t["rules"] if acc != "deny" and not w.startswith(":")
                   and any(r == d or r.startswith(d + "/") for d in denies for r in (w, os.path.realpath(w)))  # 解く前の書き方でも
-                  and not (acc == "read" and any(r.startswith(h + "/") and arg0.fullmatch(r[len(h) + 1:])
-                                                for h in homes for r in (w, os.path.realpath(w))))]
+                  and not (acc == "read" and all(any(r.startswith(h + "/") and arg0.fullmatch(r[len(h) + 1:]) for h in homes)
+                                                for r in (w, os.path.realpath(w))))]  # 解く前も解いた後も（symlink で認証情報を指させない）
         if missing or opened:
             return f"Codex の実効の権限で、認証情報の置き場を拒めていない（記録に無い deny: {missing[:5]}、その下で開いた場所: {opened[:5]}）"
     return None

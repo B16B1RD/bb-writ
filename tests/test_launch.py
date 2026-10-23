@@ -86,7 +86,9 @@ FAKE_CODEX = textwrap.dedent(r'''
                  "relative-path": {"path": {"type": "path", "path": "rel/x"}, "access": "read"}}.get(mode)
         if extra is not None:
             entries.append(extra)
-        arg0 = os.path.join(os.environ["CODEX_HOME"], "tmp", "arg0-linux", "codex-arg0Ab12")
+        arg0 = os.path.join(os.environ["CODEX_HOME"], os.environ.get("FAKE_ARG0", os.path.join("tmp", "arg0-linux", "codex-arg0Ab12")))
+        if os.environ.get("FAKE_ARG0_REAL"):  # Codex が symlink を解いた形で記録する場合
+            arg0 = os.path.realpath(arg0)
         entries.append(entry(arg0 + ("/x" if mode == "arg0-nested" else ""), "read"))  # 0.163.0 は自分で足す（専用ログインの下）
         if mode == "read-under-deny":  # 対象の設定が、拒んだ場所の下に read を足した（より狭い指定が勝つ）
             entries.append(entry(os.path.join(os.environ["CODEX_HOME"], "auth.json"), "read"))
@@ -1016,13 +1018,37 @@ class TestLaunch(unittest.TestCase):
         self.assertEqual(rec["status"], "ok", rec)  # 拒否の項目は広げない
         rc, rec = self.run_launch("codex", mode="sibling-read", env_extra={"FAKE_THREAD": "0199aaaa-bbbb-7ccc-8ddd-eeeeffff2001"})
         self.assertEqual(rec["status"], "ok", rec)  # 名前の先頭が同じ隣の場所は、拒んだ場所の下ではない
+        # Codex 自身の arg0 の read の例外は、専用ログインの tmp/arg0-<名前>/codex-arg0* そのものだけ（OS の名前は問わない）
+        for i, (arg0, status) in enumerate((("tmp/arg0-darwin/codex-arg0Zz9", "ok"), ("arg0-linux/codex-arg0Ab", "failed"),
+                                            ("tmp/other/codex-arg0Ab", "failed"), ("tmp/arg0-/codex-arg0Ab", "failed"),
+                                            ("tmp/arg0-linux/other", "failed"), ("auth.json", "failed"),
+                                            ("tmp/arg0-a/b/codex-arg0X", "failed"), ("tmp/foo/arg0-a/codex-arg0X", "failed"),
+                                            ("tmp2/arg0-a/codex-arg0X", "failed"), ("tmpZarg0-a/codex-arg0X", "failed"),  # 隣の場所
+                                            ("../outside/arg0-a/codex-arg0X", "failed"))):
+            with self.subTest(arg0=arg0):
+                rc, rec = self.run_launch("codex", env_extra={"FAKE_ARG0": arg0, "FAKE_THREAD": f"0199aaaa-bbbb-7ccc-8ddd-eeeeffff{2100 + i}"})
+                self.assertEqual(rec["status"], status, rec)
+        # 例外の形の名前が、symlink で認証情報を指す（または認証情報が例外の形を指す）なら、例外にしない
+        home_tmp = self.cfg / "codex-home" / "tmp" / "arg0-darwin"
+        home_tmp.mkdir(parents=True)
+        (self.cfg / "codex-home" / "auth.json").write_text("{}")
+        (home_tmp / "codex-arg0Link").symlink_to(self.cfg / "codex-home" / "auth.json")
+        (home_tmp / "codex-arg0Real").write_text("")
+        (self.cfg / "codex-home" / "auth-link.json").symlink_to(home_tmp / "codex-arg0Real")
+        for i, arg0 in enumerate(("tmp/arg0-darwin/codex-arg0Link", "auth-link.json")):
+            with self.subTest(arg0=arg0):
+                rc, rec = self.run_launch("codex", env_extra={"FAKE_ARG0": arg0, "FAKE_THREAD": f"0199aaaa-bbbb-7ccc-8ddd-eeeeffff{2200 + i}"})
+                self.assertEqual(rec["status"], "failed", rec)
+                self.assertIn("拒めていない", rec["problems"][0])
         # 専用ログインの置き場が symlink（macOS の /var/folders は /private/var を指す）でも、Codex 自身の arg0 の read は例外のまま
         real_cfg = Path(self.tmp.name) / "real-cfg"
         shutil.copytree(self.cfg, real_cfg)
         (Path(self.tmp.name) / "cfg-link").symlink_to(real_cfg)
-        rc, rec = self.run_launch("codex", env_extra={"BB_WRIT_CONFIG_DIR": str(Path(self.tmp.name) / "cfg-link"),
-                                                      "FAKE_THREAD": "0199aaaa-bbbb-7ccc-8ddd-eeeeffff2002"})
-        self.assertEqual((rc, rec["status"]), (0, "ok"), rec)
+        for i, real in enumerate(("", "1")):  # 解く前の形でも、解いた形でも記録されうる
+            with self.subTest(real=real):
+                rc, rec = self.run_launch("codex", env_extra={"BB_WRIT_CONFIG_DIR": str(Path(self.tmp.name) / "cfg-link"), "FAKE_ARG0_REAL": real,
+                                                              "FAKE_THREAD": f"0199aaaa-bbbb-7ccc-8ddd-eeeeffff{2002 + i * 10}"})
+                self.assertEqual((rc, rec["status"]), (0, "ok"), rec)
         # 引数で広げる・狭める（--add-dir、--config で書ける場所、ネットワーク、extends、sandbox_mode・-s）と、記録の照合が捕まえる
         (self.bin / "codex-real").write_text((self.bin / "codex").read_text())
         (self.bin / "codex-real").chmod(0o755)
