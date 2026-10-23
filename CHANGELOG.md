@@ -4,6 +4,16 @@ bb-writ を使う人に向けて、版ごとに変わったことを書く。新
 
 commit ごとの細かい変更は、各版の末尾の「commit の一覧」（前の版のタグとの比較）で見られる。
 
+## 0.13.2 - 2026-10-23
+
+### 直したこと
+
+- 読み取り専用の Codex の子で、ホームが symlink の下にある（macOS の一時ディレクトリ `/var` は `/private/var` を指すなど）か、`~/.config` そのものが symlink（dotfiles）のとき、`~/.config/git` が symlink だと `~/.config` を丸ごと拒み、Git の設定が読めなくなっていたのを直した。拒まずに残す場所の symlink の節点を、親を解き最後の名前は解かない形で持つ。
+- `~/.config/git` の行き先が専用ログインの中なら、Git の設定として残さない（専用ログインを拒む）。
+- 試験を macOS でも通るようにした（macOS が子のプロセスに足す環境変数を、子の環境の不変条件から除く。`--out` の記録は symlink を解いた形で比べる）。0.13.0・0.13.1 の CI は macOS で落ちていた。
+
+commit の一覧：https://github.com/B16B1RD/bb-writ/compare/bb-writ--v0.13.1...bb-writ--v0.13.2
+
 ## 0.13.1 - 2026-10-23
 
 ### 直したこと
