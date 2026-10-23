@@ -122,7 +122,9 @@ def home_entries(skip: list[Path]) -> tuple[set[str], set[str], set[str]]:
                 if e.is_symlink():
                     continue
                 if e.is_dir():
-                    if not any(os.scandir(e.path)):
+                    with os.scandir(e.path) as it:  # 閉じないと ResourceWarning が出る
+                        bare = not any(it)
+                    if bare:
                         empty.add(e.path)
                     elif depth < 2:
                         scan(p, depth + 1)
