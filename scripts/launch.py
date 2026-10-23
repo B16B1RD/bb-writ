@@ -702,9 +702,23 @@ def become_subreaper() -> None:
         raise OSError(ctypes.get_errno(), "prctl(PR_SET_CHILD_SUBREAPER) が失敗した")
 
 
+def wait_for_exit(child: subprocess.Popen, timeout: float) -> None:
+    """子の CLI が終わるのを、刈らずに待つ（Linux）。刈らないので、止め終わるまで子の CLI とそのプロセスグループの番号は別のプロセスに
+    使い回されない。待つ間に自分の下へ来て終わった孤児は刈る（subreaper なので、刈らないとゾンビが溜まる）。"""
+    deadline = time.monotonic() + timeout
+    while True:
+        while (r := os.waitid(os.P_ALL, 0, os.WEXITED | os.WNOHANG | os.WNOWAIT)) is not None:
+            if r.si_pid == child.pid:
+                return
+            os.waitpid(r.si_pid, 0)
+        if time.monotonic() > deadline:
+            raise subprocess.TimeoutExpired(child.args, timeout)
+        time.sleep(0.1)
+
+
 def stop_descendants(group: int) -> tuple[list[str], list[str]]:
-    """自分の子孫を、残らなくなるまで止める。(止めたもの, 止められずに残ったもの) を「pid コマンド行」で返す。
-    become_subreaper の後、子の CLI を刈ってから呼ぶ。1 周に止めるのは自分の直接の子だけで、刈れたら終わったとみなす（刈るまでは番号を
+    """自分の子孫を、残らなくなるまで（5 秒まで）止める。(止めたもの, 止められずに残ったもの) を「pid コマンド行」で返す。
+    become_subreaper の後、子の CLI を止めてから呼ぶ。1 周に止めるのは自分の直接の子だけで、刈れたら終わったとみなす（刈るまでは番号を
     保つので、調べてから止めるまでに別のプロセスへ使い回されない。ゾンビに見えても止める: 主スレッドだけ終わったプロセスは、ほかの
     スレッドが動く間はゾンビに見え、刈れず、その下の子孫もまだ付け替わっていない）。子が終わると、その下の子孫が自分の下に来るので、
     次の周で止める。止めたものには、刈る前に自分で終わっていたものも入る。子の CLI のプロセスグループ（group。止めてから呼ぶ）の
@@ -728,10 +742,8 @@ def stop_descendants(group: int) -> tuple[list[str], list[str]]:
         return found
 
     stopped, denied = {}, {}
-    for _ in range(100):  # 止めるたびに、その下の子孫が 1 段ずつ上がってくる
-        left = children()
-        if not left:
-            break
+    deadline = time.monotonic() + 5  # 止めるたびに、その下の子孫が 1 段ずつ上がってくる。大きなプロセスは終わるのに時間がかかる
+    while (left := children()) and time.monotonic() < deadline:
         for pid, (line, cli) in left.items():
             if not cli:
                 stopped.setdefault(pid, line)
@@ -746,7 +758,6 @@ def stop_descendants(group: int) -> tuple[list[str], list[str]]:
             except ChildProcessError:
                 pass
         time.sleep(0.05)
-    left = children()
     return sorted(v for k, v in stopped.items() if k not in left), sorted(denied.get(k, v[0]) for k, v in left.items())
 
 
@@ -837,22 +848,25 @@ def main() -> int:
             # 切り離した子孫（Claude Code の Bash）はグループの外なので、Linux では自分の下に来たものを残らなくなるまで止める
             child = subprocess.Popen(cmd, cwd=a.cwd, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                      start_new_session=True)  # バイトで受ける（子の出力は UTF-8 とは限らない）
-            output = {}
-            readers = [threading.Thread(target=lambda k=k, f=f: output.__setitem__(k, f.read()), daemon=True)
-                       for k, f in (("stdout", child.stdout), ("stderr", child.stderr))]
-            for t in readers:
-                t.start()
+            output, readers = {}, []
             try:
-                child.wait(timeout=a.timeout)  # 出力が閉じるのでなく、子の CLI が終わるのを待つ（子孫が出力を開いたままでも）
+                for k, f in (("stdout", child.stdout), ("stderr", child.stderr)):
+                    readers.append(threading.Thread(target=lambda k=k, f=f: output.__setitem__(k, f.read()), daemon=True))
+                    readers[-1].start()
+                # 出力が閉じるのでなく、子の CLI が終わるのを待つ（子孫が出力を開いたままでも）
+                wait_for_exit(child, a.timeout) if LINUX else child.wait(timeout=a.timeout)
             finally:
                 try:
-                    os.killpg(child.pid, signal.SIGKILL)
+                    os.killpg(child.pid, signal.SIGKILL)  # Linux では、まだ刈っていない（番号は使い回されていない）
                 except ProcessLookupError:
                     pass
                 finally:
                     if LINUX:
                         try:
-                            child.wait()  # 時間切れでも、子の CLI を刈ってから（刈る前は、生きた子として見える）
+                            try:
+                                child.wait(timeout=10)
+                            except subprocess.TimeoutExpired:  # 止まらない子の CLI は、下で残りとして並ぶ
+                                pass
                             rec["stopped_after_exit"], left = stop_descendants(child.pid)
                         except Exception as e:
                             rec.setdefault("stopped_after_exit", [])
