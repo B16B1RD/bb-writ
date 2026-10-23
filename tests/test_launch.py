@@ -420,6 +420,19 @@ class TestLaunch(unittest.TestCase):
         self.assertEqual(rec["head"], None, rec)
         rc, rec = self.run_launch("claude", extra=["--write"])  # 書く子（ここでは起動しない）は write が真
         self.assertIs(last()["write"], True)
+        sub = Path(self.tmp.name) / "sub"  # サブモジュールの中の変更は、無視する設定があっても数える
+        sub.mkdir()
+        git("init", "-q", cwd=sub)
+        git("commit", "-q", "--allow-empty", "-m", "s", cwd=sub)
+        git("-c", "protocol.file.allow=always", "submodule", "add", "-q", str(sub), "s")
+        git("commit", "-q", "-m", "s")
+        rc, rec = self.run_launch("claude")
+        self.assertEqual((rc, rec["head"]), (0, git("rev-parse", "HEAD")), rec)
+        ignore = Path(self.tmp.name) / "ignore-submodules"
+        ignore.write_text("[diff]\n\tignoreSubmodules = all\n")
+        (self.cwd / "s" / "x.txt").write_text("x\n")
+        rc, rec = self.run_launch("claude", env_extra={"GIT_CONFIG_GLOBAL": str(ignore)})
+        self.assertEqual((rc, rec["head"]), (0, None), rec)
 
     def test_reports_with_unicode_line_separators_are_read(self):
         text = GOOD.encode().decode("unicode_escape").replace('"conclusion": "', '"conclusion": "\u2028\x85\u2029')

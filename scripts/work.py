@@ -157,7 +157,7 @@ def reviews_of(commit: str) -> tuple:
                        and isinstance(e.get("out"), str) and os.path.isabs(e["out"]))  # launcher は絶対パスを書く
     f = state_dir() / "delegations.jsonl"
     found, broken = [], 0
-    if f.is_file():
+    if f.exists():
         try:
             rows = f.read_bytes().split(b"\n")
         except OSError as x:  # 権限など。拒否の理由に出す

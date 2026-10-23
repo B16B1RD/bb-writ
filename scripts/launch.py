@@ -673,13 +673,14 @@ def clean_head(cwd: Path) -> str | None:
     """対象の HEAD の commit。Git の作業ツリーでないか、未 commit の変更（staged・追跡外のファイルを含む。無視するものは除く）があれば None。
     子が見たものを commit に結び付け、work.py の --reviewed がこの記録と照らす（Issue #14）。
     親の GIT_DIR・GIT_WORK_TREE など（git rev-parse --local-env-vars）は外す（別の場所を見て、対象の変更を見落とす）。
-    追跡外のファイルは設定（status.showUntrackedFiles=no）に関わらず数える。assume-unchanged・skip-worktree で隠した変更は見分けない。"""
+    追跡外のファイルとサブモジュールの中の変更は、設定（status.showUntrackedFiles=no、diff.ignoreSubmodules・submodule.<名>.ignore）に関わらず数える。
+    assume-unchanged・skip-worktree・fsmonitor で隠した変更は見分けない。"""
     try:
         local = subprocess.run(["git", "rev-parse", "--local-env-vars"], capture_output=True, text=True, timeout=GIT_TIMEOUT)
         env = {k: v for k, v in os.environ.items() if k not in local.stdout.split()}
         head = subprocess.run(["git", "rev-parse", "--verify", "HEAD^{commit}"], cwd=cwd, env=env, capture_output=True, text=True, timeout=GIT_TIMEOUT)
         # バイトで受ける（ファイル名は UTF-8 とは限らない）。index を書き直すロックを取らない（利用者の git と競わない）
-        status = subprocess.run(["git", "--no-optional-locks", "status", "--porcelain", "--untracked-files=normal"], cwd=cwd, env=env,
+        status = subprocess.run(["git", "--no-optional-locks", "status", "--porcelain", "--untracked-files=normal", "--ignore-submodules=none"], cwd=cwd, env=env,
                                 capture_output=True, timeout=GIT_TIMEOUT)
     except (OSError, subprocess.TimeoutExpired):  # git が無い・対象が無い・管理ファイルが FIFO で止まる
         return None

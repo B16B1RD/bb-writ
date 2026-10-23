@@ -802,6 +802,26 @@ class TestReviewedCommit(unittest.TestCase):
         self.assertEqual(rc, 6, r)
         self.assertIn("審査役の記録が無い", r["reason"])
         self.assertNotIn("読めない", r["reason"])  # 無いのは壊れた印でない
+        (Path(self.env["BB_WRIT_STATE_DIR"]) / "delegations.jsonl").mkdir()  # 読めない形
+        rc, r = self.publish(tok, "push:feat@1", "--reviewed", self.head())
+        self.assertEqual(rc, 6, r)
+        self.assertIn("を読めない", r["reason"])
+
+    def test_op_run_refuses_a_commit_no_reviewer_was_launched_on_and_does_not_run_the_command(self):
+        self.launcher_reviews = False
+        tok = self.claim()
+        self.commit("tests/test_new.py")
+        marker = Path(self.tmp.name) / "pushed"
+        rc, r = self.w("op", "run", "--dir", str(self.wt), "--token", tok, "--key", "push:feat@1", "--what", "x", "--from", str(self.repo),
+                       "--verified", self.head(), "--reviewed", self.head(), "--", sys.executable, "-c", f"open({str(marker)!r}, 'w')")
+        self.assertEqual(rc, 6, r)
+        self.assertIn("審査役の記録が無い", r["reason"])
+        self.assertFalse(marker.exists())
+        self.review_record(self.head())
+        rc, r = self.w("op", "run", "--dir", str(self.wt), "--token", tok, "--key", "push:feat@1", "--what", "x", "--from", str(self.repo),
+                       "--verified", self.head(), "--reviewed", self.head(), "--", sys.executable, "-c", f"open({str(marker)!r}, 'w')")
+        self.assertEqual(rc, 0, r)
+        self.assertTrue(marker.exists())
 
     def test_no_review_needs_no_reviewer_record(self):
         self.launcher_reviews = False
