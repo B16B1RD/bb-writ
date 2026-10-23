@@ -49,7 +49,7 @@ FAKE_CODEX = textwrap.dedent(r'''
         import re
         argv = sys.argv[1:]
         conf = [argv[i + 1] for i, x in enumerate(argv[:-1]) if x in ("-c", "--config")] + [x[9:] for x in argv if x.startswith("--config=")]
-        value = lambda key: next((c.split("=", 1)[1].strip().strip('"') for c in conf if c.split("=", 1)[0].strip() == key), None)
+        value = lambda key: next((c.split("=", 1)[1].strip().strip('"') for c in reversed(conf) if c.split("=", 1)[0].strip() == key), None)
         entry = lambda where, access: {"path": {"type": "special", "value": {"kind": where[1:]}} if where.startswith(":")
                                        else {"type": "path", "path": where}, "access": access}
         sandbox = value("sandbox_mode") or next((argv[i + 1] for i, x in enumerate(argv[:-1]) if x in ("-s", "--sandbox")), None)
@@ -71,7 +71,7 @@ FAKE_CODEX = textwrap.dedent(r'''
                 network = "enabled"
             entries += [entry(d, "write") for d in added]
         # 入力の書き換えの場面（対象の設定が同じ profile に足した・版で記録の形が変わった）
-        extra = {"odd-entry": 42, "odd-access": entry(":root", "readwrite"), "odd-path": {"path": {"type": "weird"}, "access": "read"},
+        extra = {"odd-deny-path": {"path": {"type": "weird"}, "access": "deny"}, "odd-entry": 42, "odd-access": entry(":root", "readwrite"), "odd-path": {"path": {"type": "weird"}, "access": "read"},
                  "slash-tmp-profile": entry(":slash_tmp", "write"), "wide-profile": entry(os.getcwd(), "write"),
                  "outdir-profile": entry(os.path.dirname(os.environ.get("TMPDIR", "/nonexistent/x")), "write"),
                  "workspace-profile": entry(":workspace_roots", "write"), "deny-tmp": entry(":tmpdir", "deny"),
@@ -629,7 +629,7 @@ class TestLaunch(unittest.TestCase):
                                           ("ok-then-narrow", "書けない"), ("fs-unknown-then-ok", "確かめられない"),
                                           ("net-unknown-then-ok", "確かめられない"), ("workspace-profile", "広い"), ("deny-tmp", "書けない"),
                                           ("net-open-then-ok", "広い"), ("ok-then-net-open", "広い"),
-                                          ("big-wide-line", "確かめられない"), ("fs-odd-type", "確かめられない"))):
+                                          ("big-wide-line", "確かめられない"), ("odd-deny-path", "確かめられない"), ("fs-odd-type", "確かめられない"))):
             with self.subTest(mode=mode):  # 記録は session ごと
                 rc, rec = self.run_launch("codex", mode=mode, env_extra={"FAKE_THREAD": f"0199aaaa-bbbb-7ccc-8ddd-eeeeffff{1000 + i}"})
                 self.assertEqual((rc, rec["status"]), (2, "failed"), rec)
@@ -640,16 +640,21 @@ class TestLaunch(unittest.TestCase):
         self.assertEqual(rec["status"], "ok", rec)
         rc, rec = self.run_launch("codex", mode="deny-entry", env_extra={"FAKE_THREAD": "0199aaaa-bbbb-7ccc-8ddd-eeeeffff2000"})
         self.assertEqual(rec["status"], "ok", rec)  # 拒否の項目は広げない
-        # 引数で広げる（--add-dir、--config で書ける場所、ネットワーク、sandbox_mode）と、記録の照合が捕まえる
-        launch = (LAUNCH.read_text())
-        for i, more in enumerate((["--add-dir", str(self.cwd)], ["--config", 'permissions.bbwrit-read-only.filesystem={":root"="write"}'],
-                                  ["-c", "permissions.bbwrit-read-only.network.enabled=true"], ["-c", 'sandbox_mode="workspace-write"'])):
+        # 引数で広げる・狭める（--add-dir、--config で書ける場所、ネットワーク、extends、sandbox_mode・-s）と、記録の照合が捕まえる
+        (self.bin / "codex-real").write_text((self.bin / "codex").read_text())
+        (self.bin / "codex-real").chmod(0o755)
+        for i, (more, sign) in enumerate(((["--add-dir", str(self.cwd)], "広い"),
+                                          (["--config", 'permissions.bbwrit-read-only.filesystem={":root"="write"}'], "広い"),
+                                          (['--config=permissions.bbwrit-read-only.filesystem={":slash_tmp"="write"}'], "広い"),
+                                          (["-c", "permissions.bbwrit-read-only.network.enabled=true"], "広い"),
+                                          (["-c", 'permissions.bbwrit-read-only.extends=":workspace"'], "広い"),
+                                          (["-c", 'sandbox_mode="workspace-write"'], "広い"), (["-s", "read-only"], "書けない"),
+                                          (["--sandbox", "read-only"], "書けない"))):
             with self.subTest(more=more):
-                (self.bin / "codex-real").write_text((self.bin / "codex").read_text()) if i == 0 else None
-                wrapper = f"#!/bin/sh\nexec {self.bin / 'codex-real'} \"$@\" {' '.join(repr(m) for m in more)}\n"
-                (self.bin / "codex").write_text(wrapper)
+                (self.bin / "codex").write_text(f"#!/bin/sh\nexec {self.bin / 'codex-real'} \"$@\" {' '.join(repr(m) for m in more)}\n")
                 rc, rec = self.run_launch("codex", env_extra={"FAKE_THREAD": f"0199aaaa-bbbb-7ccc-8ddd-eeeeffff{3000 + i}"})
-                self.assertEqual((rc, rec["status"]), (2, "failed"), rec)
+                self.assertEqual((rc, rec["status"], rec["exit_code"]), (2, "failed", 0), rec)  # 子は動き、照合が止めた
+                self.assertIn(sign, rec["problems"][0])
 
     def test_write_children_are_not_told_to_copy_and_are_not_not_run(self):
         # 写して動かすのは読み取り専用の子だけ。書く子は作業場所で試験を動かし、実行の欄が無くても「読んだだけ」にしない
