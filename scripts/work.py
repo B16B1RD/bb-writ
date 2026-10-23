@@ -74,6 +74,7 @@ import os
 import re
 import secrets
 import signal
+import stat
 import subprocess
 import sys
 import time
@@ -148,6 +149,16 @@ def changed_since_publish(r: Path, d: Path, head: str) -> str:
     return f" 前回の push・pr（{prev[:12]}）から変えたファイル{note}: " + (", ".join(files.splitlines()) or "なし")
 
 
+def read_regular(f: Path) -> bytes:
+    """通常のファイル（symlink の行き先を含む）の中身。開くところで止まらないよう O_NONBLOCK で開き、開いたものの種類を見る。
+    無い・通常のファイルでない（ディレクトリ・FIFO・壊れた symlink）・権限で読めなければ OSError。"""
+    fd = os.open(f, os.O_RDONLY | os.O_NONBLOCK)
+    with os.fdopen(fd, "rb") as h:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise OSError(f"通常のファイルでない: {f}")
+        return h.read()
+
+
 def reviews_of(commit: str) -> tuple:
     """launcher の委任の記録（delegations.jsonl）のうち、その commit を対象に起動して ok で返った読み取り専用の子の記録の out と、
     読めないものの説明（無ければ空）。行と、out の record.json の両方で head・status・write が合うものだけを数える。
@@ -157,33 +168,32 @@ def reviews_of(commit: str) -> tuple:
                        and isinstance(e.get("out"), str) and os.path.isabs(e["out"]))  # launcher は絶対パスを書く
     f = state_dir() / "delegations.jsonl"
     found, broken = [], 0
-    if f.exists() or f.is_symlink():
+    try:
+        rows = read_regular(f).split(b"\n")
+    except FileNotFoundError:
+        if not f.is_symlink():  # まだ委任していない（壊れた symlink は読めない形）
+            rows = []
+        else:
+            return [], f"委任の記録 {f} を読めない: 行き先が無い"
+    except OSError as x:  # 権限・形。拒否の理由に出す
+        return [], f"委任の記録 {f} を読めない: {x}"
+    for line in rows:
+        if not line.strip():
+            continue
         try:
-            if not f.is_file():  # ディレクトリ、FIFO（開くと止まる）など
-                raise OSError("通常のファイルでない")
-            rows = f.read_bytes().split(b"\n")
-        except OSError as x:  # 権限など。拒否の理由に出す
-            return [], f"委任の記録 {f} を読めない: {x}"
-        for line in rows:
-            if not line.strip():
-                continue
-            try:
-                e = json.loads(line.decode("utf-8"))
-            except (ValueError, RecursionError):  # UnicodeDecodeError も ValueError
-                broken += 1
-                continue
-            if not match(e):
-                continue
-            try:
-                rp = Path(e["out"]) / "record.json"
-                if not rp.is_file():  # FIFO などは開くと止まる
-                    raise FileNotFoundError(rp)
-                rec = json.loads(rp.read_text(encoding="utf-8"))
-            except (OSError, ValueError, RecursionError):
-                broken += 1
-                continue
-            if match(rec) and rec["out"] == e["out"]:
-                found.append(e["out"])
+            e = json.loads(line.decode("utf-8"))
+        except (ValueError, RecursionError):  # UnicodeDecodeError も ValueError
+            broken += 1
+            continue
+        if not match(e):
+            continue
+        try:
+            rec = json.loads(read_regular(Path(e["out"]) / "record.json").decode("utf-8"))
+        except (OSError, ValueError, RecursionError):
+            broken += 1
+            continue
+        if match(rec) and rec["out"] == e["out"]:
+            found.append(e["out"])
     return found, (f"委任の記録 {f} に、読めない行か、out の record.json を読めない行が {broken} 行ある" if broken else "")
 
 
