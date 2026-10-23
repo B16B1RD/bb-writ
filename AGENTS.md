@@ -39,7 +39,7 @@ bb-writ は、CLI ハーネス（Claude Code・Codex。Grok Build も同じ SKIL
 | 規則 | 強制するもの |
 |---|---|
 | 子の起動の後、ホームに空のファイル・ディレクトリを残さない（子の CLI の sandbox が作る。空の `.bash_profile` でログインシェルが `.bashrc` を読まなくなった） | `scripts/launch.py` が子の前後のホームを `home_entries` で比べて `failed` にする（読めない場所が増えたときも）。Claude Code 2.1.309 の sandbox が設定を組むときに作る空のディレクトリ `~/.claude/ssh`（サーバー側の機能フラグが有効なとき。CLI が `~/.claude` の下に作り、CLI の中にもほかに使う所が見つからない）だけは数えず、消さない。`tests/test_launch.py` の `test_child_leaving_empty_files_in_home_fails`・`test_only_the_empty_ssh_dir_claude_code_makes_in_home_is_not_residue`・`test_a_child_hiding_part_of_home_fails`、`tests/verify_sandbox_live.py` の `no_home_residue` |
-| 子の CLI が終わった後（時間切れを含む）、子が起こしたプロセスを残さない（Claude Code の Bash は新しいセッションで動き、プロセスグループを止めても、審査役の試験が子の終了から 49 分以上動いた） | Linux は `scripts/launch.py` が subreaper になって照合の前に子孫を止め、止めきれなければ `failed`。`tests/test_launch.py` の `test_processes_the_child_detached_do_not_outlive_it`。Linux の外は止めない（確かめていない） |
+| 子の CLI が終わった後（時間切れを含む）、子が起こしたプロセスを残さない（Claude Code の Bash は新しいセッションで動き、プロセスグループを止めても、審査役の試験が子の終了から 49 分以上動いた） | Linux は `scripts/launch.py` が subreaper になって照合の前に子孫を止め、止めきれなければ `failed`。`tests/test_launch.py` の `test_processes_the_child_detached_do_not_outlive_it`。`test_a_child_the_launcher_cannot_stop_or_check_fails`。Linux の外はプロセスグループを止めるだけ（確かめていない） |
 | launcher はプラグインの置き場に `__pycache__` を作らない | `tests/test_launch.py` の `test_launch_leaves_no_bytecode_in_the_plugin` |
 | Claude Code の子に `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB` を使わない（許可の方針を既定に戻し、空のファイルを残した） | 読み取り専用の子は `tests/test_launch.py` の `test_claude_read_only_in_worktree_denies_the_common_git_dir`。書く子は試験が無く、残った空のファイルを上の `home_entries` が捕まえる |
 | Claude Code の子に、親の `CLAUDE*`・`ANTHROPIC_*` の環境変数を渡さない | `tests/test_launch.py` の `test_claude_child_gets_no_parent_claude_env` |

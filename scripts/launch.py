@@ -10,8 +10,9 @@
 JSON が返ったことを成功にしない: 結論が空、証拠が無い、証拠の where がファイルを指すのに存在しない、実行の欄の形が違う、は invalid-report。
 読み取り専用の子で、実行の欄が無いか、対象の試験・検査を実行できなかったと書いた報告は not-run（読んだだけの報告。起動して形の整った報告が返ったことと区別する）。
 書く子の実行の欄は記録するだけ（作業場所の試験は親が確かめる）。実行の欄の真偽（本当に動かしたか）は見ない。
-子の CLI が終わったら（時間切れを含む）、子のプロセスグループを止め、Linux では自分の下に残った子孫（新しいセッションに切り離したものも）を止めて stopped_after_exit に並べる。
-止めきれなければ failed。Linux の外では、プロセスグループを止めるだけ（stopped_after_exit は出ない）。
+子の CLI が終わったら（時間切れを含む。出力を開いたままの子孫は待たない）、子のプロセスグループを止め、Linux では自分の下に残った子孫
+（新しいセッションに切り離したものも）を止めて stopped_after_exit に並べる。止めきれない・/proc を読めない・subreaper になれないなら failed。
+Linux の外では、プロセスグループを止めるだけ（stopped_after_exit は出ない）。
 トークンは画面にもログにも出さない（Claude Code は dotenvx run で子の環境にだけ渡す）。
 """
 from __future__ import annotations  # macOS の Command Line Tools の python3（3.9）でも型注釈で落ちないように
@@ -27,6 +28,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from pathlib import Path
 
@@ -700,57 +702,52 @@ def become_subreaper() -> None:
         raise OSError(ctypes.get_errno(), "prctl(PR_SET_CHILD_SUBREAPER) が失敗した")
 
 
-def stop_descendants() -> tuple[list[str], list[str]]:
-    """自分の子孫を、残らなくなるまで止めて刈る。(止めたもの, 止められずに残ったもの) を「pid コマンド行」で返す。
-    become_subreaper の後、子の CLI を刈ってから呼ぶ（親が死んだ子孫は自分の下に来るので、ppid をたどれば全部見つかる）。"""
-    def reap():
-        while True:
-            try:
-                if os.waitpid(-1, os.WNOHANG)[0] == 0:
-                    return
-            except ChildProcessError:
-                return
-
-    def alive() -> dict[int, str]:
-        parent = {}
+def stop_descendants(group: int) -> tuple[list[str], list[str]]:
+    """自分の子孫を、残らなくなるまで止める。(止めたもの, 止められずに残ったもの) を「pid コマンド行」で返す。
+    become_subreaper の後、子の CLI を刈ってから呼ぶ。1 周に止めるのは自分の直接の子だけで、刈れたら終わったとみなす（刈るまでは番号を
+    保つので、調べてから止めるまでに別のプロセスへ使い回されない。ゾンビに見えても止める: 主スレッドだけ終わったプロセスは、ほかの
+    スレッドが動く間はゾンビに見え、刈れず、その下の子孫もまだ付け替わっていない）。子が終わると、その下の子孫が自分の下に来るので、
+    次の周で止める。止めたものには、刈る前に自分で終わっていたものも入る。子の CLI のプロセスグループ（group。止めてから呼ぶ）の
+    ものは、子の CLI そのもの（dotenvx の下の claude など）なので、止めて刈るが並べない。/proc を読めなければ例外を出す。"""
+    def children() -> dict[int, tuple[str, bool]]:
+        found = {}
         for d in os.listdir("/proc"):
             if not d.isdigit():
                 continue
             try:
-                raw = Path(f"/proc/{d}/stat").read_bytes()
-            except OSError:  # 調べる間に終わった
+                with open(f"/proc/{d}/stat", "rb") as f:
+                    raw = f.read()
+                fields = raw[raw.rindex(b")") + 2:].split()  # コマンド名は ) を含みうる
+                if int(fields[1]) != os.getpid():
+                    continue
+                with open(f"/proc/{d}/cmdline", "rb") as f:  # 主スレッドが終わると空になるので、そのときはコマンド名
+                    args = (f.read().replace(b"\0", b" ").strip() or raw[raw.index(b"(") : raw.rindex(b")") + 1]).decode("utf-8", "replace")
+            except (FileNotFoundError, ProcessLookupError):  # 調べる間に終わって刈られた
                 continue
-            fields = raw[raw.rindex(b")") + 2:].split()  # コマンド名は ) を含みうる
-            if fields[0] != b"Z":  # ゾンビは刈るだけ
-                parent[int(d)] = int(fields[1])
-        found, todo = {}, [os.getpid()]
-        while todo:
-            p = todo.pop()
-            for c in [c for c, pp in parent.items() if pp == p and c not in found]:
-                try:
-                    args = Path(f"/proc/{c}/cmdline").read_bytes().replace(b"\0", b" ").strip().decode("utf-8", "replace")
-                except OSError:
-                    args = ""
-                found[c] = f"{c} {args}"[:300]
-                todo.append(c)
+            found[int(d)] = (f"{d} {args}"[:300], int(fields[2]) == group)
         return found
 
-    stopped = {}
-    for _ in range(100):  # 止める間に fork したものも、次の周で見つかる
-        reap()
-        left = alive()
+    stopped, denied = {}, {}
+    for _ in range(100):  # 止めるたびに、その下の子孫が 1 段ずつ上がってくる
+        left = children()
         if not left:
-            return sorted(stopped.values()), []
-        for pid, line in left.items():
-            stopped.setdefault(pid, line)
+            break
+        for pid, (line, cli) in left.items():
+            if not cli:
+                stopped.setdefault(pid, line)
             try:
                 os.kill(pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
+            except PermissionError as e:  # ほかの子孫は止め続ける
+                denied[pid] = f"{line}（{e!r}）"[:300]
+            try:
+                os.waitpid(pid, os.WNOHANG)
+            except ChildProcessError:
+                pass
         time.sleep(0.05)
-    reap()
-    left = alive()
-    return sorted(v for k, v in stopped.items() if k not in left), sorted(left.values())
+    left = children()
+    return sorted(v for k, v in stopped.items() if k not in left), sorted(denied.get(k, v[0]) for k, v in left.items())
 
 
 def launcher_error(out_dir: Path) -> str:
@@ -840,19 +837,31 @@ def main() -> int:
             # 切り離した子孫（Claude Code の Bash）はグループの外なので、Linux では自分の下に来たものを残らなくなるまで止める
             child = subprocess.Popen(cmd, cwd=a.cwd, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                      start_new_session=True)  # バイトで受ける（子の出力は UTF-8 とは限らない）
+            output = {}
+            readers = [threading.Thread(target=lambda k=k, f=f: output.__setitem__(k, f.read()), daemon=True)
+                       for k, f in (("stdout", child.stdout), ("stderr", child.stderr))]
+            for t in readers:
+                t.start()
             try:
-                stdout, stderr = child.communicate(timeout=a.timeout)
+                child.wait(timeout=a.timeout)  # 出力が閉じるのでなく、子の CLI が終わるのを待つ（子孫が出力を開いたままでも）
             finally:
                 try:
                     os.killpg(child.pid, signal.SIGKILL)
                 except ProcessLookupError:
                     pass
-                if LINUX:
-                    try:
-                        rec["stopped_after_exit"], left = stop_descendants()  # 時間切れでも。止めた子の CLI もここで刈る
-                    except Exception as e:
-                        rec.setdefault("stopped_after_exit", [])
-                        left = [f"子の残りを確かめられない: {e!r}"[:300], f"詳細: {launcher_error(out_dir)}"]
+                finally:
+                    if LINUX:
+                        try:
+                            child.wait()  # 時間切れでも、子の CLI を刈ってから（刈る前は、生きた子として見える）
+                            rec["stopped_after_exit"], left = stop_descendants(child.pid)
+                        except Exception as e:
+                            rec.setdefault("stopped_after_exit", [])
+                            left = [f"子の残りを確かめられない: {e!r}"[:300], f"詳細: {launcher_error(out_dir)}"]
+            for t in readers:
+                t.join(timeout=10)  # 開いていた子孫が止まれば閉じる
+            if any(t.is_alive() for t in readers):
+                raise RuntimeError("子の CLI が終わった後も、ほかのプロセスが子の出力を開いたまま")
+            stdout, stderr = output["stdout"], output["stderr"]
             (out_dir / "stdout.jsonl").write_bytes(stdout)  # 照合の材料は生のまま残す
             (out_dir / "stderr.log").write_bytes(stderr)
             p = subprocess.CompletedProcess(cmd, child.wait(), stdout.decode("utf-8", "replace"), stderr.decode("utf-8", "replace"))

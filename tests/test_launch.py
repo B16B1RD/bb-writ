@@ -138,6 +138,7 @@ FAKE_CODEX = textwrap.dedent(r'''
     if mode == "tmpdir":  # 書ける一時ディレクトリで試験を動かした
         import tempfile
         tempfile.mkdtemp()
+    # ORPHAN
     print(json.dumps({"type": "thread.started", "thread_id": "**" if mode == "glob-session" else thread}, ensure_ascii=raw))
     print(json.dumps({"type": "item.completed", "item": {"type": "agent_message", "text": text}}, ensure_ascii=raw))
     if mode == "deep-usage":  # 読めるが、記録（indent 付き）には書けない深さ
@@ -243,20 +244,7 @@ FAKE_CLAUDE = textwrap.dedent(r'''
         open(os.path.join(gd, "HEAD"), "wb").write(h.rstrip(b"\n") + b" \n")
     if mode == "shapes":  # 深すぎる行
         print('{"a": ' + "[" * 100000 + "]" * 100000 + "}")
-    if mode in ("orphan", "orphan-hang"):  # Claude Code の Bash のように、新しいセッションで起こし、その下にもう 1 段起こす（2.1.309 は sh → bwrap → … → sleep）
-        late = "import os, subprocess, sys, time; s = subprocess.Popen([sys.argv[1], '600'], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL); " \
-               "open(sys.argv[2] + '.part', 'w').write(f'{os.getpid()} {s.pid}'); os.rename(sys.argv[2] + '.part', sys.argv[2]); " \
-               "time.sleep(1.5); sys.argv[3] and open('late.txt', 'w').write('x'); time.sleep(600)"  # 子が終わった後に、作業場所へ書く
-        subprocess.Popen([sys.executable, "-c", late, os.environ["FAKE_SLEEP"], os.environ["FAKE_ARGS"] + ".orphan", "" if mode == "orphan-hang" else "1"],
-                         start_new_session=True,
-                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        import time
-        for _ in range(200):
-            if os.path.exists(os.environ["FAKE_ARGS"] + ".orphan"):
-                break
-            time.sleep(0.05)
-        if mode == "orphan-hang":  # 時間切れの経路
-            time.sleep(60)
+    # ORPHAN
     result = os.environ["FAKE_TEXT"]
     if mode == "unwritable-report":  # 試験の sitecustomize が書き出しを失敗させる印
         result = result.replace('"conclusion": "', '"__unwritable__": 1, "conclusion": "')
@@ -294,16 +282,43 @@ FAKE_GROK = textwrap.dedent(r'''
         auth = os.path.join(os.environ["GROK_HOME"], "auth.json")
         os.unlink(auth)
         open(auth, "w").write('{"refreshed": true}')
+    # ORPHAN
     print(json.dumps({"text": os.environ["FAKE_TEXT"], "stopReason": "end_turn", "sessionId": "g-1",
                       "modelUsage": "x" if mode == "shapes" else {"grok-4.7-build": {}}, "total_cost_usd": 0.02, "num_turns": 3,
                       **({"sessionId": ["g"]} if mode == "shapes" else {})}))
 ''').lstrip()
 
+# 偽の CLI の共通の部分: Claude Code 2.1.309 の Bash のように、新しいセッションでプロセスを起こし、その下にもう 1 段起こして、自分は先に終わる
+# （実物は sh → bwrap → … → sleep）。上の段はコマンド名に ) を含め（/proc の stat を最初の ) で切ると読み違える）、主スレッドだけを終わらせて
+# 別のスレッドで動き続ける（ゾンビに見えるが生きていて、下の段もまだ付け替わらない。ゾンビを止まったものとみなすと残る）
+ORPHAN = textwrap.indent(textwrap.dedent(r'''
+    if mode in ("orphan", "orphan-hang", "orphan-pipe"):
+        import subprocess, time
+        late = ("import ctypes, os, platform, subprocess, sys, threading, time; libc = ctypes.CDLL(None); libc.prctl(15, b'x) Z 1 (', 0, 0, 0); "
+                "s = subprocess.Popen([sys.argv[1], '600'], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL); "
+                "threading.Thread(target=lambda: (time.sleep(1.5), sys.argv[3] and open('late.txt', 'w').write('x'), time.sleep(600))).start(); "  # 子が終わった後に、作業場所へ書く
+                "open(sys.argv[2] + '.part', 'w').write(f'{os.getpid()} {s.pid}'); os.rename(sys.argv[2] + '.part', sys.argv[2]); "
+                "libc.syscall({'x86_64': 60, 'aarch64': 93}[platform.machine()], 0)")  # SYS_exit: 主スレッドだけ終わる
+        quiet = {} if mode == "orphan-pipe" else {"stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}  # orphan-pipe は子の出力を開いたまま
+        subprocess.Popen([sys.executable, "-c", late, os.environ["FAKE_SLEEP"], os.environ["FAKE_ARGS"] + ".orphan", "" if mode == "orphan-hang" else "1"],
+                         start_new_session=True, stdin=subprocess.DEVNULL, **quiet)
+        for _ in range(200):  # 上の段の主スレッドが終わる（ゾンビに見える）まで待ってから、自分が終わる
+            try:
+                top = open(os.environ["FAKE_ARGS"] + ".orphan").read().split()[0]
+                if open(f"/proc/{top}/stat", "rb").read().rsplit(b")", 1)[1].split()[0] == b"Z":
+                    break
+            except (OSError, IndexError):
+                pass
+            time.sleep(0.05)
+        if mode == "orphan-hang":  # 時間切れの経路（子が生きている間に書くことになるので、書かせない）
+            time.sleep(60)
+''').strip("\n"), "") + "\n"
+
 FAKE_DOTENVX = textwrap.dedent(r'''
     #!/usr/bin/env python3
-    import os, sys
+    import subprocess, sys
     args = sys.argv[1:]
-    os.execvp(args[args.index("--") + 1], args[args.index("--") + 1:])
+    sys.exit(subprocess.run(args[args.index("--") + 1:]).returncode)  # 本物と同じく、子を起こして待つ（時間切れで止めると、claude が launcher の下に来る）
 ''').lstrip()
 
 
@@ -317,7 +332,7 @@ def fs_rules(argv: list) -> dict:
 def stop_leftover(pid: int):
     """試験の偽の子が残した sleep 600 と回し役だけを止める（番号が別のプロセスに使い回されていたら触らない）。"""
     try:
-        if b"600" in Path(f"/proc/{pid}/cmdline").read_bytes():
+        if b"600" in Path(f"/proc/{pid}/cmdline").read_bytes() or b"(x) Z 1 ()" in Path(f"/proc/{pid}/stat").read_bytes():
             os.kill(pid, 9)
     except (OSError, ProcessLookupError):
         pass
@@ -345,16 +360,18 @@ class TestLaunch(unittest.TestCase):
         (self.cfg / ".env").write_text("X=1\n")
         (self.cfg / ".env.keys").write_text("K=1\n")
         for name, body in (("codex", FAKE_CODEX), ("claude", FAKE_CLAUDE), ("grok", FAKE_GROK), ("dotenvx", FAKE_DOTENVX)):
-            (self.bin / name).write_text(body.replace("/usr/bin/env python3", sys.executable))
+            (self.bin / name).write_text(body.replace("/usr/bin/env python3", sys.executable).replace("# ORPHAN\n", ORPHAN))
             (self.bin / name).chmod(0o755)
         self.prompt = t / "prompt.md"
         self.prompt.write_text("x を確かめて")
         self.args_file = t / "args.json"
 
     def tearDown(self):
+        self.orphans()  # 試験が run_launch の途中で落ちても、偽の子孫を残さない（記録の置き場を消す前に読む）
         self.tmp.cleanup()
 
     def run_launch(self, host, mode="good", extra=(), path=None, cwd=None, env_extra=None, proc_cwd=None):
+        self.orphans()  # 前の回が途中で落ちて読まれなかった偽の子孫を、上書きする前に片付けに回す
         env = {**os.environ, "HOME": str(self.home), "PATH": path if path is not None else f"{self.bin}:/usr/bin:/bin", "BB_WRIT_CONFIG_DIR": str(self.cfg),
                "BB_WRIT_STATE_DIR": str(self.state), "FAKE_MODE": mode, "FAKE_ARGS": str(self.args_file),
                "FAKE_TEXT": GOOD.encode().decode("unicode_escape"), **(env_extra or {})}
@@ -1395,27 +1412,103 @@ class TestLaunch(unittest.TestCase):
     @unittest.skipUnless(sys.platform.startswith("linux"), "子の CLI が切り離した子孫を止めるのは Linux だけ（PR_SET_CHILD_SUBREAPER）")
     def test_processes_the_child_detached_do_not_outlive_it(self):
         # Claude Code 2.1.309 の Bash は、コマンドを新しいセッションで起こす。プロセスグループを止めるだけでは、子が終わった後も
-        # 試験を回し続け、作業場所にも書けた（Issue #20）。正常に終わったときも、時間切れのときも、照合の前に止める
+        # 試験を回し続け、作業場所にも書けた（Issue #20）。どの子でも、正常に終わったときも時間切れのときも止め、記録に並べる。
+        # 見るのは、子孫が 1.5 秒後に書く前に止めたことまでで、照合（Git の管理情報・ホームの比較）より前に止めた順序は見ない（照合は速く終わる）
         sleep = shutil.which("sleep")  # PATH を偽の置き場に変える前に、本物を絶対パスで引く
-        orphan = Path(str(self.args_file) + ".orphan")
-        for mode, extra, status in (("orphan", (), "ok"), ("orphan", ("--write",), None), ("orphan-hang", ("--timeout", "3"), "failed")):
-            with self.subTest(mode=mode, extra=extra):
-                orphan.unlink(missing_ok=True)
-                (self.cwd / "late.txt").unlink(missing_ok=True)
-                rc, rec = self.run_launch("claude", mode, extra=extra, env_extra={"FAKE_SLEEP": sleep})
-                pids = [int(p) for p in orphan.read_text().split()]
-                self.addCleanup(lambda pids=pids: [stop_leftover(p) for p in pids])  # 落ちても sleep を残さない
-                if status:
-                    self.assertEqual(rec["status"], status, rec)
+        grok = self.grok_target()
+        cases = (  # (ホスト, 偽の CLI のモード, 引数, 対象, status)
+            ("claude", "orphan", (), self.cwd, "ok"),
+            ("claude", "orphan", ("--write",), self.cwd, "ok"),
+            ("claude", "orphan-pipe", ("--timeout", "60"), self.cwd, "ok"),  # 子孫が子の出力を開いたままでも、子の CLI の終わりで返る
+            ("claude", "orphan-hang", ("--timeout", "3"), self.cwd, "failed"),
+            ("codex", "orphan", (), self.cwd, "ok"),
+            ("grok", "orphan", (), grok, "ok"),
+        )
+        for host, mode, extra, cwd, status in cases:
+            with self.subTest(host=host, mode=mode, extra=extra):
+                (cwd / "late.txt").unlink(missing_ok=True)
+                t0 = time.time()
+                rc, rec = self.run_launch(host, mode, extra=extra, cwd=cwd, env_extra={"FAKE_SLEEP": sleep})
+                took = time.time() - t0
+                pids = self.orphans()
+                self.assertEqual(rec["status"], status, rec)
                 for pid in pids:
                     with self.assertRaises(ProcessLookupError, msg=f"{pid} が残った: {rec}"):
-                        os.kill(pid, 0)  # 止めて刈ってある（ゾンビも残さない）
+                        os.kill(pid, 0)
+                # 子の CLI 自身は並べない（時間切れで止めた CLI がまだゾンビになっていないと並ぶ。この環境で毎回出るかは時刻による）
                 self.assertEqual(sorted(int(p.split()[0]) for p in rec["stopped_after_exit"]), sorted(pids), rec)
                 self.assertTrue(any(p.endswith(f"{sleep} 600") for p in rec["stopped_after_exit"]), rec)
-                time.sleep(2)  # 止めていなければ、ここまでに作業場所へ書く（時間切れの経路では書かせない。子が生きている間に書くことになる）
-                self.assertFalse((self.cwd / "late.txt").exists())
+                self.assertIn(f"{pids[0]} (x) Z 1 ()", rec["stopped_after_exit"])  # 主スレッドが終わって cmdline が空なら、コマンド名を並べる
+                if mode == "orphan-pipe":
+                    self.assertLess(took, 30, rec)
+                time.sleep(2)  # 止めていなければ、ここまでに作業場所へ書く
+                self.assertFalse((cwd / "late.txt").exists())
         rc, rec = self.run_launch("claude")
         self.assertEqual((rc, rec["stopped_after_exit"]), (0, []), rec)
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "子の CLI が切り離した子孫を止めるのは Linux だけ（PR_SET_CHILD_SUBREAPER）")
+    def test_a_child_the_launcher_cannot_stop_or_check_fails(self):
+        # 止めきれない・/proc を読めない・subreaper になれないときは、残ったかもしれないので failed にする（黙って ok にしない）。
+        # 止めるのを 1 回拒まれても、止め続ける（ほかの子孫も、次の周の同じ子孫も）
+        sleep = shutil.which("sleep")
+        site = Path(self.tmp.name) / "site"
+        site.mkdir()
+        (site / "sitecustomize.py").write_text(textwrap.dedent('''
+            import builtins, ctypes, os, re
+            what = os.environ.get("FAKE_SITE")
+            if what == "unkillable":  # 偽の子孫だけ、SIGKILL が効かない（D 状態の代わり）
+                _kill = os.kill
+                def kill(pid, sig):
+                    if sig == 9 and (b"600" in open(f"/proc/{pid}/cmdline", "rb").read() or b"(x) Z 1 ()" in open(f"/proc/{pid}/stat", "rb").read()):
+                        return
+                    _kill(pid, sig)
+                os.kill = kill
+            if what == "eperm-once":  # 偽の子孫を止めるのを、最初の 1 回だけ拒む
+                _kill2, _denied = os.kill, []
+                def kill(pid, sig):
+                    if sig == 9 and not _denied and b"(x) Z 1 ()" in open(f"/proc/{pid}/stat", "rb").read():
+                        _denied.append(pid)
+                        raise PermissionError(1, "denied")
+                    _kill2(pid, sig)
+                os.kill = kill
+            if what == "unreadable":
+                _open = builtins.open
+                builtins.open = lambda f, *a, **k: (_ for _ in ()).throw(PermissionError(13, "denied", f)) if re.fullmatch(r"/proc/\\d+/stat", str(f)) else _open(f, *a, **k)
+            if what == "no-subreaper":
+                class _Libc:
+                    def __init__(self, *a, **k):
+                        pass
+                    def prctl(self, *a):
+                        return -1
+                ctypes.CDLL = _Libc
+        '''))
+        rc, rec = self.run_launch("claude", "orphan", env_extra={"FAKE_SLEEP": sleep, "PYTHONPATH": str(site), "FAKE_SITE": "eperm-once"})
+        pids = self.orphans()
+        self.assertEqual((rc, rec["status"], sorted(int(p.split()[0]) for p in rec["stopped_after_exit"])), (0, "ok", sorted(pids)), rec)
+        for pid in pids:
+            with self.assertRaises(ProcessLookupError, msg=f"{pid} が残った: {rec}"):
+                os.kill(pid, 0)
+        for what, words in (("unkillable", "子が起こしたプロセスを止められない"), ("unreadable", "子の残りを確かめられない"),
+                            ("no-subreaper", "起動の前の準備ができない")):
+            with self.subTest(what=what):
+                rc, rec = self.run_launch("claude", "orphan", env_extra={"FAKE_SLEEP": sleep, "PYTHONPATH": str(site), "FAKE_SITE": what})
+                pids = self.orphans()
+                self.assertEqual((rc, rec["status"]), (2, "failed"), rec)
+                self.assertTrue(any(words in p for p in rec["problems"]), rec)
+                if what == "no-subreaper":  # 子を起こさない
+                    self.assertEqual(pids, [], rec)
+                elif what == "unkillable":  # 止められなかった上の段を並べる（下の段は、上の段が生きているので自分の下に来ない）
+                    self.assertTrue(any(p.startswith(f"{pids[0]} ") for p in rec["problems"]), rec)
+
+    def orphans(self) -> list:
+        """偽の子が切り離して起こした 2 段の pid。試験が落ちても残さないよう、片付けに登録する。"""
+        orphan = Path(str(self.args_file) + ".orphan")
+        if not orphan.exists():
+            return []
+        pids = [int(p) for p in orphan.read_text().split()]
+        orphan.unlink()
+        self.addCleanup(lambda: [stop_leftover(p) for p in pids])
+        return pids
 
     def test_only_the_empty_ssh_dir_claude_code_makes_in_home_is_not_residue(self):
         # 2.1.309 の sandbox は、子を起こすたびにホームへ空の .claude/ssh を作り、残りとして委任が毎回 failed になった。
