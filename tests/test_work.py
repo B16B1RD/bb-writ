@@ -1092,9 +1092,11 @@ class TestOpRun(unittest.TestCase):
         return go
 
     def start_run(self, tok, key, body, env=None, **kw):
-        return subprocess.Popen([sys.executable, str(WORK), "op", "run", "--dir", str(self.wt), "--token", tok, "--key", key,
-                                 "--what", "x", "--from", str(self.repo), "--verified", self.head(), "--reviewed", self.head(),
-                                 *self.script(body)], env={**self.env, **(env or {})}, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, **kw)
+        p = subprocess.Popen([sys.executable, str(WORK), "op", "run", "--dir", str(self.wt), "--token", tok, "--key", key,
+                              "--what", "x", "--from", str(self.repo), "--verified", self.head(), "--reviewed", self.head(),
+                              *self.script(body)], env={**self.env, **(env or {})}, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, **kw)
+        self.addCleanup(p.stdout.close)  # 読み切らない試験もある。閉じないと ResourceWarning が出る
+        return p
 
     def wait_running(self, key):
         for _ in range(200):
@@ -1507,6 +1509,7 @@ class TestOpRun(unittest.TestCase):
         p = subprocess.Popen([sys.executable, str(WORK), "op", "run", "--dir", str(self.wt), "--token", tok, "--key", "push:feat@1",
                               "--what", "x", "--from", str(self.repo), "--verified", self.head(), "--reviewed", self.head(),
                               *self.script("print('SECRET' * 2_000_000)")], env=self.env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        self.addCleanup(p.stderr.close)
         p.stderr.read(1024)  # 表示が始まった
         p.kill()
         p.wait()
@@ -1546,6 +1549,7 @@ class TestOpRun(unittest.TestCase):
         holder = subprocess.Popen([sys.executable, "-c", f"import fcntl, os, time; fd = os.open({str(lock)!r}, os.O_RDWR | os.O_CREAT); "
                                    "os.write(fd, b'push:feat@1'); fcntl.flock(fd, fcntl.LOCK_EX); print('held', flush=True); time.sleep(60)"],
                                   stdout=subprocess.PIPE, text=True)
+        self.addCleanup(holder.stdout.close)
         self.assertEqual(holder.stdout.readline().strip(), "held")
         try:
             self.assertEqual(self.run_op(tok, "pr:feat", "--reviewed", "none:x", *self.script("print(2)"))[0], 0)
@@ -1932,6 +1936,7 @@ class TestOpRun(unittest.TestCase):
         lock.write_text("push:h")
         holder = subprocess.Popen([sys.executable, "-c", f"import fcntl, os, time; fd = os.open({str(lock)!r}, os.O_RDWR); "
                                    "fcntl.flock(fd, fcntl.LOCK_EX); print('held', flush=True); time.sleep(60)"], stdout=subprocess.PIPE, text=True)
+        self.addCleanup(holder.stdout.close)
         try:
             self.assertEqual(holder.stdout.readline().strip(), "held")
             self.assertEqual(work.run_holder(r), "push:h")  # 取られているロックは、記録が読めなくても数える
