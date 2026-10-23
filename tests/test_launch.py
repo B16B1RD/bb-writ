@@ -790,6 +790,28 @@ class TestLaunch(unittest.TestCase):
         h = str((real / "home").resolve())
         self.assertNotIn(f"{h}/.config", rules)
         self.assertEqual(rules.get(f"{h}/.config/gh"), "deny", rules)
+        for kept in (f"{h}/.config/git", f"{h}/dotfiles/git", f"{h}/dotfiles"):  # Git の設定は拒まない
+            self.assertNotIn(kept, rules)
+        # ~/.config そのものが symlink（dotfiles）の配置でも、~/.config を丸ごと拒まない
+        (real / "home" / "dotfiles" / "config" / "gh").mkdir(parents=True)
+        (real / "home" / ".config" / "git").unlink()
+        shutil.rmtree(real / "home" / ".config")
+        (real / "home" / ".config").symlink_to(real / "home" / "dotfiles" / "config")
+        (real / "home" / "dotfiles" / "config" / "git").symlink_to(real / "home" / "dotfiles" / "git")
+        rc, rec = self.run_launch("codex", env_extra={"HOME": str(home)})
+        self.assertEqual((rc, rec["status"]), (0, "ok"), rec)
+        rules = fs_rules(json.loads(self.args_file.read_text()))
+        self.assertNotIn(f"{h}/dotfiles/config", rules)
+        self.assertEqual(rules.get(f"{h}/dotfiles/config/gh"), "deny", rules)
+        # ~/.config/git が専用ログインの中を指すなら、Git の設定として残さない
+        login = Path(self.tmp.name) / "login-cfg"
+        shutil.copytree(self.cfg, login)
+        (login / "claude-home").mkdir()
+        (real / "home" / "dotfiles" / "config" / "git").unlink()
+        (real / "home" / "dotfiles" / "config" / "git").symlink_to(login / "claude-home")
+        rc, rec = self.run_launch("codex", env_extra={"HOME": str(home), "BB_WRIT_CONFIG_DIR": str(login)})
+        rules = fs_rules(json.loads(self.args_file.read_text()))
+        self.assertEqual(rules.get(str(login.resolve())), "deny", rules)
 
     def test_codex_binary_inside_the_login_keeps_only_the_binary(self):
         # 本体が専用ログインの中（codex-home/bin/codex）にあると、2 つ上は codex-home。中の auth.json は拒む

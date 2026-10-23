@@ -340,7 +340,7 @@ def codex_read_only(scratch: Path, cwd: Path) -> tuple[list[str], list[str]]:
     binary = Path(os.path.realpath(shutil.which("codex") or "/"))
     package = binary.parent.parent
     keep = [binary, *([package] if package not in roots and login not in package.parents else []),
-            *([gitconf] if Path(os.path.realpath(gitconf := Path.home() / ".config" / "git")) not in roots else []),
+            *([gitconf] if (g := Path(os.path.realpath(gitconf := Path.home() / ".config" / "git"))) not in roots and login not in g.parents else []),
             cwd, *([git_dir] if git_dir else [])]
     denies = secret_denies(keep)
     scratch.mkdir(parents=True)
