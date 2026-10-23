@@ -766,6 +766,7 @@ class TestReviewedCommit(unittest.TestCase):
             self.review_record(h, **over)
         for record in ({"head": None}, {"status": "failed"}, {"write": True}, {"out": "/elsewhere"}):  # 行だけ書き換えた記録
             self.review_record(h, record=record)
+        self.review_record(h, out="/a\x00b")  # 開けない名前の out（os.open が ValueError）
         gone = self.review_record(h)  # out の record.json が無い
         (Path(gone) / "record.json").unlink()
         fifo = self.review_record(h)  # out の record.json が FIFO（開くと止まる）
@@ -776,7 +777,7 @@ class TestReviewedCommit(unittest.TestCase):
             f.write(b'[1]\nnull\n"x"\n' + b'{"head": "' + h.encode() + b'", "status": "o\n' + b'{"x": "\xff"}\n' + b"[" * 100000 + b"\n")
         rc, r = self.publish(tok, "push:feat@1", "--reviewed", h)
         self.assertEqual(rc, 6, r)
-        self.assertIn("record.json を読めない行が 5 行", r["reason"])  # 書きかけ・UTF-8 でない・深すぎる行と、record.json の無い・FIFO の行
+        self.assertIn("record.json を読めない行が 6 行", r["reason"])  # 書きかけ・UTF-8 でない・深すぎる行と、record.json の無い・FIFO・開けない名前の行
         rel = Path(self.tmp.name) / "rel"  # 相対の out（work.py の場所で解かれる。launcher は絶対パスを書く）
         rel.mkdir()
         rel_out = "rel"  # w() の work.py は self.tmp.name で動く
