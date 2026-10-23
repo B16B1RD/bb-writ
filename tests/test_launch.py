@@ -66,6 +66,8 @@ FAKE_CLAUDE = textwrap.dedent(r'''
     os.makedirs(".claude/.cc-writes", exist_ok=True)  # 2.1.302 の --restricted が対象に作る空のディレクトリ
     import subprocess
     mode = os.environ.get("FAKE_MODE")
+    if mode == "home-claude-only":  # 空の .claude だけを作る
+        os.makedirs(os.path.join(os.environ["HOME"], ".claude"))
     if (mode or "").startswith("home-ssh"):  # 2.1.309 の sandbox がホームに作る空のディレクトリ
         ssh = os.path.join(os.environ["HOME"], ".claude", "ssh")
         os.makedirs(os.path.dirname(ssh), exist_ok=True)
@@ -546,35 +548,39 @@ class TestLaunch(unittest.TestCase):
             self.assertEqual((rec["status"], rec["home_residue"]), ("failed", [str(home / ".bash_profile")]), (host, rec))
             (home / ".bash_profile").unlink()
 
-    def test_the_empty_ssh_dir_claude_code_makes_in_home_is_not_residue(self):
-        # 2.1.309 の sandbox は、子を起こすたびにホームへ空の .claude/ssh を作り、残りとして委任が毎回 failed になった
+    def test_only_the_empty_ssh_dir_claude_code_makes_in_home_is_not_residue(self):
+        # 2.1.309 の sandbox は、子を起こすたびにホームへ空の .claude/ssh を作り、残りとして委任が毎回 failed になった。
+        # 数えないのは空のディレクトリの ~/.claude/ssh だけで、どのホストでも、~/.claude が前からあってもなくても同じ。消さない
+        import shutil
         home = Path(self.tmp.name) / "home"
-        (home / ".config").mkdir(parents=True)
-        for host, extra, cwd in (("claude", (), None), ("claude", ("--write",), None), ("codex", (), None), ("grok", (), self.grok_target())):
-            rc, rec = self.run_launch(host, "home-ssh", extra=extra, cwd=cwd, env_extra={"HOME": str(home), "XAI_API_KEY": "k"})
-            self.assertEqual((rec["status"], rec["home_residue"]), ("ok", []), (host, rec))  # 並行する Claude Code の子が作ったものも数えない
-            self.assertTrue((home / ".claude" / "ssh").is_dir())  # 消さない（並行する別の委任の子と競う）
-            (home / ".claude" / "ssh").rmdir(); (home / ".claude").rmdir()
-        (home / ".claude").mkdir()  # 利用者のホームにはたいてい前から .claude がある
-        (home / ".claude" / "settings.json").write_text("{}")
-        rc, rec = self.run_launch("claude", "home-ssh", env_extra={"HOME": str(home)})
-        self.assertEqual((rec["status"], rec["home_residue"]), ("ok", []), rec)
-
-    def test_only_the_empty_ssh_dir_itself_is_exempt(self):
-        home = Path(self.tmp.name) / "home"
-        (home / ".config").mkdir(parents=True)
-        rc, rec = self.run_launch("claude", "home-ssh-near", env_extra={"HOME": str(home)})  # 隣の空のディレクトリ・別の場所の ssh は数える
-        self.assertEqual((rec["status"], rec["home_residue"]), ("failed", [str(home / ".claude" / "other"), str(home / ".config" / "ssh")]), rec)
-        (home / ".claude" / "other").rmdir(); (home / ".config" / "ssh").rmdir(); (home / ".claude" / "ssh").rmdir()
-        rc, rec = self.run_launch("claude", "home-ssh-link", env_extra={"HOME": str(home)})  # symlink は見ない。行き先の空の場所は数える
-        self.assertEqual((rec["status"], rec["home_residue"]), ("failed", [str(home / "elsewhere")]), rec)
-        (home / ".claude" / "ssh").unlink(); (home / "elsewhere").rmdir()
-        rc, rec = self.run_launch("claude", "home-ssh-file", env_extra={"HOME": str(home)})  # 同じ名前の空のファイルは数える
-        self.assertEqual((rec["status"], rec["home_residue"]), ("failed", [str(home / ".claude" / "ssh")]), rec)
-        (home / ".claude" / "ssh").unlink()
-        rc, rec = self.run_launch("claude", "home-residue", env_extra={"HOME": str(home)})  # ほかの空の残りは従来どおり
-        self.assertEqual(rec["status"], "failed", rec)
-        self.assertIn(str(home / ".bash_profile"), rec["home_residue"])
+        h = lambda *p: str(home.joinpath(*p))
+        cases = (  # (ホスト, 偽の CLI のモード, 引数, 前から .claude があるか, status, 残り, 後の ~/.claude/ssh)
+            ("claude", "home-ssh", (), False, "ok", [], "dir"),
+            ("claude", "home-ssh", ("--write",), False, "ok", [], "dir"),
+            ("claude", "home-ssh", (), True, "ok", [], "dir"),  # 利用者のホームにはたいてい前から .claude がある
+            ("codex", "home-ssh", (), False, "ok", [], "dir"),  # 並行する Claude Code の子が作ったものを、ほかの委任も見る
+            ("grok", "home-ssh", (), True, "ok", [], "dir"),
+            ("claude", "home-claude-only", (), False, "failed", [h(".claude")], "absent"),  # 空の .claude そのものは数える
+            ("claude", "home-ssh-near", (), True, "failed", [h(".claude", "other"), h(".config", "ssh")], "dir"),  # 隣・別の場所の ssh は数える
+            ("claude", "home-ssh-file", (), True, "failed", [h(".claude", "ssh")], "file"),  # 同じ名前の空のファイルは数える
+            ("claude", "home-ssh-link", (), True, "failed", [h("elsewhere")], "link"),  # symlink は見ない。行き先の空の場所は数える
+            ("claude", "home-residue", (), True, "failed", [h(".bash_profile"), h(".config", "pip"), h(".netrc")], "absent"),
+        )
+        for host, mode, extra, had_claude, status, residue, ssh in cases:
+            with self.subTest(host=host, mode=mode, extra=extra, had_claude=had_claude):
+                shutil.rmtree(home, ignore_errors=True)
+                (home / ".config").mkdir(parents=True)
+                if had_claude:
+                    (home / ".claude").mkdir()
+                    (home / ".claude" / "settings.json").write_text("{}")
+                rc, rec = self.run_launch(host, mode, extra=extra, cwd=self.grok_target() if host == "grok" else None,
+                                          env_extra={"HOME": str(home), "XAI_API_KEY": "k"})
+                self.assertEqual((rec["status"], rec["home_residue"]), (status, residue), rec)
+                p = home / ".claude" / "ssh"
+                got = "link" if p.is_symlink() else "dir" if p.is_dir() else "file" if p.is_file() else "absent"
+                self.assertEqual(got, ssh, rec)  # 消さない
+                if had_claude:
+                    self.assertEqual((home / ".claude" / "settings.json").read_text(), "{}")
 
     @unittest.skipIf(os.geteuid() == 0, "root は権限で止められない")
     def test_a_child_hiding_part_of_home_fails(self):
