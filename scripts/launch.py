@@ -695,7 +695,9 @@ def main() -> int:
         if a.cwd in scratch.parents:  # 子の書ける一時ディレクトリが対象の中にできる（scratch は毎回新しい名前で、対象と同じにはならない）
             ap.error(f"bb-writ の状態の置き場 {state_dir()} が対象の中にある。読み取り専用の Codex は一時ディレクトリに書けるので、対象の外に置く")
         # Git の管理ディレクトリの中（.git の下、bare の形）なら、子がそこに ref を作れる。git は呼ばずに形で見る
-        if any(d.name == ".git" or all((d / n).exists() for n in ("HEAD", "objects", "refs")) for d in scratch.parents):
+        # 解く前の道筋でも見る（.git/refs を外への symlink にすると、解いた後の祖先から .git が消えた）
+        unresolved = Path(os.path.abspath(state_dir() / "delegations" / stamp / "tmp"))
+        if any(d.name == ".git" or all((d / n).exists() for n in ("HEAD", "objects", "refs")) for d in [*scratch.parents, *unresolved.parents]):
             ap.error(f"bb-writ の状態の置き場 {state_dir()} が Git の管理ディレクトリの中にある。読み取り専用の Codex は一時ディレクトリに書けるので、外に置く")
     out_dir = (a.out or state_dir() / "delegations" / stamp).resolve()
     out_dir.mkdir(parents=True, exist_ok=False)

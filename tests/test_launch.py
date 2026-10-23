@@ -3,6 +3,7 @@
 import errno
 import json
 import shlex
+import shutil
 import os
 import subprocess
 import sys
@@ -913,11 +914,17 @@ class TestLaunch(unittest.TestCase):
         subprocess.run(["git", "init", "-q", "--bare", str(bare)], check=True)
         (Path(self.tmp.name) / "state-into-target").symlink_to(wt / "st")
         (Path(self.tmp.name) / "plain" / ".git").mkdir(parents=True)  # .git という名前のディレクトリ（中身がそろっていなくても）
+        linked = Path(self.tmp.name) / "linked-refs"  # .git/refs を外への symlink にする（解いた後の祖先に .git が無い）
+        subprocess.run(["git", "init", "-q", str(linked)], check=True)
+        (Path(self.tmp.name) / "refs-store").mkdir()
+        shutil.rmtree(linked / ".git" / "refs")
+        (linked / ".git" / "refs").symlink_to(Path(self.tmp.name) / "refs-store")
         for state, sign in ((wt, "対象の中"), (wt / "a" / "b" / "state", "対象の中"), (Path(self.tmp.name) / "state-into-target", "対象の中"),
                             (repo / ".git" / "bb-writ-state", "Git の管理ディレクトリ"),
                             (repo / ".git" / "worktrees" / "out-in-repo-wt" / "bb-writ-state", "Git の管理ディレクトリ"),
                             (bare / "bb-writ-state", "Git の管理ディレクトリ"),
-                            (Path(self.tmp.name) / "plain" / ".git" / "st", "Git の管理ディレクトリ")):
+                            (Path(self.tmp.name) / "plain" / ".git" / "st", "Git の管理ディレクトリ"),
+                            (linked / ".git" / "refs" / "heads" / "state", "Git の管理ディレクトリ")):
             with self.subTest(state=state):
                 before = sorted(str(x) for x in wt.rglob("*"))
                 p = subprocess.run([sys.executable, str(LAUNCH), "--host", "codex", "--cwd", str(wt), "--prompt-file", str(self.prompt)],
@@ -927,12 +934,20 @@ class TestLaunch(unittest.TestCase):
                 self.assertIn(sign, p.stderr)
                 self.assertEqual(sorted(str(x) for x in wt.rglob("*")), before)  # 対象の中に何も作らない
                 self.assertFalse(os.path.lexists(state / "delegations") and not state.is_symlink(), state)  # 置き場も作らない
-        # HEAD という名前のファイルがあるだけの普通のディレクトリの下では起動する（bare の形は HEAD・objects・refs がそろうとき）
-        headonly = Path(self.tmp.name) / "headonly"
-        headonly.mkdir()
-        (headonly / "HEAD").write_text("x\n")
-        rc, rec = self.run_launch("codex", cwd=wt, env_extra={"BB_WRIT_STATE_DIR": str(headonly / "st")})
-        self.assertEqual((rc, rec["status"]), (0, "ok"), rec)
+        # HEAD・objects・refs のどれか 2 つだけがある普通のディレクトリの下では起動する（bare の形は 3 つがそろうとき）
+        for missing in ("HEAD", "objects", "refs"):
+            with self.subTest(missing=missing):
+                partial = Path(self.tmp.name) / f"no-{missing}"
+                partial.mkdir()
+                for n in {"HEAD", "objects", "refs"} - {missing}:
+                    (partial / n).write_text("x\n") if n == "HEAD" else (partial / n).mkdir()
+                rc, rec = self.run_launch("codex", cwd=wt, env_extra={"BB_WRIT_STATE_DIR": str(partial / "st")})
+                self.assertEqual((rc, rec["status"]), (0, "ok"), rec)
+        # 判定は読み取り専用の Codex だけ（ほかのホスト・書く子は、一時ディレクトリを書かせない）
+        for host, extra in (("claude", ()), ("codex", ("--write",))):
+            with self.subTest(host=host, extra=extra):
+                rc, rec = self.run_launch(host, cwd=wt, extra=extra, env_extra={"BB_WRIT_STATE_DIR": str(repo / ".git" / "bb-writ-state2")})
+                self.assertNotEqual(rec["status"], "unavailable", rec)
         # 子の TMPDIR は symlink を解いた絶対パス（状態の置き場が symlink でも）
         real = Path(self.tmp.name) / "real-state"
         real.mkdir()
