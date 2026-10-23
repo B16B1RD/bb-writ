@@ -44,7 +44,9 @@ FAKE_CODEX = textwrap.dedent(r'''
     thread = os.environ.get("FAKE_THREAD", "0199aaaa-bbbb-7ccc-8ddd-eeeeffff0000")
     sessions = os.path.join(os.environ["CODEX_HOME"], "sessions")
     import glob
-    if mode != "no-rollout" and not glob.glob(os.path.join(sessions, "**", f"rollout-*-{thread}.jsonl"), recursive=True):
+    # 試験が手で置いた記録（sessions/fake の外）があればそれを使う。偽の Codex の記録は起動ごとに書き直す（権限は引数で変わる）
+    if mode != "no-rollout" and not [f for f in glob.glob(os.path.join(sessions, "**", f"rollout-*-{thread}.jsonl"), recursive=True)
+                                     if os.path.dirname(f) != os.path.join(sessions, "fake")]:
         # 引数から、0.163.0 が記録する実効の権限を組み立てる（profile の名前や -c の書き方に結び付けない）
         import re
         argv = sys.argv[1:]
@@ -76,9 +78,16 @@ FAKE_CODEX = textwrap.dedent(r'''
                  "slash-tmp-profile": entry(":slash_tmp", "write"), "wide-profile": entry(os.getcwd(), "write"),
                  "outdir-profile": entry(os.path.dirname(os.environ.get("TMPDIR", "/nonexistent/x")), "write"),
                  "workspace-profile": entry(":workspace_roots", "write"), "deny-tmp": entry(":tmpdir", "deny"),
-                 "deny-entry": entry("/etc", "deny"), "path-like-special": {"path": {"type": "path", "path": ":tmpdir"}, "access": "write"}}.get(mode)
+                 "deny-entry": entry("/etc", "deny"), "path-like-special": {"path": {"type": "path", "path": ":tmpdir"}, "access": "write"},
+                 "relative-path": {"path": {"type": "path", "path": "rel/x"}, "access": "read"}}.get(mode)
         if extra is not None:
             entries.append(extra)
+        arg0 = os.path.join(os.environ["CODEX_HOME"], "tmp", "arg0-linux", "codex-arg0Ab12")
+        entries.append(entry(arg0 + ("/x" if mode == "arg0-nested" else ""), "read"))  # 0.163.0 は自分で足す（専用ログインの下）
+        if mode == "read-under-deny":  # 対象の設定が、拒んだ場所の下に read を足した（より狭い指定が勝つ）
+            entries.append(entry(os.path.join(os.environ["CODEX_HOME"], "auth.json"), "read"))
+        if mode == "deny-dropped":  # 渡した deny が記録に無い
+            entries = [e for e in entries if e["access"] != "deny"]
         if mode == "deny-tmp-first":  # deny が write より前に並ぶ（同じ場所なら順に関わらず deny が勝つ）
             entries.insert(0, entry(":tmpdir", "deny"))
         perm = {"type": "managed", "file_system": {"type": "restricted", "entries": entries}, "network": network}
@@ -267,6 +276,13 @@ FAKE_DOTENVX = textwrap.dedent(r'''
     args = sys.argv[1:]
     os.execvp(args[args.index("--") + 1], args[args.index("--") + 1:])
 ''').lstrip()
+
+
+def fs_rules(argv: list) -> dict:
+    """読み取り専用の Codex に渡した filesystem の表（-c・--config のどちらでも）を、場所 → 権限の辞書にする。"""
+    import re
+    table = next(argv[i + 1] for i, x in enumerate(argv[:-1]) if x in ("-c", "--config") and ".filesystem=" in argv[i + 1].split("{")[0])
+    return dict(re.findall(r'"([^"]+)"\s*=\s*"(read|write|deny)"', table))
 
 
 def load_launch():
@@ -576,7 +592,7 @@ class TestLaunch(unittest.TestCase):
         self.assertNotIn("--approve-for-me", argv)
         self.assertIn('default_permissions="bbwrit-read-only"', argv)
         self.assertIn('permissions.bbwrit-read-only.extends=":read-only"', argv)
-        self.assertTrue([x for x in argv if x.startswith('permissions.bbwrit-read-only.filesystem={":tmpdir"="write"')], argv)
+        self.assertEqual(fs_rules(argv).get(":tmpdir"), "write")
         self.assertIn("報告の形", argv[-1])  # 報告の約束を子に渡す
         self.assertIn('"execution": {"completed"', argv[-1])  # 実行の欄と、写して動かす場所
         self.assertIn("$TMPDIR", argv[-1])
@@ -613,10 +629,10 @@ class TestLaunch(unittest.TestCase):
         rules = dict(re.findall(r'"([^"]+)"="(read|write|deny)"', table))
         h = str(home.resolve())
         self.assertEqual(rules.get(":tmpdir"), "write")
-        for denied in (f"{h}/.ssh", f"{h}/.config", f"{h}/elsewhere/aws", f"{h}/.codex/auth.json", f"{h}/.codex/sessions"):
+        for denied in (f"{h}/.ssh", f"{h}/.config/gh", f"{h}/elsewhere/aws", f"{h}/.codex/auth.json", f"{h}/.codex/sessions"):
             self.assertEqual(rules.get(denied), "deny", (denied, rules))
-        self.assertEqual(rules.get(f"{h}/.config/git"), "read")  # Git の設定は読ませる
-        for absent in (f"{h}/.config/gh", str(self.cfg.resolve()) if str(self.cfg.resolve()).startswith(f"{h}/.config") else None,
+        self.assertNotIn("read", rules.values())  # 拒んだ場所の下に read を書かない（本体を実行できなかった）
+        for absent in (f"{h}/.config", f"{h}/.config/git",  # Git の設定を含む置き場は中身ごと、Git の設定は拒まない
                        f"{h}/.codex", f"{h}/.codex/packages", f"{h}/.gnupg", f"{h}/.aws", f"{h}/missing", f"{h}/.kube"):
             if absent:
                 self.assertNotIn(absent, rules)
@@ -626,11 +642,78 @@ class TestLaunch(unittest.TestCase):
         nested = home / ".config" / "bb-writ"
         shutil.copytree(self.cfg, nested)
         rc, rec = self.run_launch("codex", path=f"{real.parent}:/usr/bin:/bin", env_extra={"BB_WRIT_CONFIG_DIR": str(nested)})
+        self.assertEqual((rc, rec["status"]), (0, "ok"), rec)
         argv = json.loads(self.args_file.read_text())
-        table = next(argv[i + 1] for i, x in enumerate(argv) if x == "-c" and argv[i + 1].startswith("permissions.bbwrit-read-only.filesystem="))
-        rules = dict(re.findall(r'"([^"]+)"="(read|write|deny)"', table))
-        self.assertEqual(rules.get(f"{h}/.config"), "deny")
-        self.assertNotIn(f"{h}/.config/bb-writ", rules)
+        rules = fs_rules(argv)
+        self.assertEqual(rules.get(f"{h}/.config"), None)  # Git の設定を含むので、中身を 1 つずつ
+        self.assertEqual((rules.get(f"{h}/.config/gh"), rules.get(f"{h}/.config/bb-writ")), ("deny", "deny"))
+        self.assertNotIn(f"{h}/.config/git", rules)
+        self.assertNotIn(f"{h}/.config/bb-writ/codex-home", rules)  # 入れ子は書かない
+        # 対象が拒む置き場の下にあっても、対象は読ませる（その兄弟だけ拒む）。symlink の子が本体を含む場所を指すなら拒まない
+        proj = home / ".config" / "nvim"
+        (proj / "a.txt").parent.mkdir(parents=True)
+        (proj / "a.txt").write_text("x\n")
+        (home / ".codex" / "current").symlink_to(home / ".codex" / "packages")
+        (home / ".codex" / "dangling").symlink_to(home / "nowhere")
+        rc, rec = self.run_launch("codex", cwd=proj, path=f"{home / '.codex' / 'current' / 'bin'}:/usr/bin:/bin",
+                                  env_extra={"BB_WRIT_CONFIG_DIR": str(nested)})
+        self.assertEqual((rc, rec["status"]), (0, "ok"), rec)
+        argv = json.loads(self.args_file.read_text())
+        rules = fs_rules(argv)
+        self.assertNotIn(str(proj.resolve()), rules)
+        self.assertEqual(rules.get(f"{h}/.config/gh"), "deny")
+        for absent in (f"{h}/.codex/current", f"{h}/.codex/packages", f"{h}/.codex/dangling", f"{h}/nowhere"):
+            self.assertNotIn(absent, rules)
+        launch = load_launch()
+        for place in launch.SECRET_PLACES:
+            q = home / place
+            if not os.path.lexists(q):
+                q.parent.mkdir(parents=True, exist_ok=True)
+                (q.write_text("x") if place in (".netrc", ".git-credentials") else q.mkdir())
+        rc, rec = self.run_launch("codex")  # 本体は試験の bin（ホームの外）
+        self.assertEqual((rc, rec["status"]), (0, "ok"), rec)
+        argv = json.loads(self.args_file.read_text())
+        rules = fs_rules(argv)
+        for place in launch.SECRET_PLACES:
+            if place in (".config", ".aws", ".gnupg"):  # Git の設定を含むので中身ごと、symlink は行き先で、行き先の無い symlink は書かない
+                continue
+            with self.subTest(place=place):
+                self.assertEqual(rules.get(str((home / place).resolve())), "deny", (place, rules))
+        # 名前に BMP の外の文字がある置き場も、TOML として壊さない
+        odd = home / ".config" / "gh" / ".."  / "x😀"
+        (home / ".config" / "x😀").mkdir()
+        rc, rec = self.run_launch("codex")
+        argv = json.loads(self.args_file.read_text())
+        self.assertEqual(fs_rules(argv).get(f"{h}/.config/x😀"), "deny")
+        self.assertFalse([x for x in argv if "\\ud83d" in x])  # TOML に無いサロゲート対の \\u にしない
+        (home / ".config" / "git" / "credentials").write_text("x")  # Git の認証情報（XDG の置き場）は拒む
+        rc, rec = self.run_launch("codex")
+        rules = fs_rules(json.loads(self.args_file.read_text()))
+        self.assertEqual(rules.get(f"{h}/.config/git/credentials"), "deny")
+        self.assertNotIn(f"{h}/.config/git", rules)
+        # ~/.config/git が外（dotfiles）を指す symlink でも、その節点を拒まない（git は ~/.config/git/config の道筋で読む）
+        import shutil
+        shutil.rmtree(home / ".config" / "git")
+        (home / "dotfiles" / "git").mkdir(parents=True)
+        (home / ".config" / "git").symlink_to(home / "dotfiles" / "git")
+        rc, rec = self.run_launch("codex")
+        rules = fs_rules(json.loads(self.args_file.read_text()))
+        self.assertNotIn(f"{h}/.config", rules)
+        self.assertNotIn(f"{h}/dotfiles/git", rules)
+        self.assertEqual(rules.get(f"{h}/.config/gh"), "deny")
+        # 本体が置き場の直下にあっても、本体を拒まない
+        direct = home / ".codex" / "codex"
+        direct.write_text(f"#!/bin/sh\nexec {self.bin / 'codex'} \"$@\"\n")
+        direct.chmod(0o755)
+        rc, rec = self.run_launch("codex", path=f"{direct.parent}:/usr/bin:/bin")
+        self.assertEqual((rc, rec["status"]), (0, "ok"), rec)
+        rules = fs_rules(json.loads(self.args_file.read_text()))
+        self.assertNotIn(str(direct.resolve()), rules)
+        self.assertEqual(rules.get(f"{h}/.codex/auth.json"), "deny")
+        # HOME が空か / なら、ホームの置き場を拒めないので起動しない
+        for empty in ("", "/"):
+            rc, rec = self.run_launch("codex", env_extra={"HOME": empty})
+            self.assertEqual(rec["status"], "unavailable", rec)
 
     def test_codex_read_only_child_gets_its_own_writable_tmpdir(self):
         # -s read-only では mktemp -d も失敗し、審査役が試験を動かせなかった。書けるのは起動ごとの一時ディレクトリだけ
@@ -649,10 +732,21 @@ class TestLaunch(unittest.TestCase):
         link.symlink_to(self.cwd)
         (Path(self.tmp.name) / "sib").mkdir()
         repo, wt = self.worktree("out-in-repo")  # 対象が worktree でも、元の checkout・共通ディレクトリの中は対象のリポジトリ
+        subprocess.run(["git", "init", "-q", str(Path(self.tmp.name) / "other-repo")], check=True)
+        g = ["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid"]
+        sep_main, sep_admin, sep_wt = (Path(self.tmp.name) / n for n in ("sep-main", "sep-admin", "sep-wt"))
+        nl_main, nl_wt = Path(self.tmp.name) / "nl\nmain", Path(self.tmp.name) / "nl-wt"
+        for main, admin, wt2 in ((sep_main, sep_admin, sep_wt), (nl_main, None, nl_wt)):
+            subprocess.run(g + ["init", "-q", *(["--separate-git-dir", str(admin)] if admin else []), str(main)], check=True)
+            subprocess.run(g + ["-C", str(main), "commit", "-q", "--allow-empty", "-m", "i"], check=True)
+            subprocess.run(g + ["-C", str(main), "worktree", "add", "-q", "-b", "w", str(wt2)], check=True)
         (wt / "sub").mkdir()
         for cwd, out in ((self.cwd, self.cwd), (self.cwd, self.cwd / "out"), (self.cwd, link / "out"),
                          (self.cwd, Path(self.tmp.name) / "sib" / ".." / "repo" / "out"),
-                         (wt, repo / "o"), (wt, repo / ".git" / "refs" / "heads" / "x"), (wt / "sub", wt / "o")):
+                         (wt, repo / "o"), (wt, repo / ".git" / "refs" / "heads" / "x"), (wt / "sub", wt / "o"),
+                         (wt, Path(self.tmp.name) / "other-repo" / ".git" / "x"),  # 別のリポジトリの管理ディレクトリの中も
+                         (sep_wt, sep_main / "o"), (sep_wt, sep_admin / "o"),  # separate-git-dir の元の checkout・管理ディレクトリ
+                         (nl_wt, nl_main / "o")):  # 名前に改行のある元の checkout
             with self.subTest(cwd=cwd, out=out):
                 p = subprocess.run([sys.executable, str(LAUNCH), "--host", "codex", "--cwd", str(cwd), "--prompt-file", str(self.prompt),
                                     "--out", str(out)], env={**os.environ, "PATH": f"{self.bin}:/usr/bin:/bin", "HOME": str(self.home),
@@ -685,7 +779,9 @@ class TestLaunch(unittest.TestCase):
                                           ("net-unknown-then-ok", "確かめられない"), ("workspace-profile", "広い"), ("deny-tmp", "書けない"),
                                           ("net-open-then-ok", "広い"), ("ok-then-net-open", "広い"),
                                           ("big-wide-line", "確かめられない"), ("odd-deny-path", "確かめられない"), ("bad-json-after", "確かめられない"),
-                                          ("bad-utf8-after", "確かめられない"), ("deny-tmp-first", "書けない"), ("path-like-special", "確かめられない"), ("fs-odd-type", "確かめられない"))):
+                                          ("bad-utf8-after", "確かめられない"), ("deny-tmp-first", "書けない"), ("path-like-special", "確かめられない"),
+                                          ("read-under-deny", "拒めていない"), ("deny-dropped", "拒めていない"), ("arg0-nested", "拒めていない"),
+                                          ("relative-path", "確かめられない"), ("fs-odd-type", "確かめられない"))):
             with self.subTest(mode=mode):  # 記録は session ごと
                 rc, rec = self.run_launch("codex", mode=mode, env_extra={"FAKE_THREAD": f"0199aaaa-bbbb-7ccc-8ddd-eeeeffff{1000 + i}"})
                 self.assertEqual((rc, rec["status"]), (2, "failed"), rec)
@@ -745,6 +841,7 @@ class TestLaunch(unittest.TestCase):
         import re
         for err, refused in (("urllib.error.URLError: <urlopen error [Errno -3] Temporary failure in name resolution>", True),
                              ("<urlopen error [Errno -2] Name or service not known>", True), ("[Errno 101] Network is unreachable", True),
+                             ("<urlopen error [Errno -5] No address associated with hostname>", True),
                              ("<urlopen error [SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed>", False),
                              ("urllib.error.URLError: <urlopen error Tunnel connection failed: 407 Proxy Authentication Required>", False)):
             with self.subTest(err=err):
@@ -770,6 +867,8 @@ class TestLaunch(unittest.TestCase):
             ({"completed": "yes", "commands": {"command": "sh test.sh", "exit": 0}}, "invalid-report", "yes"),
             ({"completed": "maybe"}, "invalid-report", None),
             ("null", "invalid-report", None),  # "execution": null は欄が無いのと違う
+            ({"completed": "no", "commands": None}, "invalid-report", "no"),
+            ({"completed": "no", "commands": [{"command": " ", "exit": 2}]}, "invalid-report", "no"),
             ({"completed": "yes", "commands": [{"command": "x", "exit": "0"}]}, "invalid-report", "yes"),
             ({"completed": "yes"}, "invalid-report", "yes"),  # commands の鍵が無い
             ({"completed": "no", "commands": [{"command": 42, "exit": 2}]}, "invalid-report", "no"),

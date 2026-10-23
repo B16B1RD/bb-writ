@@ -295,67 +295,94 @@ def grok_home(login: Path, extends: str, read_write: list[Path]) -> tuple[Path, 
 CODEX_PROFILE = "bbwrit-read-only"
 
 
-def codex_read_only(scratch: Path) -> list[str]:
-    """読み取り専用の Codex の権限。read-only を継ぎ、書けるのは起動ごとの一時ディレクトリ（$TMPDIR）だけ。
-    -s read-only では mktemp -d も失敗し、試験を動かせない審査役が読んだだけの判定を返した（0.163.0）。
-    -s（sandbox_mode）は default_permissions より優先されるので渡さない。ネットワークは read-only の既定のまま出られない。
-    読み取り専用の Claude Code の子と同じく、認証情報の置き場（専用ログインを含む）は読ませない。Git の設定だけは読ませる
-    （より狭い指定が勝つ。公式文書）。-s read-only のころは、子が ~/.config の下を読めた（同日の実測）。"""
-    scratch.mkdir()
-    # 無い場所や symlink の場所を書くと、bwrap がそこへ mount できずに起動しなかった（/mnt/c を指す ~/.aws。0.163.0）。
-    # あるものだけを、symlink を解いた行き先で書く（symlink を通した読み取りも行き先で止まる）。拒む場所の下の場所は書かない
-    # （拒んだ場所の中に mkdir できずに起動しなかった）。拒んだ場所の下に read を書いても、そこにある codex 本体を
-    # sandbox の補助が実行できなかったので、本体を含む置き場（~/.codex）は、本体の入った項目を除く中身を 1 つずつ拒む
-    binary = Path(os.path.realpath(shutil.which("codex") or "/"))
+def secret_denies(keep: list[Path]) -> list[str]:
+    """読み取り専用の Codex の子に読ませない場所（認証情報の置き場と専用ログイン。読み取り専用の Claude Code の子と同じ範囲）。
+    -s read-only のころは、子が ~/.config の下を読めた（2026-10-23 の実測）。bwrap は、無い場所・symlink の場所・拒んだ場所の
+    下の場所を書くと起動せず（~/.aws が /mnt/c を指す、~/.config の下の専用ログイン）、拒んだ ~/.codex の下に read を書いても
+    codex 本体を実行できなかった（0.163.0、Linux）。そこで、あるものだけを symlink を解いた行き先で書き、入れ子は書かず、
+    keep（codex 本体・Git の設定・対象）を含む置き場は、起動の時点の中身を 1 つずつ見て、keep を含まないものだけを拒む（再帰）。"""
+    keep = {Path(os.path.realpath(k)) for k in keep} | {Path(os.path.abspath(k)) for k in keep}  # symlink の節点も、行き先も
     places = set()
-    for d in [Path.home() / place for place in SECRET_PLACES] + [config_dir()]:
-        if not os.path.exists(d):
-            continue
+
+    def add(d: Path):
         d = Path(os.path.realpath(d))
-        if d in binary.parents:
-            places |= {Path(os.path.realpath(c)) for c in d.iterdir() if os.path.exists(c) and c not in binary.parents and c != binary}
+        if any(k == d for k in keep):  # 残すものそのもの
+            return
+        if any(d in k.parents for k in keep):  # 残すものを含む: 中身を 1 つずつ
+            for c in d.iterdir():
+                if os.path.exists(c):
+                    add(c)
         else:
             places.add(d)
-    rules = {":tmpdir": "write", **{str(d): "deny" for d in sorted(places) if not any(o in d.parents for o in places)},
-             **{os.path.realpath(d): "read" for d in [Path.home() / ".config" / "git"]  # Git の設定は読ませる（より狭い指定が勝つ）
-                if os.path.exists(d) and any(o in Path(os.path.realpath(d)).parents for o in places)}}
-    table = ", ".join(f"{json.dumps(k)}={json.dumps(v)}" for k, v in rules.items())  # TOML の基本文字列（JSON と同じ逃がし方）
-    return ["-c", f'default_permissions="{CODEX_PROFILE}"', "-c", f'permissions.{CODEX_PROFILE}.extends=":read-only"',
-            "-c", f"permissions.{CODEX_PROFILE}.filesystem={{{table}}}"]
+
+    # 残す Git の設定の中の、Git の認証情報（credential store の XDG の置き場）も拒む
+    for d in [Path.home() / place for place in SECRET_PLACES + (".config/git/credentials",)] + [config_dir()]:
+        if os.path.exists(d):
+            add(d)
+    return sorted(str(d) for d in places if not any(o in d.parents for o in places))
+
+
+def codex_read_only(scratch: Path, cwd: Path) -> tuple[list[str], list[str]]:
+    """読み取り専用の Codex の権限と、拒む場所。read-only を継ぎ、書けるのは起動ごとの一時ディレクトリ（$TMPDIR）だけ。
+    -s read-only では mktemp -d も失敗し、試験を動かせない審査役が読んだだけの判定を返した（0.163.0）。
+    -s（sandbox_mode）は default_permissions より優先されるので渡さない。ネットワークは read-only の既定のまま出られない。"""
+    git_dir, _ = grok_git_dir(cwd)
+    keep = [Path(shutil.which("codex") or "/"), Path.home() / ".config" / "git", cwd, *([git_dir] if git_dir else [])]
+    denies = secret_denies(keep)
+    scratch.mkdir()
+    rules = {":tmpdir": "write", **{d: "deny" for d in denies}}
+    # TOML の基本文字列（JSON と同じ逃がし方。BMP の外の文字は、TOML に無いサロゲート対の \\u にせず、そのまま書く）
+    table = ", ".join(f"{json.dumps(k, ensure_ascii=False)}={json.dumps(v)}" for k, v in rules.items())
+    return (["-c", f'default_permissions="{CODEX_PROFILE}"', "-c", f'permissions.{CODEX_PROFILE}.extends=":read-only"',
+             "-c", f"permissions.{CODEX_PROFILE}.filesystem={{{table}}}"], denies)
+
+
+def git_common(d: Path) -> Path | None:
+    """d が属するリポジトリの共通ディレクトリ（Git の外なら None）。1 つだけ取り、末尾の改行だけを外す（改行を含む名前を分け違えない）。"""
+    g = subprocess.run(["git", "-C", str(d), "rev-parse", "--path-format=absolute", "--git-common-dir"], capture_output=True, text=True, timeout=GIT_TIMEOUT)
+    return Path(g.stdout[:-1]).resolve() if g.returncode == 0 and g.stdout.endswith("\n") else None
 
 
 def repo_overlap(cwd: Path, out_dir: Path) -> str | None:
-    """出力の置き場が、対象のリポジトリ（対象・作業ツリーの最上位・Git の共通ディレクトリ・元の checkout）の中にあればその理由。
-    読み取り専用の Codex は置き場の tmp/ に書けるので、そこが共通ディレクトリの中なら ref も作れる（Git の前後比較はしない）。"""
-    places = [cwd]
-    g = subprocess.run(["git", "-C", str(cwd), "rev-parse", "--path-format=absolute", "--show-toplevel", "--git-common-dir"],
-                       capture_output=True, text=True, timeout=GIT_TIMEOUT)
-    if g.returncode == 0:
-        top, common = (Path(x).resolve() for x in g.stdout.split("\n")[:2])
-        places += [top, common] + ([common.parent] if common.name == ".git" else [])
-    elif "not a git repository" not in g.stderr:
-        return f"対象の Git の場所を取れない（git rev-parse: {g.stderr.strip()[:200]}）"
-    for place in places:
-        if out_dir == place or place in out_dir.parents:
-            return f"対象のリポジトリ（{place}）の中にある"
+    """出力の置き場が、Git の管理ディレクトリの中、対象の中、または対象と同じリポジトリ（どの worktree・元の checkout でも）の中に
+    あればその理由。読み取り専用の Codex は置き場の tmp/ に書けるので、そこが管理ディレクトリの中なら ref も作れる（Git の前後比較は
+    しない）。元の checkout は separate-git-dir では git から分からないので、置き場の側から属するリポジトリを見る。"""
+    if out_dir == cwd or cwd in out_dir.parents:
+        return f"対象（{cwd}）の中にある"
+    near = next(d for d in [out_dir, *out_dir.parents] if d.exists())  # 置き場はまだ無い。在る最も近い祖先で見る
+    g = subprocess.run(["git", "-C", str(near), "rev-parse", "--is-inside-git-dir"], capture_output=True, text=True, timeout=GIT_TIMEOUT)
+    if g.returncode == 0 and g.stdout.strip() == "true":
+        return f"Git の管理ディレクトリ（{near}）の中にある"
+    target = git_common(cwd)
+    if target and git_common(near) == target:
+        return f"対象のリポジトリ（共通ディレクトリ {target}）の作業ツリーの中にある"
     return None
 
 
-def codex_breach(eff) -> str | None:
-    """読み取り専用の Codex の実効の権限（記録の turn_context）が、渡した profile と違えばその理由。
+def codex_breach(turns: list, denies: list[str]) -> str | None:
+    """読み取り専用の Codex の実効の権限（記録の turn_context。turn ごと）が、渡した profile と違えばその理由。
     読み込まれたどの設定の sandbox_mode も default_permissions より優先され（対象の .codex/config.toml・専用ログインの config.toml）、
-    同じ profile に書ける場所を足すこともできる。広ければ読み取り専用でなく、一時ディレクトリに書けなければ試験を動かせない。
-    実効の権限を記録から読めなければ、どちらとも確かめられないので理由にする。"""
-    turns = obj(eff).get("turns") or []
+    同じ profile に項目を足すこともできる。広ければ読み取り専用でなく、一時ディレクトリに書けなければ試験を動かせず、
+    渡した deny が無いか、その下に read・write が足されていれば認証情報を読める（より狭い指定が勝つ。公式文書）。
+    例外は Codex 自身が足す、専用ログインの tmp/arg0-linux/codex-arg0* の read だけ（0.163.0 の実物の記録）。
+    実効の権限を記録から読めなければ、どれも確かめられないので理由にする。"""
     if not turns or any(t["writable"] is None or t["network"] is None for t in turns):
         return "Codex の実効の権限を記録（turn_context の permission_profile）から確かめられない（記録が無い、読めない行がある、形が違う）"
     tmp = (":tmpdir",)
+    arg0 = str(config_dir().resolve() / "codex-home" / "tmp" / "arg0-linux" / "codex-arg0")
     for t in turns:  # どの turn も（合わせると、ある turn だけ書けないことが隠れる）
         wide = [w for w in t["writable"] if w not in tmp]
         if wide or t["network"] != "restricted":
             return f"Codex の実効の権限が、読み取り専用の profile より広い（書ける場所: {wide[:5]}、ネットワーク: {t['network'][:50]}）"
         if not any(w in tmp for w in t["writable"]):
             return "Codex の実効の権限で、一時ディレクトリに書けない（設定の sandbox_mode が profile より優先されたかもしれない）"
+        recorded = {w for acc, w in t["rules"] if acc == "deny"}
+        missing = [d for d in denies if d not in recorded]
+        opened = [w for acc, w in t["rules"] if acc != "deny" and not w.startswith(":")
+                  and any(w == d or w.startswith(d + "/") for d in denies)
+                  and not (acc == "read" and w.startswith(arg0) and "/" not in w[len(arg0):])]
+        if missing or opened:
+            return f"Codex の実効の権限で、認証情報の置き場を拒めていない（記録に無い deny: {missing[:5]}、その下で開いた場所: {opened[:5]}）"
     return None
 
 
@@ -449,7 +476,9 @@ def command(a, prompt: str, scratch: Path) -> tuple[list[str], dict, str | None]
         for d in [work_record(a.cwd), *(commit_dirs(own, common) if own else [])]:
             mode += ["--add-dir", str(d)]
     else:
-        mode = codex_read_only(scratch)
+        if os.environ.get("HOME", "") in ("", "/"):  # ホームの置き場の deny が 1 つも出ない（黙って開かない）
+            return [], env, "HOME が空か / なので、読み取り専用の Codex の子に認証情報の置き場を拒めない"
+        mode, a.codex_denies = codex_read_only(scratch, a.cwd)
         env["TMPDIR"] = str(scratch.resolve())
     cmd = ["codex", "exec", "--json", "-m", a.model, "-c", f'model_reasoning_effort="{a.effort}"',
            "--skip-git-repo-check", "-C", str(a.cwd), *mode, prompt]
@@ -539,7 +568,7 @@ def parse_codex(out: str) -> dict:
                 try:
                     e = obj(json.loads(line.decode("utf-8")))
                 except (ValueError, RecursionError):  # 書きかけの行、UTF-8 として読めない行（置き換えた文字を実効値にしない）。取れなければ null
-                    perms.append((None, None))  # turn_context だったかもしれない（1 MiB を超えて割れた行も）。権限は不明として閉じる
+                    perms.append((None, None, None))  # turn_context だったかもしれない（1 MiB を超えて割れた行も）。権限は不明として閉じる
                     continue
                 if e.get("type") == "turn_context":
                     p = obj(e.get("payload"))
@@ -554,13 +583,16 @@ def parse_codex(out: str) -> dict:
                     # 書ける場所（特別な場所は :tmpdir の形）。0.163.0 の sandbox は、読み取り専用の profile でも workspace-write と記録される
                     denied = {where_of(x["path"]) for x in entries or [] if x["access"] == "deny"}  # 同じ場所なら deny が write に勝つ（公式文書）
                     perms.append((None if entries is None else [w for x in entries if x["access"] == "write" and (w := where_of(x["path"])) not in denied],
-                                  text_of(perm.get("network")) or None))
+                                  text_of(perm.get("network")) or None,
+                                  None if entries is None else [(x["access"], where_of(x["path"])) for x in entries]))
     if eff is not None:  # 判定は turn ごと（codex_breach）。writable・network は表示のために合わせる（どれかが読めなければ不明）
-        eff["turns"] = [{"writable": w, "network": n} for w, n in perms]
-        eff["writable"] = None if any(w is None for w, _ in perms) else sorted({x for w, _ in perms for x in w})
-        nets = {n for _, n in perms}
+        eff["turns"] = [{"writable": w, "network": n} for w, n, _ in perms]
+        eff["writable"] = None if any(w is None for w, _, _ in perms) else sorted({x for w, _, _ in perms for x in w})
+        nets = {n for _, n, _ in perms}
         eff["network"] = None if None in nets else next((n for n in sorted(nets) if n != "restricted"), "restricted")
-    return {"text": text, "session": session, "model_effective": eff, "usage": usage, "errors": errors}
+    # 照合（codex_breach）に渡す turn ごとの権限（項目の全部は記録に書かない）
+    turns = [{"writable": w, "network": n, "rules": r or []} for w, n, r in perms] if eff is not None else []
+    return {"text": text, "session": session, "model_effective": eff, "usage": usage, "errors": errors, "permissions": turns}
 
 
 def parse_grok(out: str) -> dict:
@@ -729,7 +761,7 @@ def main() -> int:
             elif p.returncode != 0 or got.get("is_error") or not got["text"]:
                 tail = [l for l in p.stderr.strip().splitlines() if "injected env" not in l and "Reading additional input" not in l][-5:]
                 rec.update(status="failed", problems=[f"終了コード {p.returncode}"] + got["errors"] + tail)
-            elif breach := (a.host == "codex" and not a.write and codex_breach(got["model_effective"])):
+            elif breach := (a.host == "codex" and not a.write and codex_breach(got["permissions"], a.codex_denies)):
                 # 対象の設定が profile を広げた・狭めた（読み取り専用の結果として使わない）。報告は report.md に残す
                 rec.update(status="failed", problems=[breach])
                 (out_dir / "report.md").write_text(got["text"], encoding="utf-8", errors="backslashreplace")
