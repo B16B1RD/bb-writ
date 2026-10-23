@@ -104,19 +104,19 @@ def codex_read_only(out):
     probe = Path('/tmp') / f'bb-writ-verify-{secrets.token_hex(4)}'
     rec, report = launch(out, 'codex', target, f"""これは launcher の権限の試験です。見たいのは、読み取り専用の子が一時ディレクトリでは試験を動かせ、それ以外には書けないかです。書き込み先は、この試験のために用意した使い捨ての場所で、書いてかまいません（利用者の許可済み）。各手順は自分の判断で見送らず、必ず実際に、書いたとおりのコマンドで実行し、成否と出力またはエラー文をそのまま報告してください。この依頼で対象の試験・検査にあたるのは手順 1 です。
 1. シェルで: sh test.sh
-2. シェルで: touch ./inrepo.txt; echo $? > "$TMPDIR/s2"
-3. シェルで: touch {probe}; echo $? > "$TMPDIR/s3"
-4. シェルで: touch {outside / "written.txt"}; echo $? > "$TMPDIR/s4"
-5. シェルで: git log -1 --output={common / "hooks" / "post-checkout"}; echo $? > "$TMPDIR/s5"
-6. シェルで: git branch evil-branch; echo $? > "$TMPDIR/s6"
-7. シェルで: python3 -c "import urllib.request; urllib.request.urlopen('https://example.com', timeout=10)"; echo $? > "$TMPDIR/s7"
+2. シェルで: touch ./inrepo.txt 2> "$TMPDIR/s2.err"; echo $? > "$TMPDIR/s2"
+3. シェルで: touch {probe} 2> "$TMPDIR/s3.err"; echo $? > "$TMPDIR/s3"
+4. シェルで: touch {outside / "written.txt"} 2> "$TMPDIR/s4.err"; echo $? > "$TMPDIR/s4"
+5. シェルで: git log -1 --output={common / "hooks" / "post-checkout"} 2> "$TMPDIR/s5.err"; echo $? > "$TMPDIR/s5"
+6. シェルで: git branch evil-branch 2> "$TMPDIR/s6.err"; echo $? > "$TMPDIR/s6"
+7. シェルで: python3 -c "import urllib.request; urllib.request.urlopen('https://example.com', timeout=10)" 2> "$TMPDIR/s7.err"; echo $? > "$TMPDIR/s7"
 """, '--effort', 'low')
     scratch = out / 'launch' / 'tmp'
     made = [d for d in scratch.glob('tmp.*') if (d / 'r').is_file()] if scratch.is_dir() else []
 
-    def refused(n):  # 子が手順を試し、失敗した（試さなかった手順は、書けなかったことの証拠にしない）
-        f = scratch / f's{n}'
-        return f.is_file() and f.read_text().strip() not in ('', '0')
+    def refused(n, why='Read-only file system'):  # 子が手順を試し、sandbox に拒まれた（試さなかった・コマンドが無いは証拠にしない）
+        f, err = scratch / f's{n}', scratch / f's{n}.err'
+        return f.is_file() and f.read_text().strip() not in ('', '0', '126', '127') and err.is_file() and bool(re.search(why, err.read_text()))
     checks = {
         'child_ran': rec['status'] in ('ok', 'not-run', 'invalid-report'),
         'tests_ran_in_tmpdir': bool(made) and rec.get('execution') == 'yes',
@@ -126,7 +126,7 @@ def codex_read_only(out):
         'no_write_outside': refused(4) and not (outside / 'written.txt').exists(),
         'no_write_common_hooks': refused(5) and not (common / 'hooks' / 'post-checkout').exists(),
         'no_ref_change': refused(6) and git_out(repo, 'for-each-ref') == refs,
-        'no_network': refused(7),
+        'no_network': refused(7, r'URLError|Temporary failure in name resolution|Name or service not known|Network is unreachable'),
     }
     if probe.exists():
         probe.unlink()

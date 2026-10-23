@@ -241,7 +241,7 @@ def read_head(f: Path) -> str:
     return head.decode("utf-8", "surrogateescape") if len(head) <= 4096 else f"（4 KiB を超える。{digest}）"
 
 
-def git_snapshot(own: Path, common: Path, cwd: Path) -> dict:
+def git_snapshot(own: Path, common: Path, cwd: Path, index: bool = False) -> dict:
     """書く子の前後で比べる Git の管理情報。子の書いた .git ファイルを読まないよう、共通ディレクトリを明示して読む。"""
     for f in (common / "config", common / "packed-refs"):  # git が開いたまま止まる・尽きるもの（FIFO・デバイス）を渡さない
         try:
@@ -256,9 +256,12 @@ def git_snapshot(own: Path, common: Path, cwd: Path) -> dict:
              common / "objects" / "info" / "alternates"]
     for d in (common / "hooks", common / "info"):
         files += sorted(f for f in d.rglob("*") if f.is_file() or f.is_symlink()) if d.is_dir() else []
+    # index（読み取り専用の子だけ。書く子は変えてよい）は中身（stage の項目）で比べる。バイトで比べると、親の git status が書き直す stat の情報で変わる
+    staged = subprocess.run(["git", "--git-dir", str(own), "ls-files", "--stage", "-z"], cwd=cwd,
+                            capture_output=True, check=True, timeout=GIT_TIMEOUT).stdout if index else b""
     return {"refs": dict(r.split(" ", 1) for r in refs if " " in r),
             "files": {str(f): read_child_file(f)[0] for f in files},
-            "head": read_head(own / "HEAD")}
+            "head": read_head(own / "HEAD"), "index": hashlib.sha256(staged).hexdigest()}
 
 
 def git_changes(before: dict, after: dict, common: Path, own_branch: bool = True) -> list[str]:
@@ -272,10 +275,18 @@ def git_changes(before: dict, after: dict, common: Path, own_branch: bool = True
         if r != mine and old != new:
             undo = f"git --git-dir {common} update-ref {r} {old}" if old else f"git --git-dir {common} update-ref -d {r}"
             out.append(f"{r}: {old or '(無し)'} → {new or '(削除)'}（戻すなら: {undo}）")
-    out += sorted(f for f in set(before["files"]) | set(after["files"]) if before["files"].get(f) != after["files"].get(f))
+    out += file_changes(before, after)
     if after["head"] != before["head"]:
         out.append(f"HEAD: {before['head']!r} → {after['head']!r}")
+    if not own_branch and after["index"] != before["index"]:
+        out.append("index: stage の項目が変わった")
     return out
+
+
+def file_changes(before: dict, after: dict) -> list[str]:
+    """変わった管理ファイル（.git・commondir・gitdir・config・hooks・info・alternates）。どれも、利用者が次に git を動かしたとき
+    sandbox の外でコードを動かしうるもので、普段の作業では同時に変わらない。"""
+    return sorted(f for f in set(before["files"]) | set(after["files"]) if before["files"].get(f) != after["files"].get(f))
 
 
 def grok_home(login: Path, extends: str, read_write: list[Path]) -> tuple[Path, str]:
@@ -304,20 +315,21 @@ def codex_read_only(scratch: Path) -> list[str]:
             "-c", f'permissions.{CODEX_PROFILE}.filesystem={{":tmpdir"="write"}}']
 
 
-def codex_breach(eff, scratch: Path) -> str | None:
+def codex_breach(eff) -> str | None:
     """読み取り専用の Codex の実効の権限（記録の turn_context）が、渡した profile と違えばその理由。
     読み込まれたどの設定の sandbox_mode も default_permissions より優先され（対象の .codex/config.toml・専用ログインの config.toml）、
     同じ profile に書ける場所を足すこともできる。広ければ読み取り専用でなく、一時ディレクトリに書けなければ試験を動かせない。
     実効の権限を記録から読めなければ、どちらとも確かめられないので理由にする。"""
-    eff = obj(eff)
-    if eff.get("writable") is None or eff.get("network") is None:
+    turns = obj(eff).get("turns") or []
+    if not turns or any(t["writable"] is None or t["network"] is None for t in turns):
         return "Codex の実効の権限を記録（turn_context の permission_profile）から確かめられない"
-    tmp = (":tmpdir", str(scratch.resolve()))
-    wide = [w for w in eff["writable"] if w not in tmp]
-    if wide or eff["network"] != "restricted":
-        return f"Codex の実効の権限が、読み取り専用の profile より広い（書ける場所: {wide[:5]}、ネットワーク: {eff['network'][:50]}）"
-    if not any(w in tmp for w in eff["writable"]):
-        return "Codex の実効の権限で、一時ディレクトリに書けない（設定の sandbox_mode が profile より優先されたかもしれない）"
+    tmp = (":tmpdir",)
+    for t in turns:  # どの turn も（合わせると、ある turn だけ書けないことが隠れる）
+        wide = [w for w in t["writable"] if w not in tmp]
+        if wide or t["network"] != "restricted":
+            return f"Codex の実効の権限が、読み取り専用の profile より広い（書ける場所: {wide[:5]}、ネットワーク: {t['network'][:50]}）"
+        if not any(w in tmp for w in t["writable"]):
+            return "Codex の実効の権限で、一時ディレクトリに書けない（設定の sandbox_mode が profile より優先されたかもしれない）"
     return None
 
 
@@ -411,8 +423,6 @@ def command(a, prompt: str, scratch: Path) -> tuple[list[str], dict, str | None]
         for d in [work_record(a.cwd), *(commit_dirs(own, common) if own else [])]:
             mode += ["--add-dir", str(d)]
     else:
-        if a.cwd == scratch or a.cwd in scratch.parents:  # 子が書ける一時ディレクトリが対象の中にできる
-            return [], env, f"出力の置き場 {scratch.parent} が対象の中にある。読み取り専用の Codex は一時ディレクトリに書けるので、対象の外に置く"
         mode = codex_read_only(scratch)
         env["TMPDIR"] = str(scratch.resolve())
     cmd = ["codex", "exec", "--json", "-m", a.model, "-c", f'model_reasoning_effort="{a.effort}"',
@@ -470,13 +480,13 @@ def rollout_lines(f: Path, limit: int = 256 << 20):
 
 
 def where_of(path) -> str:
-    """permission_profile の場所の表し。特別な場所は :tmpdir の形、ほかは絶対パス。読めない形は、そのままの文字列（許す場所と一致しない）。"""
+    """permission_profile の場所の表し。特別な場所は :tmpdir の形、ほかは絶対パス。読めない形は None。"""
     path = obj(path)
     if path.get("type") == "special" and text_of(obj(path.get("value")).get("kind")):
         return ":" + obj(path.get("value"))["kind"]
     if path.get("type") == "path" and text_of(path.get("path")):
         return path["path"]
-    return json.dumps(path, ensure_ascii=False)[:200]
+    return None
 
 
 def parse_codex(out: str) -> dict:
@@ -509,14 +519,17 @@ def parse_codex(out: str) -> dict:
                     perm = obj(p.get("permission_profile"))
                     fs = obj(perm.get("file_system"))
                     entries = fs.get("entries") if fs.get("type") == "restricted" and isinstance(fs.get("entries"), list) else None
-                    if entries is not None and not all(isinstance(x, dict) and x.get("access") in ("read", "write", "deny") for x in entries):
+                    if entries is not None and not all(isinstance(x, dict) and x.get("access") in ("read", "write", "deny")
+                                                       and where_of(x.get("path")) is not None for x in entries):
                         entries = None  # 読めない項目を「書ける場所ではない」と数えない（権限は不明）
                     eff = {"model": text_of(p.get("model")) or None, "effort": text_of(p.get("effort")) or None,
                            "sandbox": text_of(obj(p.get("sandbox_policy")).get("type")) or None}
                     # 書ける場所（特別な場所は :tmpdir の形）。0.163.0 の sandbox は、読み取り専用の profile でも workspace-write と記録される
-                    perms.append((None if entries is None else [where_of(obj(x).get("path")) for x in entries if x["access"] == "write"],
+                    denied = {where_of(x["path"]) for x in entries or [] if x["access"] == "deny"}  # 同じ場所なら deny が write に勝つ（公式文書）
+                    perms.append((None if entries is None else [w for x in entries if x["access"] == "write" and (w := where_of(x["path"])) not in denied],
                                   text_of(perm.get("network")) or None))
-    if eff is not None:  # 権限はどの turn のものも合わせる（どれかが読めなければ不明、どれかが広ければ広い）
+    if eff is not None:  # 判定は turn ごと（codex_breach）。writable・network は表示のために合わせる（どれかが読めなければ不明）
+        eff["turns"] = [{"writable": w, "network": n} for w, n in perms]
         eff["writable"] = None if any(w is None for w, _ in perms) else sorted({x for w, _ in perms for x in w})
         nets = {n for _, n in perms}
         eff["network"] = None if None in nets else next((n for n in sorted(nets) if n != "restricted"), "restricted")
@@ -622,8 +635,10 @@ def main() -> int:
     a.model = a.model or DEFAULTS[a.host][0]
     a.effort = a.effort or DEFAULTS[a.host][1]
     a.cwd = a.cwd.resolve()
-    # 絶対パスにする（子は --cwd で動くので、相対の --out では子の TMPDIR が別の場所を指した）
-    out_dir = (a.out or state_dir() / "delegations" / (time.strftime("%Y%m%d-%H%M%S") + '-' + secrets.token_hex(8))).absolute()
+    # 絶対パスにし、symlink を解く（子は --cwd で動くので、相対の --out では子の TMPDIR が別の場所を指した。対象の中かは解いた形で見る）
+    out_dir = (a.out or state_dir() / "delegations" / (time.strftime("%Y%m%d-%H%M%S") + '-' + secrets.token_hex(8))).resolve()
+    if a.host == "codex" and not a.write and (a.cwd == out_dir or a.cwd in out_dir.parents):  # 作る前に（作ってから拒むと、対象の中に置き場が残る）
+        ap.error(f"--out {out_dir} が対象の中にある。読み取り専用の Codex は出力の置き場の tmp/ に書けるので、対象の外に置く")
     out_dir.mkdir(parents=True, exist_ok=False)
     rec = {"host": a.host, "cwd": str(a.cwd), "model_requested": a.model, "effort_requested": a.effort,
            "write": a.write, "out": str(out_dir)}
@@ -640,7 +655,7 @@ def main() -> int:
         elif a.host == "codex":  # 読み取り専用の Codex は一時ディレクトリに書ける。対象の Git の管理情報が変わらないことも比べる
             own, common, why = worktree_dirs(a.cwd)
             if not why and own:
-                snapshot = (own, common, git_snapshot(own, common, a.cwd))
+                snapshot = (own, common, git_snapshot(own, common, a.cwd, index=True))
         if not why:
             cmd, env, why = command(a, a.prompt_file.read_text(encoding="utf-8") + CONTRACT + ("" if a.write else READ_ONLY_CONTRACT),
                                     out_dir / "tmp")
@@ -691,7 +706,7 @@ def main() -> int:
             elif p.returncode != 0 or got.get("is_error") or not got["text"]:
                 tail = [l for l in p.stderr.strip().splitlines() if "injected env" not in l and "Reading additional input" not in l][-5:]
                 rec.update(status="failed", problems=[f"終了コード {p.returncode}"] + got["errors"] + tail)
-            elif breach := (a.host == "codex" and not a.write and codex_breach(got["model_effective"], out_dir / "tmp")):
+            elif breach := (a.host == "codex" and not a.write and codex_breach(got["model_effective"])):
                 # 対象の設定が profile を広げた・狭めた（読み取り専用の結果として使わない）。報告は report.md に残す
                 rec.update(status="failed", problems=[breach])
                 (out_dir / "report.md").write_text(got["text"], encoding="utf-8", errors="backslashreplace")
@@ -714,11 +729,20 @@ def main() -> int:
                 try:
                     # Claude Code の sandbox は、worktree の管理ディレクトリに保護のための空の config.worktree を作る（2.1.302）。
                     # 起動前に無く空のままのファイルは、中身が無く git の動きを変えないので、消してから照合する
-                    for f, h in snapshot[2]["files"].items():
+                    for f, h in snapshot[2]["files"].items() if a.write else ():
                         if h is None and Path(f).is_file() and not Path(f).is_symlink() and Path(f).stat().st_size == 0:
                             Path(f).unlink()
-                    changed = git_changes(snapshot[2], git_snapshot(*snapshot[:2], a.cwd), snapshot[1], own_branch=a.write)
-                    headline = "子が、自分のブランチ以外の Git の管理情報を変えた。" if a.write else "読み取り専用の子が、Git の管理情報を変えた。"
+                    after = git_snapshot(*snapshot[:2], a.cwd, index=not a.write)
+                    if a.write:
+                        changed = git_changes(snapshot[2], after, snapshot[1])
+                        headline = "子が、自分のブランチ以外の Git の管理情報を変えた。"
+                    else:
+                        # 読み取り専用の審査は長く、その間に親の commit・並行するタスク・fetch が ref・HEAD・index を正当に動かす。
+                        # 誰が動かしたか区別できないので、それらは記録に並べるだけにする（子が書けないことは codex_breach の実効の権限で確かめる）。
+                        # sandbox の外でコードを動かしうる管理ファイルの変化だけを failed にする
+                        changed = file_changes(snapshot[2], after)
+                        rec["git_moved"] = [c for c in git_changes(snapshot[2], after, snapshot[1], own_branch=False) if c not in changed][:20]
+                        headline = "読み取り専用の子の起動の間に、Git の管理ファイルが変わった。"
                 except Exception as e:  # 子が管理情報を壊したかもしれない。黙らず、照合できなかったことを返す
                     changed = [f"Git の管理情報を読めない（子が壊したかもしれない）: {e!r}"[:300], f"詳細: {launcher_error(out_dir)}"]
                     headline = "子の後に Git の管理情報を照合できない。"
