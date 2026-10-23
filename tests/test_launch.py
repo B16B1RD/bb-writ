@@ -246,8 +246,9 @@ FAKE_CLAUDE = textwrap.dedent(r'''
     if mode in ("orphan", "orphan-hang"):  # Claude Code の Bash のように、新しいセッションで起こし、その下にもう 1 段起こす（2.1.309 は sh → bwrap → … → sleep）
         late = "import os, subprocess, sys, time; s = subprocess.Popen([sys.argv[1], '600'], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL); " \
                "open(sys.argv[2] + '.part', 'w').write(f'{os.getpid()} {s.pid}'); os.rename(sys.argv[2] + '.part', sys.argv[2]); " \
-               "time.sleep(1.5); open('late.txt', 'w').write('x'); time.sleep(600)"  # 子が終わった後に、作業場所へ書く
-        subprocess.Popen([sys.executable, "-c", late, os.environ["FAKE_SLEEP"], os.environ["FAKE_ARGS"] + ".orphan"], start_new_session=True,
+               "time.sleep(1.5); sys.argv[3] and open('late.txt', 'w').write('x'); time.sleep(600)"  # 子が終わった後に、作業場所へ書く
+        subprocess.Popen([sys.executable, "-c", late, os.environ["FAKE_SLEEP"], os.environ["FAKE_ARGS"] + ".orphan", "" if mode == "orphan-hang" else "1"],
+                         start_new_session=True,
                          stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         import time
         for _ in range(200):
@@ -1411,7 +1412,7 @@ class TestLaunch(unittest.TestCase):
                         os.kill(pid, 0)  # 止めて刈ってある（ゾンビも残さない）
                 self.assertEqual(sorted(int(p.split()[0]) for p in rec["stopped_after_exit"]), sorted(pids), rec)
                 self.assertTrue(any(p.endswith(f"{sleep} 600") for p in rec["stopped_after_exit"]), rec)
-                time.sleep(2)  # 止めていなければ、ここまでに作業場所へ書く
+                time.sleep(2)  # 止めていなければ、ここまでに作業場所へ書く（時間切れの経路では書かせない。子が生きている間に書くことになる）
                 self.assertFalse((self.cwd / "late.txt").exists())
         rc, rec = self.run_launch("claude")
         self.assertEqual((rc, rec["stopped_after_exit"]), (0, []), rec)
