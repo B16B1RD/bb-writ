@@ -23,6 +23,8 @@ FAKE_CODEX = textwrap.dedent(r'''
     mode = os.environ.get("FAKE_MODE", "good")
     if mode == "home-ssh":  # 並行する Claude Code の子が作ったものを、この委任が見る
         os.makedirs(os.path.join(os.environ["HOME"], ".claude", "ssh"), mode=0o700)
+    if mode == "home-residue":  # どの子の CLI の sandbox も、ホームに空のファイルを残しうる
+        open(os.path.join(os.environ["HOME"], ".bash_profile"), "w").close()
     if mode == "crash":
         print("boom", file=sys.stderr); sys.exit(1)
     if mode == "quota":
@@ -163,6 +165,8 @@ FAKE_GROK = textwrap.dedent(r'''
     mode = os.environ.get("FAKE_MODE", "good")
     if mode == "home-ssh":  # 並行する Claude Code の子が作ったものを、この委任が見る
         os.makedirs(os.path.join(os.environ["HOME"], ".claude", "ssh"), mode=0o700)
+    if mode == "home-residue":  # どの子の CLI の sandbox も、ホームに空のファイルを残しうる
+        open(os.path.join(os.environ["HOME"], ".bash_profile"), "w").close()
     if mode == "signedout":
         print(json.dumps({"type": "error", "message": "Not signed in."})); sys.exit(1)
     if mode == "nosandbox":
@@ -537,6 +541,10 @@ class TestLaunch(unittest.TestCase):
                 Path(f).unlink() if Path(f).is_file() else Path(f).rmdir()
         rc, rec = self.run_launch("claude", env_extra={"HOME": str(home)})
         self.assertEqual((rc, rec["status"], rec.get("home_residue")), (0, "ok", []), rec)  # 前からある空のファイルは数えない
+        for host, cwd in (("codex", None), ("grok", self.grok_target())):  # どの子でも比べる
+            rc, rec = self.run_launch(host, "home-residue", cwd=cwd, env_extra={"HOME": str(home), "XAI_API_KEY": "k"})
+            self.assertEqual((rec["status"], rec["home_residue"]), ("failed", [str(home / ".bash_profile")]), (host, rec))
+            (home / ".bash_profile").unlink()
 
     def test_the_empty_ssh_dir_claude_code_makes_in_home_is_not_residue(self):
         # 2.1.309 の sandbox は、子を起こすたびにホームへ空の .claude/ssh を作り、残りとして委任が毎回 failed になった
