@@ -4,6 +4,8 @@ import json
 import re
 import unittest
 from pathlib import Path
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parent)); import process_limit  # noqa: E402,F401  試験に上限を掛ける（直に走らせても）
 
 ROOT = Path(__file__).resolve().parents[1]
 

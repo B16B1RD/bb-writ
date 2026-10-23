@@ -2,6 +2,7 @@
 
 import errno
 import json
+import shlex
 import os
 import subprocess
 import sys
@@ -9,6 +10,7 @@ import tempfile
 import textwrap
 import unittest
 from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent)); import process_limit  # noqa: E402,F401  試験に上限を掛ける（直に走らせても）
 
 ROOT = Path(__file__).resolve().parents[1]
 LAUNCH = ROOT / "scripts" / "launch.py"
@@ -750,6 +752,22 @@ class TestLaunch(unittest.TestCase):
             rc, rec = self.run_launch("codex", env_extra={"HOME": empty})
             self.assertEqual(rec["status"], "unavailable", rec)
 
+    def test_out_under_a_mount_inside_the_target_repository_is_refused(self):
+        # git は既定で mount の境で探すのをやめ、その下の作業ツリーを Git の外と読む（devcontainer の volume など）
+        import shutil
+        if not shutil.which("unshare") or subprocess.run(["unshare", "-rm", "true"], capture_output=True).returncode != 0:
+            self.skipTest("利用者の名前空間で mount できない環境")
+        repo, wt = self.worktree("mounted")
+        (repo / "data").mkdir()
+        out = repo / "data" / "out"
+        script = (f"mount -t tmpfs none {shlex.quote(str(repo / 'data'))} && exec {shlex.quote(sys.executable)} {shlex.quote(str(LAUNCH))} "
+                  f"--host codex --cwd {shlex.quote(str(wt))} --prompt-file {shlex.quote(str(self.prompt))} --out {shlex.quote(str(out))}")
+        p = subprocess.run(["unshare", "-rm", "sh", "-c", script], capture_output=True, text=True, timeout=60,
+                           env={**os.environ, "PATH": f"{self.bin}:/usr/bin:/bin", "HOME": str(self.home),
+                                "BB_WRIT_CONFIG_DIR": str(self.cfg), "BB_WRIT_STATE_DIR": str(self.state)})
+        self.assertEqual(p.returncode, 2, p)
+        self.assertIn("対象のリポジトリ（共通ディレクトリ", p.stderr)  # 境を越えて同じリポジトリと分かる（取れずに止まるのとは別の理由）
+
     def test_codex_binary_inside_the_login_keeps_only_the_binary(self):
         # 本体が専用ログインの中（codex-home/bin/codex）にあると、2 つ上は codex-home。中の auth.json は拒む
         cfg = self.home / ".config" / "bb-writ"
@@ -771,10 +789,9 @@ class TestLaunch(unittest.TestCase):
         if not sys.platform.startswith("linux") or os.geteuid() == 0:
             self.skipTest("上限を掛けるのは Linux の一般の利用者だけ")
         import resource
-        soft, _ = resource.getrlimit(resource.RLIMIT_NPROC)
+        soft, hard = resource.getrlimit(resource.RLIMIT_NPROC)
         self.assertNotEqual(soft, resource.RLIM_INFINITY)
-        tasks = int(subprocess.run(["sh", "-c", 'ps -L -u "$(id -u)" -o pid= | wc -l'], capture_output=True, text=True).stdout)
-        self.assertLess(soft, tasks + 1000)  # 今の数から大きく離れていない（+500 で掛けた）
+        self.assertLess(soft, hard)  # 元の上限より下げてある（ほかのプロセスの余裕を残す）
 
     def test_skipping_unwritable_places_is_only_for_read_only_file_systems(self):
         from unittest import mock
@@ -784,8 +801,14 @@ class TestLaunch(unittest.TestCase):
                     with self.assertRaises(unittest.SkipTest):
                         self.writable_dir(Path("/var/tmp"))
                 else:
-                    with self.assertRaises(OSError):
+                    try:  # 飛ばさずに失敗として伝わる（飛ばすと、この試験自身が飛ばされて通って見えた）
                         self.writable_dir(Path("/var/tmp"))
+                    except unittest.SkipTest:
+                        self.fail(f"errno {code} で試験を飛ばした")
+                    except OSError:
+                        pass
+                    else:
+                        self.fail("OSError が伝わらない")
 
     def test_live_check_tells_refused_from_untried_credential_reads(self):
         import importlib.util
@@ -803,6 +826,13 @@ class TestLaunch(unittest.TestCase):
         (d / "s8").write_text("127\n")
         self.assertEqual(live.credentials_attempt(d), "other")
         (d / "s8").write_text("126\n")  # 実行できない（コマンドが拒まれたのでなく、起動できなかった）
+        self.assertEqual(live.credentials_attempt(d), "other")
+        (d / "s8").write_text("")  # 終了コードを書けなかった
+        self.assertEqual(live.credentials_attempt(d), "other")
+        (d / "s8").write_text("1\n")
+        (d / "s8.err").write_text("cat: x: No such file or directory\n")  # 拒まれたのでなく、別の失敗
+        self.assertEqual(live.credentials_attempt(d), "other")
+        (d / "s8.err").unlink()
         self.assertEqual(live.credentials_attempt(d), "other")
 
     def test_codex_read_only_child_keeps_tools_and_drops_secret_env(self):
@@ -850,9 +880,16 @@ class TestLaunch(unittest.TestCase):
         self.assertFalse([d for d, acc in rules.items() if acc == "deny" and (tool == d or tool.startswith(d + "/"))], rules)
         rc, rec = self.run_launch("codex", path=f"{pkg / 'bin'}:/usr/bin:/bin",
                                   env_extra={"GH_TOKEN": "ghp_fake", "AWS_SECRET_ACCESS_KEY": "x", "MY_API_KEY": "y",
-                                             "SSH_AUTH_SOCK": "/tmp/agent", "DBUS_SESSION_BUS_ADDRESS": "unix:path=/x", "GIT_DIR": "/x"})
+                                             "SSH_AUTH_SOCK": "/tmp/agent", "DBUS_SESSION_BUS_ADDRESS": "unix:path=/x", "GIT_DIR": "/x",
+                                             "LC_TIME": "C", "HTTPS_PROXY": "http://proxy.invalid:1", "LC_SECRET_TOKEN": "z"})
         env = json.loads(Path(str(self.args_file) + ".allenv").read_text())
-        for name in ("GH_TOKEN", "AWS_SECRET_ACCESS_KEY", "MY_API_KEY", "SSH_AUTH_SOCK", "DBUS_SESSION_BUS_ADDRESS", "GIT_DIR"):
+        for name in ("LC_TIME", "HTTPS_PROXY"):  # 言語とプロキシは渡す
+            self.assertIn(name, env)
+        launch = load_launch()
+        for name in set(env) - {"PWD", "SHLVL", "_"}:  # 子が受け取るのは、許可の一覧と launcher が足す 2 つだけ（包みの sh が足す 3 つを除く）
+            self.assertTrue(name in launch.READ_ONLY_ENV | {"CODEX_HOME", "TMPDIR"} or name.startswith("LC_") or name.upper().endswith("_PROXY"), name)
+            self.assertNotIn(name, {e["name"] for e in launch.secret_env({name: ""})["envVars"]})
+        for name in ("GH_TOKEN", "AWS_SECRET_ACCESS_KEY", "MY_API_KEY", "SSH_AUTH_SOCK", "DBUS_SESSION_BUS_ADDRESS", "GIT_DIR", "LC_SECRET_TOKEN"):
             self.assertNotIn(name, env)  # 許可の一覧の外は子に渡さない
         for name in ("PATH", "HOME", "CODEX_HOME", "TMPDIR"):
             self.assertIn(name, env)
@@ -882,6 +919,8 @@ class TestLaunch(unittest.TestCase):
         subprocess.run(g + ["clone", "-q", "--bare", str(repo), str(bare)], check=True)
         (repo / "stale").mkdir()
         (repo / "stale" / ".git").write_text(f"gitdir: {repo / '.git' / 'worktrees' / 'gone'}\n")
+        (repo / "named").mkdir()  # 壊れた .git ファイルの行き先の名前に「Git の外」の文言を入れる
+        (repo / "named" / ".git").write_text("gitdir: /nonexistent/not a git repository (or any of the parent directories): .git\n")
         broken_cwd = Path(self.tmp.name) / "broken-repo"
         subprocess.run(g + ["init", "-q", str(broken_cwd)], check=True)
         subprocess.run(g + ["-C", str(broken_cwd), "config", "core.repositoryformatversion", "99"], check=True)
@@ -906,6 +945,7 @@ class TestLaunch(unittest.TestCase):
                          (bare_wt, bare / "refs" / "heads" / "x"), (bare_wt, bare / "x" / "y"),
                          (wt, other_bare / "refs" / "heads" / "x"),  # 対象と別の bare の中も
                          (wt, repo / "stale" / "out"),  # 壊れた .git ファイルのあるディレクトリ（「Git の外」と読まない）
+                         (wt, repo / "named" / "out"),  # 行き先の名前に文言を入れても
                          (broken_cwd, Path(self.tmp.name) / "outside-x" / "out")):  # 対象の git が読めない  # bare（safe.bareRepository=explicit の下でも）
             with self.subTest(cwd=cwd, out=out):
                 p = subprocess.run([sys.executable, str(LAUNCH), "--host", "codex", "--cwd", str(cwd), "--prompt-file", str(self.prompt),
@@ -929,7 +969,11 @@ class TestLaunch(unittest.TestCase):
         tr.mkdir()
         self.assertTrue(real_git and Path(real_git).resolve() != (tr / "git").resolve(), real_git)
         calls = Path(self.tmp.name) / "tr-calls"
+        # 2 度目に呼ばれたら止まる（本物が PATH を引き直す包みでも、偽物に戻り続けない）。本物は PATH を元に戻して呼ぶ
         (tr / "git").write_text("#!/bin/sh\n"
+                                "[ -n \"$BBW_FAKE_GIT\" ] && exit 99\n"
+                                "export BBW_FAKE_GIT=1\n"
+                                f"export PATH={shlex.quote(os.environ.get('PATH', '/usr/bin:/bin'))}\n"
                                 f"echo \"LC_ALL=$LC_ALL\" >> '{calls}'\n"
                                 "err=$(mktemp) || exit 99\n"
                                 f"'{real_git}' \"$@\" 2>\"$err\"; rc=$?\n"

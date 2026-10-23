@@ -359,11 +359,13 @@ def codex_read_only(scratch: Path, cwd: Path) -> tuple[list[str], list[str]]:
 def detect_env() -> dict:
     """置き場の判定に使う git の環境。親の GIT_DIR・GIT_CEILING_DIRECTORIES などは、判定する場所と別のものを見せるので渡さない。
     文言で「Git の外」を見分けるので、翻訳しない（翻訳入りの git では、Git の外の置き場をすべて止めた）。"""
-    return {**{k: v for k, v in os.environ.items() if not k.startswith("GIT_")}, "LC_ALL": "C"}  # LC_ALL=C では LANGUAGE も効かない
+    # LC_ALL=C では LANGUAGE も効かない。mount の境で探すのをやめると、その下の作業ツリーを Git の外と読む（devcontainer の volume など）
+    return {**{k: v for k, v in os.environ.items() if not k.startswith("GIT_")}, "LC_ALL": "C", "GIT_DISCOVERY_ACROSS_FILESYSTEM": "1"}
 
 
-# git が上へたどって見つけなかった（Git の外）。壊れた .git ファイルの「not a git repository: <場所>」はここに入れない（その上を探さずに止まる）
-OUTSIDE_GIT = re.compile(r"not a git repository \(or any (of the )?parent")
+# git が上へたどって見つけなかった（Git の外）ときの、C ロケールの診断の全体。壊れた .git ファイルの「not a git repository: <場所>」は
+# 入れない（その上を探さずに止まる）。部分一致にすると、その場所の名前に同じ文字列を入れて通せた
+OUTSIDE_GIT = re.compile(r"fatal: not a git repository \(or any of the parent directories\): \.git\n")
 
 
 def git_common(d: Path) -> tuple[Path | None, str | None]:
@@ -374,7 +376,7 @@ def git_common(d: Path) -> tuple[Path | None, str | None]:
                        capture_output=True, text=True, timeout=GIT_TIMEOUT, env=detect_env())
     if g.returncode == 0 and g.stdout.endswith("\n"):
         return Path(g.stdout[:-1]).resolve(), None
-    if OUTSIDE_GIT.search(g.stderr):
+    if OUTSIDE_GIT.fullmatch(g.stderr):
         return None, None
     return None, f"{d} の Git の場所を取れない（git rev-parse: {g.stderr.strip()[:200]}）"
 
@@ -394,7 +396,7 @@ def repo_overlap(cwd: Path, out_dir: Path) -> str | None:
                        capture_output=True, text=True, timeout=GIT_TIMEOUT, env=detect_env())
     if g.returncode == 0 and g.stdout.strip() == "true":
         return f"Git の管理ディレクトリ（{near}）の中にある"
-    if g.returncode != 0 and not OUTSIDE_GIT.search(g.stderr):
+    if g.returncode != 0 and not OUTSIDE_GIT.fullmatch(g.stderr):
         return f"{near} の Git の場所を取れない（git rev-parse: {g.stderr.strip()[:200]}）"
     common, why = git_common(near)
     if why:
@@ -525,7 +527,8 @@ def command(a, prompt: str, scratch: Path) -> tuple[list[str], dict, str | None]
             return [], env, "HOME が無いか / を指すので、読み取り専用の Codex の子に認証情報の置き場を拒めない"
         # 子に渡す環境は、読み取り専用の Claude Code の子と同じ許可の一覧だけ（Codex は既定で KEY・SECRET・TOKEN を含む変数も子の
         # コマンドに残す。SSH_AUTH_SOCK・DBUS_SESSION_BUS_ADDRESS・親の GIT_* も渡さない）
-        env = {k: v for k, v in env.items() if k in READ_ONLY_ENV or k.upper().endswith("_PROXY") or k.startswith("LC_")}
+        secret = {e["name"] for e in secret_env(env)["envVars"]}  # LC_ で始まる名前の認証情報も外す
+        env = {k: v for k, v in env.items() if (k in READ_ONLY_ENV or k.upper().endswith("_PROXY") or k.startswith("LC_")) and k not in secret}
         env["CODEX_HOME"] = str(home)
         mode, a.codex_denies = codex_read_only(scratch, a.cwd)
         env["TMPDIR"] = str(scratch.resolve())

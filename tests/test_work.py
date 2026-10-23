@@ -10,6 +10,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent)); import process_limit  # noqa: E402,F401  試験に上限を掛ける（直に走らせても）
 
 WORK = Path(__file__).resolve().parents[1] / "scripts" / "work.py"
 

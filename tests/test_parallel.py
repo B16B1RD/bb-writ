@@ -7,6 +7,7 @@ import shutil
 from pathlib import Path
 import subprocess
 import sys
+sys.path.insert(0, str(Path(__file__).resolve().parent)); import process_limit  # noqa: E402,F401  試験に上限を掛ける（直に走らせても）
 import tempfile
 import time
 import unittest
