@@ -334,6 +334,13 @@ def codex_read_only(scratch: Path, cwd: Path) -> tuple[list[str], list[str]]:
     roots = {Path(os.path.realpath(d)) for d in [Path.home(), config_dir(), *(Path.home() / p for p in SECRET_PLACES)]}
     binary = Path(os.path.realpath(shutil.which("codex") or "/"))
     tools = [Path(d) for d in os.environ.get("PATH", "").split(os.pathsep) if d.startswith(str(Path.home()) + os.sep)]
+    # PATH の道具が symlink なら、行き先とそのパッケージ（2 つ上。nvm の npm は bin から ../lib/node_modules/npm を指す）も残す
+    for d in list(tools):
+        try:
+            links = [Path(os.path.realpath(e.path)) for e in os.scandir(d) if e.is_symlink()]
+        except OSError:
+            continue
+        tools += [x for t in links for x in (t, t.parent.parent)]
     login = Path(os.path.realpath(config_dir()))  # 専用ログインの中は中身が認証情報（codex-home/auth.json など）なので、本体だけを残す
     keep = [binary, *(d for d in [binary.parent.parent, binary.parent, *tools]
                       if (r := Path(os.path.realpath(d))) not in roots and r != login and login not in r.parents),
@@ -348,8 +355,14 @@ def codex_read_only(scratch: Path, cwd: Path) -> tuple[list[str], list[str]]:
 
 
 def detect_env() -> dict:
-    """置き場の判定に使う git の環境。親の GIT_DIR・GIT_CEILING_DIRECTORIES などは、判定する場所と別のものを見せるので渡さない。"""
-    return {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    """置き場の判定に使う git の環境。親の GIT_DIR・GIT_CEILING_DIRECTORIES などは、判定する場所と別のものを見せるので渡さない。
+    文言で「Git の外」を見分けるので、翻訳しない（翻訳入りの git では、Git の外の置き場をすべて止めた）。"""
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_") and k != "LANGUAGE"}
+    return {**env, "LC_ALL": "C"}
+
+
+# git が上へたどって見つけなかった（Git の外）。壊れた .git ファイルの「not a git repository: <場所>」はここに入れない（その上を探さずに止まる）
+OUTSIDE_GIT = re.compile(r"not a git repository \(or any (of the )?parent")
 
 
 def git_common(d: Path) -> tuple[Path | None, str | None]:
@@ -360,7 +373,7 @@ def git_common(d: Path) -> tuple[Path | None, str | None]:
                        capture_output=True, text=True, timeout=GIT_TIMEOUT, env=detect_env())
     if g.returncode == 0 and g.stdout.endswith("\n"):
         return Path(g.stdout[:-1]).resolve(), None
-    if "not a git repository" in g.stderr:
+    if OUTSIDE_GIT.search(g.stderr):
         return None, None
     return None, f"{d} の Git の場所を取れない（git rev-parse: {g.stderr.strip()[:200]}）"
 
@@ -380,7 +393,7 @@ def repo_overlap(cwd: Path, out_dir: Path) -> str | None:
                        capture_output=True, text=True, timeout=GIT_TIMEOUT, env=detect_env())
     if g.returncode == 0 and g.stdout.strip() == "true":
         return f"Git の管理ディレクトリ（{near}）の中にある"
-    if g.returncode != 0 and "not a git repository" not in g.stderr:
+    if g.returncode != 0 and not OUTSIDE_GIT.search(g.stderr):
         return f"{near} の Git の場所を取れない（git rev-parse: {g.stderr.strip()[:200]}）"
     common, why = git_common(near)
     if why:
@@ -509,9 +522,10 @@ def command(a, prompt: str, scratch: Path) -> tuple[list[str], dict, str | None]
     else:
         if not os.environ.get("HOME") or Path(os.environ["HOME"]).resolve() == Path("/"):  # ホームの置き場の deny が 1 つも出ない（黙って開かない）
             return [], env, "HOME が無いか / を指すので、読み取り専用の Codex の子に認証情報の置き場を拒めない"
-        # 親の環境の認証情報らしい変数を渡さない（Codex は既定で KEY・SECRET・TOKEN を含む変数も子のコマンドに残す。読み取り専用の
-        # Claude Code の子と同じ名前の規則で外す）
-        env = {k: v for k, v in env.items() if k not in {e["name"] for e in secret_env(env)["envVars"]}}
+        # 子に渡す環境は、読み取り専用の Claude Code の子と同じ許可の一覧だけ（Codex は既定で KEY・SECRET・TOKEN を含む変数も子の
+        # コマンドに残す。SSH_AUTH_SOCK・DBUS_SESSION_BUS_ADDRESS・親の GIT_* も渡さない）
+        env = {k: v for k, v in env.items() if k in READ_ONLY_ENV or k.upper().endswith("_PROXY") or k.startswith("LC_")}
+        env["CODEX_HOME"] = str(home)
         mode, a.codex_denies = codex_read_only(scratch, a.cwd)
         env["TMPDIR"] = str(scratch.resolve())
     cmd = ["codex", "exec", "--json", "-m", a.model, "-c", f'model_reasoning_effort="{a.effort}"',

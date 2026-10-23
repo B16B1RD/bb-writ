@@ -805,20 +805,26 @@ class TestLaunch(unittest.TestCase):
         js.write_text(f"#!/bin/sh\nexec {self.bin / 'codex'} \"$@\"\n")
         js.chmod(0o755)
         (pkg / "bin" / "codex").symlink_to(js)
+        npm = pkg / "lib" / "node_modules" / "npm" / "bin"
+        npm.mkdir(parents=True)
+        (npm / "npm-cli.js").write_text("")
+        (pkg / "bin" / "npm").symlink_to(npm / "npm-cli.js")
         (home / ".config" / "gh").mkdir()
         rc, rec = self.run_launch("codex", path=f"{pkg / 'bin'}:/usr/bin:/bin",
-                                  env_extra={"GH_TOKEN": "ghp_fake", "AWS_SECRET_ACCESS_KEY": "x", "MY_API_KEY": "y"})
+                                  env_extra={"GH_TOKEN": "ghp_fake", "AWS_SECRET_ACCESS_KEY": "x", "MY_API_KEY": "y",
+                                             "SSH_AUTH_SOCK": "/tmp/agent", "DBUS_SESSION_BUS_ADDRESS": "unix:path=/x", "GIT_DIR": "/x"})
         self.assertEqual((rc, rec["status"]), (0, "ok"), rec)
         rules = fs_rules(json.loads(self.args_file.read_text()))
         h = str(home.resolve())
-        for kept in (pkg / "bin" / "node", pkg / "lib" / "node_modules" / "@openai" / "codex" / "vendor"):  # 覆う deny が無い
+        for kept in (pkg / "bin" / "node", pkg / "lib" / "node_modules" / "@openai" / "codex" / "vendor", npm / "npm-cli.js"):  # 覆う deny が無い
             k = str(kept.resolve())
             self.assertFalse([d for d, acc in rules.items() if acc == "deny" and (k == d or k.startswith(d + "/"))], (kept, rules))
         self.assertEqual(rules.get(f"{h}/.config/gh"), "deny")
         env = json.loads(Path(str(self.args_file) + ".allenv").read_text())
-        for name in ("GH_TOKEN", "AWS_SECRET_ACCESS_KEY", "MY_API_KEY"):  # 認証情報らしい変数は子に渡さない
-            self.assertNotIn(name, env)
-        self.assertIn("PATH", env)
+        for name in ("GH_TOKEN", "AWS_SECRET_ACCESS_KEY", "MY_API_KEY", "SSH_AUTH_SOCK", "DBUS_SESSION_BUS_ADDRESS", "GIT_DIR"):
+            self.assertNotIn(name, env)  # 許可の一覧の外は子に渡さない
+        for name in ("PATH", "HOME", "CODEX_HOME", "TMPDIR"):
+            self.assertIn(name, env)
 
     def test_codex_read_only_child_gets_its_own_writable_tmpdir(self):
         # -s read-only では mktemp -d も失敗し、審査役が試験を動かせなかった。書けるのは起動ごとの一時ディレクトリだけ
@@ -843,6 +849,11 @@ class TestLaunch(unittest.TestCase):
         nl_main, nl_wt = Path(self.tmp.name) / "nl\nmain", Path(self.tmp.name) / "nl-wt"
         bare, bare_wt = Path(self.tmp.name) / "bare.git", Path(self.tmp.name) / "bare-wt"
         subprocess.run(g + ["clone", "-q", "--bare", str(repo), str(bare)], check=True)
+        (repo / "stale").mkdir()
+        (repo / "stale" / ".git").write_text(f"gitdir: {repo / '.git' / 'worktrees' / 'gone'}\n")
+        broken_cwd = Path(self.tmp.name) / "broken-repo"
+        subprocess.run(g + ["init", "-q", str(broken_cwd)], check=True)
+        subprocess.run(g + ["-C", str(broken_cwd), "config", "core.repositoryformatversion", "99"], check=True)
         other_bare = Path(self.tmp.name) / "other-bare.git"
         subprocess.run(g + ["init", "-q", "--bare", str(other_bare)], check=True)
         subprocess.run(g + ["-C", str(bare), "worktree", "add", "-q", "-b", "bw", str(bare_wt)], check=True)
@@ -862,10 +873,12 @@ class TestLaunch(unittest.TestCase):
                          (nl_wt, nl_main / "o"),  # 名前に改行のある元の checkout
                          (wt, Path(self.tmp.name) / "other-repo" / ".git" / "new" / "sub"),  # 2 段以上無い道
                          (bare_wt, bare / "refs" / "heads" / "x"), (bare_wt, bare / "x" / "y"),
-                         (wt, other_bare / "refs" / "heads" / "x")):  # 対象と別の bare の中も  # bare（safe.bareRepository=explicit の下でも）
+                         (wt, other_bare / "refs" / "heads" / "x"),  # 対象と別の bare の中も
+                         (wt, repo / "stale" / "out"),  # 壊れた .git ファイルのあるディレクトリ（「Git の外」と読まない）
+                         (broken_cwd, Path(self.tmp.name) / "outside-x" / "out")):  # 対象の git が読めない  # bare（safe.bareRepository=explicit の下でも）
             with self.subTest(cwd=cwd, out=out):
                 p = subprocess.run([sys.executable, str(LAUNCH), "--host", "codex", "--cwd", str(cwd), "--prompt-file", str(self.prompt),
-                                    "--out", str(out)], env={**os.environ, "GIT_CEILING_DIRECTORIES": str(repo), "GIT_DIR": ".git",
+                                    "--out", str(out)], env={**os.environ, "GIT_CEILING_DIRECTORIES": str(repo), "GIT_DIR": ".git", "LANGUAGE": "de",
                                                              "PATH": f"{self.bin}:/usr/bin:/bin", "HOME": str(self.home),
                                                              "BB_WRIT_CONFIG_DIR": str(self.cfg), "BB_WRIT_STATE_DIR": str(self.state)},
                                    capture_output=True, text=True, timeout=120)
@@ -876,6 +889,26 @@ class TestLaunch(unittest.TestCase):
         # 対象の外を指す .. は通す
         rc, rec = self.run_launch("codex", mode="tmpdir", extra=("--out", str(self.cwd / ".." / "outside-out")))
         self.assertEqual((rc, rec["status"]), (0, "ok"), rec)
+        # Git の外の置き場は、翻訳した git でも止めない（判定の git は C ロケールで動く）
+        # 偽の git は、C ロケールでないときだけ「Git の外」の文言を訳す。中から呼ぶ本物の git は、PATH を変える前に引いた絶対パスにする
+        # （PATH から引くと偽の git 自身に当たり、自分を呼び続けて、利用者の全体のプロセスの上限を埋めた）
+        import shutil
+        real_git = shutil.which("git")
+        tr = Path(self.tmp.name) / "tr-bin"
+        tr.mkdir()
+        self.assertTrue(real_git and Path(real_git).resolve() != (tr / "git").resolve(), real_git)
+        calls = Path(self.tmp.name) / "tr-calls"
+        (tr / "git").write_text("#!/bin/sh\n"
+                                f"echo \"LC_ALL=$LC_ALL\" >> '{calls}'\n"
+                                "err=$(mktemp) || exit 99\n"
+                                f"'{real_git}' \"$@\" 2>\"$err\"; rc=$?\n"
+                                "if [ \"$LC_ALL\" = C ]; then cat \"$err\" >&2; else sed 's/not a git repository/kein Git-Repository/' \"$err\" >&2; fi\n"
+                                "rm -f \"$err\"; exit $rc\n")
+        (tr / "git").chmod(0o755)
+        rc, rec = self.run_launch("codex", mode="tmpdir", extra=("--out", str(Path(self.tmp.name) / "tr-out")),
+                                  path=f"{tr}:{self.bin}:/usr/bin:/bin", env_extra={"LC_ALL": "de_DE.UTF-8"})
+        self.assertEqual((rc, rec["status"]), (0, "ok"), rec)
+        self.assertIn("LC_ALL=C", calls.read_text().split("\n"))  # 偽の git が判定に使われた（試験が空振りしていない）
         # 子の TMPDIR は symlink を解いた絶対パス（状態の置き場が symlink でも）
         real = Path(self.tmp.name) / "real-state"
         real.mkdir()
