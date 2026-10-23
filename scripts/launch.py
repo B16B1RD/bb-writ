@@ -471,11 +471,6 @@ def command(a, prompt: str, scratch: Path) -> tuple[list[str], dict, str | None]
         secret = {e["name"] for e in secret_env(env)["envVars"]}  # LC_ で始まる名前の認証情報も外す
         env = {k: v for k, v in env.items() if (k in READ_ONLY_ENV or k.upper().endswith("_PROXY") or k.startswith("LC_")) and k not in secret}
         env["CODEX_HOME"] = str(home)
-        if a.cwd == scratch or a.cwd in scratch.parents:  # 子の書ける一時ディレクトリが対象の中にできる（状態の置き場が対象の下）
-            return [], env, f"bb-writ の状態の置き場 {scratch.parent} が対象の中にある。読み取り専用の Codex は一時ディレクトリに書けるので、対象の外に置く"
-        # 状態の置き場が Git の管理ディレクトリの中（.git の下、bare の形）なら、子がそこに ref を作れる。git は呼ばずに形で見る
-        if any(d.name == ".git" or all((d / n).exists() for n in ("HEAD", "objects", "refs")) for d in scratch.parents):
-            return [], env, f"bb-writ の状態の置き場 {scratch.parent} が Git の管理ディレクトリの中にある。読み取り専用の Codex は一時ディレクトリに書けるので、外に置く"
         mode, a.codex_denies = codex_read_only(scratch, a.cwd)
         env["TMPDIR"] = str(scratch.resolve())
     cmd = ["codex", "exec", "--json", "-m", a.model, "-c", f'model_reasoning_effort="{a.effort}"',
@@ -693,11 +688,17 @@ def main() -> int:
     a.effort = a.effort or DEFAULTS[a.host][1]
     a.cwd = a.cwd.resolve()
     stamp = time.strftime("%Y%m%d-%H%M%S") + '-' + secrets.token_hex(8)
-    out_dir = (a.out or state_dir() / "delegations" / stamp).resolve()
-    out_dir.mkdir(parents=True, exist_ok=False)
     # 読み取り専用の Codex の子が書ける一時ディレクトリは、--out でなく bb-writ の状態の置き場に置く（--out は呼び出し側が選ぶので、
     # その下に置くと、対象のリポジトリや Git の管理ディレクトリの中かを判定し続けることになり、判定の穴が尽きなかった）
     scratch = (state_dir() / "delegations" / stamp / "tmp").resolve()
+    if a.host == "codex" and not a.write:  # 記録を作る前に（状態の置き場が対象の下だと、記録も対象の中にできた）
+        if a.cwd == scratch or a.cwd in scratch.parents:  # 子の書ける一時ディレクトリが対象の中にできる
+            ap.error(f"bb-writ の状態の置き場 {state_dir()} が対象の中にある。読み取り専用の Codex は一時ディレクトリに書けるので、対象の外に置く")
+        # Git の管理ディレクトリの中（.git の下、bare の形）なら、子がそこに ref を作れる。git は呼ばずに形で見る
+        if any(d.name == ".git" or all((d / n).exists() for n in ("HEAD", "objects", "refs")) for d in scratch.parents):
+            ap.error(f"bb-writ の状態の置き場 {state_dir()} が Git の管理ディレクトリの中にある。読み取り専用の Codex は一時ディレクトリに書けるので、外に置く")
+    out_dir = (a.out or state_dir() / "delegations" / stamp).resolve()
+    out_dir.mkdir(parents=True, exist_ok=False)
     rec = {"host": a.host, "cwd": str(a.cwd), "model_requested": a.model, "effort_requested": a.effort,
            "write": a.write, "out": str(out_dir)}
 

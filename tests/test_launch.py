@@ -894,17 +894,23 @@ class TestLaunch(unittest.TestCase):
                 self.assertEqual(len(list(scratch.iterdir())), 1)
                 self.assertFalse((Path(rec["out"]) / "tmp").exists())
         self.assertEqual(rec["out"], str((Path(self.tmp.name) / "rel-out").resolve()))  # 相対の --out は絶対パスに（macOS の /tmp は /private/tmp）
-        self.assertEqual(subprocess.run(["git", "-C", str(repo), "for-each-ref", "refs/heads/x"], capture_output=True, text=True).stdout, "")
-        # 状態の置き場が対象の下、Git の管理ディレクトリの中（共有の .git、worktree の管理ディレクトリ、bare）なら起動しない
-        rc, rec = self.run_launch("codex", cwd=self.tmp.name)
-        self.assertEqual(rec["status"], "unavailable", rec)
+        # 状態の置き場が対象そのもの・対象の下（深くても、対象の中を指す symlink でも）、Git の管理ディレクトリの中（共有の .git、
+        # worktree の管理ディレクトリ、bare）なら、置き場も記録も作らずに止まる
         bare = Path(self.tmp.name) / "bare.git"
         subprocess.run(["git", "init", "-q", "--bare", str(bare)], check=True)
-        for state in (repo / ".git" / "bb-writ-state", repo / ".git" / "worktrees" / "out-in-repo-wt" / "bb-writ-state", bare / "bb-writ-state"):
+        (Path(self.tmp.name) / "state-into-target").symlink_to(wt / "st")
+        for state, sign in ((wt, "対象の中"), (wt / "a" / "b" / "state", "対象の中"), (Path(self.tmp.name) / "state-into-target", "対象の中"),
+                            (repo / ".git" / "bb-writ-state", "Git の管理ディレクトリ"),
+                            (repo / ".git" / "worktrees" / "out-in-repo-wt" / "bb-writ-state", "Git の管理ディレクトリ"),
+                            (bare / "bb-writ-state", "Git の管理ディレクトリ")):
             with self.subTest(state=state):
-                rc, rec = self.run_launch("codex", cwd=wt, env_extra={"BB_WRIT_STATE_DIR": str(state)})
-                self.assertEqual(rec["status"], "unavailable", rec)
-                self.assertIn("Git の管理ディレクトリ", rec["problems"][0])
+                before = sorted(str(x) for x in wt.rglob("*"))
+                p = subprocess.run([sys.executable, str(LAUNCH), "--host", "codex", "--cwd", str(wt), "--prompt-file", str(self.prompt)],
+                                   env={**os.environ, "PATH": f"{self.bin}:/usr/bin:/bin", "HOME": str(self.home), "BB_WRIT_CONFIG_DIR": str(self.cfg),
+                                        "BB_WRIT_STATE_DIR": str(state)}, capture_output=True, text=True, timeout=120)
+                self.assertEqual(p.returncode, 2, p)
+                self.assertIn(sign, p.stderr)
+                self.assertEqual(sorted(str(x) for x in wt.rglob("*")), before)  # 対象の中に何も作らない
         # 子の TMPDIR は symlink を解いた絶対パス（状態の置き場が symlink でも）
         real = Path(self.tmp.name) / "real-state"
         real.mkdir()
