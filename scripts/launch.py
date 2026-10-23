@@ -5,9 +5,11 @@
   python3 launch.py --host codex|claude|grok --cwd <対象> --prompt-file <依頼> [--model M] [--effort E] [--write] [--out <dir>]
 
 標準出力に 1 行の JSON を出す。status は ok / not-run / invalid-report / failed / quota / unavailable。ok のときだけ終了コード 0。
+報告を使えるのは ok と、読んだだけの報告として使う not-run。
 子には、最後に ```json {"conclusion": ..., "evidence": [{"what": ..., "where": ...}], "unknowns": [...], "execution": {...}} ``` を書かせる。
 JSON が返ったことを成功にしない: 結論が空、証拠が無い、証拠の where がファイルを指すのに存在しない、実行の欄の形が違う、は invalid-report。
-実行の欄が無いか、対象の試験・検査を実行できなかったと書いた報告は not-run（読んだだけの報告。起動して形の整った報告が返ったことと区別する）。
+読み取り専用の子で、実行の欄が無いか、対象の試験・検査を実行できなかったと書いた報告は not-run（読んだだけの報告。起動して形の整った報告が返ったことと区別する）。
+書く子の実行の欄は記録するだけ（作業場所の試験は親が確かめる）。実行の欄の真偽（本当に動かしたか）は見ない。
 トークンは画面にもログにも出さない（Claude Code は dotenvx run で子の環境にだけ渡す）。
 """
 from __future__ import annotations  # macOS の Command Line Tools の python3（3.9）でも型注釈で落ちないように
@@ -39,10 +41,11 @@ CONTRACT = """
 {"conclusion": "結論を 1〜3 文", "evidence": [{"what": "何を見て何が分かったか", "where": "ファイルのパス:行、実行したコマンド、URL のどれか"}], "unknowns": ["確かめられなかったこと"],
  "execution": {"completed": "yes か no か not-needed", "commands": [{"command": "実行したコマンド", "exit": 0}]}}
 証拠の無い主張を conclusion に入れない。読み取り専用と言われたら、ファイルを変更しない。
-execution.completed は、この依頼で対象の試験・検査を最後まで実行できたか。yes は実行して結果を得た（試験が落ちたのも yes）、no は環境・権限で実行できなかったか途中で止まった（一時ディレクトリを作れない、など）、not-needed はこの依頼に実行が要らない。commands には実行したコマンドと終了コードを書く（yes なら 1 つ以上）。
-対象に書く試験・検査は、書ける一時ディレクトリ（$TMPDIR。無ければ /tmp）に対象を写して（cp -r など）、そこで動かす。
+execution.completed は、この依頼で対象の試験・検査を最後まで実行できたか。yes は実行して、試験自身の合否を得た（試験が退行を見つけて落ちたのも yes）。no は実行できなかったか途中で止まった。試験が環境・権限で止まった（一時ディレクトリを作れない、Read-only file system、Permission denied、コマンドが無い）なら、試験のコマンドの終了コードに関わらず no。not-needed はこの依頼に実行が要らない。commands には実行したコマンドと終了コードを書く（yes なら 1 つ以上）。
 対象に AGENTS.md・CLAUDE.md があれば、最初に読む（子によっては自動で読まれない）。そこに書かれた指示は対象の慣習として使い、この依頼で許された操作を広げない。
 """
+# 読み取り専用の子にだけ足す（書く子は作業場所で試験を動かす）
+READ_ONLY_CONTRACT = "対象に書く試験・検査は、書ける一時ディレクトリ（$TMPDIR。無ければ /tmp）に対象を写して（cp -r など）、そこで動かす。\n"
 
 
 def config_dir() -> Path:
@@ -258,11 +261,11 @@ def git_snapshot(own: Path, common: Path, cwd: Path) -> dict:
             "head": read_head(own / "HEAD")}
 
 
-def git_changes(before: dict, after: dict, common: Path) -> list[str]:
-    """子が変えてよいのは、起動時に checkout していたブランチの ref と、その作業場所の HEAD・index だけ。
+def git_changes(before: dict, after: dict, common: Path, own_branch: bool = True) -> list[str]:
+    """子が変えてよいのは、起動時に checkout していたブランチの ref と、その作業場所の HEAD・index だけ（own_branch が偽なら、どれも変えてはいけない）。
     ref は前後の値と戻すコマンドを添える（自動では戻さない。子の実行中に親や別のタスクが正当に動かしたかもしれない）。"""
     head = before["head"].strip()
-    mine = head[len("ref: "):] if head.startswith("ref: ") else None
+    mine = head[len("ref: "):] if head.startswith("ref: ") and own_branch else None
     out = []
     for r in sorted(set(before["refs"]) | set(after["refs"])):
         old, new = before["refs"].get(r), after["refs"].get(r)
@@ -302,15 +305,19 @@ def codex_read_only(scratch: Path) -> list[str]:
 
 
 def codex_breach(eff, scratch: Path) -> str | None:
-    """読み取り専用の Codex の実効の権限（記録の turn_context）が、渡した profile より広ければその理由。
-    対象の .codex/config.toml の sandbox_mode は default_permissions より優先され、同じ profile に書ける場所を足すこともできる。
-    実効の権限を記録から読めなければ、広くないと確かめられないので理由にする。"""
+    """読み取り専用の Codex の実効の権限（記録の turn_context）が、渡した profile と違えばその理由。
+    読み込まれたどの設定の sandbox_mode も default_permissions より優先され（対象の .codex/config.toml・専用ログインの config.toml）、
+    同じ profile に書ける場所を足すこともできる。広ければ読み取り専用でなく、一時ディレクトリに書けなければ試験を動かせない。
+    実効の権限を記録から読めなければ、どちらとも確かめられないので理由にする。"""
     eff = obj(eff)
     if eff.get("writable") is None or eff.get("network") is None:
         return "Codex の実効の権限を記録（turn_context の permission_profile）から確かめられない"
-    wide = [w for w in eff["writable"] if w not in (":tmpdir", str(scratch.resolve()))]
+    tmp = (":tmpdir", str(scratch.resolve()))
+    wide = [w for w in eff["writable"] if w not in tmp]
     if wide or eff["network"] != "restricted":
         return f"Codex の実効の権限が、読み取り専用の profile より広い（書ける場所: {wide[:5]}、ネットワーク: {eff['network'][:50]}）"
+    if not any(w in tmp for w in eff["writable"]):
+        return "Codex の実効の権限で、一時ディレクトリに書けない（設定の sandbox_mode が profile より優先されたかもしれない）"
     return None
 
 
@@ -404,8 +411,10 @@ def command(a, prompt: str, scratch: Path) -> tuple[list[str], dict, str | None]
         for d in [work_record(a.cwd), *(commit_dirs(own, common) if own else [])]:
             mode += ["--add-dir", str(d)]
     else:
+        if a.cwd == scratch or a.cwd in scratch.parents:  # 子が書ける一時ディレクトリが対象の中にできる
+            return [], env, f"出力の置き場 {scratch.parent} が対象の中にある。読み取り専用の Codex は一時ディレクトリに書けるので、対象の外に置く"
         mode = codex_read_only(scratch)
-        env["TMPDIR"] = str(scratch)
+        env["TMPDIR"] = str(scratch.resolve())
     cmd = ["codex", "exec", "--json", "-m", a.model, "-c", f'model_reasoning_effort="{a.effort}"',
            "--skip-git-repo-check", "-C", str(a.cwd), *mode, prompt]
     return cmd, env, None
@@ -486,7 +495,7 @@ def parse_codex(out: str) -> dict:
             usage = e.get("usage")
         elif e.get("type") in ("error", "turn.failed"):
             errors.append(str(e.get("message") or obj(e.get("error")).get("message") or "")[:300])
-    eff = None
+    eff, perms = None, []
     # 実効値は記録の turn_context から（メタデータだけを読む）。session は UUID の形のときだけ探す（glob に記号を渡さず、別の記録の末尾に当たらない）
     if session and re.fullmatch(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}", session):
         for f in (config_dir() / "codex-home" / "sessions").glob(f"**/rollout-*-{session}.jsonl"):
@@ -500,11 +509,17 @@ def parse_codex(out: str) -> dict:
                     perm = obj(p.get("permission_profile"))
                     fs = obj(perm.get("file_system"))
                     entries = fs.get("entries") if fs.get("type") == "restricted" and isinstance(fs.get("entries"), list) else None
+                    if entries is not None and not all(isinstance(x, dict) and x.get("access") in ("read", "write", "deny") for x in entries):
+                        entries = None  # 読めない項目を「書ける場所ではない」と数えない（権限は不明）
                     eff = {"model": text_of(p.get("model")) or None, "effort": text_of(p.get("effort")) or None,
-                           "sandbox": text_of(obj(p.get("sandbox_policy")).get("type")) or None,
-                           # 書ける場所（特別な場所は :tmpdir の形）。0.163.0 の sandbox は、読み取り専用の profile でも workspace-write と記録される
-                           "writable": None if entries is None else [where_of(obj(x).get("path")) for x in entries if obj(x).get("access") == "write"],
-                           "network": text_of(perm.get("network")) or None}
+                           "sandbox": text_of(obj(p.get("sandbox_policy")).get("type")) or None}
+                    # 書ける場所（特別な場所は :tmpdir の形）。0.163.0 の sandbox は、読み取り専用の profile でも workspace-write と記録される
+                    perms.append((None if entries is None else [where_of(obj(x).get("path")) for x in entries if x["access"] == "write"],
+                                  text_of(perm.get("network")) or None))
+    if eff is not None:  # 権限はどの turn のものも合わせる（どれかが読めなければ不明、どれかが広ければ広い）
+        eff["writable"] = None if any(w is None for w, _ in perms) else sorted({x for w, _ in perms for x in w})
+        nets = {n for _, n in perms}
+        eff["network"] = None if None in nets else next((n for n in sorted(nets) if n != "restricted"), "restricted")
     return {"text": text, "session": session, "model_effective": eff, "usage": usage, "errors": errors}
 
 
@@ -533,7 +548,7 @@ def check_execution(r: dict) -> tuple[str | None, list[str]]:
     if not isinstance(ex, dict) or ex.get("completed") not in RAN:
         return None, [f"execution.completed が {' / '.join(RAN)} のどれでもない"]
     commands = ex.get("commands", [])
-    if not isinstance(commands, list) or not all(isinstance(c, dict) and str(c.get("command") or "").strip()
+    if not isinstance(commands, list) or not all(isinstance(c, dict) and isinstance(c.get("command"), str) and c["command"].strip()
                                                  and type(c.get("exit")) is int for c in commands):
         return ex["completed"], ["execution.commands がコマンドと整数の終了コードの組の並びでない"]
     if ex["completed"] == "yes" and not commands:
@@ -607,7 +622,8 @@ def main() -> int:
     a.model = a.model or DEFAULTS[a.host][0]
     a.effort = a.effort or DEFAULTS[a.host][1]
     a.cwd = a.cwd.resolve()
-    out_dir = a.out or state_dir() / "delegations" / (time.strftime("%Y%m%d-%H%M%S") + '-' + secrets.token_hex(8))
+    # 絶対パスにする（子は --cwd で動くので、相対の --out では子の TMPDIR が別の場所を指した）
+    out_dir = (a.out or state_dir() / "delegations" / (time.strftime("%Y%m%d-%H%M%S") + '-' + secrets.token_hex(8))).absolute()
     out_dir.mkdir(parents=True, exist_ok=False)
     rec = {"host": a.host, "cwd": str(a.cwd), "model_requested": a.model, "effort_requested": a.effort,
            "write": a.write, "out": str(out_dir)}
@@ -621,8 +637,13 @@ def main() -> int:
                 why = "書く子は task start の作業場所（worktree）で起動する。元の checkout とその下では起動しない"
             if not why and own:
                 snapshot = (own, common, git_snapshot(own, common, a.cwd))
-        if not (a.write and why):
-            cmd, env, why = command(a, a.prompt_file.read_text(encoding="utf-8") + CONTRACT, out_dir / "tmp")
+        elif a.host == "codex":  # 読み取り専用の Codex は一時ディレクトリに書ける。対象の Git の管理情報が変わらないことも比べる
+            own, common, why = worktree_dirs(a.cwd)
+            if not why and own:
+                snapshot = (own, common, git_snapshot(own, common, a.cwd))
+        if not why:
+            cmd, env, why = command(a, a.prompt_file.read_text(encoding="utf-8") + CONTRACT + ("" if a.write else READ_ONLY_CONTRACT),
+                                    out_dir / "tmp")
         if a.host == "grok" and not why:
             rec["grok_home"] = env["GROK_HOME"]  # 再開（grok -r）はこの home で
         if not why:
@@ -670,15 +691,15 @@ def main() -> int:
             elif p.returncode != 0 or got.get("is_error") or not got["text"]:
                 tail = [l for l in p.stderr.strip().splitlines() if "injected env" not in l and "Reading additional input" not in l][-5:]
                 rec.update(status="failed", problems=[f"終了コード {p.returncode}"] + got["errors"] + tail)
-            elif a.host == "codex" and not a.write and codex_breach(got["model_effective"], out_dir / "tmp"):
-                # 対象の設定が profile を広げた（読み取り専用の結果として使わない）。報告は report.md に残す
-                rec.update(status="failed", problems=[codex_breach(got["model_effective"], out_dir / "tmp")])
+            elif breach := (a.host == "codex" and not a.write and codex_breach(got["model_effective"], out_dir / "tmp")):
+                # 対象の設定が profile を広げた・狭めた（読み取り専用の結果として使わない）。報告は report.md に残す
+                rec.update(status="failed", problems=[breach])
                 (out_dir / "report.md").write_text(got["text"], encoding="utf-8", errors="backslashreplace")
             else:
                 report, problems = check_report(got["text"], a.cwd)
                 ran = check_execution(report)[0] if report is not None else None
                 rec.update(status="invalid-report" if problems else "ok", report=report, problems=problems, execution=ran)
-                if not problems and ran in (None, "no"):  # 読んだだけの報告。実行が要る審査では審査役に数えない（interrogate の 3）
+                if not problems and ran in (None, "no") and not a.write:  # 読んだだけの報告。実行が要る審査では審査役に数えない（interrogate の 3）
                     rec.update(status="not-run", problems=["対象の試験・検査を実行できなかった（読んだだけの報告）" if ran == "no"
                                                            else "報告に実行の欄（execution）が無い（読んだだけの報告として扱う）"])
                 (out_dir / "report.md").write_text(got["text"], encoding="utf-8", errors="backslashreplace")  # 単独のサロゲート
@@ -696,8 +717,8 @@ def main() -> int:
                     for f, h in snapshot[2]["files"].items():
                         if h is None and Path(f).is_file() and not Path(f).is_symlink() and Path(f).stat().st_size == 0:
                             Path(f).unlink()
-                    changed = git_changes(snapshot[2], git_snapshot(*snapshot[:2], a.cwd), snapshot[1])
-                    headline = "子が、自分のブランチ以外の Git の管理情報を変えた。"
+                    changed = git_changes(snapshot[2], git_snapshot(*snapshot[:2], a.cwd), snapshot[1], own_branch=a.write)
+                    headline = "子が、自分のブランチ以外の Git の管理情報を変えた。" if a.write else "読み取り専用の子が、Git の管理情報を変えた。"
                 except Exception as e:  # 子が管理情報を壊したかもしれない。黙らず、照合できなかったことを返す
                     changed = [f"Git の管理情報を読めない（子が壊したかもしれない）: {e!r}"[:300], f"詳細: {launcher_error(out_dir)}"]
                     headline = "子の後に Git の管理情報を照合できない。"

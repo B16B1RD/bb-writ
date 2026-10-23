@@ -48,16 +48,40 @@ FAKE_CODEX = textwrap.dedent(r'''
         # 0.163.0 が読み取り専用の profile で記録する実効の権限（root を読み、$TMPDIR だけに書ける。ネットワークは restricted）
         entries = [{"path": {"type": "special", "value": {"kind": "root"}}, "access": "read"},
                    {"path": {"type": "special", "value": {"kind": "tmpdir"}}, "access": "write"}]
+        if mode == "odd-entry":  # 読めない項目（書ける場所かどうか分からない）
+            entries.append(42)
+        if mode == "odd-access":  # 知らない書き込みの値
+            entries.append({"path": {"type": "special", "value": {"kind": "root"}}, "access": "readwrite"})
+        if mode == "odd-path":  # 読めない場所に書ける
+            entries.append({"path": {"type": "weird"}, "access": "write"})
+        if mode in ("slash-tmp-profile", "outdir-profile"):  # /tmp、出力の置き場（一時ディレクトリの親）に書ける
+            entries.append({"path": {"type": "special", "value": {"kind": "slash_tmp"}} if mode == "slash-tmp-profile"
+                                    else {"type": "path", "path": os.path.dirname(os.environ["TMPDIR"])}, "access": "write"})
         if mode == "wide-profile":  # 対象の設定が同じ profile に書ける場所を足した
             entries.append({"path": {"type": "path", "path": os.getcwd()}, "access": "write"})
         perm = {"type": "managed", "file_system": {"type": "restricted", "entries": entries},
                 "network": "enabled" if mode == "net-profile" else "restricted"}
-        if mode == "legacy-sandbox":  # 対象の設定の sandbox_mode が profile より優先された
-            perm = {"type": "legacy"}
+        if mode == "no-network":
+            del perm["network"]
+        if mode == "net-odd":
+            perm["network"] = "restricted-but-open"
+        chosen = 'default_permissions="bbwrit-read-only"' in sys.argv and 'permissions.bbwrit-read-only.extends=":read-only"' in sys.argv \
+            and 'permissions.bbwrit-read-only.filesystem={":tmpdir"="write"}' in sys.argv
+        # どこかの sandbox_mode（-s・設定）は default_permissions より優先される。0.163.0 の -s read-only の記録は root を読むだけ
+        legacy = "-s" in sys.argv or "--sandbox" in sys.argv or any(a.startswith("sandbox_mode") for a in sys.argv)
+        if mode == "legacy-sandbox" or legacy or not chosen:
+            perm = {"type": "managed", "file_system": {"type": "restricted", "entries": entries[:1]}, "network": "restricted"}
         os.makedirs(os.path.join(sessions, "fake"), exist_ok=True)
-        open(os.path.join(sessions, "fake", f"rollout-1-{thread}.jsonl"), "w").write(json.dumps(
-            {"type": "turn_context", "payload": {"model": "gpt-6-sol", "effort": "medium", "sandbox_policy": {"type": "workspace-write"},
-                                                 "permission_profile": perm}}) + "\n")
+        turn = lambda perm: json.dumps({"type": "turn_context", "payload": {"model": "gpt-6-sol", "effort": "medium",
+                                                                           "sandbox_policy": {"type": "workspace-write"}, "permission_profile": perm}}) + "\n"
+        wide = {**perm, "file_system": {"type": "restricted", "entries": entries + [{"path": {"type": "special", "value": {"kind": "root"}}, "access": "write"}]}}
+        # 1 つの記録に turn が 2 つ（後の turn だけ、前の turn だけが広い）
+        turns = {"wide-then-ok": [wide, perm], "ok-then-wide": [perm, wide]}.get(mode, [perm])
+        open(os.path.join(sessions, "fake", f"rollout-1-{thread}.jsonl"), "w").write("".join(turn(x) for x in turns))
+    if mode in ("ro-branch", "ro-own-commit"):  # 読み取り専用の子が Git の管理情報を変えた（sandbox が守らなかったとき）
+        import subprocess
+        g = ["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid"]
+        subprocess.run(g + (["branch", "evil"] if mode == "ro-branch" else ["commit", "-q", "--allow-empty", "-m", "x"]), check=True)
     if mode == "tmpdir":  # 書ける一時ディレクトリで試験を動かした
         import tempfile
         tempfile.mkdtemp()
@@ -245,13 +269,13 @@ class TestLaunch(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def run_launch(self, host, mode="good", extra=(), path=None, cwd=None, env_extra=None):
+    def run_launch(self, host, mode="good", extra=(), path=None, cwd=None, env_extra=None, proc_cwd=None):
         env = {**os.environ, "HOME": str(self.home), "PATH": path if path is not None else f"{self.bin}:/usr/bin:/bin", "BB_WRIT_CONFIG_DIR": str(self.cfg),
                "BB_WRIT_STATE_DIR": str(self.state), "FAKE_MODE": mode, "FAKE_ARGS": str(self.args_file),
                "FAKE_TEXT": GOOD.encode().decode("unicode_escape"), **(env_extra or {})}
         (self.bin / "fake_env.json").write_text(json.dumps({k: v for k, v in env.items() if k.startswith("FAKE_")}))
         p = subprocess.run([sys.executable, str(LAUNCH), "--host", host, "--cwd", str(cwd or self.cwd), "--prompt-file", str(self.prompt), *extra],
-                           env=env, capture_output=True, text=True, timeout=120)  # launcher が止まったら、試験ごと止まらずに落とす
+                           env=env, capture_output=True, text=True, timeout=120, cwd=proc_cwd)  # launcher が止まったら、試験ごと止まらずに落とす
         return p.returncode, json.loads(p.stdout)
 
     def test_launch_leaves_no_bytecode_in_the_plugin(self):
@@ -277,7 +301,12 @@ class TestLaunch(unittest.TestCase):
         for host in ("codex", "claude"):
             with self.subTest(host=host):
                 rc, rec = self.run_launch(host, env_extra={"FAKE_RAW": "1", "FAKE_TEXT": text, "FAKE_THREAD": "0199aaaa-bbbb-7ccc-8ddd-eeeeffff0001"})
-                self.assertEqual((rc, rec["status"]), (0, "ok"), rec)  # 報告を失わない
+                if host == "codex":  # 形の違う turn_context の権限は不明（どの turn の権限も合わせて見る）。報告は残す
+                    self.assertEqual((rc, rec["status"]), (2, "failed"), rec)
+                    self.assertIn("確かめられない", rec["problems"][0])
+                    self.assertIn("\u2028", (Path(rec["out"]) / "report.md").read_text())
+                else:
+                    self.assertEqual((rc, rec["status"]), (0, "ok"), rec)  # 報告を失わない
                 if host == "codex":
                     self.assertEqual(rec["model_effective"]["model"], "m")  # 記録の行を割らずに読む
                     self.assertIsNone(rec["model_effective"]["sandbox"])  # 文字列でない値は記録しない
@@ -500,9 +529,17 @@ class TestLaunch(unittest.TestCase):
         argv = json.loads(self.args_file.read_text())
         self.assertNotIn("-s", argv)  # sandbox_mode は default_permissions より優先される
         self.assertNotIn("--approve-for-me", argv)
+        self.assertIn('default_permissions="bbwrit-read-only"', argv)
         self.assertIn('permissions.bbwrit-read-only.extends=":read-only"', argv)
         self.assertIn('permissions.bbwrit-read-only.filesystem={":tmpdir"="write"}', argv)
         self.assertIn("報告の形", argv[-1])  # 報告の約束を子に渡す
+        self.assertIn('"execution": {"completed"', argv[-1])  # 実行の欄と、写して動かす場所
+        self.assertIn("$TMPDIR", argv[-1])
+        self.assertIn("試験のコマンドの終了コードに関わらず no", argv[-1])  # 環境で止まった試験を yes と申告させない
+        # 権限を変える設定は、この 3 つだけ（sandbox_mode・-s を足すと profile より優先され、別の書ける場所を足すと広がる）
+        conf = [argv[i + 1] for i, x in enumerate(argv) if x == "-c" and not argv[i + 1].startswith("model_reasoning_effort")]
+        self.assertEqual(conf, ['default_permissions="bbwrit-read-only"', 'permissions.bbwrit-read-only.extends=":read-only"',
+                                'permissions.bbwrit-read-only.filesystem={":tmpdir"="write"}'])
         self.assertTrue((self.state / "delegations.jsonl").read_text().strip())
 
     def test_codex_read_only_child_gets_its_own_writable_tmpdir(self):
@@ -512,19 +549,57 @@ class TestLaunch(unittest.TestCase):
         scratch = Path(rec["out"]) / "tmp"
         self.assertEqual(len(list(scratch.iterdir())), 1)  # 子の mkdtemp はそこにできる（証拠として残す）
         self.assertFalse(self.cwd in scratch.parents)
+        # 相対の --out でも、子（--cwd で動く）の TMPDIR は同じ場所を指す
+        rc, rec = self.run_launch("codex", mode="tmpdir", extra=("--out", "rel-out"), proc_cwd=self.tmp.name)
+        self.assertEqual((rc, rec["status"]), (0, "ok"), rec)
+        self.assertEqual(rec["out"], str(Path(self.tmp.name) / "rel-out"))
+        self.assertEqual(len(list((Path(self.tmp.name) / "rel-out" / "tmp").iterdir())), 1)
+        # 出力の置き場が対象の中なら、子の書ける場所が対象の中にできるので起動しない
+        rc, rec = self.run_launch("codex", mode="tmpdir", extra=("--out", str(self.cwd / "out")))
+        self.assertEqual((rc, rec["status"]), (2, "unavailable"), rec)
+        self.assertFalse((self.cwd / "out" / "tmp").exists())
 
     def test_codex_read_only_wider_than_the_profile_is_failed(self):
         # 対象の .codex/config.toml の sandbox_mode は default_permissions より優先され、同じ profile に書ける場所も足せる
-        for i, (mode, sign) in enumerate((("wide-profile", "広い"), ("net-profile", "広い"), ("legacy-sandbox", "確かめられない"),
-                                          ("no-rollout", "確かめられない"))):
+        for i, (mode, sign) in enumerate((("wide-profile", "広い"), ("net-profile", "広い"), ("legacy-sandbox", "書けない"),
+                                          ("no-rollout", "確かめられない"), ("odd-entry", "確かめられない"), ("no-network", "確かめられない"),
+                                          ("odd-access", "確かめられない"), ("odd-path", "広い"), ("slash-tmp-profile", "広い"),
+                                          ("outdir-profile", "広い"), ("net-odd", "広い"),
+                                          ("wide-then-ok", "広い"), ("ok-then-wide", "広い"))):
             with self.subTest(mode=mode):  # 記録は session ごと
-                rc, rec = self.run_launch("codex", mode=mode, env_extra={"FAKE_THREAD": f"0199aaaa-bbbb-7ccc-8ddd-eeeeffff100{i}"})
+                rc, rec = self.run_launch("codex", mode=mode, env_extra={"FAKE_THREAD": f"0199aaaa-bbbb-7ccc-8ddd-eeeeffff{1000 + i}"})
                 self.assertEqual((rc, rec["status"]), (2, "failed"), rec)
                 self.assertIn(sign, rec["problems"][0])
                 self.assertNotIn("report", rec)  # 報告を使わない
                 self.assertTrue((Path(rec["out"]) / "report.md").is_file())  # 中身は残す
         rc, rec = self.run_launch("codex", mode="wide-profile", extra=["--write"])  # 書く子は対象に書ける
         self.assertEqual(rec["status"], "ok", rec)
+
+    def test_codex_read_only_child_changing_git_admin_is_failed(self):
+        # 読み取り専用の Codex は一時ディレクトリに書ける。sandbox が守らなくても、対象の Git の管理情報の変化を捕まえる（自分のブランチも）
+        for mode, sign in (("ro-branch", "refs/heads/evil"), ("ro-own-commit", "refs/heads/bb-writ/t1")):
+            with self.subTest(mode=mode):
+                _, wt = self.worktree(mode)
+                rc, rec = self.run_launch("codex", mode=mode, cwd=wt)
+                self.assertEqual((rc, rec["status"]), (2, "failed"), rec)
+                self.assertIn("読み取り専用の子が、Git の管理情報を変えた", rec["problems"][0])
+                self.assertTrue([p for p in rec["problems"] if p.startswith(sign + ":")], rec)
+        _, wt = self.worktree("ro-good")
+        rc, rec = self.run_launch("codex", cwd=wt)
+        self.assertEqual((rc, rec["status"]), (0, "ok"), rec)
+
+    def test_write_children_are_not_told_to_copy_and_are_not_not_run(self):
+        # 写して動かすのは読み取り専用の子だけ。書く子は作業場所で試験を動かし、実行の欄が無くても「読んだだけ」にしない
+        for host in ("codex", "claude"):
+            with self.subTest(host=host):
+                no_execution = GOOD.encode().decode("unicode_escape").replace(
+                    ', "execution": {"completed": "yes", "commands": [{"command": "python3 -m unittest", "exit": 0}]}', "")
+                rc, rec = self.run_launch(host, extra=["--write"], env_extra={"FAKE_TEXT": no_execution})
+                self.assertEqual((rc, rec["status"], rec["execution"]), (0, "ok", None), rec)
+                prompt = json.loads(self.args_file.read_text())
+                prompt = prompt[-1] if host == "codex" else prompt[prompt.index("-p") + 1]
+                self.assertIn('"execution"', prompt)
+                self.assertNotIn("写して", prompt)
 
     def test_reports_that_did_not_run_the_checks_are_not_ok(self):
         # 実行が要る審査で、読んだだけの報告を ok と数えた（Codex の read-only で mktemp -d が終了コード 2）
@@ -539,6 +614,11 @@ class TestLaunch(unittest.TestCase):
             ({"completed": "yes", "commands": [{"command": "bash tests/self-test.sh"}]}, "invalid-report", "yes"),  # 終了コードが無い
             ({"completed": "yes", "commands": []}, "invalid-report", "yes"),
             ({"completed": "yes", "commands": [{"command": "x", "exit": True}]}, "invalid-report", "yes"),
+            ({"completed": "yes", "commands": [{"command": 42, "exit": 0}]}, "invalid-report", "yes"),
+            ({"completed": "yes", "commands": [{"command": " ", "exit": 0}]}, "invalid-report", "yes"),
+            ({"completed": "yes", "commands": [{"command": "x", "exit": 0.0}]}, "invalid-report", "yes"),
+            ({"completed": "yes", "commands": ["sh test.sh"]}, "invalid-report", "yes"),
+            ({"completed": "yes", "commands": {"command": "sh test.sh", "exit": 0}}, "invalid-report", "yes"),
             ({"completed": "maybe"}, "invalid-report", None),
             ("yes", "invalid-report", None),
             ({"completed": "yes", "commands": [{"command": "bash tests/self-test.sh", "exit": 1}]}, "ok", "yes"),  # 試験が落ちたのも実行できた
