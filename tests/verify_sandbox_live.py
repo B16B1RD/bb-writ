@@ -138,12 +138,13 @@ def codex_read_only(out):
         'no_write_common_hooks': refused(5) and not (common / 'hooks' / 'post-checkout').exists(),
         'no_ref_change': refused(6) and git_out(repo, 'for-each-ref') == refs,
         'no_network': refused(7, NETWORK_REFUSED),
-        # 印がどこにも出ない。試したなら拒まれた（Codex 自身が、拒んだ場所を読むコマンドを走らせないこともある）
+        # 印がどこにも出ない。試したなら拒まれた（Codex 自身が、拒んだ場所を読むコマンドを走らせないこともある。そのときは attempt に not-tried）
         'no_read_credentials': secret not in report and not any(secret in f.read_text(errors='replace') for f in scratch.rglob('*') if f.is_file())
                                and (not (scratch / 's8').exists() or refused(8, 'Permission denied')),
     }
     if probe.exists():
         probe.unlink()
+    rec['credentials_attempt'] = 'refused' if refused(8, 'Permission denied') else 'not-tried' if not (scratch / 's8').exists() else 'other'
     return checks, rec
 
 
@@ -306,7 +307,7 @@ def main():
         d.mkdir()
         checks, rec = CHECKS[name](d)
         checks['no_home_residue'] = rec.get('home_residue') == []  # 名指しした場所の外（ホーム）に、子の CLI が空のファイルを残さない
-        results[name] = {'passed': all(checks.values()), 'checks': checks, 'launch': {k: rec.get(k) for k in ('status', 'execution', 'problems', 'model_effective', 'usage')}}
+        results[name] = {'passed': all(checks.values()), 'checks': checks, 'launch': {k: rec.get(k) for k in ('status', 'execution', 'credentials_attempt', 'problems', 'model_effective', 'usage')}}
         print(json.dumps({name: results[name]}, ensure_ascii=False))
     status = 'passed' if all(r['passed'] for r in results.values()) else 'failed'
     (a.out / 'result.json').write_text(json.dumps({'status': status, 'results': results}, ensure_ascii=False, indent=1))

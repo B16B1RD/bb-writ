@@ -1,5 +1,6 @@
 """launcher（scripts/launch.py。plan-v3 4.2）: 別系統の CLI の起動と、報告の検査。偽の CLI を PATH に置いて、成功と失敗の各場合を確かめる。"""
 
+import errno
 import json
 import os
 import subprocess
@@ -86,6 +87,10 @@ FAKE_CODEX = textwrap.dedent(r'''
         entries.append(entry(arg0 + ("/x" if mode == "arg0-nested" else ""), "read"))  # 0.163.0 は自分で足す（専用ログインの下）
         if mode == "read-under-deny":  # 対象の設定が、拒んだ場所の下に read を足した（より狭い指定が勝つ）
             entries.append(entry(os.path.join(os.environ["CODEX_HOME"], "auth.json"), "read"))
+        if mode == "read-via-link":  # 拒んだ場所（symlink の行き先）を、解く前の書き方で開き直す
+            entries.append(entry(os.path.join(os.environ["HOME"], ".aws", "credentials"), "read"))
+        if mode == "sibling-read":  # 拒んだ場所と名前の先頭が同じ隣の場所の read（拒んだ場所の下ではない）
+            entries.append(entry(os.path.dirname(os.environ["CODEX_HOME"]) + "2", "read"))
         if mode == "deny-dropped":  # 渡した deny が記録に無い
             entries = [e for e in entries if e["access"] != "deny"]
         if mode == "deny-tmp-first":  # deny が write より前に並ぶ（同じ場所なら順に関わらず deny が勝つ）
@@ -710,6 +715,32 @@ class TestLaunch(unittest.TestCase):
         rules = fs_rules(json.loads(self.args_file.read_text()))
         self.assertNotIn(str(direct.resolve()), rules)
         self.assertEqual(rules.get(f"{h}/.codex/auth.json"), "deny")
+        # 対象の Git の共通ディレクトリが拒む置き場の下にあっても拒まない。認証情報の symlink が別の拒む場所の中を指すなら、入れ子は書かない
+        g = ["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid"]
+        main = home / ".claude" / "plugins" / "repo"
+        subprocess.run(g + ["init", "-q", str(main)], check=True)
+        subprocess.run(g + ["-C", str(main), "commit", "-q", "--allow-empty", "-m", "i"], check=True)
+        wt2 = home / "work-wt"
+        subprocess.run(g + ["-C", str(main), "worktree", "add", "-q", "-b", "w", str(wt2)], check=True)
+        (wt2 / "a.txt").write_text("x\n")
+        (home / ".kube").rename(home / ".kube-old")
+        (home / ".kube").symlink_to(home / ".ssh" / "kube")
+        (home / ".ssh" / "kube").mkdir()
+        rc, rec = self.run_launch("codex", cwd=wt2)
+        self.assertEqual((rc, rec["status"]), (0, "ok"), rec)
+        rules = fs_rules(json.loads(self.args_file.read_text()))
+        self.assertNotIn(f"{h}/.claude", rules)
+        self.assertNotIn(f"{h}/.claude/plugins", rules)
+        self.assertNotIn(str((main / ".git").resolve()), rules)
+        self.assertEqual(rules.get(f"{h}/.ssh"), "deny")
+        self.assertNotIn(f"{h}/.ssh/kube", rules)
+        # 拒んだ場所を symlink の解く前の書き方で開き直す read も捕まえる。祖先を指す symlink でも、組み立てが止まる
+        rc, rec = self.run_launch("codex", mode="read-via-link", cwd=wt2, env_extra={"FAKE_THREAD": "0199aaaa-bbbb-7ccc-8ddd-eeeeffff5000"})
+        self.assertEqual(rec["status"], "failed", rec)
+        self.assertIn("拒めていない", rec["problems"][0])
+        (home / ".config" / "home-link").symlink_to(home)
+        rc, rec = self.run_launch("codex", cwd=wt2)
+        self.assertEqual((rc, rec["status"]), (0, "ok"), rec)
         # HOME が空か / なら、ホームの置き場を拒めないので起動しない
         for empty in ("", "/"):
             rc, rec = self.run_launch("codex", env_extra={"HOME": empty})
@@ -736,20 +767,32 @@ class TestLaunch(unittest.TestCase):
         g = ["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid"]
         sep_main, sep_admin, sep_wt = (Path(self.tmp.name) / n for n in ("sep-main", "sep-admin", "sep-wt"))
         nl_main, nl_wt = Path(self.tmp.name) / "nl\nmain", Path(self.tmp.name) / "nl-wt"
+        bare, bare_wt = Path(self.tmp.name) / "bare.git", Path(self.tmp.name) / "bare-wt"
+        subprocess.run(g + ["clone", "-q", "--bare", str(repo), str(bare)], check=True)
+        other_bare = Path(self.tmp.name) / "other-bare.git"
+        subprocess.run(g + ["init", "-q", "--bare", str(other_bare)], check=True)
+        subprocess.run(g + ["-C", str(bare), "worktree", "add", "-q", "-b", "bw", str(bare_wt)], check=True)
+        (self.home / ".gitconfig").write_text("[safe]\n\tbareRepository = explicit\n")  # Git の勧める堅牢化
         for main, admin, wt2 in ((sep_main, sep_admin, sep_wt), (nl_main, None, nl_wt)):
             subprocess.run(g + ["init", "-q", *(["--separate-git-dir", str(admin)] if admin else []), str(main)], check=True)
             subprocess.run(g + ["-C", str(main), "commit", "-q", "--allow-empty", "-m", "i"], check=True)
             subprocess.run(g + ["-C", str(main), "worktree", "add", "-q", "-b", "w", str(wt2)], check=True)
         (wt / "sub").mkdir()
-        for cwd, out in ((self.cwd, self.cwd), (self.cwd, self.cwd / "out"), (self.cwd, link / "out"),
+        (repo / "sub").mkdir()
+        for cwd, out in ((wt, repo / "sub" / "out"),  # 親の GIT_* の環境変数は判定に使わない（下の env）
+                         (self.cwd, self.cwd), (self.cwd, self.cwd / "out"), (self.cwd, link / "out"),
                          (self.cwd, Path(self.tmp.name) / "sib" / ".." / "repo" / "out"),
                          (wt, repo / "o"), (wt, repo / ".git" / "refs" / "heads" / "x"), (wt / "sub", wt / "o"),
                          (wt, Path(self.tmp.name) / "other-repo" / ".git" / "x"),  # 別のリポジトリの管理ディレクトリの中も
                          (sep_wt, sep_main / "o"), (sep_wt, sep_admin / "o"),  # separate-git-dir の元の checkout・管理ディレクトリ
-                         (nl_wt, nl_main / "o")):  # 名前に改行のある元の checkout
+                         (nl_wt, nl_main / "o"),  # 名前に改行のある元の checkout
+                         (wt, Path(self.tmp.name) / "other-repo" / ".git" / "new" / "sub"),  # 2 段以上無い道
+                         (bare_wt, bare / "refs" / "heads" / "x"), (bare_wt, bare / "x" / "y"),
+                         (wt, other_bare / "refs" / "heads" / "x")):  # 対象と別の bare の中も  # bare（safe.bareRepository=explicit の下でも）
             with self.subTest(cwd=cwd, out=out):
                 p = subprocess.run([sys.executable, str(LAUNCH), "--host", "codex", "--cwd", str(cwd), "--prompt-file", str(self.prompt),
-                                    "--out", str(out)], env={**os.environ, "PATH": f"{self.bin}:/usr/bin:/bin", "HOME": str(self.home),
+                                    "--out", str(out)], env={**os.environ, "GIT_CEILING_DIRECTORIES": str(repo), "GIT_DIR": ".git",
+                                                             "PATH": f"{self.bin}:/usr/bin:/bin", "HOME": str(self.home),
                                                              "BB_WRIT_CONFIG_DIR": str(self.cfg), "BB_WRIT_STATE_DIR": str(self.state)},
                                    capture_output=True, text=True, timeout=120)
                 self.assertEqual(p.returncode, 2, p)
@@ -792,6 +835,8 @@ class TestLaunch(unittest.TestCase):
         self.assertEqual(rec["status"], "ok", rec)
         rc, rec = self.run_launch("codex", mode="deny-entry", env_extra={"FAKE_THREAD": "0199aaaa-bbbb-7ccc-8ddd-eeeeffff2000"})
         self.assertEqual(rec["status"], "ok", rec)  # 拒否の項目は広げない
+        rc, rec = self.run_launch("codex", mode="sibling-read", env_extra={"FAKE_THREAD": "0199aaaa-bbbb-7ccc-8ddd-eeeeffff2001"})
+        self.assertEqual(rec["status"], "ok", rec)  # 名前の先頭が同じ隣の場所は、拒んだ場所の下ではない
         # 引数で広げる・狭める（--add-dir、--config で書ける場所、ネットワーク、extends、sandbox_mode・-s）と、記録の照合が捕まえる
         (self.bin / "codex-real").write_text((self.bin / "codex").read_text())
         (self.bin / "codex-real").chmod(0o755)
@@ -1189,6 +1234,8 @@ class TestLaunch(unittest.TestCase):
         try:
             return tempfile.TemporaryDirectory(dir=parent)
         except OSError as e:
+            if e.errno != errno.EROFS:  # 読み取り専用のファイルシステム（sandbox の中）だけ。ほかの失敗は試験の失敗にする
+                raise
             self.skipTest(f"{parent} に書けない環境（{e.strerror}）。Grok の読み取り専用の試験は /tmp の外の書ける場所が要る")
 
     def grok_target(self):

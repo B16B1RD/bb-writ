@@ -302,12 +302,13 @@ def secret_denies(keep: list[Path]) -> list[str]:
     codex 本体を実行できなかった（0.163.0、Linux）。そこで、あるものだけを symlink を解いた行き先で書き、入れ子は書かず、
     keep（codex 本体・Git の設定・対象）を含む置き場は、起動の時点の中身を 1 つずつ見て、keep を含まないものだけを拒む（再帰）。"""
     keep = {Path(os.path.realpath(k)) for k in keep} | {Path(os.path.abspath(k)) for k in keep}  # symlink の節点も、行き先も
-    places = set()
+    places, seen = set(), set()
 
     def add(d: Path):
         d = Path(os.path.realpath(d))
-        if any(k == d for k in keep):  # 残すものそのもの
+        if any(k == d for k in keep) or d in seen:  # 残すものそのもの。祖先を指す symlink で同じ場所に戻ったとき
             return
+        seen.add(d)
         if any(d in k.parents for k in keep):  # 残すものを含む: 中身を 1 つずつ
             for c in d.iterdir():
                 if os.path.exists(c):
@@ -337,24 +338,45 @@ def codex_read_only(scratch: Path, cwd: Path) -> tuple[list[str], list[str]]:
              "-c", f"permissions.{CODEX_PROFILE}.filesystem={{{table}}}"], denies)
 
 
-def git_common(d: Path) -> Path | None:
-    """d が属するリポジトリの共通ディレクトリ（Git の外なら None）。1 つだけ取り、末尾の改行だけを外す（改行を含む名前を分け違えない）。"""
-    g = subprocess.run(["git", "-C", str(d), "rev-parse", "--path-format=absolute", "--git-common-dir"], capture_output=True, text=True, timeout=GIT_TIMEOUT)
-    return Path(g.stdout[:-1]).resolve() if g.returncode == 0 and g.stdout.endswith("\n") else None
+def detect_env() -> dict:
+    """置き場の判定に使う git の環境。親の GIT_DIR・GIT_CEILING_DIRECTORIES などは、判定する場所と別のものを見せるので渡さない。"""
+    return {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+
+
+def git_common(d: Path) -> tuple[Path | None, str | None]:
+    """(d が属するリポジトリの共通ディレクトリ, 理由)。Git の外なら (None, None)。1 つだけ取り、末尾の改行だけを外す（改行を含む名前を
+    分け違えない）。それ以外の失敗（safe.bareRepository=explicit の下の bare など）は理由にする（「Git の外」と読み違えると、
+    管理ディレクトリの中の置き場を通した）。"""
+    g = subprocess.run(["git", "-C", str(d), "rev-parse", "--path-format=absolute", "--git-common-dir"],
+                       capture_output=True, text=True, timeout=GIT_TIMEOUT, env=detect_env())
+    if g.returncode == 0 and g.stdout.endswith("\n"):
+        return Path(g.stdout[:-1]).resolve(), None
+    if "not a git repository" in g.stderr:
+        return None, None
+    return None, f"{d} の Git の場所を取れない（git rev-parse: {g.stderr.strip()[:200]}）"
 
 
 def repo_overlap(cwd: Path, out_dir: Path) -> str | None:
-    """出力の置き場が、Git の管理ディレクトリの中、対象の中、または対象と同じリポジトリ（どの worktree・元の checkout でも）の中に
-    あればその理由。読み取り専用の Codex は置き場の tmp/ に書けるので、そこが管理ディレクトリの中なら ref も作れる（Git の前後比較は
-    しない）。元の checkout は separate-git-dir では git から分からないので、置き場の側から属するリポジトリを見る。"""
+    """出力の置き場が、対象の中、どこかの Git の管理ディレクトリの中（bare も）、または対象と同じリポジトリ
+    （どの worktree・元の checkout でも）の作業ツリーの中にあればその理由。読み取り専用の Codex は置き場の tmp/ に書けるので、そこが
+    管理ディレクトリの中なら ref も作れる（Git の前後比較はしない）。元の checkout は separate-git-dir では git から分からないので、
+    置き場の側から属するリポジトリを見る。Git の場所を取れなければ（「Git の外」以外の失敗）、重ならないとみなさず理由にする。"""
     if out_dir == cwd or cwd in out_dir.parents:
         return f"対象（{cwd}）の中にある"
+    target, why = git_common(cwd)
+    if why:
+        return why
     near = next(d for d in [out_dir, *out_dir.parents] if d.exists())  # 置き場はまだ無い。在る最も近い祖先で見る
-    g = subprocess.run(["git", "-C", str(near), "rev-parse", "--is-inside-git-dir"], capture_output=True, text=True, timeout=GIT_TIMEOUT)
+    g = subprocess.run(["git", "-C", str(near), "rev-parse", "--is-inside-git-dir"],
+                       capture_output=True, text=True, timeout=GIT_TIMEOUT, env=detect_env())
     if g.returncode == 0 and g.stdout.strip() == "true":
         return f"Git の管理ディレクトリ（{near}）の中にある"
-    target = git_common(cwd)
-    if target and git_common(near) == target:
+    if g.returncode != 0 and "not a git repository" not in g.stderr:
+        return f"{near} の Git の場所を取れない（git rev-parse: {g.stderr.strip()[:200]}）"
+    common, why = git_common(near)
+    if why:
+        return why
+    if target and common == target:
         return f"対象のリポジトリ（共通ディレクトリ {target}）の作業ツリーの中にある"
     return None
 
@@ -379,7 +401,7 @@ def codex_breach(turns: list, denies: list[str]) -> str | None:
         recorded = {w for acc, w in t["rules"] if acc == "deny"}
         missing = [d for d in denies if d not in recorded]
         opened = [w for acc, w in t["rules"] if acc != "deny" and not w.startswith(":")
-                  and any(w == d or w.startswith(d + "/") for d in denies)
+                  and any(r == d or r.startswith(d + "/") for d in denies for r in (w, os.path.realpath(w)))  # 解く前の書き方でも
                   and not (acc == "read" and w.startswith(arg0) and "/" not in w[len(arg0):])]
         if missing or opened:
             return f"Codex の実効の権限で、認証情報の置き場を拒めていない（記録に無い deny: {missing[:5]}、その下で開いた場所: {opened[:5]}）"
