@@ -19,6 +19,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 LAUNCH = ROOT / 'scripts' / 'launch.py'
 CFG = Path(os.environ.get('BB_WRIT_CONFIG_DIR', Path.home() / '.config' / 'bb-writ'))
+# ネットワークの拒否と数えるエラー: 名前解決・到達の失敗だけ（証明書やプロキシの誤りは、出られたことの否定にならない）
+NETWORK_REFUSED = r'Temporary failure in name resolution|Name or service not known|Network is unreachable|No address associated'
 
 
 def git(at, *args):
@@ -126,8 +128,7 @@ def codex_read_only(out):
         'no_write_outside': refused(4) and not (outside / 'written.txt').exists(),
         'no_write_common_hooks': refused(5) and not (common / 'hooks' / 'post-checkout').exists(),
         'no_ref_change': refused(6) and git_out(repo, 'for-each-ref') == refs,
-        # 名前解決・到達の失敗だけ（証明書やプロキシの誤りは、出られたことの否定にならない）
-        'no_network': refused(7, r'Temporary failure in name resolution|Name or service not known|Network is unreachable|No address associated'),
+        'no_network': refused(7, NETWORK_REFUSED),
     }
     if probe.exists():
         probe.unlink()

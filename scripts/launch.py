@@ -490,7 +490,7 @@ def where_of(path) -> str:
     path = obj(path)
     if path.get("type") == "special" and text_of(obj(path.get("value")).get("kind")):
         return ":" + obj(path.get("value"))["kind"]
-    if path.get("type") == "path" and text_of(path.get("path")):
+    if path.get("type") == "path" and text_of(path.get("path")).startswith("/"):  # 絶対パスだけ（:tmpdir の形の文字列と取り違えない）
         return path["path"]
     return None
 

@@ -48,7 +48,8 @@ FAKE_CODEX = textwrap.dedent(r'''
         # 引数から、0.163.0 が記録する実効の権限を組み立てる（profile の名前や -c の書き方に結び付けない）
         import re
         argv = sys.argv[1:]
-        conf = [argv[i + 1] for i, x in enumerate(argv[:-1]) if x in ("-c", "--config")] + [x[9:] for x in argv if x.startswith("--config=")]
+        conf = [argv[i + 1] if x in ("-c", "--config") else x[9:] for i, x in enumerate(argv)
+                if x in ("-c", "--config") and i + 1 < len(argv) or x.startswith("--config=")]  # 引数の順のまま
         value = lambda key: next((c.split("=", 1)[1].strip().strip('"') for c in reversed(conf) if c.split("=", 1)[0].strip() == key), None)
         entry = lambda where, access: {"path": {"type": "special", "value": {"kind": where[1:]}} if where.startswith(":")
                                        else {"type": "path", "path": where}, "access": access}
@@ -75,9 +76,11 @@ FAKE_CODEX = textwrap.dedent(r'''
                  "slash-tmp-profile": entry(":slash_tmp", "write"), "wide-profile": entry(os.getcwd(), "write"),
                  "outdir-profile": entry(os.path.dirname(os.environ.get("TMPDIR", "/nonexistent/x")), "write"),
                  "workspace-profile": entry(":workspace_roots", "write"), "deny-tmp": entry(":tmpdir", "deny"),
-                 "deny-entry": entry("/etc", "deny")}.get(mode)
+                 "deny-entry": entry("/etc", "deny"), "path-like-special": {"path": {"type": "path", "path": ":tmpdir"}, "access": "write"}}.get(mode)
         if extra is not None:
             entries.append(extra)
+        if mode == "deny-tmp-first":  # deny が write より前に並ぶ（同じ場所なら順に関わらず deny が勝つ）
+            entries.insert(0, entry(":tmpdir", "deny"))
         perm = {"type": "managed", "file_system": {"type": "restricted", "entries": entries}, "network": network}
         if mode == "net-profile":
             perm["network"] = "enabled"
@@ -99,9 +102,14 @@ FAKE_CODEX = textwrap.dedent(r'''
         # 1 つの記録に turn が 2 つ（どちらか一方だけが広い・狭い・読めない）
         net_open = {**perm, "network": "enabled"}
         big = {**perm, "user_instructions": "x" * (2 << 20)}  # 1 MiB を超える行（割れて読めない）
+        bad = {"bad-json-after": '{"type": "turn_context", "pay\n', "bad-utf8-after": '\udcff\n'}.get(mode)  # 正しい turn の後の、短い読めない行
         turns = {"big-wide-line": [perm, {**big, "file_system": wide["file_system"]}], "net-open-then-ok": [net_open, perm], "ok-then-net-open": [perm, net_open], "wide-then-ok": [wide, perm], "ok-then-wide": [perm, wide], "narrow-then-ok": [narrow, perm], "ok-then-narrow": [perm, narrow],
                  "fs-unknown-then-ok": [fs_unknown, perm], "net-unknown-then-ok": [net_unknown, perm]}.get(mode, [perm])
-        open(os.path.join(sessions, "fake", f"rollout-1-{thread}.jsonl"), "w").write("".join(turn(x) for x in turns))
+        open(os.path.join(sessions, "fake", f"rollout-1-{thread}.jsonl"), "w", errors="surrogateescape").write("".join(turn(x) for x in turns) + (bad or ""))
+    if mode == "parent-moves-git":  # 子の実行中に、親や並行するタスクが ref と設定を正当に動かす（子は何もしない）
+        import subprocess
+        subprocess.run(["git", "branch", "parent-work"], check=True)
+        subprocess.run(["git", "config", "branch.main.remote", "origin"], check=True)
     open(os.environ["FAKE_ARGS"] + ".tmpdir", "w").write(os.environ.get("TMPDIR", ""))
     if mode == "tmpdir":  # 書ける一時ディレクトリで試験を動かした
         import tempfile
@@ -573,9 +581,10 @@ class TestLaunch(unittest.TestCase):
         self.assertIn('"execution": {"completed"', argv[-1])  # 実行の欄と、写して動かす場所
         self.assertIn("$TMPDIR", argv[-1])
         # 約束の意味を決める文は、文ごと固定する（語の有無だけでは、意味を逆にした書き換えが通った）
-        for sentence in ("yes は実行して、試験自身の合否を得た（試験が退行を見つけて落ちたのも yes）。",
-                         "試験が環境・権限で止まった（一時ディレクトリを作れない、Read-only file system、Permission denied、コマンドが無い）なら、試験のコマンドの終了コードに関わらず no。",
-                         "commands には実行したコマンドと終了コードを書く（yes なら 1 つ以上）。",
+        for sentence in ("execution.completed は、この依頼で対象の試験・検査を最後まで実行できたか。yes は実行して、試験自身の合否を得た"
+                         "（試験が退行を見つけて落ちたのも yes）。no は実行できなかったか途中で止まった。試験が環境・権限で止まった（一時ディレクトリを作れない、"
+                         "Read-only file system、Permission denied、コマンドが無い）なら、試験のコマンドの終了コードに関わらず no。not-needed はこの依頼に"
+                         "実行が要らない。commands には実行したコマンドと終了コードを書く（yes なら 1 つ以上）。\n",
                          "対象に書く試験・検査は、書ける一時ディレクトリ（$TMPDIR。無ければ /tmp）に対象を写して（cp -r など）、そこで動かす。"):
             self.assertIn(sentence, argv[-1])
         # 権限を変える設定は、この 3 つだけ（sandbox_mode・-s を足すと profile より優先され、別の書ける場所を足すと広がる）
@@ -636,7 +645,8 @@ class TestLaunch(unittest.TestCase):
                                           ("ok-then-narrow", "書けない"), ("fs-unknown-then-ok", "確かめられない"),
                                           ("net-unknown-then-ok", "確かめられない"), ("workspace-profile", "広い"), ("deny-tmp", "書けない"),
                                           ("net-open-then-ok", "広い"), ("ok-then-net-open", "広い"),
-                                          ("big-wide-line", "確かめられない"), ("odd-deny-path", "確かめられない"), ("fs-odd-type", "確かめられない"))):
+                                          ("big-wide-line", "確かめられない"), ("odd-deny-path", "確かめられない"), ("bad-json-after", "確かめられない"),
+                                          ("bad-utf8-after", "確かめられない"), ("deny-tmp-first", "書けない"), ("path-like-special", "確かめられない"), ("fs-odd-type", "確かめられない"))):
             with self.subTest(mode=mode):  # 記録は session ごと
                 rc, rec = self.run_launch("codex", mode=mode, env_extra={"FAKE_THREAD": f"0199aaaa-bbbb-7ccc-8ddd-eeeeffff{1000 + i}"})
                 self.assertEqual((rc, rec["status"]), (2, "failed"), rec)
@@ -677,12 +687,36 @@ class TestLaunch(unittest.TestCase):
                 self.assertIn('"execution"', prompt)
                 self.assertNotIn("写して", prompt)
 
+    def test_codex_read_only_review_survives_the_parent_moving_git(self):
+        # 審査の間に親や並行するタスクが ref・設定を動かしても、読み取り専用の子の報告は使える（前後比較で誤って failed にしない）
+        repo, wt = self.worktree("parent-moves")
+        (repo / "a.txt").write_text("x\n")  # 報告の証拠が指すファイル
+        for target in (wt, repo):
+            with self.subTest(target=target):
+                subprocess.run(["git", "-C", str(target), "branch", "-D", "parent-work"], capture_output=True)
+                rc, rec = self.run_launch("codex", mode="parent-moves-git", cwd=target,
+                                          env_extra={"FAKE_THREAD": f"0199aaaa-bbbb-7ccc-8ddd-eeeeffff{4000 + (target == repo)}"})
+                self.assertEqual((rc, rec["status"]), (0, "ok"), rec)
+
+    def test_network_refusal_counts_only_resolution_and_reachability_failures(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("verify_live", ROOT / "tests" / "verify_sandbox_live.py")
+        live = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(live)
+        import re
+        for err, refused in (("urllib.error.URLError: <urlopen error [Errno -3] Temporary failure in name resolution>", True),
+                             ("<urlopen error [Errno -2] Name or service not known>", True), ("[Errno 101] Network is unreachable", True),
+                             ("<urlopen error [SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed>", False),
+                             ("urllib.error.URLError: <urlopen error Tunnel connection failed: 407 Proxy Authentication Required>", False)):
+            with self.subTest(err=err):
+                self.assertEqual(bool(re.search(live.NETWORK_REFUSED, err)), refused)
+
     def test_reports_that_did_not_run_the_checks_are_not_ok(self):
         # 実行が要る審査で、読んだだけの報告を ok と数えた（Codex の read-only で mktemp -d が終了コード 2）
         def report(execution):
             body = {"conclusion": "c", "evidence": [{"what": "読んだ", "where": "a.txt:1"}], "unknowns": []}
             if execution is not None:
-                body["execution"] = execution
+                body["execution"] = None if execution == "null" else execution
             return "```json\n" + json.dumps(body, ensure_ascii=False) + "\n```"
         cases = (  # (実行の欄, status, execution)
             (None, "not-run", None),  # 前の形の報告（欄なし）
@@ -696,6 +730,7 @@ class TestLaunch(unittest.TestCase):
             ({"completed": "yes", "commands": ["sh test.sh"]}, "invalid-report", "yes"),
             ({"completed": "yes", "commands": {"command": "sh test.sh", "exit": 0}}, "invalid-report", "yes"),
             ({"completed": "maybe"}, "invalid-report", None),
+            ("null", "invalid-report", None),  # "execution": null は欄が無いのと違う
             ({"completed": "yes", "commands": [{"command": "x", "exit": "0"}]}, "invalid-report", "yes"),
             ({"completed": "yes"}, "invalid-report", "yes"),  # commands の鍵が無い
             ({"completed": "no", "commands": [{"command": 42, "exit": 2}]}, "invalid-report", "no"),
