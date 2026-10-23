@@ -331,13 +331,15 @@ def codex_read_only(scratch: Path, cwd: Path) -> tuple[list[str], list[str]]:
     # 残すものは、実機で要ると分かったものだけ: codex 本体とそのパッケージ（本体の 2 つ上。standalone の版で、拒んだ ~/.codex の中の本体を、sandbox の補助が
     # 実行できなかった）、Git の設定、対象とその共通ディレクトリ。PATH の道具などを足すと、そのたびに別の置き場を開けた（dotfiles など）。
     # 道具が名前を挙げた置き場の下にあれば拒まれ、子の試験は動かず not-run になる（読んだだけの報告として扱われる）。
-    # 置き場の根・ホーム・専用ログインの中は、本体のパッケージでも残さない（~/.codex/bin/codex の 2 つ上は ~/.codex）
+    # 本体のパッケージが置き場の根・ホームそのもの（~/.codex/bin/codex の 2 つ上は ~/.codex）か、専用ログインの中なら残さない。
+    # Git の設定が置き場の根そのもの（~/.config/git が ~/.ssh を指す symlink）なら残さない
     roots = {Path(os.path.realpath(d)) for d in [Path.home(), config_dir(), *(Path.home() / p for p in SECRET_PLACES)]}
     login = Path(os.path.realpath(config_dir()))
     binary = Path(os.path.realpath(shutil.which("codex") or "/"))
     package = binary.parent.parent
     keep = [binary, *([package] if package not in roots and login not in package.parents else []),
-            Path.home() / ".config" / "git", cwd, *([git_dir] if git_dir else [])]
+            *([gitconf] if Path(os.path.realpath(gitconf := Path.home() / ".config" / "git")) not in roots else []),
+            cwd, *([git_dir] if git_dir else [])]
     denies = secret_denies(keep)
     scratch.mkdir(parents=True)
     rules = {":tmpdir": "write", **{d: "deny" for d in denies}}

@@ -757,6 +757,12 @@ class TestLaunch(unittest.TestCase):
         (home / ".config" / "home-link").symlink_to(home)
         rc, rec = self.run_launch("codex", cwd=wt2)
         self.assertEqual((rc, rec["status"]), (0, "ok"), rec)
+        # ~/.config/git が置き場の根（~/.ssh）を指す symlink なら、Git の設定として残さない（~/.ssh を拒む）
+        shutil.rmtree(home / ".config" / "git") if (home / ".config" / "git").is_dir() and not (home / ".config" / "git").is_symlink() else (home / ".config" / "git").unlink()
+        (home / ".config" / "git").symlink_to(home / ".ssh")
+        rc, rec = self.run_launch("codex")
+        rules = fs_rules(json.loads(self.args_file.read_text()))
+        self.assertEqual(rules.get(f"{h}/.ssh"), "deny", rules)
         # HOME が空か / なら、ホームの置き場を拒めないので起動しない
         for empty in ("", "/", "//", "/."):
             rc, rec = self.run_launch("codex", env_extra={"HOME": empty})
@@ -919,12 +925,15 @@ class TestLaunch(unittest.TestCase):
         (Path(self.tmp.name) / "refs-store").mkdir()
         shutil.rmtree(linked / ".git" / "refs")
         (linked / ".git" / "refs").symlink_to(Path(self.tmp.name) / "refs-store")
+        (repo / ".git" / "st").mkdir()
+        (Path(self.tmp.name) / "link-into-git").symlink_to(repo / ".git" / "st")
         for state, sign in ((wt, "対象の中"), (wt / "a" / "b" / "state", "対象の中"), (Path(self.tmp.name) / "state-into-target", "対象の中"),
                             (repo / ".git" / "bb-writ-state", "Git の管理ディレクトリ"),
                             (repo / ".git" / "worktrees" / "out-in-repo-wt" / "bb-writ-state", "Git の管理ディレクトリ"),
                             (bare / "bb-writ-state", "Git の管理ディレクトリ"),
                             (Path(self.tmp.name) / "plain" / ".git" / "st", "Git の管理ディレクトリ"),
-                            (linked / ".git" / "refs" / "heads" / "state", "Git の管理ディレクトリ")):
+                            (linked / ".git" / "refs" / "heads" / "state", "Git の管理ディレクトリ"),
+                            (Path(self.tmp.name) / "link-into-git", "Git の管理ディレクトリ")):  # .git の中を指す symlink
             with self.subTest(state=state):
                 before = sorted(str(x) for x in wt.rglob("*"))
                 p = subprocess.run([sys.executable, str(LAUNCH), "--host", "codex", "--cwd", str(wt), "--prompt-file", str(self.prompt)],
