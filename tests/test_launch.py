@@ -579,6 +579,8 @@ class TestLaunch(unittest.TestCase):
                 p = home / ".claude" / "ssh"
                 got = "link" if p.is_symlink() else "dir" if p.is_dir() else "file" if p.is_file() else "absent"
                 self.assertEqual(got, ssh, rec)  # 消さない
+                for r in residue:  # 数えた残りも消さない
+                    self.assertTrue(os.path.lexists(r), r)
                 if had_claude:
                     self.assertEqual((home / ".claude" / "settings.json").read_text(), "{}")
 
