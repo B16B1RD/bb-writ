@@ -635,11 +635,12 @@ def main() -> int:
                                                       f"詳細: {launcher_error(out_dir)}"] + rec.get("problems", []))
             try:
                 _, empty, unreadable = home_entries(skip)
-                # Claude Code 2.1.309 の sandbox は、起動のたびに CLAUDE_CONFIG_DIR に関わらずホームに空の .claude/ssh（0700）を作る
-                # （サーバー側の機能フラグが有効なとき）。CLI 自身の置き場で、ほかの道具の動きを変えないので数えない。消さない（消すと、
-                # 並行する別の委任の子と競う）。どのホストの委任でも数えない（並行する Claude Code の子が作ったものを、ほかの委任が見る）
+                # Claude Code 2.1.309 の sandbox は、起動のたびに CLAUDE_CONFIG_DIR に関わらずホームに空のディレクトリ .claude/ssh を作る
+                # （サーバー側の機能フラグが有効なとき）。CLI 自身の置き場で、ほかの道具の動きを変えないので、権限を問わず数えない。消さない
+                # （消すと、並行する別の委任の子と競う）。どのホストの委任でも数えない（並行する Claude Code の子が作ったものを、ほかの委任が見る）。
+                # 同じ名前の空のファイルは数える。symlink は home_entries がもともと見ない（行き先がホームの 2 段目までの空の場所なら、それを数える）
                 ssh = Path.home() / ".claude" / "ssh"
-                rec["home_residue"] = sorted(empty - home_before - ({str(ssh)} if ssh.is_dir() and not ssh.is_symlink() else set()))
+                rec["home_residue"] = sorted(empty - home_before - ({str(ssh)} if ssh.is_dir() else set()))
                 if unreadable - unreadable_before:  # 子が権限を落とした場所は、残りを確かめられない
                     raise PermissionError(f"読めない場所が増えた: {sorted(unreadable - unreadable_before)[:20]}")
             except Exception as e:

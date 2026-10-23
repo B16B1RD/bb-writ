@@ -72,6 +72,9 @@ FAKE_CLAUDE = textwrap.dedent(r'''
             os.symlink(os.path.join(os.environ["HOME"], "elsewhere"), ssh)
         elif mode == "home-ssh-file":
             open(ssh, "w").close()
+        elif mode == "home-ssh-near":
+            for d in (ssh, os.path.join(os.environ["HOME"], ".claude", "other"), os.path.join(os.environ["HOME"], ".config", "ssh")):
+                os.makedirs(d)
         else:
             os.makedirs(ssh, mode=0o700, exist_ok=True)
     git = ["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid"]
@@ -545,10 +548,13 @@ class TestLaunch(unittest.TestCase):
             self.assertTrue((home / ".claude" / "ssh").is_dir())  # 消さない（並行する別の委任の子と競う）
             (home / ".claude" / "ssh").rmdir(); (home / ".claude").rmdir()
 
-    def test_other_empty_things_under_the_ssh_dir_are_still_residue(self):
+    def test_only_the_empty_ssh_dir_itself_is_exempt(self):
         home = Path(self.tmp.name) / "home"
         (home / ".config").mkdir(parents=True)
-        rc, rec = self.run_launch("claude", "home-ssh-link", env_extra={"HOME": str(home)})  # 数えないのは実ディレクトリの ssh だけ
+        rc, rec = self.run_launch("claude", "home-ssh-near", env_extra={"HOME": str(home)})  # 隣の空のディレクトリ・別の場所の ssh は数える
+        self.assertEqual((rec["status"], rec["home_residue"]), ("failed", [str(home / ".claude" / "other"), str(home / ".config" / "ssh")]), rec)
+        (home / ".claude" / "other").rmdir(); (home / ".config" / "ssh").rmdir(); (home / ".claude" / "ssh").rmdir()
+        rc, rec = self.run_launch("claude", "home-ssh-link", env_extra={"HOME": str(home)})  # symlink は見ない。行き先の空の場所は数える
         self.assertEqual((rec["status"], rec["home_residue"]), ("failed", [str(home / "elsewhere")]), rec)
         (home / ".claude" / "ssh").unlink(); (home / "elsewhere").rmdir()
         rc, rec = self.run_launch("claude", "home-ssh-file", env_extra={"HOME": str(home)})  # 同じ名前の空のファイルは数える
