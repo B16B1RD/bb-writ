@@ -636,9 +636,10 @@ def main() -> int:
             try:
                 _, empty, unreadable = home_entries(skip)
                 # Claude Code 2.1.309 の sandbox は、起動のたびに CLAUDE_CONFIG_DIR に関わらずホームに空のディレクトリ .claude/ssh を作る
-                # （サーバー側の機能フラグが有効なとき）。CLI 自身の置き場で、ほかの道具の動きを変えないので、権限を問わず数えない。消さない
+                # （サーバー側の機能フラグが有効なとき）。CLI 自身の置き場で、ほかの道具の動きを変えないので数えない（読めなければ、ほかと同じく failed）。消さない
                 # （消すと、並行する別の委任の子と競う）。どのホストの委任でも数えない（並行する Claude Code の子が作ったものを、ほかの委任が見る）。
-                # 同じ名前の空のファイルは数える。symlink は home_entries がもともと見ない（行き先がホームの 2 段目までの空の場所なら、それを数える）
+                # 同じ名前の空のファイルは数える。symlink は home_entries がもともと見ない（行き先がホームの 2 段目までの空の場所なら、それを数える）。
+                # HOME が空のときは、ここ（Python）はホームを / と、子（Node）は空と読むので、子は対象の中に .claude/ssh を作り、ここでは見ない
                 ssh = Path.home() / ".claude" / "ssh"
                 rec["home_residue"] = sorted(empty - home_before - ({str(ssh)} if ssh.is_dir() else set()))
                 if unreadable - unreadable_before:  # 子が権限を落とした場所は、残りを確かめられない
