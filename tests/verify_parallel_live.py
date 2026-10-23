@@ -80,7 +80,7 @@ work.py は {ROOT}/scripts/work.py。元の checkout は {repo}。
             prompt = instructions
         a = SimpleNamespace(host=host, write=True, cwd=repo,
                             model='sonnet' if host == 'claude' else 'gpt-6-sol', effort='medium')
-        cmd, child_env, why = launcher.command(a, prompt)
+        cmd, child_env, why = launcher.command(a, prompt, evidence / 'scratch')  # 読み取り専用の Codex にだけ使う一時ディレクトリ
         if why:
             raise RuntimeError(why)
         # このセッションは子ではなく利用者の親セッションの代わり（自分で task start・commit する）なので、子に掛ける制限
@@ -164,7 +164,7 @@ work.py は {ROOT}/scripts/work.py。元の checkout は {repo}。
         # 読むだけの依頼では、専用 worktree を作らず investigation を使う。
         a = SimpleNamespace(host='claude', write=False, cwd=repo, model='sonnet', effort='medium')
         prompt = '/bb-writ:bb-writ README.md を読んで説明して。変更はしないで。委任も不要。'
-        cmd, child_env, why = launcher.command(a, prompt + launcher.CONTRACT)
+        cmd, child_env, why = launcher.command(a, prompt + launcher.CONTRACT, evidence / 'scratch')
         if why:
             raise RuntimeError(why)
         child_env['BB_WRIT_STATE_DIR'] = str(evidence / 'state')

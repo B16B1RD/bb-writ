@@ -692,7 +692,7 @@ def main() -> int:
     # その下に置くと、対象のリポジトリや Git の管理ディレクトリの中かを判定し続けることになり、判定の穴が尽きなかった）
     scratch = (state_dir() / "delegations" / stamp / "tmp").resolve()
     if a.host == "codex" and not a.write:  # 記録を作る前に（状態の置き場が対象の下だと、記録も対象の中にできた）
-        if a.cwd == scratch or a.cwd in scratch.parents:  # 子の書ける一時ディレクトリが対象の中にできる
+        if a.cwd in scratch.parents:  # 子の書ける一時ディレクトリが対象の中にできる（scratch は毎回新しい名前で、対象と同じにはならない）
             ap.error(f"bb-writ の状態の置き場 {state_dir()} が対象の中にある。読み取り専用の Codex は一時ディレクトリに書けるので、対象の外に置く")
         # Git の管理ディレクトリの中（.git の下、bare の形）なら、子がそこに ref を作れる。git は呼ばずに形で見る
         if any(d.name == ".git" or all((d / n).exists() for n in ("HEAD", "objects", "refs")) for d in scratch.parents):

@@ -786,6 +786,19 @@ class TestLaunch(unittest.TestCase):
         self.assertNotEqual(soft, resource.RLIM_INFINITY)
         self.assertLess(soft, hard)  # 元の上限より下げてある（ほかのプロセスの余裕を残す）
 
+    def test_live_checks_call_the_launcher_with_its_current_signature(self):
+        # 実機の確認の台本は CI で動かないので、launcher の関数の引数が変わっても気づけなかった（command に一時ディレクトリを足した後、
+        # verify_parallel_live.py が 2 つの引数で呼んだまま動かなくなっていた）
+        import ast
+        import inspect
+        launch = load_launch()
+        for script in sorted((ROOT / "tests").glob("verify_*.py")):
+            for node in ast.walk(ast.parse(script.read_text())):
+                if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and isinstance(node.func.value, ast.Name) \
+                        and node.func.value.id == "launcher" and callable(getattr(launch, node.func.attr, None)):
+                    with self.subTest(script=script.name, line=node.lineno):
+                        inspect.signature(getattr(launch, node.func.attr)).bind(*node.args, **{k.arg: k.value for k in node.keywords})
+
     def test_skipping_unwritable_places_is_only_for_read_only_file_systems(self):
         from unittest import mock
         for code, skipped in ((errno.EROFS, True), (errno.EACCES, False), (errno.ENOSPC, False)):
@@ -899,10 +912,12 @@ class TestLaunch(unittest.TestCase):
         bare = Path(self.tmp.name) / "bare.git"
         subprocess.run(["git", "init", "-q", "--bare", str(bare)], check=True)
         (Path(self.tmp.name) / "state-into-target").symlink_to(wt / "st")
+        (Path(self.tmp.name) / "plain" / ".git").mkdir(parents=True)  # .git という名前のディレクトリ（中身がそろっていなくても）
         for state, sign in ((wt, "対象の中"), (wt / "a" / "b" / "state", "対象の中"), (Path(self.tmp.name) / "state-into-target", "対象の中"),
                             (repo / ".git" / "bb-writ-state", "Git の管理ディレクトリ"),
                             (repo / ".git" / "worktrees" / "out-in-repo-wt" / "bb-writ-state", "Git の管理ディレクトリ"),
-                            (bare / "bb-writ-state", "Git の管理ディレクトリ")):
+                            (bare / "bb-writ-state", "Git の管理ディレクトリ"),
+                            (Path(self.tmp.name) / "plain" / ".git" / "st", "Git の管理ディレクトリ")):
             with self.subTest(state=state):
                 before = sorted(str(x) for x in wt.rglob("*"))
                 p = subprocess.run([sys.executable, str(LAUNCH), "--host", "codex", "--cwd", str(wt), "--prompt-file", str(self.prompt)],
@@ -911,6 +926,13 @@ class TestLaunch(unittest.TestCase):
                 self.assertEqual(p.returncode, 2, p)
                 self.assertIn(sign, p.stderr)
                 self.assertEqual(sorted(str(x) for x in wt.rglob("*")), before)  # 対象の中に何も作らない
+                self.assertFalse(os.path.lexists(state / "delegations") and not state.is_symlink(), state)  # 置き場も作らない
+        # HEAD という名前のファイルがあるだけの普通のディレクトリの下では起動する（bare の形は HEAD・objects・refs がそろうとき）
+        headonly = Path(self.tmp.name) / "headonly"
+        headonly.mkdir()
+        (headonly / "HEAD").write_text("x\n")
+        rc, rec = self.run_launch("codex", cwd=wt, env_extra={"BB_WRIT_STATE_DIR": str(headonly / "st")})
+        self.assertEqual((rc, rec["status"]), (0, "ok"), rec)
         # 子の TMPDIR は symlink を解いた絶対パス（状態の置き場が symlink でも）
         real = Path(self.tmp.name) / "real-state"
         real.mkdir()
