@@ -670,14 +670,18 @@ def check_report(text: str, cwd: Path) -> tuple[dict | None, list[str]]:
 
 
 def clean_head(cwd: Path) -> str | None:
-    """対象の HEAD の commit。未 commit の変更（追跡外のファイルを含む。無視するものは除く）があるか、Git の作業ツリーでなければ None。
-    子が見たものを commit に結び付け、work.py の --reviewed がこの記録と照らす（Issue #14）。"""
+    """対象の HEAD の commit。Git の作業ツリーでないか、未 commit の変更（staged・追跡外のファイルを含む。無視するものは除く）があれば None。
+    子が見たものを commit に結び付け、work.py の --reviewed がこの記録と照らす（Issue #14）。
+    親の GIT_DIR・GIT_WORK_TREE など（git rev-parse --local-env-vars）は外す（別の場所を見て、対象の変更を見落とす）。
+    追跡外のファイルは設定（status.showUntrackedFiles=no）に関わらず数える。"""
     try:
-        head = subprocess.run(["git", "rev-parse", "--verify", "HEAD^{commit}"], cwd=cwd, capture_output=True, text=True)
-        status = subprocess.run(["git", "status", "--porcelain"], cwd=cwd, capture_output=True, text=True)
-    except OSError:  # git が無い
+        local = subprocess.run(["git", "rev-parse", "--local-env-vars"], capture_output=True, text=True)
+        env = {k: v for k, v in os.environ.items() if k not in local.stdout.split()}
+        head = subprocess.run(["git", "rev-parse", "--verify", "HEAD^{commit}"], cwd=cwd, env=env, capture_output=True, text=True)
+        status = subprocess.run(["git", "status", "--porcelain", "--untracked-files=normal"], cwd=cwd, env=env, capture_output=True, text=True)
+    except OSError:  # git が無い・対象が無い
         return None
-    if head.returncode or status.returncode or status.stdout.strip():
+    if local.returncode or head.returncode or status.returncode or status.stdout.strip():
         return None
     return head.stdout.strip()
 
@@ -849,6 +853,8 @@ def main() -> int:
                 rec.update(status="failed", problems=["子の起動の後、ホームに空のファイル・ディレクトリが新しく残った。中身を確かめて消す"
                                                       "（空の ~/.bash_profile があると、ログインシェルが ~/.profile と ~/.bashrc を読まない）"]
                            + rec["home_residue"][:20] + rec.get("problems", []))
+    if rec["head"] and clean_head(a.cwd) != rec["head"]:  # 確かめた後、子の終わりまでに作業ツリーが変わった（子が見たものが commit と違いうる）
+        rec.update(head=None, head_lost="子の起動の前に確かめた後、終わりまでに対象の HEAD か作業ツリーが変わった")
     rec["duration_s"] = round(time.time() - t0, 1)
     try:
         body = json.dumps(rec, ensure_ascii=False, indent=1)

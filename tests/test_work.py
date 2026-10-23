@@ -204,17 +204,22 @@ class TestAccountCheck(unittest.TestCase):
         p = subprocess.run([sys.executable, str(WORK), *args], env=self.env, capture_output=True, text=True, errors="replace")
         return p.returncode, json.loads(p.stdout)
 
-    def review_record(self, commit, **over):
-        """launcher が読み取り専用の審査役を ok で返したときの、委任の記録の 1 行（launch.py の delegations.jsonl）。"""
+    def review_record(self, commit, record=None, **over):
+        """launcher が読み取り専用の審査役を ok で返したときの、委任の記録の 1 行（launch.py の delegations.jsonl）と out の record.json。
+        record を渡すと、record.json だけをその上書きで書く。"""
         p = subprocess.run(["git", "rev-parse", "--verify", "--quiet", commit + "^{commit}"], env=self.env, cwd=self.wt,
                            capture_output=True, text=True)
         if p.returncode or not re.fullmatch(r"[0-9a-f]{7,64}", commit):
             return
-        rec = {"host": "claude", "cwd": str(self.wt), "write": False, "out": f"/delegations/{len(commit)}", "head": p.stdout.strip(),
-               "status": "ok", **over}
-        Path(self.env["BB_WRIT_STATE_DIR"]).mkdir(parents=True, exist_ok=True)
-        with open(Path(self.env["BB_WRIT_STATE_DIR"]) / "delegations.jsonl", "a", encoding="utf-8") as f:
+        state = Path(self.env["BB_WRIT_STATE_DIR"])
+        out = state / "delegations" / f"r{len(list((state / 'delegations').glob('*'))) if (state / 'delegations').is_dir() else 0}"
+        rec = {"host": "claude", "cwd": str(self.wt), "write": False, "out": str(out), "head": p.stdout.strip(), "status": "ok", **over}
+        rec = {k: v for k, v in rec.items() if v is not ...}  # ... はその欄を書かない
+        out.mkdir(parents=True)
+        (out / "record.json").write_text(json.dumps({**rec, **(record or {})}, indent=1), encoding="utf-8")
+        with open(state / "delegations.jsonl", "a", encoding="utf-8") as f:
             f.write(json.dumps(rec) + "\n")
+        return str(out)
 
     def claim(self):
         return self.w("claim", "--dir", str(self.wt), "--holder", "A")[1]["token"]
@@ -741,9 +746,9 @@ class TestReviewedCommit(unittest.TestCase):
         self.launcher_reviews = False
         tok = self.claim()
         self.commit("tests/test_new.py")
-        self.review_record(self.head(), out="/delegations/the-review")
+        out = self.review_record(self.head())
         rc, r = self.publish(tok, "push:feat@1", "--reviewed", self.head()[:10])
-        self.assertEqual((rc, r["op"]["reviews"]), (0, ["/delegations/the-review"]), r)
+        self.assertEqual((rc, r["op"]["reviews"]), (0, [out]), r)
 
     def test_records_of_another_commit_a_failed_or_unrun_review_or_a_writing_child_do_not_count(self):
         self.launcher_reviews = False
@@ -751,16 +756,22 @@ class TestReviewedCommit(unittest.TestCase):
         before_fix = self.head()
         self.commit("tests/test_new.py")
         self.review_record(before_fix)  # 直す前の commit の審査
-        for over in ({"status": "not-run"}, {"status": "failed"}, {"status": "invalid-report"}, {"write": True}, {"head": None}):
-            self.review_record(self.head(), **over)
+        h = self.head()
+        for over in ({"status": "not-run"}, {"status": "failed"}, {"status": "invalid-report"}, {"status": "quota"}, {"status": ...},
+                     {"write": True}, {"write": ...}, {"write": 0}, {"head": None}, {"head": h[:12]}, {"head": h.upper()}, {"out": ...}):
+            self.review_record(h, **over)
+        for record in ({"head": None}, {"status": "failed"}, {"write": True}, {"out": "/elsewhere"}):  # 行だけ書き換えた記録
+            self.review_record(h, record=record)
+        gone = self.review_record(h)  # out の record.json が無い
+        (Path(gone) / "record.json").unlink()
         delegations = Path(self.env["BB_WRIT_STATE_DIR"]) / "delegations.jsonl"
-        with open(delegations, "a", encoding="utf-8") as f:
-            f.write('{"head": "' + self.head() + '", "status": "o\n')  # 書きかけの行
-        rc, r = self.publish(tok, "push:feat@1", "--reviewed", self.head())
+        with open(delegations, "ab") as f:
+            f.write(b'[1]\nnull\n"x"\n' + b'{"head": "' + h.encode() + b'", "status": "o\n' + b'{"x": "\xff"}\n' + b"[" * 100000 + b"\n")
+        rc, r = self.publish(tok, "push:feat@1", "--reviewed", h)
         self.assertEqual(rc, 6, r)
-        self.assertIn("読めない行が 1 行", r["reason"])
-        self.review_record(self.head())
-        self.assertEqual(self.publish(tok, "push:feat@1", "--reviewed", self.head())[0], 0)
+        self.assertIn("record.json を読めない行が 4 行", r["reason"])  # 書きかけ・UTF-8 でない・深すぎる行と、record.json の無い行
+        self.review_record(h)
+        self.assertEqual(self.publish(tok, "push:feat@1", "--reviewed", h)[0], 0)
 
     def test_no_review_needs_no_reviewer_record(self):
         self.launcher_reviews = False

@@ -346,25 +346,56 @@ class TestLaunch(unittest.TestCase):
 
     def test_the_record_names_the_commit_the_child_saw_only_when_the_tree_matches_it(self):
         """work.py の --reviewed は、この head と照らす（Issue #14）。未 commit の変更があれば、子が見たものは commit と違う。"""
+        last = lambda: json.loads((self.state / "delegations.jsonl").read_text().splitlines()[-1])
         rc, rec = self.run_launch("claude")
         self.assertEqual((rc, rec["head"]), (0, None))  # Git の作業ツリーでない
-        git = lambda *a: subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", *a], cwd=self.cwd, check=True,
-                                        capture_output=True, text=True).stdout.strip()
+        git = lambda *a, cwd=self.cwd: subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", *a], cwd=cwd, check=True,
+                                                      capture_output=True, text=True).stdout.strip()
+        unborn = Path(self.tmp.name) / "unborn"  # まだ commit が無い（ほかに変更の無い作業ツリー）
+        unborn.mkdir()
+        git("init", "-q", cwd=unborn)
+        rc, rec = self.run_launch("claude", cwd=unborn)
+        self.assertEqual((rc, rec["head"]), (0, None))
         git("init", "-q")
-        git("add", "a.txt")
+        (self.cwd / ".gitignore").write_text("ignored.txt\n")
+        git("add", "a.txt", ".gitignore")
         git("commit", "-q", "-m", "a")
+        (self.cwd / "ignored.txt").write_text("x\n")  # 無視するファイルは変更に数えない
         for host in ("claude", "codex"):  # 読み取り専用の Grok は /tmp の下の対象で起動しない
             with self.subTest(host=host):
                 rc, rec = self.run_launch(host)
-                self.assertEqual((rc, rec["head"]), (0, git("rev-parse", "HEAD")), rec)
-                self.assertIn(f'"head": "{rec["head"]}"', (self.state / "delegations.jsonl").read_text().splitlines()[-1])
-        for dirty in ("a.txt", "new.txt"):  # 追跡しているファイルの変更、追跡外のファイル
-            with self.subTest(dirty=dirty):
-                (self.cwd / dirty).write_text("changed\n")
-                rc, rec = self.run_launch("claude")
-                self.assertEqual((rc, rec["head"]), (0, None), rec)
-                git("checkout", "-q", "--", "a.txt")
-                (self.cwd / "new.txt").unlink(missing_ok=True)
+                self.assertEqual((rc, rec["head"], last()["head"]), (0, git("rev-parse", "HEAD"), rec["head"]), rec)
+                self.assertIs(last()["write"], False)
+        no_untracked = Path(self.tmp.name) / "gitconfig"
+        no_untracked.write_text("[status]\n\tshowUntrackedFiles = no\n")
+        clean = Path(self.tmp.name) / "clean"
+        clean.mkdir()
+        git("init", "-q", cwd=clean)
+        git("commit", "-q", "--allow-empty", "-m", "c", cwd=clean)
+        dirty = {"tracked": lambda: (self.cwd / "a.txt").write_text("changed\n"),
+                 "staged": lambda: ((self.cwd / "a.txt").write_text("staged\n"), git("add", "a.txt")),
+                 "untracked": lambda: (self.cwd / "new.txt").write_text("x\n")}
+        for name, make in dirty.items():
+            # 追跡外は設定で隠しても数える。親の GIT_DIR・GIT_WORK_TREE が別の変更の無いリポジトリを指しても、対象を見る
+            for env in ({}, {"GIT_CONFIG_GLOBAL": str(no_untracked)}, {"GIT_DIR": str(clean / ".git"), "GIT_WORK_TREE": str(clean)}):
+                with self.subTest(dirty=name, env=env):
+                    make()
+                    rc, rec = self.run_launch("claude", env_extra=env)
+                    self.assertEqual((rc, rec["head"]), (0, None), rec)
+                    git("reset", "-q", "--hard")
+                    (self.cwd / "new.txt").unlink(missing_ok=True)
+        rc, rec = self.run_launch("claude", mode="wrote")  # 子の実行の間に作業ツリーが変わった
+        self.assertEqual((rc, rec["head"]), (0, None), rec)
+        self.assertIn("変わった", rec["head_lost"])
+        subprocess.run(["rm", "-rf", str(self.cwd / ".claude")], check=True)
+        rc, rec = self.run_launch("claude", path=str(self.bin))  # git が無い
+        self.assertEqual(rec["head"], None, rec)
+        bare = Path(self.tmp.name) / "bare.git"
+        git("clone", "-q", "--bare", str(self.cwd), str(bare))
+        rc, rec = self.run_launch("claude", cwd=bare)
+        self.assertEqual(rec["head"], None, rec)
+        rc, rec = self.run_launch("claude", extra=["--write"])  # 書く子（ここでは起動しない）は write が真
+        self.assertIs(last()["write"], True)
 
     def test_reports_with_unicode_line_separators_are_read(self):
         text = GOOD.encode().decode("unicode_escape").replace('"conclusion": "', '"conclusion": "\u2028\x85\u2029')

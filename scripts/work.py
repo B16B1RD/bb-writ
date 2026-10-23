@@ -150,8 +150,11 @@ def changed_since_publish(r: Path, d: Path, head: str) -> str:
 
 def reviews_of(commit: str) -> tuple:
     """launcher の委任の記録（delegations.jsonl）のうち、その commit を対象に起動して ok で返った読み取り専用の子の記録の out と、
-    読めない行の数。head は launcher が起動の前に、対象の作業ツリーが commit と同じとき（未 commit の変更が無いとき）だけ書く。
-    審査の中身（子が十分に攻めたか）は見ない。"""
+    読めない行の数。行と、out の record.json の両方で head・status・write が合うものだけを数える。
+    head は launcher が、対象の作業ツリーが子の起動の前から終わりまで commit と同じとき（未 commit の変更が無いとき）だけ書く。
+    審査の中身（子が十分に攻めたか、何人か、審査の依頼だったか）は見ない。手で書き足した記録も見分けない（忘れて飛ばすのを止める）。"""
+    match = lambda e: (isinstance(e, dict) and e.get("head") == commit and e.get("status") == "ok" and e.get("write") is False
+                       and isinstance(e.get("out"), str))
     f = state_dir() / "delegations.jsonl"
     found, broken = [], 0
     if f.is_file():
@@ -160,11 +163,18 @@ def reviews_of(commit: str) -> tuple:
                 continue
             try:
                 e = json.loads(line.decode("utf-8"))
-            except (ValueError, RecursionError):
+            except (ValueError, RecursionError):  # UnicodeDecodeError も ValueError
                 broken += 1
                 continue
-            if isinstance(e, dict) and e.get("head") == commit and e.get("status") == "ok" and e.get("write") is False:
-                found.append(e.get("out"))
+            if not match(e):
+                continue
+            try:
+                rec = json.loads((Path(e["out"]) / "record.json").read_text(encoding="utf-8"))
+            except (OSError, ValueError, RecursionError):
+                broken += 1
+                continue
+            if match(rec) and rec["out"] == e["out"]:
+                found.append(e["out"])
     return found, broken
 
 
@@ -692,7 +702,7 @@ def op_step(a, r: Path, live, now: float, action: str):
                 return ({"ok": False, "reason": f"commit {reviewed} を対象にした審査役の記録が無い。launcher（launch.py、読み取り専用）で、"
                             "この commit を checkout した未 commit の変更が無い場所を --cwd にして審査役を立て、status が ok で返った記録が要る"
                             "（Agent ツールなど launcher を通らない子は記録に残らない）。審査が要らない変更なら none:<理由>"
-                            + (f"。委任の記録 {state_dir() / 'delegations.jsonl'} に読めない行が {broken} 行ある" if broken else "")}, 6)
+                            + (f"。委任の記録 {state_dir() / 'delegations.jsonl'} に、読めない行か、out の record.json を読めない行が {broken} 行ある" if broken else "")}, 6)
             reviews = found
     if action == "begin" and known:
         return ({"ok": False, "reason": "同じ鍵の操作が既にある。外部の状態を照合してから進める（やり直さない）", "op": known}, 4)
