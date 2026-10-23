@@ -1184,9 +1184,16 @@ class TestLaunch(unittest.TestCase):
         self.assertIn(str(self.home), sandbox["filesystem"]["denyWrite"])
         self.assertEqual(Path(str(self.args_file) + ".scrub").read_text(), "")  # SCRUB は許可の方針を default に戻すので使わない
 
+    def writable_dir(self, parent: Path):
+        """parent の下の使い捨てのディレクトリ。書けない環境（読み取り専用の審査役の sandbox の中など）では、理由を出して試験を飛ばす。"""
+        try:
+            return tempfile.TemporaryDirectory(dir=parent)
+        except OSError as e:
+            self.skipTest(f"{parent} に書けない環境（{e.strerror}）。Grok の読み取り専用の試験は /tmp の外の書ける場所が要る")
+
     def grok_target(self):
         """Grok の read-only は /tmp に書けるので、読み取り専用の試験の対象は /tmp の外に置く（実物のホームの下。launcher が見るのは試験の一時のホーム）。"""
-        d = tempfile.TemporaryDirectory(dir=Path.home())
+        d = self.writable_dir(Path.home())
         self.addCleanup(d.cleanup)
         (Path(d.name) / "a.txt").write_text("x\n")
         return Path(d.name)
@@ -1223,7 +1230,7 @@ class TestLaunch(unittest.TestCase):
 
     def test_grok_read_only_refuses_targets_overlapping_writable_places(self):
         target = self.grok_target()
-        var_tmp = tempfile.TemporaryDirectory(dir="/var/tmp")
+        var_tmp = self.writable_dir(Path("/var/tmp"))
         self.addCleanup(var_tmp.cleanup)
         for cwd, state in ((Path("/tmp"), None), (Path(var_tmp.name), None), (self.cwd, None),  # self.cwd は /tmp の下
                            (Path("/"), None), (target, target / "state")):  # 対象が起動ごとの GROK_HOME（read-only でも書ける）を含む
