@@ -334,7 +334,9 @@ def codex_read_only(scratch: Path, cwd: Path) -> tuple[list[str], list[str]]:
     roots = {Path(os.path.realpath(d)) for d in [Path.home(), config_dir(), *(Path.home() / p for p in SECRET_PLACES)]}
     binary = Path(os.path.realpath(shutil.which("codex") or "/"))
     tools = [Path(d) for d in os.environ.get("PATH", "").split(os.pathsep) if d.startswith(str(Path.home()) + os.sep)]
-    keep = [binary, *(d for d in [binary.parent.parent, binary.parent, *tools] if Path(os.path.realpath(d)) not in roots),
+    login = Path(os.path.realpath(config_dir()))  # 専用ログインの中は中身が認証情報（codex-home/auth.json など）なので、本体だけを残す
+    keep = [binary, *(d for d in [binary.parent.parent, binary.parent, *tools]
+                      if (r := Path(os.path.realpath(d))) not in roots and r != login and login not in r.parents),
             Path.home() / ".config" / "git", cwd, *([git_dir] if git_dir else [])]
     denies = secret_denies(keep)
     scratch.mkdir()

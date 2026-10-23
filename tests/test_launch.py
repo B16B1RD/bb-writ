@@ -750,6 +750,49 @@ class TestLaunch(unittest.TestCase):
             rc, rec = self.run_launch("codex", env_extra={"HOME": empty})
             self.assertEqual(rec["status"], "unavailable", rec)
 
+    def test_codex_binary_inside_the_login_keeps_only_the_binary(self):
+        # 本体が専用ログインの中（codex-home/bin/codex）にあると、2 つ上は codex-home。中の auth.json は拒む
+        cfg = self.home / ".config" / "bb-writ"
+        (cfg / "codex-home" / "bin").mkdir(parents=True)
+        for f in (".env", ".env.keys"):
+            (cfg / f).write_text("X=1\n")
+        (cfg / "codex-home" / "auth.json").write_text("{}")
+        real = cfg / "codex-home" / "bin" / "codex"
+        real.write_text(f"#!/bin/sh\nexec {self.bin / 'codex'} \"$@\"\n")
+        real.chmod(0o755)
+        rc, rec = self.run_launch("codex", path=f"{real.parent}:/usr/bin:/bin", env_extra={"BB_WRIT_CONFIG_DIR": str(cfg)})
+        self.assertEqual((rc, rec["status"]), (0, "ok"), rec)
+        rules = fs_rules(json.loads(self.args_file.read_text()))
+        a = str((cfg / "codex-home" / "auth.json").resolve())
+        self.assertTrue([d for d, acc in rules.items() if acc == "deny" and (a == d or a.startswith(d + "/"))], rules)
+
+    def test_skipping_unwritable_places_is_only_for_read_only_file_systems(self):
+        from unittest import mock
+        for code, skipped in ((errno.EROFS, True), (errno.EACCES, False), (errno.ENOSPC, False)):
+            with self.subTest(code=code), mock.patch("tempfile.TemporaryDirectory", side_effect=OSError(code, os.strerror(code))):
+                if skipped:
+                    with self.assertRaises(unittest.SkipTest):
+                        self.writable_dir(Path("/var/tmp"))
+                else:
+                    with self.assertRaises(OSError):
+                        self.writable_dir(Path("/var/tmp"))
+
+    def test_live_check_tells_refused_from_untried_credential_reads(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("verify_live", ROOT / "tests" / "verify_sandbox_live.py")
+        live = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(live)
+        d = Path(self.tmp.name) / "scratch"
+        d.mkdir()
+        self.assertEqual(live.credentials_attempt(d), "not-tried")
+        (d / "s8").write_text("1\n")
+        (d / "s8.err").write_text("cat: x: Permission denied\n")
+        self.assertEqual(live.credentials_attempt(d), "refused")
+        (d / "s8").write_text("0\n")
+        self.assertEqual(live.credentials_attempt(d), "other")
+        (d / "s8").write_text("127\n")
+        self.assertEqual(live.credentials_attempt(d), "other")
+
     def test_codex_read_only_child_keeps_tools_and_drops_secret_env(self):
         # nvm を ~/.config に入れると、codex は node のパッケージで、ネイティブの本体は vendor にある（補助が実行する）。PATH の道具も読ませる
         home = self.home
