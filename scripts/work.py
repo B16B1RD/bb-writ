@@ -151,7 +151,7 @@ def changed_since_publish(r: Path, d: Path, head: str) -> str:
 def reviews_of(commit: str) -> tuple:
     """launcher の委任の記録（delegations.jsonl）のうち、その commit を対象に起動して ok で返った読み取り専用の子の記録の out と、
     読めない行の数。行と、out の record.json の両方で head・status・write が合うものだけを数える。
-    head は launcher が、対象の作業ツリーが子の起動の前から終わりまで commit と同じとき（未 commit の変更が無いとき）だけ書く。
+    head は launcher が、対象の作業ツリーが子の起動の前と終わりの両方で commit と同じとき（未 commit の変更が無いとき）だけ書く。
     審査の中身（子が十分に攻めたか、何人か、審査の依頼だったか）は見ない。手で書き足した記録も見分けない（忘れて飛ばすのを止める）。"""
     match = lambda e: (isinstance(e, dict) and e.get("head") == commit and e.get("status") == "ok" and e.get("write") is False
                        and isinstance(e.get("out"), str))
