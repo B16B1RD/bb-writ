@@ -77,7 +77,8 @@ FAKE_CLAUDE = textwrap.dedent(r'''
         elif mode == "home-ssh-file":
             open(ssh, "w").close()
         elif mode == "home-ssh-near":
-            for d in (ssh, os.path.join(os.environ["HOME"], ".claude", "other"), os.path.join(os.environ["HOME"], ".config", "ssh")):
+            for d in (ssh, os.path.join(os.environ["HOME"], ".claude", "other"), os.path.join(os.environ["HOME"], ".claude", "ssh-agent"),
+                      os.path.join(os.environ["HOME"], ".config", "ssh")):
                 os.makedirs(d)
         else:
             os.makedirs(ssh, mode=0o700, exist_ok=True)
@@ -561,7 +562,7 @@ class TestLaunch(unittest.TestCase):
             ("codex", "home-ssh", (), False, "ok", [], "dir"),  # 並行する Claude Code の子が作ったものを、ほかの委任も見る
             ("grok", "home-ssh", (), True, "ok", [], "dir"),
             ("claude", "home-claude-only", (), False, "failed", [h(".claude")], "absent"),  # 空の .claude そのものは数える
-            ("claude", "home-ssh-near", (), True, "failed", [h(".claude", "other"), h(".config", "ssh")], "dir"),  # 隣・別の場所の ssh は数える
+            ("claude", "home-ssh-near", (), True, "failed", [h(".claude", "other"), h(".claude", "ssh-agent"), h(".config", "ssh")], "dir"),  # 隣・別の場所の ssh は数える
             ("claude", "home-ssh-file", (), True, "failed", [h(".claude", "ssh")], "file"),  # 同じ名前の空のファイルは数える
             ("claude", "home-ssh-link", (), True, "failed", [h("elsewhere")], "link"),  # symlink は見ない。行き先の空の場所は数える
             ("claude", "home-residue", (), True, "failed", [h(".bash_profile"), h(".config", "pip"), h(".netrc")], "absent"),

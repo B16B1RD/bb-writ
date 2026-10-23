@@ -642,6 +642,7 @@ def main() -> int:
                 # .bash_profile のようにほかの道具が読む場所ではないので数えない。消さない
                 # （消すと、並行する別の委任の子と競う）。どのホストの委任でも数えない（並行する Claude Code の子が作ったものを、ほかの委任が見る）。
                 # 同じ名前の空のファイルは数える。symlink は home_entries がもともと見ない（行き先がホームの 2 段目までの空の場所なら、それを数える）。
+                # ~/.claude が symlink なら、その下は見ない（行き先がホームの直下なら、行き先の ssh は空の残りとして数える）。
                 # HOME が空のときは、ここ（Python）はホームを / と読み、子の CLI と一致しない（Node は空と読む）。そのときの子の .claude/ssh は見ない
                 ssh = Path.home() / ".claude" / "ssh"
                 rec["home_residue"] = sorted(empty - home_before - ({str(ssh)} if ssh.is_dir() else set()))
