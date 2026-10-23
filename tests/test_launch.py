@@ -390,6 +390,28 @@ class TestLaunch(unittest.TestCase):
         self.assertEqual((rc, rec["head"]), (0, None), rec)
         self.assertIn("変わった", rec["head_lost"])
         subprocess.run(["rm", "-rf", str(self.cwd / ".claude")], check=True)
+        rc, rec = self.run_launch("claude", mode="own-commit")  # 子の実行の間に HEAD が別の commit に動いた（作業ツリーは変更なし）
+        self.assertEqual((rc, git("status", "--porcelain"), rec["head"]), (0, "", None), rec)
+        self.assertIn("変わった", rec["head_lost"])
+        git("reset", "-q", "--hard", "HEAD~1")
+        (self.cwd / "b.txt").write_text("b")  # 起動の前に変更があり、子の間に commit されて終わりは変更なし（子が見たのは commit でない）
+        rc, rec = self.run_launch("claude", mode="own-commit")
+        self.assertEqual((rc, git("status", "--porcelain"), rec["head"]), (0, "", None), rec)
+        git("reset", "-q", "--hard", "HEAD~1")
+        quote = Path(self.tmp.name) / "quote"
+        quote.write_text("[core]\n\tquotePath = false\n")
+        odd = os.fsencode(str(self.cwd)) + b"/\xff.txt"  # UTF-8 でない名前の追跡外のファイル
+        open(odd, "w").close()
+        rc, rec = self.run_launch("claude", env_extra={"GIT_CONFIG_GLOBAL": str(quote)})
+        self.assertEqual((rc, rec["head"]), (0, None), rec)
+        os.unlink(odd)
+        index = self.cwd / ".git" / "index"  # git status が開いたまま止まる index（上限で止めて null）
+        index.rename(self.cwd / ".git" / "index.bak")
+        os.mkfifo(index)
+        rc, rec = self.run_launch("claude", env_extra={"BB_WRIT_GIT_TIMEOUT": "2"})
+        self.assertEqual((rc, rec["head"]), (0, None), rec)
+        index.unlink()
+        (self.cwd / ".git" / "index.bak").rename(index)
         rc, rec = self.run_launch("claude", path=str(self.bin))  # git が無い
         self.assertEqual(rec["head"], None, rec)
         bare = Path(self.tmp.name) / "bare.git"

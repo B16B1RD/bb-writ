@@ -150,15 +150,19 @@ def changed_since_publish(r: Path, d: Path, head: str) -> str:
 
 def reviews_of(commit: str) -> tuple:
     """launcher の委任の記録（delegations.jsonl）のうち、その commit を対象に起動して ok で返った読み取り専用の子の記録の out と、
-    読めない行の数。行と、out の record.json の両方で head・status・write が合うものだけを数える。
+    読めないものの説明（無ければ空）。行と、out の record.json の両方で head・status・write が合うものだけを数える。
     head は launcher が、対象の作業ツリーが子の起動の前と終わりの両方で commit と同じとき（未 commit の変更が無いとき）だけ書く。
     審査の中身（子が十分に攻めたか、何人か、審査の依頼だったか）は見ない。手で書き足した記録も見分けない（忘れて飛ばすのを止める）。"""
     match = lambda e: (isinstance(e, dict) and e.get("head") == commit and e.get("status") == "ok" and e.get("write") is False
-                       and isinstance(e.get("out"), str))
+                       and isinstance(e.get("out"), str) and os.path.isabs(e["out"]))  # launcher は絶対パスを書く
     f = state_dir() / "delegations.jsonl"
     found, broken = [], 0
     if f.is_file():
-        for line in f.read_bytes().split(b"\n"):
+        try:
+            rows = f.read_bytes().split(b"\n")
+        except OSError as x:  # 権限など。拒否の理由に出す
+            return [], f"委任の記録 {f} を読めない: {x}"
+        for line in rows:
             if not line.strip():
                 continue
             try:
@@ -169,13 +173,16 @@ def reviews_of(commit: str) -> tuple:
             if not match(e):
                 continue
             try:
-                rec = json.loads((Path(e["out"]) / "record.json").read_text(encoding="utf-8"))
+                rp = Path(e["out"]) / "record.json"
+                if not rp.is_file():  # FIFO などは開くと止まる
+                    raise FileNotFoundError(rp)
+                rec = json.loads(rp.read_text(encoding="utf-8"))
             except (OSError, ValueError, RecursionError):
                 broken += 1
                 continue
             if match(rec) and rec["out"] == e["out"]:
                 found.append(e["out"])
-    return found, broken
+    return found, (f"委任の記録 {f} に、読めない行か、out の record.json を読めない行が {broken} 行ある" if broken else "")
 
 
 def pending(r: Path) -> list:
@@ -697,12 +704,12 @@ def op_step(a, r: Path, live, now: float, action: str):
                 after = (", ".join(files.splitlines()) or "なし") if rc == 0 else f"（差分を出せない: {err}）"
                 return ({"ok": False, "reason": f"審査を通した commit {reviewed} と作業場所の HEAD {head} が違う。"
                             f"審査の後に変えた。直した commit で審査を通し直してから出す。審査の後に変えたファイル: {after}"}, 6)
-            found, broken = reviews_of(reviewed)
+            found, unread = reviews_of(reviewed)
             if not found:
                 return ({"ok": False, "reason": f"commit {reviewed} を対象にした審査役の記録が無い。launcher（launch.py、読み取り専用）で、"
                             "この commit を checkout した未 commit の変更が無い場所を --cwd にして審査役を立て、status が ok で返った記録が要る"
                             "（Agent ツールなど launcher を通らない子は記録に残らない）。審査が要らない変更なら none:<理由>"
-                            + (f"。委任の記録 {state_dir() / 'delegations.jsonl'} に、読めない行か、out の record.json を読めない行が {broken} 行ある" if broken else "")}, 6)
+                            + (f"。{unread}" if unread else "")}, 6)
             reviews = found
     if action == "begin" and known:
         return ({"ok": False, "reason": "同じ鍵の操作が既にある。外部の状態を照合してから進める（やり直さない）", "op": known}, 4)

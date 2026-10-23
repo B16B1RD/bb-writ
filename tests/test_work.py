@@ -748,9 +748,9 @@ class TestReviewedCommit(unittest.TestCase):
         self.launcher_reviews = False
         tok = self.claim()
         self.commit("tests/test_new.py")
-        out = self.review_record(self.head())
+        outs = [self.review_record(self.head()), self.review_record(self.head())]  # A と B
         rc, r = self.publish(tok, "push:feat@1", "--reviewed", self.head()[:10])
-        self.assertEqual((rc, r["op"]["reviews"]), (0, [out]), r)
+        self.assertEqual((rc, r["op"]["reviews"]), (0, outs), r)
 
     def test_records_of_another_commit_a_failed_or_unrun_review_or_a_writing_child_do_not_count(self):
         self.launcher_reviews = False
@@ -759,21 +759,47 @@ class TestReviewedCommit(unittest.TestCase):
         self.commit("tests/test_new.py")
         self.review_record(before_fix)  # 直す前の commit の審査
         h = self.head()
-        for over in ({"status": "not-run"}, {"status": "failed"}, {"status": "invalid-report"}, {"status": "quota"}, {"status": ...},
+        for over in ({"status": "not-run"}, {"status": "failed"}, {"status": "invalid-report"}, {"status": "quota"}, {"status": "unavailable"},
+                     {"status": ...},
                      {"write": True}, {"write": ...}, {"write": 0}, {"head": None}, {"head": h[:12]}, {"head": h.upper()}, {"out": ...}):
             self.review_record(h, **over)
         for record in ({"head": None}, {"status": "failed"}, {"write": True}, {"out": "/elsewhere"}):  # 行だけ書き換えた記録
             self.review_record(h, record=record)
         gone = self.review_record(h)  # out の record.json が無い
         (Path(gone) / "record.json").unlink()
+        fifo = self.review_record(h)  # out の record.json が FIFO（開くと止まる）
+        (Path(fifo) / "record.json").unlink()
+        os.mkfifo(Path(fifo) / "record.json")
         delegations = Path(self.env["BB_WRIT_STATE_DIR"]) / "delegations.jsonl"
         with open(delegations, "ab") as f:
             f.write(b'[1]\nnull\n"x"\n' + b'{"head": "' + h.encode() + b'", "status": "o\n' + b'{"x": "\xff"}\n' + b"[" * 100000 + b"\n")
         rc, r = self.publish(tok, "push:feat@1", "--reviewed", h)
         self.assertEqual(rc, 6, r)
-        self.assertIn("record.json を読めない行が 4 行", r["reason"])  # 書きかけ・UTF-8 でない・深すぎる行と、record.json の無い行
+        self.assertIn("record.json を読めない行が 5 行", r["reason"])  # 書きかけ・UTF-8 でない・深すぎる行と、record.json の無い・FIFO の行
+        rel = Path(self.tmp.name) / "rel"  # 相対の out（work.py の場所で解かれる。launcher は絶対パスを書く）
+        rel.mkdir()
+        rel_out = os.path.relpath(rel)  # w() の work.py はこの試験と同じ場所で動く
+        (rel / "record.json").write_text(json.dumps({"head": h, "status": "ok", "write": False, "out": rel_out}))
+        with open(delegations, "a", encoding="utf-8") as f:
+            f.write(json.dumps({"head": h, "status": "ok", "write": False, "out": rel_out}) + "\n")
+        delegations.chmod(0)  # 委任の記録そのものを読めない
+        try:
+            if not os.access(delegations, os.R_OK):  # root では権限で止められない
+                rc, r = self.publish(tok, "push:feat@1", "--reviewed", h)
+                self.assertEqual(rc, 6, r)
+                self.assertIn("を読めない", r["reason"])
+        finally:
+            delegations.chmod(0o644)
         self.review_record(h)
         self.assertEqual(self.publish(tok, "push:feat@1", "--reviewed", h)[0], 0)
+
+    def test_no_delegation_record_at_all_is_a_refusal_not_a_crash(self):
+        self.launcher_reviews = False
+        tok = self.claim()
+        (Path(self.env["BB_WRIT_STATE_DIR"]) / "delegations.jsonl").unlink()  # setUp が置いた記録も無い（初めての利用）
+        rc, r = self.publish(tok, "push:feat@1", "--reviewed", self.head())
+        self.assertEqual(rc, 6, r)
+        self.assertIn("審査役の記録が無い", r["reason"])
 
     def test_no_review_needs_no_reviewer_record(self):
         self.launcher_reviews = False
