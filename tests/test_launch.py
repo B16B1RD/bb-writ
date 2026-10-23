@@ -763,6 +763,11 @@ class TestLaunch(unittest.TestCase):
         rc, rec = self.run_launch("codex")
         rules = fs_rules(json.loads(self.args_file.read_text()))
         self.assertEqual(rules.get(f"{h}/.ssh"), "deny", rules)
+        (home / ".config" / "git").unlink()  # 専用ログインそのものを指しても、残さない
+        (home / ".config" / "git").symlink_to(self.cfg)
+        rc, rec = self.run_launch("codex")
+        rules = fs_rules(json.loads(self.args_file.read_text()))
+        self.assertEqual(rules.get(str(self.cfg.resolve())), "deny", rules)
         # HOME が空か / なら、ホームの置き場を拒めないので起動しない
         for empty in ("", "/", "//", "/."):
             rc, rec = self.run_launch("codex", env_extra={"HOME": empty})
@@ -800,11 +805,22 @@ class TestLaunch(unittest.TestCase):
         import inspect
         launch = load_launch()
         for script in sorted((ROOT / "tests").glob("verify_*.py")):
-            for node in ast.walk(ast.parse(script.read_text())):
+            tree = ast.parse(script.read_text())
+            # launch.py を読み込んだ名前（変数の名前に頼らない: spec_from_file_location の行き先が launch.py の変数）
+            names = {t.id for n in ast.walk(tree) if isinstance(n, ast.Assign) and "launch.py" in ast.dump(n.value) for t in n.targets
+                     if isinstance(t, ast.Name)} | {"launcher"}
+            mods = {t.id for n in ast.walk(tree) if isinstance(n, ast.Assign) and isinstance(n.value, ast.Call)
+                    and "module_from_spec" in ast.dump(n.value.func) and any(isinstance(a, ast.Name) and a.id in names for a in n.value.args)
+                    for t in n.targets if isinstance(t, ast.Name)} | {"launcher"}
+            for node in ast.walk(tree):
                 if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and isinstance(node.func.value, ast.Name) \
-                        and node.func.value.id == "launcher" and callable(getattr(launch, node.func.attr, None)):
+                        and node.func.value.id in mods:
                     with self.subTest(script=script.name, line=node.lineno):
-                        inspect.signature(getattr(launch, node.func.attr)).bind(*node.args, **{k.arg: k.value for k in node.keywords})
+                        f = getattr(launch, node.func.attr, None)
+                        self.assertTrue(callable(f), node.func.attr)  # launch.py に無い関数を呼ばない
+                        if any(isinstance(a, ast.Starred) for a in node.args) or any(k.arg is None for k in node.keywords):
+                            continue  # 展開する引数の数は、ここでは決まらない
+                        inspect.signature(f).bind(*node.args, **{k.arg: k.value for k in node.keywords})
 
     def test_skipping_unwritable_places_is_only_for_read_only_file_systems(self):
         from unittest import mock
@@ -926,6 +942,11 @@ class TestLaunch(unittest.TestCase):
         shutil.rmtree(linked / ".git" / "refs")
         (linked / ".git" / "refs").symlink_to(Path(self.tmp.name) / "refs-store")
         (repo / ".git" / "st").mkdir()
+        barelinked = Path(self.tmp.name) / "x.gitdir"  # bare の形（名前は .git でない）で、refs を外への symlink にする
+        subprocess.run(["git", "init", "-q", "--bare", str(barelinked)], check=True)
+        (Path(self.tmp.name) / "bare-refs-store").mkdir()
+        shutil.rmtree(barelinked / "refs")
+        (barelinked / "refs").symlink_to(Path(self.tmp.name) / "bare-refs-store")
         (Path(self.tmp.name) / "link-into-git").symlink_to(repo / ".git" / "st")
         for state, sign in ((wt, "対象の中"), (wt / "a" / "b" / "state", "対象の中"), (Path(self.tmp.name) / "state-into-target", "対象の中"),
                             (repo / ".git" / "bb-writ-state", "Git の管理ディレクトリ"),
@@ -933,7 +954,8 @@ class TestLaunch(unittest.TestCase):
                             (bare / "bb-writ-state", "Git の管理ディレクトリ"),
                             (Path(self.tmp.name) / "plain" / ".git" / "st", "Git の管理ディレクトリ"),
                             (linked / ".git" / "refs" / "heads" / "state", "Git の管理ディレクトリ"),
-                            (Path(self.tmp.name) / "link-into-git", "Git の管理ディレクトリ")):  # .git の中を指す symlink
+                            (Path(self.tmp.name) / "link-into-git", "Git の管理ディレクトリ"),  # .git の中を指す symlink
+                            (barelinked / "refs" / "heads" / "st", "Git の管理ディレクトリ")):  # bare の refs が外への symlink
             with self.subTest(state=state):
                 before = sorted(str(x) for x in wt.rglob("*"))
                 p = subprocess.run([sys.executable, str(LAUNCH), "--host", "codex", "--cwd", str(wt), "--prompt-file", str(self.prompt)],
