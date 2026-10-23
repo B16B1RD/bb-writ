@@ -1016,6 +1016,13 @@ class TestLaunch(unittest.TestCase):
         self.assertEqual(rec["status"], "ok", rec)  # 拒否の項目は広げない
         rc, rec = self.run_launch("codex", mode="sibling-read", env_extra={"FAKE_THREAD": "0199aaaa-bbbb-7ccc-8ddd-eeeeffff2001"})
         self.assertEqual(rec["status"], "ok", rec)  # 名前の先頭が同じ隣の場所は、拒んだ場所の下ではない
+        # 専用ログインの置き場が symlink（macOS の /var/folders は /private/var を指す）でも、Codex 自身の arg0 の read は例外のまま
+        real_cfg = Path(self.tmp.name) / "real-cfg"
+        shutil.copytree(self.cfg, real_cfg)
+        (Path(self.tmp.name) / "cfg-link").symlink_to(real_cfg)
+        rc, rec = self.run_launch("codex", env_extra={"BB_WRIT_CONFIG_DIR": str(Path(self.tmp.name) / "cfg-link"),
+                                                      "FAKE_THREAD": "0199aaaa-bbbb-7ccc-8ddd-eeeeffff2002"})
+        self.assertEqual((rc, rec["status"]), (0, "ok"), rec)
         # 引数で広げる・狭める（--add-dir、--config で書ける場所、ネットワーク、extends、sandbox_mode・-s）と、記録の照合が捕まえる
         (self.bin / "codex-real").write_text((self.bin / "codex").read_text())
         (self.bin / "codex-real").chmod(0o755)

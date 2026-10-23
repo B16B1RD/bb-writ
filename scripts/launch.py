@@ -354,12 +354,15 @@ def codex_breach(turns: list, denies: list[str]) -> str | None:
     読み込まれたどの設定の sandbox_mode も default_permissions より優先され（対象の .codex/config.toml・専用ログインの config.toml）、
     同じ profile に項目を足すこともできる。広ければ読み取り専用でなく、一時ディレクトリに書けなければ試験を動かせず、
     渡した deny が無いか、その下に read・write が足されていれば認証情報を読める（より狭い指定が勝つ。公式文書）。
-    例外は Codex 自身が足す、専用ログインの tmp/arg0-linux/codex-arg0* の read だけ（0.163.0 の実物の記録）。
+    例外は Codex 自身が足す、専用ログインの tmp/arg0-<OS>/codex-arg0* そのものの read だけ（0.163.0 の Linux の実物の記録は arg0-linux。
+    記録の場所は解く前の形でも解いた後の形でも比べる。macOS の一時ディレクトリ /var/folders は /private/var への symlink で、解いた形とだけ
+    比べると、試験の Codex の子がいつも failed になった）。
     実効の権限を記録から読めなければ、どれも確かめられないので理由にする。"""
     if not turns or any(t["writable"] is None or t["network"] is None for t in turns):
         return "Codex の実効の権限を記録（turn_context の permission_profile）から確かめられない（記録が無い、読めない行がある、形が違う）"
     tmp = (":tmpdir",)
-    arg0 = str(config_dir().resolve() / "codex-home" / "tmp" / "arg0-linux" / "codex-arg0")
+    homes = {str(config_dir().resolve() / "codex-home" / "tmp"), str(Path(os.path.abspath(config_dir())) / "codex-home" / "tmp")}
+    arg0 = re.compile(r"arg0-[^/]+/codex-arg0[^/]*")  # 専用ログインの tmp/ の下の、この形の 1 ファイルだけ
     for t in turns:  # どの turn も（合わせると、ある turn だけ書けないことが隠れる）
         wide = [w for w in t["writable"] if w not in tmp]
         if wide or t["network"] != "restricted":
@@ -370,7 +373,8 @@ def codex_breach(turns: list, denies: list[str]) -> str | None:
         missing = [d for d in denies if d not in recorded]
         opened = [w for acc, w in t["rules"] if acc != "deny" and not w.startswith(":")
                   and any(r == d or r.startswith(d + "/") for d in denies for r in (w, os.path.realpath(w)))  # 解く前の書き方でも
-                  and not (acc == "read" and w.startswith(arg0) and "/" not in w[len(arg0):])]
+                  and not (acc == "read" and any(r.startswith(h + "/") and arg0.fullmatch(r[len(h) + 1:])
+                                                for h in homes for r in (w, os.path.realpath(w))))]
         if missing or opened:
             return f"Codex の実効の権限で、認証情報の置き場を拒めていない（記録に無い deny: {missing[:5]}、その下で開いた場所: {opened[:5]}）"
     return None
