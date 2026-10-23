@@ -4,6 +4,14 @@ bb-writ を使う人に向けて、版ごとに変わったことを書く。新
 
 commit ごとの細かい変更は、各版の末尾の「commit の一覧」（前の版のタグとの比較）で見られる。
 
+## 0.13.1 - 2026-10-23
+
+### 直したこと
+
+- 0.13.0 の読み取り専用の Codex の子が、macOS では照合でいつも `failed` になりうるのを直した。照合は、Codex 自身が専用ログインの一時ディレクトリに足す読み取り（`tmp/arg0-linux/codex-arg0*`）を例外にしていたが、Linux の名前に固定し、symlink を解いた道筋とだけ比べていた（macOS の一時ディレクトリ `/var/folders` は `/private/var` への symlink）。今は、解く前と解いた後の両方の道筋で、`tmp/arg0-<名前>/codex-arg0*` そのものの読み取りを例外にする。macOS の実物の Codex では、まだ確かめていない。
+
+commit の一覧：https://github.com/B16B1RD/bb-writ/compare/bb-writ--v0.13.0...bb-writ--v0.13.1
+
 ## 0.13.0 - 2026-10-23
 
 ### 変えたこと
