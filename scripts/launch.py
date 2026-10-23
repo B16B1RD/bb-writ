@@ -328,82 +328,23 @@ def codex_read_only(scratch: Path, cwd: Path) -> tuple[list[str], list[str]]:
     -s read-only では mktemp -d も失敗し、試験を動かせない審査役が読んだだけの判定を返した（0.163.0）。
     -s（sandbox_mode）は default_permissions より優先されるので渡さない。ネットワークは read-only の既定のまま出られない。"""
     git_dir, _ = grok_git_dir(cwd)
-    # 残すもの: codex 本体のパッケージ（本体の 2 つ上。npm の版はネイティブの本体が vendor にあり、補助が実行する）、ホームの下の PATH の道具
-    # （nvm を ~/.config に入れた node など。Claude Code の子と同じく読ませる）、Git の設定、対象とその共通ディレクトリ
-    # 置き場の根やホームそのものは残すものに数えない（~/.codex/bin/codex の 2 つ上は ~/.codex で、丸ごと読めてしまう）
+    # 残すものは、実機で要ると分かったものだけ: codex 本体とそのパッケージ（本体の 2 つ上。拒んだ ~/.codex の中の本体を、sandbox の補助が
+    # 実行できなかった）、Git の設定、対象とその共通ディレクトリ。PATH の道具などを足すと、そのたびに別の置き場を開けた（dotfiles など）。
+    # 道具が名前を挙げた置き場の下にあれば拒まれ、子の試験は動かず not-run になる（読んだだけの報告として扱われる）。
+    # 置き場の根・ホーム・専用ログインの中は、本体のパッケージでも残さない（~/.codex/bin/codex の 2 つ上は ~/.codex）
     roots = {Path(os.path.realpath(d)) for d in [Path.home(), config_dir(), *(Path.home() / p for p in SECRET_PLACES)]}
+    login = Path(os.path.realpath(config_dir()))
     binary = Path(os.path.realpath(shutil.which("codex") or "/"))
-    tools = [Path(d) for d in os.environ.get("PATH", "").split(os.pathsep) if d.startswith(str(Path.home()) + os.sep)]
-    # PATH の道具が symlink なら、行き先を残す。行き先の 2 つ上（パッケージ。nvm の npm は bin から ../lib/node_modules/npm を指す）は、
-    # PATH のディレクトリの親の中にあるときだけ残す（~/.local/bin から ~/.config/dotfiles/bin を指すとき、dotfiles を丸ごと残さない）
-    for d in list(tools):
-        try:
-            links = [Path(os.path.realpath(e.path)) for e in os.scandir(d) if e.is_symlink()]
-        except OSError:
-            continue
-        top = Path(os.path.realpath(d)).parent
-        tools += [x for t in links for x in (t, *([t.parent.parent] if top in t.parent.parent.parents else []))]
-    login = Path(os.path.realpath(config_dir()))  # 専用ログインの中は中身が認証情報（codex-home/auth.json など）なので、本体だけを残す
-    keep = [binary, *(d for d in [binary.parent.parent, binary.parent, *tools]
-                      if (r := Path(os.path.realpath(d))) not in roots and login not in r.parents),
+    package = binary.parent.parent
+    keep = [binary, *([package] if package not in roots and login not in package.parents else []),
             Path.home() / ".config" / "git", cwd, *([git_dir] if git_dir else [])]
     denies = secret_denies(keep)
-    scratch.mkdir()
+    scratch.mkdir(parents=True)
     rules = {":tmpdir": "write", **{d: "deny" for d in denies}}
     # TOML の基本文字列（JSON と同じ逃がし方。BMP の外の文字は、TOML に無いサロゲート対の \\u にせず、そのまま書く）
     table = ", ".join(f"{json.dumps(k, ensure_ascii=False)}={json.dumps(v)}" for k, v in rules.items())
     return (["-c", f'default_permissions="{CODEX_PROFILE}"', "-c", f'permissions.{CODEX_PROFILE}.extends=":read-only"',
              "-c", f"permissions.{CODEX_PROFILE}.filesystem={{{table}}}"], denies)
-
-
-def detect_env() -> dict:
-    """置き場の判定に使う git の環境。親の GIT_DIR・GIT_CEILING_DIRECTORIES などは、判定する場所と別のものを見せるので渡さない。
-    文言で「Git の外」を見分けるので、翻訳しない（翻訳入りの git では、Git の外の置き場をすべて止めた）。"""
-    # LC_ALL=C では LANGUAGE も効かない。mount の境で探すのをやめると、その下の作業ツリーを Git の外と読む（devcontainer の volume など）
-    return {**{k: v for k, v in os.environ.items() if not k.startswith("GIT_")}, "LC_ALL": "C", "GIT_DISCOVERY_ACROSS_FILESYSTEM": "1"}
-
-
-# git が上へたどって見つけなかった（Git の外）ときの、C ロケールの診断の全体。壊れた .git ファイルの「not a git repository: <場所>」は
-# 入れない（その上を探さずに止まる）。部分一致にすると、その場所の名前に同じ文字列を入れて通せた
-OUTSIDE_GIT = re.compile(r"fatal: not a git repository \(or any of the parent directories\): \.git\n")
-
-
-def git_common(d: Path) -> tuple[Path | None, str | None]:
-    """(d が属するリポジトリの共通ディレクトリ, 理由)。Git の外なら (None, None)。1 つだけ取り、末尾の改行だけを外す（改行を含む名前を
-    分け違えない）。それ以外の失敗（safe.bareRepository=explicit の下の bare など）は理由にする（「Git の外」と読み違えると、
-    管理ディレクトリの中の置き場を通した）。"""
-    g = subprocess.run(["git", "-C", str(d), "rev-parse", "--path-format=absolute", "--git-common-dir"],
-                       capture_output=True, text=True, timeout=GIT_TIMEOUT, env=detect_env())
-    if g.returncode == 0 and g.stdout.endswith("\n"):
-        return Path(g.stdout[:-1]).resolve(), None
-    if OUTSIDE_GIT.fullmatch(g.stderr):
-        return None, None
-    return None, f"{d} の Git の場所を取れない（git rev-parse: {g.stderr.strip()[:200]}）"
-
-
-def repo_overlap(cwd: Path, out_dir: Path) -> str | None:
-    """出力の置き場が、対象の中、どこかの Git の管理ディレクトリの中（bare も）、または対象と同じリポジトリ
-    （どの worktree・元の checkout でも）の作業ツリーの中にあればその理由。読み取り専用の Codex は置き場の tmp/ に書けるので、そこが
-    管理ディレクトリの中なら ref も作れる（Git の前後比較はしない）。元の checkout は separate-git-dir では git から分からないので、
-    置き場の側から属するリポジトリを見る。Git の場所を取れなければ（「Git の外」以外の失敗）、重ならないとみなさず理由にする。"""
-    if out_dir == cwd or cwd in out_dir.parents:
-        return f"対象（{cwd}）の中にある"
-    target, why = git_common(cwd)
-    if why:
-        return why
-    near = next(d for d in [out_dir, *out_dir.parents] if d.exists())  # 置き場はまだ無い。在る最も近い祖先で見る
-    g = subprocess.run(["git", "-C", str(near), "rev-parse", "--is-inside-git-dir"],
-                       capture_output=True, text=True, timeout=GIT_TIMEOUT, env=detect_env())
-    if g.returncode == 0 and g.stdout.strip() == "true":
-        return f"Git の管理ディレクトリ（{near}）の中にある"
-    if g.returncode != 0 and not OUTSIDE_GIT.fullmatch(g.stderr):
-        return f"{near} の Git の場所を取れない（git rev-parse: {g.stderr.strip()[:200]}）"
-    common, why = git_common(near)
-    if why:
-        return why
-    if target and common == target:
-        return f"対象のリポジトリ（共通ディレクトリ {target}）の作業ツリーの中にある"
-    return None
 
 
 def codex_breach(turns: list, denies: list[str]) -> str | None:
@@ -530,6 +471,8 @@ def command(a, prompt: str, scratch: Path) -> tuple[list[str], dict, str | None]
         secret = {e["name"] for e in secret_env(env)["envVars"]}  # LC_ で始まる名前の認証情報も外す
         env = {k: v for k, v in env.items() if (k in READ_ONLY_ENV or k.upper().endswith("_PROXY") or k.startswith("LC_")) and k not in secret}
         env["CODEX_HOME"] = str(home)
+        if a.cwd == scratch or a.cwd in scratch.parents:  # 子の書ける一時ディレクトリが対象の中にできる（状態の置き場が対象の下）
+            return [], env, f"bb-writ の状態の置き場 {scratch.parent} が対象の中にある。読み取り専用の Codex は一時ディレクトリに書けるので、対象の外に置く"
         mode, a.codex_denies = codex_read_only(scratch, a.cwd)
         env["TMPDIR"] = str(scratch.resolve())
     cmd = ["codex", "exec", "--json", "-m", a.model, "-c", f'model_reasoning_effort="{a.effort}"',
@@ -746,11 +689,12 @@ def main() -> int:
     a.model = a.model or DEFAULTS[a.host][0]
     a.effort = a.effort or DEFAULTS[a.host][1]
     a.cwd = a.cwd.resolve()
-    # 絶対パスにし、symlink を解く（子は --cwd で動くので、相対の --out では子の TMPDIR が別の場所を指した。対象の中かは解いた形で見る）
-    out_dir = (a.out or state_dir() / "delegations" / (time.strftime("%Y%m%d-%H%M%S") + '-' + secrets.token_hex(8))).resolve()
-    if a.host == "codex" and not a.write and (why := repo_overlap(a.cwd, out_dir)):  # 作る前に（作ってから拒むと、対象の中に置き場が残る）
-        ap.error(f"--out {out_dir}: {why}。読み取り専用の Codex は出力の置き場の tmp/ に書けるので、対象のリポジトリの外に置く")
+    stamp = time.strftime("%Y%m%d-%H%M%S") + '-' + secrets.token_hex(8)
+    out_dir = (a.out or state_dir() / "delegations" / stamp).resolve()
     out_dir.mkdir(parents=True, exist_ok=False)
+    # 読み取り専用の Codex の子が書ける一時ディレクトリは、--out でなく bb-writ の状態の置き場に置く（--out は呼び出し側が選ぶので、
+    # その下に置くと、対象のリポジトリや Git の管理ディレクトリの中かを判定し続けることになり、判定の穴が尽きなかった）
+    scratch = (state_dir() / "delegations" / stamp / "tmp").resolve()
     rec = {"host": a.host, "cwd": str(a.cwd), "model_requested": a.model, "effort_requested": a.effort,
            "write": a.write, "out": str(out_dir)}
 
@@ -765,7 +709,9 @@ def main() -> int:
                 snapshot = (own, common, git_snapshot(own, common, a.cwd))
         if not why:
             cmd, env, why = command(a, a.prompt_file.read_text(encoding="utf-8") + CONTRACT + ("" if a.write else READ_ONLY_CONTRACT),
-                                    out_dir / "tmp")
+                                    scratch)
+        if a.host == "codex" and not a.write and not why:
+            rec["scratch"] = str(scratch)
         if a.host == "grok" and not why:
             rec["grok_home"] = env["GROK_HOME"]  # 再開（grok -r）はこの home で
         if not why:

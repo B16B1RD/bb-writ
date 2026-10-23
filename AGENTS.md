@@ -45,7 +45,7 @@ bb-writ は、CLI ハーネス（Claude Code・Codex。Grok Build も同じ SKIL
 | 入口の聞く範囲・呼び直しの文・返答の形・検証の条件 (1)〜(6) の文を、要約の後に戻る先頭 5,000 トークン（字数で近似して 5,600 字）に置く。入口が合計の枠から丸ごと落ちたときのため、手引き 6 本（feature・bug・docs-skill・investigation・parallel・session-pickup）・delegate・interrogate の 8 本だけ、本文の先頭 4,000 字以内に呼び直しの文を置く（単独でも呼ばれる delegate・interrogate は入口から始めた仕事に限る。pause-safely・eval・reflect・correct・unknowns・原則・検証スキルには置いていない） | `tests/test_distribution.py` の `test_entry_keeps_what_to_ask_and_review_rules_within_the_compaction_head`（目印の語の位置だけ。順と意味は確かめず、意味は読者役で確かめる）と `test_skills_invoked_after_the_entry_say_to_reinvoke_it_after_compaction` |
 | push・PR は、届ける前の審査を通した commit（HEAD と同じ）か、要らない理由を宣言してから出す（レビュー対応で試験を足した commit を、新しい子の再審査なしに push した） | `scripts/work.py` の `op run`・`op begin` の `--reviewed`。`tests/test_work.py` の `TestReviewedCommit` |
 | 版はマニフェストの間で揃え、`CHANGELOG.md` の先頭は今の版。スキルは SKILL.md の本文だけで届き、名前はフォルダと同じ | `tests/test_distribution.py` |
-| 試験が PATH に置く偽のコマンドの中から本物を呼ぶときは、PATH を変える前に引いた絶対パスで呼ぶ。偽物が呼ばれたことを記録で確かめる（偽の git が PATH で自分を呼び続け、利用者のプロセスの上限を埋めて、同時に動いていた Claude Code を落とした） | `tests/process_limit.py`（包みと各試験のモジュールの先頭から読む）が、試験のプロセスとその子に、利用者の今のスレッド数と元の上限の中ほどの上限を掛ける（Linux。同じ誤りでも増えるのは試験の分だけ）。`tests/test_launch.py` の `test_tests_run_under_a_process_limit`。翻訳した git の試験の偽の git は、本物を `shutil.which` で引き、2 度目の呼び出しで止まり、呼ばれた記録を見る |
+| 試験が PATH に置く偽のコマンドの中から本物を呼ぶときは、PATH を変える前に引いた絶対パスで呼ぶ。偽物が呼ばれたことを記録で確かめる（偽の git が PATH で自分を呼び続け、利用者のプロセスの上限を埋めて、同時に動いていた Claude Code を落とした） | `tests/process_limit.py`（包みと各試験のモジュールの先頭から読む）が、試験のプロセスとその子に、利用者の今のスレッド数と元の上限の中ほどの上限を掛ける（Linux。同じ誤りでも増えるのは試験の分だけ）。`tests/test_launch.py` の `test_tests_run_under_a_process_limit` |
 
 ## commit
 

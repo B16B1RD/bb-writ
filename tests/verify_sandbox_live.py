@@ -131,7 +131,7 @@ def codex_read_only(out):
     finally:
         (vault / 'token').unlink()
         vault.rmdir()
-    scratch = out / 'launch' / 'tmp'
+    scratch = Path(rec['scratch']) if rec.get('scratch') else out / 'launch' / 'missing-scratch'  # 子の書ける一時ディレクトリ（状態の置き場）
     made = [d for d in scratch.glob('tmp.*') if (d / 'r').is_file()] if scratch.is_dir() else []
 
     def refused(n, why='Read-only file system'):  # 子が手順を試し、sandbox に拒まれた（試さなかった・コマンドが無いは証拠にしない）

@@ -752,22 +752,6 @@ class TestLaunch(unittest.TestCase):
             rc, rec = self.run_launch("codex", env_extra={"HOME": empty})
             self.assertEqual(rec["status"], "unavailable", rec)
 
-    def test_out_under_a_mount_inside_the_target_repository_is_refused(self):
-        # git は既定で mount の境で探すのをやめ、その下の作業ツリーを Git の外と読む（devcontainer の volume など）
-        import shutil
-        if not shutil.which("unshare") or subprocess.run(["unshare", "-rm", "true"], capture_output=True).returncode != 0:
-            self.skipTest("利用者の名前空間で mount できない環境")
-        repo, wt = self.worktree("mounted")
-        (repo / "data").mkdir()
-        out = repo / "data" / "out"
-        script = (f"mount -t tmpfs none {shlex.quote(str(repo / 'data'))} && exec {shlex.quote(sys.executable)} {shlex.quote(str(LAUNCH))} "
-                  f"--host codex --cwd {shlex.quote(str(wt))} --prompt-file {shlex.quote(str(self.prompt))} --out {shlex.quote(str(out))}")
-        p = subprocess.run(["unshare", "-rm", "sh", "-c", script], capture_output=True, text=True, timeout=60,
-                           env={**os.environ, "PATH": f"{self.bin}:/usr/bin:/bin", "HOME": str(self.home),
-                                "BB_WRIT_CONFIG_DIR": str(self.cfg), "BB_WRIT_STATE_DIR": str(self.state)})
-        self.assertEqual(p.returncode, 2, p)
-        self.assertIn("対象のリポジトリ（共通ディレクトリ", p.stderr)  # 境を越えて同じリポジトリと分かる（取れずに止まるのとは別の理由）
-
     def test_codex_binary_inside_the_login_keeps_only_the_binary(self):
         # 本体が専用ログインの中（codex-home/bin/codex）にあると、2 つ上は codex-home。中の auth.json は拒む
         cfg = self.home / ".config" / "bb-writ"
@@ -835,8 +819,9 @@ class TestLaunch(unittest.TestCase):
         (d / "s8.err").unlink()
         self.assertEqual(live.credentials_attempt(d), "other")
 
-    def test_codex_read_only_child_keeps_tools_and_drops_secret_env(self):
-        # nvm を ~/.config に入れると、codex は node のパッケージで、ネイティブの本体は vendor にある（補助が実行する）。PATH の道具も読ませる
+    def test_codex_read_only_child_keeps_only_its_package_and_drops_secret_env(self):
+        # 残すのは、実機で要ると分かったものだけ（codex 本体とそのパッケージ、Git の設定、対象とその共通ディレクトリ）。
+        # nvm を ~/.config に入れた node・npm や、dotfiles を指す道具は、名前を挙げた置き場の下なので拒まれる（子の試験は動かず not-run）
         home = self.home
         pkg = home / ".config" / "nvm" / "versions" / "node" / "v22"
         (pkg / "lib" / "node_modules" / "@openai" / "codex" / "bin").mkdir(parents=True)
@@ -847,37 +832,22 @@ class TestLaunch(unittest.TestCase):
         js.write_text(f"#!/bin/sh\nexec {self.bin / 'codex'} \"$@\"\n")
         js.chmod(0o755)
         (pkg / "bin" / "codex").symlink_to(js)
-        npm = pkg / "lib" / "node_modules" / "npm" / "bin"
-        npm.mkdir(parents=True)
-        (npm / "npm-cli.js").write_text("")
-        (npm.parent / "lib").mkdir()
-        (npm.parent / "lib" / "cli.js").write_text("")  # npm はパッケージの中のほかのファイルも読む
-        (pkg / "bin" / "npm").symlink_to(npm / "npm-cli.js")
         (home / ".config" / "gh").mkdir()
-        rc, rec = self.run_launch("codex", path=f"{pkg / 'bin'}:/usr/bin:/bin",
-                                  env_extra={"GH_TOKEN": "ghp_fake", "AWS_SECRET_ACCESS_KEY": "x", "MY_API_KEY": "y",
-                                             "SSH_AUTH_SOCK": "/tmp/agent", "DBUS_SESSION_BUS_ADDRESS": "unix:path=/x", "GIT_DIR": "/x"})
-        self.assertEqual((rc, rec["status"]), (0, "ok"), rec)
-        rules = fs_rules(json.loads(self.args_file.read_text()))
-        h = str(home.resolve())
-        for kept in (pkg / "bin" / "node", pkg / "lib" / "node_modules" / "@openai" / "codex" / "vendor", npm / "npm-cli.js",
-                     npm.parent / "lib" / "cli.js"):  # 覆う deny が無い
-            k = str(kept.resolve())
-            self.assertFalse([d for d, acc in rules.items() if acc == "deny" and (k == d or k.startswith(d + "/"))], (kept, rules))
-        self.assertEqual(rules.get(f"{h}/.config/gh"), "deny")
-        # ~/.local/bin の道具が ~/.config/dotfiles/bin を指しても、dotfiles を丸ごと残さない（行き先だけ）
         dots = home / ".config" / "dotfiles"
         (dots / "bin").mkdir(parents=True)
-        (dots / "bin" / "tool").write_text("")
         (dots / "secrets.env").write_text("X=1\n")
         (home / ".local" / "bin").mkdir(parents=True)
         (home / ".local" / "bin" / "tool").symlink_to(dots / "bin" / "tool")
         rc, rec = self.run_launch("codex", path=f"{home / '.local' / 'bin'}:{pkg / 'bin'}:/usr/bin:/bin")
+        self.assertEqual((rc, rec["status"]), (0, "ok"), rec)
         rules = fs_rules(json.loads(self.args_file.read_text()))
-        sec = str((dots / "secrets.env").resolve())
-        self.assertTrue([d for d, acc in rules.items() if acc == "deny" and (sec == d or sec.startswith(d + "/"))], rules)
-        tool = str((dots / "bin" / "tool").resolve())
-        self.assertFalse([d for d, acc in rules.items() if acc == "deny" and (tool == d or tool.startswith(d + "/"))], rules)
+
+        def covered(path):
+            k = str(path.resolve())
+            return [d for d, acc in rules.items() if acc == "deny" and (k == d or k.startswith(d + "/"))]
+        self.assertFalse(covered(pkg / "lib" / "node_modules" / "@openai" / "codex" / "vendor"), rules)  # 本体のパッケージは残す
+        for denied in (pkg / "bin" / "node", dots / "secrets.env", dots / "bin", home / ".config" / "gh"):
+            self.assertTrue(covered(denied), (denied, rules))
         rc, rec = self.run_launch("codex", path=f"{pkg / 'bin'}:/usr/bin:/bin",
                                   env_extra={"GH_TOKEN": "ghp_fake", "AWS_SECRET_ACCESS_KEY": "x", "MY_API_KEY": "y",
                                              "SSH_AUTH_SOCK": "/tmp/agent", "DBUS_SESSION_BUS_ADDRESS": "unix:path=/x", "GIT_DIR": "/x",
@@ -895,103 +865,38 @@ class TestLaunch(unittest.TestCase):
             self.assertIn(name, env)
 
     def test_codex_read_only_child_gets_its_own_writable_tmpdir(self):
-        # -s read-only では mktemp -d も失敗し、審査役が試験を動かせなかった。書けるのは起動ごとの一時ディレクトリだけ
+        # -s read-only では mktemp -d も失敗し、審査役が試験を動かせなかった。書けるのは起動ごとの一時ディレクトリだけで、
+        # それは --out（呼び出し側が選ぶ）でなく、いつも bb-writ の状態の置き場にできる
         rc, rec = self.run_launch("codex", mode="tmpdir")
         self.assertEqual((rc, rec["status"]), (0, "ok"), rec)
-        scratch = Path(rec["out"]) / "tmp"
+        scratch = Path(rec["scratch"])
         self.assertEqual(len(list(scratch.iterdir())), 1)  # 子の mkdtemp はそこにできる（証拠として残す）
-        self.assertFalse(self.cwd in scratch.parents)
-        # 相対の --out でも、子（--cwd で動く）の TMPDIR は同じ場所を指す
-        rc, rec = self.run_launch("codex", mode="tmpdir", extra=("--out", "rel-out"), proc_cwd=self.tmp.name)
-        self.assertEqual((rc, rec["status"]), (0, "ok"), rec)
-        self.assertEqual(rec["out"], str((Path(self.tmp.name) / "rel-out").resolve()))  # macOS の /tmp は /private/tmp
-        self.assertEqual(len(list((Path(rec["out"]) / "tmp").iterdir())), 1)
-        # 出力の置き場が対象の中なら、子の書ける場所が対象の中にできるので起動しない（symlink・.. を通しても。置き場も作らない）
+        self.assertTrue(self.state.resolve() in scratch.parents)
+        self.assertEqual(Path(str(self.args_file) + ".tmpdir").read_text(), str(scratch))
+        repo, wt = self.worktree("out-in-repo")
         link = Path(self.tmp.name) / "link"
         link.symlink_to(self.cwd)
-        (Path(self.tmp.name) / "sib").mkdir()
-        repo, wt = self.worktree("out-in-repo")  # 対象が worktree でも、元の checkout・共通ディレクトリの中は対象のリポジトリ
-        subprocess.run(["git", "init", "-q", str(Path(self.tmp.name) / "other-repo")], check=True)
-        g = ["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid"]
-        sep_main, sep_admin, sep_wt = (Path(self.tmp.name) / n for n in ("sep-main", "sep-admin", "sep-wt"))
-        nl_main, nl_wt = Path(self.tmp.name) / "nl\nmain", Path(self.tmp.name) / "nl-wt"
-        bare, bare_wt = Path(self.tmp.name) / "bare.git", Path(self.tmp.name) / "bare-wt"
-        subprocess.run(g + ["clone", "-q", "--bare", str(repo), str(bare)], check=True)
-        (repo / "stale").mkdir()
-        (repo / "stale" / ".git").write_text(f"gitdir: {repo / '.git' / 'worktrees' / 'gone'}\n")
-        (repo / "named").mkdir()  # 壊れた .git ファイルの行き先の名前に「Git の外」の文言を入れる
-        (repo / "named" / ".git").write_text("gitdir: /nonexistent/not a git repository (or any of the parent directories): .git\n")
-        broken_cwd = Path(self.tmp.name) / "broken-repo"
-        subprocess.run(g + ["init", "-q", str(broken_cwd)], check=True)
-        subprocess.run(g + ["-C", str(broken_cwd), "config", "core.repositoryformatversion", "99"], check=True)
-        other_bare = Path(self.tmp.name) / "other-bare.git"
-        subprocess.run(g + ["init", "-q", "--bare", str(other_bare)], check=True)
-        subprocess.run(g + ["-C", str(bare), "worktree", "add", "-q", "-b", "bw", str(bare_wt)], check=True)
-        (self.home / ".gitconfig").write_text("[safe]\n\tbareRepository = explicit\n")  # Git の勧める堅牢化
-        for main, admin, wt2 in ((sep_main, sep_admin, sep_wt), (nl_main, None, nl_wt)):
-            subprocess.run(g + ["init", "-q", *(["--separate-git-dir", str(admin)] if admin else []), str(main)], check=True)
-            subprocess.run(g + ["-C", str(main), "commit", "-q", "--allow-empty", "-m", "i"], check=True)
-            subprocess.run(g + ["-C", str(main), "worktree", "add", "-q", "-b", "w", str(wt2)], check=True)
-        (wt / "sub").mkdir()
-        (repo / "sub").mkdir()
-        for cwd, out in ((wt, repo / "sub" / "out"),  # 親の GIT_* の環境変数は判定に使わない（下の env）
-                         (self.cwd, self.cwd), (self.cwd, self.cwd / "out"), (self.cwd, link / "out"),
-                         (self.cwd, Path(self.tmp.name) / "sib" / ".." / "repo" / "out"),
-                         (wt, repo / "o"), (wt, repo / ".git" / "refs" / "heads" / "x"), (wt / "sub", wt / "o"),
-                         (wt, Path(self.tmp.name) / "other-repo" / ".git" / "x"),  # 別のリポジトリの管理ディレクトリの中も
-                         (sep_wt, sep_main / "o"), (sep_wt, sep_admin / "o"),  # separate-git-dir の元の checkout・管理ディレクトリ
-                         (nl_wt, nl_main / "o"),  # 名前に改行のある元の checkout
-                         (wt, Path(self.tmp.name) / "other-repo" / ".git" / "new" / "sub"),  # 2 段以上無い道
-                         (bare_wt, bare / "refs" / "heads" / "x"), (bare_wt, bare / "x" / "y"),
-                         (wt, other_bare / "refs" / "heads" / "x"),  # 対象と別の bare の中も
-                         (wt, repo / "stale" / "out"),  # 壊れた .git ファイルのあるディレクトリ（「Git の外」と読まない）
-                         (wt, repo / "named" / "out"),  # 行き先の名前に文言を入れても
-                         (broken_cwd, Path(self.tmp.name) / "outside-x" / "out")):  # 対象の git が読めない  # bare（safe.bareRepository=explicit の下でも）
-            with self.subTest(cwd=cwd, out=out):
-                p = subprocess.run([sys.executable, str(LAUNCH), "--host", "codex", "--cwd", str(cwd), "--prompt-file", str(self.prompt),
-                                    "--out", str(out)], env={**os.environ, "GIT_CEILING_DIRECTORIES": str(repo), "GIT_DIR": ".git", "LANGUAGE": "de",
-                                                             "PATH": f"{self.bin}:/usr/bin:/bin", "HOME": str(self.home),
-                                                             "BB_WRIT_CONFIG_DIR": str(self.cfg), "BB_WRIT_STATE_DIR": str(self.state)},
-                                   capture_output=True, text=True, timeout=120)
-                self.assertEqual(p.returncode, 2, p)
-                self.assertIn("対象のリポジトリ", p.stderr)
-                self.assertFalse(out.exists() and out != cwd, out)
-                self.assertNotIn("Traceback", p.stderr)
-        # 対象の外を指す .. は通す
-        rc, rec = self.run_launch("codex", mode="tmpdir", extra=("--out", str(self.cwd / ".." / "outside-out")))
-        self.assertEqual((rc, rec["status"]), (0, "ok"), rec)
-        # Git の外の置き場は、翻訳した git でも止めない（判定の git は C ロケールで動く）
-        # 偽の git は、C ロケールでないときだけ「Git の外」の文言を訳す。中から呼ぶ本物の git は、PATH を変える前に引いた絶対パスにする
-        # （PATH から引くと偽の git 自身に当たり、自分を呼び続けて、利用者の全体のプロセスの上限を埋めた）
-        import shutil
-        real_git = shutil.which("git")
-        tr = Path(self.tmp.name) / "tr-bin"
-        tr.mkdir()
-        self.assertTrue(real_git and Path(real_git).resolve() != (tr / "git").resolve(), real_git)
-        calls = Path(self.tmp.name) / "tr-calls"
-        # 2 度目に呼ばれたら止まる（本物が PATH を引き直す包みでも、偽物に戻り続けない）。本物は PATH を元に戻して呼ぶ
-        (tr / "git").write_text("#!/bin/sh\n"
-                                "[ -n \"$BBW_FAKE_GIT\" ] && exit 99\n"
-                                "export BBW_FAKE_GIT=1\n"
-                                f"export PATH={shlex.quote(os.environ.get('PATH', '/usr/bin:/bin'))}\n"
-                                f"echo \"LC_ALL=$LC_ALL\" >> '{calls}'\n"
-                                "err=$(mktemp) || exit 99\n"
-                                f"'{real_git}' \"$@\" 2>\"$err\"; rc=$?\n"
-                                "if [ \"$LC_ALL\" = C ]; then cat \"$err\" >&2; else sed 's/not a git repository/kein Git-Repository/' \"$err\" >&2; fi\n"
-                                "rm -f \"$err\"; exit $rc\n")
-        (tr / "git").chmod(0o755)
-        rc, rec = self.run_launch("codex", mode="tmpdir", extra=("--out", str(Path(self.tmp.name) / "tr-out")),
-                                  path=f"{tr}:{self.bin}:/usr/bin:/bin", env_extra={"LC_ALL": "de_DE.UTF-8"})
-        self.assertEqual((rc, rec["status"]), (0, "ok"), rec)
-        self.assertIn("LC_ALL=C", calls.read_text().split("\n"))  # 偽の git が判定に使われた（試験が空振りしていない）
+        for out in (self.cwd / "out", repo / ".git" / "refs" / "heads" / "x", link / "out2", "rel-out"):  # --out がどこでも
+            with self.subTest(out=out):
+                rc, rec = self.run_launch("codex", mode="tmpdir", extra=("--out", str(out)), cwd=wt, proc_cwd=self.tmp.name)
+                self.assertEqual((rc, rec["status"]), (0, "ok"), rec)
+                scratch = Path(rec["scratch"])
+                self.assertTrue(self.state.resolve() in scratch.parents, rec)
+                self.assertEqual(len(list(scratch.iterdir())), 1)
+                self.assertFalse((Path(rec["out"]) / "tmp").exists())
+        self.assertEqual(rec["out"], str((Path(self.tmp.name) / "rel-out").resolve()))  # 相対の --out は絶対パスに（macOS の /tmp は /private/tmp）
+        self.assertEqual(subprocess.run(["git", "-C", str(repo), "for-each-ref", "refs/heads/x"], capture_output=True, text=True).stdout, "")
+        # 状態の置き場が対象の下なら、子の書ける場所が対象の中にできるので起動しない
+        rc, rec = self.run_launch("codex", cwd=self.tmp.name)
+        self.assertEqual(rec["status"], "unavailable", rec)
         # 子の TMPDIR は symlink を解いた絶対パス（状態の置き場が symlink でも）
         real = Path(self.tmp.name) / "real-state"
         real.mkdir()
         (Path(self.tmp.name) / "state-link").symlink_to(real)
         rc, rec = self.run_launch("codex", mode="tmpdir", env_extra={"BB_WRIT_STATE_DIR": str(Path(self.tmp.name) / "state-link")})
         self.assertEqual((rc, rec["status"]), (0, "ok"), rec)
-        self.assertEqual(Path(str(self.args_file) + ".tmpdir").read_text(), str(Path(rec["out"]).resolve() / "tmp"))
-        self.assertTrue(rec["out"].startswith(str(real.resolve())))
+        self.assertEqual(Path(str(self.args_file) + ".tmpdir").read_text(), rec["scratch"])
+        self.assertTrue(rec["scratch"].startswith(str(real.resolve())))
 
     def test_codex_read_only_wider_than_the_profile_is_failed(self):
         (self.home / ".ssh").mkdir()  # 渡す deny を 2 つ以上にする（1 つだけ欠けた記録を、全部欠けた記録と見分ける）
