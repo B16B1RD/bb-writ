@@ -558,7 +558,7 @@ class TestLaunch(unittest.TestCase):
         self.assertIn("子の結果を読めない", rec["problems"][0])
         self.assertIn("Traceback", (out / "launcher-error.log").read_text())  # 詳細を残す
         self.assertTrue((out / "record.json").is_file())
-        self.assertIn(str(out), (self.state / "delegations.jsonl").read_text())
+        self.assertIn(str(out.resolve()), (self.state / "delegations.jsonl").read_text())  # --out は symlink を解いた形で記録する
 
     def test_report_check_does_not_crash_on_odd_reports(self):
         launch = load_launch()
@@ -775,6 +775,22 @@ class TestLaunch(unittest.TestCase):
             rc, rec = self.run_launch("codex", env_extra={"HOME": empty})
             self.assertEqual(rec["status"], "unavailable", rec)
 
+    def test_git_config_symlink_is_kept_when_home_is_under_a_symlink(self):
+        # macOS の一時ディレクトリ /var は /private/var を指す。ホームが symlink の下にあり、~/.config/git が外（dotfiles）を指す
+        # symlink でも、~/.config を丸ごと拒まず、Git の設定の節点を残す（Linux の CI では出ず、macOS の CI だけで落ちた）
+        real = Path(self.tmp.name) / "real-root"
+        (real / "home" / ".config" / "gh").mkdir(parents=True)
+        (real / "home" / "dotfiles" / "git").mkdir(parents=True)
+        (Path(self.tmp.name) / "link-root").symlink_to(real)
+        home = Path(self.tmp.name) / "link-root" / "home"
+        (home / ".config" / "git").symlink_to(home / "dotfiles" / "git")
+        rc, rec = self.run_launch("codex", env_extra={"HOME": str(home)})
+        self.assertEqual((rc, rec["status"]), (0, "ok"), rec)
+        rules = fs_rules(json.loads(self.args_file.read_text()))
+        h = str((real / "home").resolve())
+        self.assertNotIn(f"{h}/.config", rules)
+        self.assertEqual(rules.get(f"{h}/.config/gh"), "deny", rules)
+
     def test_codex_binary_inside_the_login_keeps_only_the_binary(self):
         # 本体が専用ログインの中（codex-home/bin/codex）にあると、2 つ上は codex-home。中の auth.json は拒む
         cfg = self.home / ".config" / "bb-writ"
@@ -903,7 +919,8 @@ class TestLaunch(unittest.TestCase):
         for name in ("LC_TIME", "HTTPS_PROXY"):  # 言語とプロキシは渡す
             self.assertIn(name, env)
         launch = load_launch()
-        for name in set(env) - {"PWD", "SHLVL", "_"}:  # 子が受け取るのは、許可の一覧と launcher が足す 2 つだけ（包みの sh が足す 3 つを除く）
+        for name in set(env) - {"PWD", "SHLVL", "_", "__CF_USER_TEXT_ENCODING"}:  # 子が受け取るのは、許可の一覧と launcher が足す 2 つだけ
+            # （包みの sh が足す 3 つと、macOS が子のプロセスに足す __CF_USER_TEXT_ENCODING を除く）
             self.assertTrue(name in launch.READ_ONLY_ENV | {"CODEX_HOME", "TMPDIR"} or name.startswith("LC_") or name.upper().endswith("_PROXY"), name)
             self.assertNotIn(name, {e["name"] for e in launch.secret_env({name: ""})["envVars"]})
         for name in ("GH_TOKEN", "AWS_SECRET_ACCESS_KEY", "MY_API_KEY", "SSH_AUTH_SOCK", "DBUS_SESSION_BUS_ADDRESS", "GIT_DIR", "LC_SECRET_TOKEN"):

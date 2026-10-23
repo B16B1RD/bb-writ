@@ -301,7 +301,9 @@ def secret_denies(keep: list[Path]) -> list[str]:
     下の場所を書くと起動せず（~/.aws が /mnt/c を指す、~/.config の下の専用ログイン）、拒んだ ~/.codex の下に read を書いても
     codex 本体を実行できなかった（0.163.0、Linux）。そこで、あるものだけを symlink を解いた行き先で書き、入れ子は書かず、
     keep（codex 本体・Git の設定・対象）を含む置き場は、起動の時点の中身を 1 つずつ見て、keep を含まないものだけを拒む（再帰）。"""
-    keep = {Path(os.path.realpath(k)) for k in keep} | {Path(os.path.abspath(k)) for k in keep}  # symlink の節点も、行き先も
+    # 行き先と、symlink の節点（親を解き、最後の名前は解かない形。比べる置き場は解いた形なので、ホームが symlink の下でも
+    # 節点を含むと分かるように。macOS の一時ディレクトリ /var は /private/var を指す）
+    keep = {Path(os.path.realpath(k)) for k in keep} | {Path(os.path.realpath(Path(k).parent)) / Path(k).name for k in keep}
     places, seen = set(), set()
 
     def add(d: Path):
