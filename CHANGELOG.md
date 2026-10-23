@@ -4,6 +4,19 @@ bb-writ を使う人に向けて、版ごとに変わったことを書く。新
 
 commit ごとの細かい変更は、各版の末尾の「commit の一覧」（前の版のタグとの比較）で見られる。
 
+## 0.14.0 - 2026-10-23
+
+### 変えたこと
+
+- push・pr の前の宣言 `work.py op run --reviewed <commit>` が、その commit を審査した子の記録と照らすようになった（#14）。これまでは宣言の形と HEAD の一致だけを照らしていたので、審査役を立てずに HEAD を書けば通った。
+  - その commit を対象に launcher（`scripts/launch.py`、読み取り専用）で立てた子が `status: ok` で返った記録が無ければ、終了コード 6 で拒否する。`op run` のコマンドは走らない。通ったら、子の記録の場所を操作の記録の `reviews` に残す。
+  - launcher は、`--cwd` が Git の作業ツリーで、子の起動の前と終わりの両方で HEAD が同じで未 commit の変更（staged・追跡外のファイル・サブモジュールの中を含む）が無いときだけ、委任の記録に `head` を書く。利用者の Git の設定（`status.showUntrackedFiles`・`diff.ignoreSubmodules` など）や親の `GIT_DIR` には左右されない。assume-unchanged・skip-worktree・fsmonitor で隠した変更と、途中で変えて戻したものは見分けない。終わりに変わっていれば `head` は `null` で、`head_lost` に書く。`git status` は index を書き直さない（`--no-optional-locks`）。
+  - Claude Code の `Agent` ツールで立てた子と、書き手が自分で入れた退行の注入は記録に残らず、審査に数えない。入口の条件 (5) の子と `interrogate` の審査役は launcher で立てる（Claude Code でも `--host claude`）。審査役は、届ける commit を checkout して未 commit の変更が無い場所で立て、終わるまでそこを変えない。
+  - 照らすのは記録の有無だけで、人数・依頼が審査だったか・審査の中身と、手で書き足した記録は見分けない。条件 (5) の子の記録だけでも通る（(5) と (6) を分けて照らすのは #17）。`not-run` の子は数えない。`none:<理由>` は今までどおり宣言だけで通る。
+- 委任の記録（`delegations.jsonl`）や子の `record.json` が読めない形（FIFO・ディレクトリ・壊れた symlink・権限）でも、`work.py` は止まらず、理由を添えて拒否する。
+
+commit の一覧：https://github.com/B16B1RD/bb-writ/compare/bb-writ--v0.13.3...bb-writ--v0.14.0
+
 ## 0.13.3 - 2026-10-23
 
 ### 変えたこと
