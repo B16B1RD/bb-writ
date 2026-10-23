@@ -782,6 +782,7 @@ class TestReviewedCommit(unittest.TestCase):
         (rel / "record.json").write_text(json.dumps({"head": h, "status": "ok", "write": False, "out": rel_out}))
         with open(delegations, "a", encoding="utf-8") as f:
             f.write(json.dumps({"head": h, "status": "ok", "write": False, "out": rel_out}) + "\n")
+        self.assertEqual(self.publish(tok, "push:feat@1", "--reviewed", h)[0], 6)
         delegations.chmod(0)  # 委任の記録そのものを読めない
         try:
             if not os.access(delegations, os.R_OK):  # root では権限で止められない
@@ -800,6 +801,7 @@ class TestReviewedCommit(unittest.TestCase):
         rc, r = self.publish(tok, "push:feat@1", "--reviewed", self.head())
         self.assertEqual(rc, 6, r)
         self.assertIn("審査役の記録が無い", r["reason"])
+        self.assertNotIn("読めない", r["reason"])  # 無いのは壊れた印でない
 
     def test_no_review_needs_no_reviewer_record(self):
         self.launcher_reviews = False
