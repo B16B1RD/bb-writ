@@ -290,7 +290,8 @@ FAKE_GROK = textwrap.dedent(r'''
 
 # 偽の CLI の共通の部分: Claude Code 2.1.309 の Bash のように、新しいセッションでプロセスを起こし、その下に 6 段の鎖（実物の sandbox の木と
 # 同じくらいの深さ。最後の段が sleep 600）を起こして、自分は先に終わる。上の段はコマンド名に ) を含め（/proc の stat を最初の ) で切ると
-# 読み違える）、主スレッドだけを終わらせて別のスレッドで動き続ける（ゾンビに見えるが生きていて、下の段もまだ付け替わらない）
+# 読み違える）、主スレッドだけを終わらせて別のスレッドで動き続ける（ゾンビに見えるが生きていて、下の段もまだ付け替わらない）。
+# 鎖は SIGTERM を無視する（SIGKILL でなければ止まらない）
 LATE = """
 import ctypes, os, platform, subprocess, sys, threading, time
 libc = ctypes.CDLL(None)
@@ -305,7 +306,7 @@ open(out + '.part', 'w').write(' '.join([str(os.getpid())] + open(out + '.chain'
 os.rename(out + '.part', out)
 libc.syscall({'x86_64': 60, 'aarch64': 93}[platform.machine()], 0)  # SYS_exit: 主スレッドだけ終わる
 """
-CHAIN = ("import os, subprocess, sys; d = int(sys.argv[1]); open(sys.argv[2], 'a').write(f'{os.getpid()} '); "
+CHAIN = ("import os, signal, subprocess, sys; signal.signal(signal.SIGTERM, signal.SIG_IGN); d = int(sys.argv[1]); open(sys.argv[2], 'a').write(f'{os.getpid()} '); "
          "os.execv(sys.argv[3], [sys.argv[3], '600']) if d == 0 else subprocess.run([sys.executable, '-c', sys.argv[4], str(d - 1), *sys.argv[2:]])")
 ORPHAN = textwrap.dedent(r'''
     open(os.environ["FAKE_ARGS"] + ".cli", "w").write(f"{os.getpid()} {os.getppid()}")  # 子の CLI（と dotenvx）
@@ -1462,8 +1463,9 @@ class TestLaunch(unittest.TestCase):
                 took = time.time() - t0
                 pids = self.orphans()
                 self.assertEqual((len(pids), rec["status"]), (7, status), rec)
-                if status == "failed":  # 時間切れの理由だけ（止めた子の CLI は残りに並ばない）
+                if status == "failed":  # 時間切れの理由だけ（止めた子の CLI は残りに並ばない）。期限を守る
                     self.assertEqual(rec["problems"], ["3 秒で終わらなかった"], rec)
+                    self.assertLess(took, 5, rec)
                 for pid in pids:
                     with self.assertRaises(ProcessLookupError, msg=f"{pid} が残った: {rec}"):
                         os.kill(pid, 0)
@@ -1483,7 +1485,7 @@ class TestLaunch(unittest.TestCase):
     @unittest.skipUnless(sys.platform.startswith("linux"), "子の CLI が切り離した子孫を止めるのは Linux だけ（PR_SET_CHILD_SUBREAPER）")
     def test_a_child_the_launcher_cannot_stop_or_check_fails(self):
         # 止めきれない（子孫も、子の CLI 自身も）・/proc を読めない・subreaper になれない・出力を読めないときは、残ったかもしれないので
-        # failed にする（黙って ok にしない。待ち続けない）。止めるのを 1 回拒まれても、止め続ける（ほかの子孫も、次の周の同じ子孫も）
+        # failed にする（黙って ok にしない。待ち続けない。終わった孤児が続いても、時間切れを守る）。止めるのを 1 回拒まれても、止め続ける（ほかの子孫も、次の周の同じ子孫も）
         sleep = shutil.which("sleep")
         site = Path(self.tmp.name) / "site"
         site.mkdir()
@@ -1513,6 +1515,12 @@ class TestLaunch(unittest.TestCase):
                         return
                     _kill3(pid, sig)
                 os.kill, os.killpg = kill, lambda *a: None
+            if what == "waitid-storm":  # 終わった孤児が続く（子の CLI が終わったと報告される前に、別の番号を返し続ける）
+                _waitid, _waitpid = os.waitid, os.waitpid
+                class _Exited:
+                    si_pid = 2 ** 22 + 1
+                os.waitid = lambda idtype, id, options: _Exited() if idtype == os.P_ALL else _waitid(idtype, id, options)
+                os.waitpid = lambda pid, options: (pid, 0) if pid == _Exited.si_pid else _waitpid(pid, options)
             if what == "no-thread":  # 出力を読むスレッドを起こせない
                 import threading
                 def start(self):
@@ -1549,21 +1557,23 @@ class TestLaunch(unittest.TestCase):
                     self.assertNotIn(pids[0], [int(p.split()[0]) for p in rec["stopped_after_exit"]], rec)
                 else:
                     self.assertEqual(rec["stopped_after_exit"], [], rec)
-        for what, words in (("unkillable-cli", "子が起こしたプロセスを止められない"), ("no-thread", "スレッドを起こせない")):
-            with self.subTest(what=what):  # 子の CLI は 60 秒眠る。止まらなければ待ち続けず、止まるなら止める
+        for host, mode, what, words in (("claude", "orphan-hang", "unkillable-cli", "子が起こしたプロセスを止められない"),
+                                        ("claude", "orphan-hang", "no-thread", "スレッドを起こせない"),
+                                        ("claude", "orphan-hang", "waitid-storm", "2 秒で終わらなかった")):
+            with self.subTest(host=host, mode=mode, what=what):  # 子の CLI は 60 秒眠る。止まらなければ待ち続けず、止まるなら止める
                 self.stop_fakes()  # 前の subTest が、止まらない子の CLI として残したもの
                 self.addCleanup(self.stop_fakes)
                 t0 = time.time()
-                rc, rec = self.run_launch("claude", "orphan-hang", extra=("--timeout", "2"),
+                rc, rec = self.run_launch(host, mode, extra=("--timeout", "2"),
                                           env_extra={"FAKE_SLEEP": sleep, "PYTHONPATH": str(site), "FAKE_SITE": what})
                 self.orphans()
                 self.assertEqual((rc, rec["status"]), (2, "failed"), rec)
                 self.assertTrue(any(words in p for p in rec["problems"]), rec)
                 self.assertLess(time.time() - t0, 40, rec)
-                if what == "unkillable-cli":  # 止まらない子の CLI（Popen の子の偽の dotenvx）を並べる
-                    dotenvx = Path(str(self.args_file) + ".cli").read_text().split()[1]
-                    self.assertTrue(any(p.startswith(f"{dotenvx} ") for p in rec["problems"]), rec)
-                else:
+                if what == "unkillable-cli":  # 止まらない子の CLI（Popen の子。claude なら偽の dotenvx）を並べる
+                    cli = Path(str(self.args_file) + ".cli").read_text().split()[host == "claude"]
+                    self.assertTrue(any(p.startswith(f"{cli} ") for p in rec["problems"]), rec)
+                elif what == "no-thread":
                     self.assertEqual(self.fakes(), [], rec)
 
     def fakes(self) -> list:

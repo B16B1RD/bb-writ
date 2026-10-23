@@ -707,13 +707,15 @@ def wait_for_exit(child: subprocess.Popen, timeout: float) -> None:
     使い回されない。待つ間に自分の下へ来て終わった孤児は刈る（subreaper なので、刈らないとゾンビが溜まる）。"""
     deadline = time.monotonic() + timeout
     while True:
-        while (r := os.waitid(os.P_ALL, 0, os.WEXITED | os.WNOHANG | os.WNOWAIT)) is not None:
-            if r.si_pid == child.pid:
-                return
-            os.waitpid(r.si_pid, 0)
-        if time.monotonic() > deadline:
+        r = os.waitid(os.P_ALL, 0, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+        if r is not None and r.si_pid == child.pid:
+            return
+        if r is not None:
+            os.waitpid(r.si_pid, 0)  # 終わったと報告されたものなので、すぐ返る
+        if time.monotonic() > deadline:  # 孤児が終わり続けても、期限は守る
             raise subprocess.TimeoutExpired(child.args, timeout)
-        time.sleep(0.1)
+        if r is None:
+            time.sleep(0.1)
 
 
 def stop_descendants(group: int) -> tuple[list[str], list[str]]:
