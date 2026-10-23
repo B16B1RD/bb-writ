@@ -473,6 +473,9 @@ def command(a, prompt: str, scratch: Path) -> tuple[list[str], dict, str | None]
         env["CODEX_HOME"] = str(home)
         if a.cwd == scratch or a.cwd in scratch.parents:  # 子の書ける一時ディレクトリが対象の中にできる（状態の置き場が対象の下）
             return [], env, f"bb-writ の状態の置き場 {scratch.parent} が対象の中にある。読み取り専用の Codex は一時ディレクトリに書けるので、対象の外に置く"
+        # 状態の置き場が Git の管理ディレクトリの中（.git の下、bare の形）なら、子がそこに ref を作れる。git は呼ばずに形で見る
+        if any(d.name == ".git" or all((d / n).exists() for n in ("HEAD", "objects", "refs")) for d in scratch.parents):
+            return [], env, f"bb-writ の状態の置き場 {scratch.parent} が Git の管理ディレクトリの中にある。読み取り専用の Codex は一時ディレクトリに書けるので、外に置く"
         mode, a.codex_denies = codex_read_only(scratch, a.cwd)
         env["TMPDIR"] = str(scratch.resolve())
     cmd = ["codex", "exec", "--json", "-m", a.model, "-c", f'model_reasoning_effort="{a.effort}"',

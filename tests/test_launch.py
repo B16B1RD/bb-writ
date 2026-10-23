@@ -712,6 +712,15 @@ class TestLaunch(unittest.TestCase):
         self.assertNotIn(f"{h}/.config", rules)
         self.assertNotIn(f"{h}/dotfiles/git", rules)
         self.assertEqual(rules.get(f"{h}/.config/gh"), "deny")
+        # 本体が置き場の根の 1 段下（~/.codex/bin/codex）なら、2 つ上は ~/.codex（根）なので残さず、中の auth.json は拒む
+        (home / ".codex" / "bin").mkdir()
+        nested = home / ".codex" / "bin" / "codex"
+        nested.write_text(f"#!/bin/sh\nexec {self.bin / 'codex'} \"$@\"\n")
+        nested.chmod(0o755)
+        rc, rec = self.run_launch("codex", path=f"{nested.parent}:/usr/bin:/bin")
+        self.assertEqual((rc, rec["status"]), (0, "ok"), rec)
+        rules = fs_rules(json.loads(self.args_file.read_text()))
+        self.assertEqual(rules.get(f"{h}/.codex/auth.json"), "deny", rules)
         # 本体が置き場の直下にあっても、本体を拒まない
         direct = home / ".codex" / "codex"
         direct.write_text(f"#!/bin/sh\nexec {self.bin / 'codex'} \"$@\"\n")
@@ -886,9 +895,16 @@ class TestLaunch(unittest.TestCase):
                 self.assertFalse((Path(rec["out"]) / "tmp").exists())
         self.assertEqual(rec["out"], str((Path(self.tmp.name) / "rel-out").resolve()))  # 相対の --out は絶対パスに（macOS の /tmp は /private/tmp）
         self.assertEqual(subprocess.run(["git", "-C", str(repo), "for-each-ref", "refs/heads/x"], capture_output=True, text=True).stdout, "")
-        # 状態の置き場が対象の下なら、子の書ける場所が対象の中にできるので起動しない
+        # 状態の置き場が対象の下、Git の管理ディレクトリの中（共有の .git、worktree の管理ディレクトリ、bare）なら起動しない
         rc, rec = self.run_launch("codex", cwd=self.tmp.name)
         self.assertEqual(rec["status"], "unavailable", rec)
+        bare = Path(self.tmp.name) / "bare.git"
+        subprocess.run(["git", "init", "-q", "--bare", str(bare)], check=True)
+        for state in (repo / ".git" / "bb-writ-state", repo / ".git" / "worktrees" / "out-in-repo-wt" / "bb-writ-state", bare / "bb-writ-state"):
+            with self.subTest(state=state):
+                rc, rec = self.run_launch("codex", cwd=wt, env_extra={"BB_WRIT_STATE_DIR": str(state)})
+                self.assertEqual(rec["status"], "unavailable", rec)
+                self.assertIn("Git の管理ディレクトリ", rec["problems"][0])
         # 子の TMPDIR は symlink を解いた絶対パス（状態の置き場が symlink でも）
         real = Path(self.tmp.name) / "real-state"
         real.mkdir()
