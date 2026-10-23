@@ -191,6 +191,8 @@ FAKE_CLAUDE = textwrap.dedent(r'''
         os.chmod(os.path.join(os.environ["HOME"], ".config"), 0)
     if mode == "home-lock-root":  # ホームそのものを読めなくする
         os.chmod(os.environ["HOME"], 0)
+    if mode == "hook-chmod":  # 前からある実行できない hook に、実行権限だけを足す（中身は同じ）
+        os.chmod(os.path.join(common(), "hooks", "pre-commit"), 0o755)
     if mode == "hook-symlink":  # 行き先の無い symlink を hooks に足す
         os.symlink("/nonexistent/hook", os.path.join(common(), "hooks", "pre-commit"))
     if mode == "config-include-fifo":  # 設定は通常のファイルのまま、git に FIFO を読ませる
@@ -449,6 +451,15 @@ class TestLaunch(unittest.TestCase):
                     if mode in ("head-fifo", "head-dir"):  # 空の HEAD と見分けられる表し
                         self.assertTrue([p for p in rec["problems"] if p.startswith("HEAD: ") and "通常のファイルでない" in p], rec)
                 self.assertIn(rec["out"], (self.state / "delegations.jsonl").read_text())
+
+    def test_a_write_child_making_a_hook_executable_is_reported(self):
+        repo, wt = self.worktree("hook-chmod")
+        hook = repo / ".git" / "hooks" / "pre-commit"
+        hook.write_text("#!/bin/sh\n")
+        hook.chmod(0o644)  # git は実行できない hook を動かさない
+        rc, rec = self.run_launch("claude", "hook-chmod", extra=["--write"], cwd=wt)
+        self.assertEqual(rec["status"], "failed", rec)
+        self.assertTrue([p for p in rec["problems"] if p.endswith("hooks/pre-commit")], rec)
 
     @unittest.skipIf(os.geteuid() == 0, "root は権限で止められない")
     def test_a_child_locking_its_leftovers_still_writes_the_record(self):
@@ -912,7 +923,7 @@ class TestLaunch(unittest.TestCase):
                     f"s = importlib.util.spec_from_file_location('l', {str(LAUNCH)!r}); m = importlib.util.module_from_spec(s); "
                     f"s.loader.exec_module(m); print(len(m.read_child_file(__import__('pathlib').Path({str(big)!r}))[0]))")
             p = subprocess.run([sys.executable, "-B", "-c", code], capture_output=True, text=True, timeout=120)
-            self.assertEqual(p.stdout.strip(), str(len("sha256: ") + 64), p.stderr[-500:])
+            self.assertEqual(p.stdout.strip(), str(len("-rw-r--r-- sha256: ") + 64), p.stderr[-500:])  # 権限と中身のハッシュ
 
     def test_rollout_reading_is_bounded(self):
         launch, d = load_launch(), Path(self.tmp.name) / "ro"

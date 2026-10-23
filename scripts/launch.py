@@ -192,7 +192,7 @@ def commit_dirs(own: Path, common: Path) -> list[Path]:
 
 def read_child_file(f: Path, keep: int = 0):
     """書く子が書き換えうるファイルを読む。FIFO・/dev/zero への symlink・巨大なファイルにされても止まらず尽きないよう、
-    symlink は行き先と、行き先の種類（通常のファイルならその中身のハッシュ）で表す。どれも止まらずに開いて種類を見て、
+    symlink は行き先と、行き先の種類（通常のファイルならその権限と中身のハッシュ）で表す。通常のファイルも権限と中身で表す。どれも止まらずに開いて種類を見て、
     通常のファイルだけを決まった大きさずつハッシュする。
     無ければ None。(表し, 先頭 keep バイト, 通常のファイルか) を返す。表しは中身全体の変化を映す。"""
     try:
@@ -206,7 +206,7 @@ def read_child_file(f: Path, keep: int = 0):
             return f"symlink: {os.readlink(f)!r}（開けない: {e.strerror}）", b"", False
         try:
             mode = os.fstat(fd).st_mode
-            return f"symlink: {os.readlink(f)!r} " + (digest_of(fd) if stat.S_ISREG(mode) else f"（{stat.filemode(mode)}）"), b"", False
+            return f"symlink: {os.readlink(f)!r} " + (f"{stat.filemode(mode)} {digest_of(fd)}" if stat.S_ISREG(mode) else f"（{stat.filemode(mode)}）"), b"", False
         finally:
             os.close(fd)
     fd = os.open(f, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)  # FIFO でも開くところで止まらない
@@ -215,7 +215,7 @@ def read_child_file(f: Path, keep: int = 0):
         if not stat.S_ISREG(mode):
             return f"（通常のファイルでない: {stat.filemode(mode)}）", b"", False
         head = []
-        return digest_of(fd, keep, head), b"".join(head), True
+        return f"{stat.filemode(mode)} {digest_of(fd, keep, head)}", b"".join(head), True  # 権限も（hook に実行権限を足すと git が動かす）
     finally:
         os.close(fd)
 
