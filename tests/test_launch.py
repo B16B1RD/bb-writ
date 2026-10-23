@@ -408,10 +408,15 @@ class TestLaunch(unittest.TestCase):
         quote = Path(self.tmp.name) / "quote"
         quote.write_text("[core]\n\tquotePath = false\n")
         odd = os.fsencode(str(self.cwd)) + b"/\xff.txt"  # UTF-8 でない名前の追跡外のファイル
-        open(odd, "w").close()
-        rc, rec = self.run_launch("claude", env_extra={"GIT_CONFIG_GLOBAL": str(quote)})
-        self.assertEqual((rc, rec["head"]), (0, None), rec)
-        os.unlink(odd)
+        try:
+            open(odd, "w").close()
+        except OSError as e:  # macOS の APFS は UTF-8 でない名前を作れない（そこでは起きない）
+            if e.errno != errno.EILSEQ:
+                raise
+        else:
+            rc, rec = self.run_launch("claude", env_extra={"GIT_CONFIG_GLOBAL": str(quote)})
+            self.assertEqual((rc, rec["head"]), (0, None), rec)
+            os.unlink(odd)
         index = self.cwd / ".git" / "index"  # git status が開いたまま止まる index（上限で止めて null）
         index.rename(self.cwd / ".git" / "index.bak")
         os.mkfifo(index)
