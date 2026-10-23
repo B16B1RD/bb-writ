@@ -547,6 +547,10 @@ class TestLaunch(unittest.TestCase):
             self.assertEqual((rec["status"], rec["home_residue"]), ("ok", []), (host, rec))  # 並行する Claude Code の子が作ったものも数えない
             self.assertTrue((home / ".claude" / "ssh").is_dir())  # 消さない（並行する別の委任の子と競う）
             (home / ".claude" / "ssh").rmdir(); (home / ".claude").rmdir()
+        (home / ".claude").mkdir()  # 利用者のホームにはたいてい前から .claude がある
+        (home / ".claude" / "settings.json").write_text("{}")
+        rc, rec = self.run_launch("claude", "home-ssh", env_extra={"HOME": str(home)})
+        self.assertEqual((rec["status"], rec["home_residue"]), ("ok", []), rec)
 
     def test_only_the_empty_ssh_dir_itself_is_exempt(self):
         home = Path(self.tmp.name) / "home"
