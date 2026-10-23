@@ -11,7 +11,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 LAUNCH = ROOT / "scripts" / "launch.py"
-GOOD = 'ok.\\n```json\\n{"conclusion": "x は正しい", "evidence": [{"what": "読んだ", "where": "a.txt:1"}], "unknowns": []}\\n```'
+GOOD = ('ok.\\n```json\\n{"conclusion": "x は正しい", "evidence": [{"what": "読んだ", "where": "a.txt:1"}], "unknowns": [], '
+        '"execution": {"completed": "yes", "commands": [{"command": "python3 -m unittest", "exit": 0}]}}\\n```')
 
 FAKE_CODEX = textwrap.dedent(r'''
     #!/usr/bin/env python3
@@ -40,7 +41,27 @@ FAKE_CODEX = textwrap.dedent(r'''
     if mode == "shapes":  # 形の違う行（オブジェクトでない行、item が文字列、深すぎる行）
         print("1"); print(json.dumps({"type": "item.completed", "item": "x"})); print(json.dumps({"type": "error", "error": "x"}))
         print("[" * 100000 + "]" * 100000)
-    print(json.dumps({"type": "thread.started", "thread_id": "**" if mode == "glob-session" else os.environ.get("FAKE_THREAD", "t-1")}, ensure_ascii=raw))
+    thread = os.environ.get("FAKE_THREAD", "0199aaaa-bbbb-7ccc-8ddd-eeeeffff0000")
+    sessions = os.path.join(os.environ["CODEX_HOME"], "sessions")
+    import glob
+    if mode != "no-rollout" and not glob.glob(os.path.join(sessions, "**", f"rollout-*-{thread}.jsonl"), recursive=True):
+        # 0.163.0 が読み取り専用の profile で記録する実効の権限（root を読み、$TMPDIR だけに書ける。ネットワークは restricted）
+        entries = [{"path": {"type": "special", "value": {"kind": "root"}}, "access": "read"},
+                   {"path": {"type": "special", "value": {"kind": "tmpdir"}}, "access": "write"}]
+        if mode == "wide-profile":  # 対象の設定が同じ profile に書ける場所を足した
+            entries.append({"path": {"type": "path", "path": os.getcwd()}, "access": "write"})
+        perm = {"type": "managed", "file_system": {"type": "restricted", "entries": entries},
+                "network": "enabled" if mode == "net-profile" else "restricted"}
+        if mode == "legacy-sandbox":  # 対象の設定の sandbox_mode が profile より優先された
+            perm = {"type": "legacy"}
+        os.makedirs(os.path.join(sessions, "fake"), exist_ok=True)
+        open(os.path.join(sessions, "fake", f"rollout-1-{thread}.jsonl"), "w").write(json.dumps(
+            {"type": "turn_context", "payload": {"model": "gpt-6-sol", "effort": "medium", "sandbox_policy": {"type": "workspace-write"},
+                                                 "permission_profile": perm}}) + "\n")
+    if mode == "tmpdir":  # 書ける一時ディレクトリで試験を動かした
+        import tempfile
+        tempfile.mkdtemp()
+    print(json.dumps({"type": "thread.started", "thread_id": "**" if mode == "glob-session" else thread}, ensure_ascii=raw))
     print(json.dumps({"type": "item.completed", "item": {"type": "agent_message", "text": text}}, ensure_ascii=raw))
     if mode == "deep-usage":  # 読めるが、記録（indent 付き）には書けない深さ
         print('{"type": "turn.completed", "usage": ' + "[" * 3000 + "]" * 3000 + "}")
@@ -247,6 +268,9 @@ class TestLaunch(unittest.TestCase):
                              + '{"type": "tu\n1\n{"type": "turn_context", "payload": "x"}\n'  # 書きかけの行、形の違う行は飛ばして続ける
                              + json.dumps({"type": "turn_context", "payload": {"model": "m0", "sandbox_policy": "x"}}) + "\n"
                              + json.dumps({"type": "turn_context", "payload": {"model": "m", "effort": "e\u2028", "cwd": "a\u2028b",
+                                                                               "permission_profile": {"file_system": {"type": "restricted", "entries": [
+                                                                                   {"path": {"type": "special", "value": {"kind": "tmpdir"}}, "access": "write"}]},
+                                                                                   "network": "restricted"},
                                                                                "sandbox_policy": {"type": [1]}}}, ensure_ascii=False)
                              + "\n").encode()
                             + b'{"type": "turn_context", "payload": {"model": "gpt-\xff"}}\n')  # UTF-8 として読めない行は使わない
@@ -265,7 +289,11 @@ class TestLaunch(unittest.TestCase):
             with self.subTest(mode=mode):
                 before = (self.state / "delegations.jsonl").read_text().count("\n") if (self.state / "delegations.jsonl").exists() else 0
                 rc, rec = self.run_launch(host, mode=mode, cwd=self.grok_target() if host == "grok" else None)
-                self.assertEqual((rc, rec["status"]), (0, "ok"), rec)  # 報告は読め、落ちない
+                if host == "codex" and mode in ("shapes", "glob-session"):  # session を読めず、実効の権限の記録を探せない
+                    self.assertEqual((rc, rec["status"]), (2, "failed"), rec)
+                    self.assertIn("確かめられない", rec["problems"][0])
+                else:
+                    self.assertEqual((rc, rec["status"]), (0, "ok"), rec)  # 報告は読め、落ちない
                 if mode == "shapes":
                     self.assertIsNone(rec["session"])  # 文字列でない session は記録しない
                 out = Path(rec["out"])
@@ -458,18 +486,73 @@ class TestLaunch(unittest.TestCase):
         other = self.cfg / "codex-home" / "sessions" / "rollout-1-zz-t-1.jsonl"  # 別の記録（名前の末尾が session と同じ）
         other.parent.mkdir(parents=True)
         other.write_text(json.dumps({"type": "turn_context", "payload": {"model": "other"}}) + "\n")
-        rc, rec = self.run_launch("codex")
-        self.assertEqual((rc, rec["status"]), (0, "ok"), rec)
+        rc, rec = self.run_launch("codex", env_extra={"FAKE_THREAD": "t-1"})
         self.assertEqual(rec["session"], "t-1")
         self.assertIsNone(rec["model_effective"])  # UUID の形でない session では探さない
+        self.assertEqual((rc, rec["status"]), (2, "failed"), rec)  # 実効の権限を確かめられない結果は使わない
         near = self.cfg / "codex-home" / "sessions" / "rollout-1-deadbeef-1234.jsonl"
         near.write_text(json.dumps({"type": "turn_context", "payload": {"model": "other"}}) + "\n")
         rc, rec = self.run_launch("codex", env_extra={"FAKE_THREAD": "deadbeef-1234"})
         self.assertIsNone(rec["model_effective"])
+        rc, rec = self.run_launch("codex")
+        self.assertEqual((rc, rec["status"], rec["execution"]), (0, "ok", "yes"), rec)
+        self.assertEqual((rec["model_effective"]["writable"], rec["model_effective"]["network"]), ([":tmpdir"], "restricted"))
         argv = json.loads(self.args_file.read_text())
-        self.assertIn("read-only", argv)
+        self.assertNotIn("-s", argv)  # sandbox_mode は default_permissions より優先される
+        self.assertNotIn("--approve-for-me", argv)
+        self.assertIn('permissions.bbwrit-read-only.extends=":read-only"', argv)
+        self.assertIn('permissions.bbwrit-read-only.filesystem={":tmpdir"="write"}', argv)
         self.assertIn("報告の形", argv[-1])  # 報告の約束を子に渡す
         self.assertTrue((self.state / "delegations.jsonl").read_text().strip())
+
+    def test_codex_read_only_child_gets_its_own_writable_tmpdir(self):
+        # -s read-only では mktemp -d も失敗し、審査役が試験を動かせなかった。書けるのは起動ごとの一時ディレクトリだけ
+        rc, rec = self.run_launch("codex", mode="tmpdir")
+        self.assertEqual((rc, rec["status"]), (0, "ok"), rec)
+        scratch = Path(rec["out"]) / "tmp"
+        self.assertEqual(len(list(scratch.iterdir())), 1)  # 子の mkdtemp はそこにできる（証拠として残す）
+        self.assertFalse(self.cwd in scratch.parents)
+
+    def test_codex_read_only_wider_than_the_profile_is_failed(self):
+        # 対象の .codex/config.toml の sandbox_mode は default_permissions より優先され、同じ profile に書ける場所も足せる
+        for i, (mode, sign) in enumerate((("wide-profile", "広い"), ("net-profile", "広い"), ("legacy-sandbox", "確かめられない"),
+                                          ("no-rollout", "確かめられない"))):
+            with self.subTest(mode=mode):  # 記録は session ごと
+                rc, rec = self.run_launch("codex", mode=mode, env_extra={"FAKE_THREAD": f"0199aaaa-bbbb-7ccc-8ddd-eeeeffff100{i}"})
+                self.assertEqual((rc, rec["status"]), (2, "failed"), rec)
+                self.assertIn(sign, rec["problems"][0])
+                self.assertNotIn("report", rec)  # 報告を使わない
+                self.assertTrue((Path(rec["out"]) / "report.md").is_file())  # 中身は残す
+        rc, rec = self.run_launch("codex", mode="wide-profile", extra=["--write"])  # 書く子は対象に書ける
+        self.assertEqual(rec["status"], "ok", rec)
+
+    def test_reports_that_did_not_run_the_checks_are_not_ok(self):
+        # 実行が要る審査で、読んだだけの報告を ok と数えた（Codex の read-only で mktemp -d が終了コード 2）
+        def report(execution):
+            body = {"conclusion": "c", "evidence": [{"what": "読んだ", "where": "a.txt:1"}], "unknowns": []}
+            if execution is not None:
+                body["execution"] = execution
+            return "```json\n" + json.dumps(body, ensure_ascii=False) + "\n```"
+        cases = (  # (実行の欄, status, execution)
+            (None, "not-run", None),  # 前の形の報告（欄なし）
+            ({"completed": "no", "commands": [{"command": "mktemp -d", "exit": 2}]}, "not-run", "no"),
+            ({"completed": "yes", "commands": [{"command": "bash tests/self-test.sh"}]}, "invalid-report", "yes"),  # 終了コードが無い
+            ({"completed": "yes", "commands": []}, "invalid-report", "yes"),
+            ({"completed": "yes", "commands": [{"command": "x", "exit": True}]}, "invalid-report", "yes"),
+            ({"completed": "maybe"}, "invalid-report", None),
+            ("yes", "invalid-report", None),
+            ({"completed": "yes", "commands": [{"command": "bash tests/self-test.sh", "exit": 1}]}, "ok", "yes"),  # 試験が落ちたのも実行できた
+            ({"completed": "not-needed"}, "ok", "not-needed"),
+        )
+        for host in ("codex", "claude", "grok"):
+            for execution, status, ran in cases:
+                with self.subTest(host=host, execution=execution):
+                    rc, rec = self.run_launch(host, cwd=self.grok_target() if host == "grok" else None,
+                                              env_extra={"FAKE_TEXT": report(execution)})
+                    self.assertEqual((rc, rec["status"], rec["execution"]), (0 if status == "ok" else 2, status, ran), rec)
+                    if status == "not-run":
+                        self.assertTrue(rec["report"]["conclusion"])  # 報告は捨てず、読んだだけの審査として使える
+                        self.assertIn("読んだだけ", rec["problems"][0])
 
     def test_claude_ok_and_read_only_uses_dont_ask(self):
         for d in (".config/gh", ".config/git", ".ssh", ".claude", ".codex"):  # 守る置き場が実際にあるホーム
