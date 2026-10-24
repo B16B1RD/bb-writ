@@ -30,6 +30,7 @@ import sys
 import tempfile
 import threading
 import time
+import uuid
 from pathlib import Path
 
 sys.dont_write_bytecode = True  # work.py の import で、プラグインの置き場に __pycache__ を作らない
@@ -460,7 +461,8 @@ def command(a, prompt: str, scratch: Path) -> tuple[list[str], dict, str | None]
         cmd = ["dotenvx", "run", "-q", "-f", str(env_file), "-fk", str(keys), "--",
                "claude", "-p", prompt, "--output-format", "json", "--model", a.model, "--effort", a.effort,
                "--permission-prompts", "none", *perm, "--settings", json.dumps(settings),
-               "--plugin-dir", str(Path(__file__).resolve().parents[1])]  # --restricted は専用ログインに入れたプラグインを読まないので、この bb-writ を渡す
+               "--plugin-dir", str(Path(__file__).resolve().parents[1]),  # --restricted は専用ログインに入れたプラグインを読まないので、この bb-writ を渡す
+               "--resume" if a.resume else "--session-id", a.session]
         return cmd, env, None
     if a.host == "grok":
         if not shutil.which("grok"):
@@ -472,19 +474,20 @@ def command(a, prompt: str, scratch: Path) -> tuple[list[str], dict, str | None]
             own, common, why = worktree_dirs(a.cwd)
             if why:
                 return [], env, why
-            home, profile = grok_home(login, "workspace", [work_record(a.cwd), *(commit_dirs(own, common) if own else [])])
+            home, profile = (a.grok_home, "bbwrit") if a.grok_home else grok_home(login, "workspace", [work_record(a.cwd), *(commit_dirs(own, common) if own else [])])
         else:
             # 起動ごとの home は状態ディレクトリの下にできるので、それと重なる対象も止める
             for d in grok_ro_writable(state_dir() / "grok-homes"):
                 if a.cwd == d or d in a.cwd.parents or a.cwd in d.parents:
                     return [], env, f"対象と {d} が重なる。Grok の read-only の sandbox はそこへの書き込みを止めないので、読み取り専用にできない"
-            home, profile = grok_home(login, "read-only", [])
+            home, profile = (a.grok_home, "bbwrit") if a.grok_home else grok_home(login, "read-only", [])
         # 親の GROK_*（GROK_AGENT・GROK_SANDBOX・GROK_CONFIG など）と API キーを渡さない。API キーがあるとログインの代わりに別料金の API へ落ちる
         env = {k: v for k, v in env.items() if not k.startswith("GROK_") and k not in ("XAI_API_KEY", "RUST_LOG")}
         env.update(GROK_HOME=str(home), GROK_MEMORY="0", **GROK_COMPAT_OFF)
         cmd = ["grok", "-p", prompt, "--output-format", "json", "-m", a.model, "--effort", a.effort, "--cwd", str(a.cwd),
                "--sandbox", profile, "--always-approve",
-               "--no-leader", "--no-auto-update", "--no-subagents", "--disable-web-search", "--disallowed-tools", "x_search"]
+               "--no-leader", "--no-auto-update", "--no-subagents", "--disable-web-search", "--disallowed-tools", "x_search",
+               "-r" if a.resume else "-s", a.session]
         return cmd, env, None
     if not shutil.which("codex"):
         return [], env, "codex が PATH に無い"
@@ -510,8 +513,9 @@ def command(a, prompt: str, scratch: Path) -> tuple[list[str], dict, str | None]
         env["CODEX_HOME"] = str(home)
         mode, a.codex_denies = codex_read_only(scratch, a.cwd)
         env["TMPDIR"] = str(scratch.resolve())
+    # 再開（exec resume）は -C・-c・--add-dir などを受けないので、exec の側に置いたまま、依頼の前に挟む（0.164.0 で、権限も同じまま続いた）
     cmd = ["codex", "exec", "--json", "-m", a.model, "-c", f'model_reasoning_effort="{a.effort}"',
-           "--skip-git-repo-check", "-C", str(a.cwd), *mode, prompt]
+           "--skip-git-repo-check", "-C", str(a.cwd), *mode, *(["resume", a.session] if a.resume else []), prompt]
     return cmd, env, None
 
 
@@ -726,6 +730,14 @@ def become_subreaper() -> None:
         raise OSError(ctypes.get_errno(), "prctl(PR_SET_CHILD_SUBREAPER) が失敗した")
 
 
+def load_now() -> float | None:
+    """1 分平均の負荷（取れない OS では null）。"""
+    try:
+        return round(os.getloadavg()[0], 1)
+    except (OSError, AttributeError):
+        return None
+
+
 def wait_for_exit(child: subprocess.Popen, timeout: float) -> None:
     """子の CLI が終わるのを、刈らずに待つ（Linux）。刈らないので、止め終わるまで子の CLI とそのプロセスグループの番号は別のプロセスに
     使い回されず、終了コードも後の child.wait に残る。待つ間に自分の下へ来て終わった孤児は刈る（subreaper なので、刈らないとゾンビが溜まる）。"""
@@ -801,15 +813,36 @@ def launcher_error(out_dir: Path) -> str:
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--host", choices=("claude", "codex", "grok"), required=True)
-    ap.add_argument("--cwd", type=Path, required=True)
+    ap.add_argument("--host", choices=("claude", "codex", "grok"))
+    ap.add_argument("--cwd", type=Path)
     ap.add_argument("--prompt-file", type=Path, required=True)
     ap.add_argument("--model")
     ap.add_argument("--effort")
     ap.add_argument("--write", action="store_true", help="変更を許す（既定は読み取り専用）")
     ap.add_argument("--out", type=Path)
     ap.add_argument("--timeout", type=int, default=1800)
+    ap.add_argument("--resume", type=Path, help="前の起動の out。同じ session・同じ権限で続きから起動する（host・cwd・model・effort・write は記録から取る）")
     a = ap.parse_args()
+    a.session, a.grok_home = None, None
+    if a.resume:
+        # 時間切れで止めた子を最初から起動し直すと、それまでの作業（会話記録には残っている）を捨てる。続きから起動する
+        try:
+            prev = obj(json.loads((a.resume / "record.json").read_text(encoding="utf-8")))
+        except (OSError, ValueError) as e:
+            ap.error(f"--resume の記録を読めない: {e!r}"[:300])
+        if a.host or a.cwd or a.model or a.effort or a.write:
+            ap.error("--resume は host・cwd・model・effort・write を前の記録から取る（違う権限で続けない）。一緒に渡さない")
+        if not (prev.get("host") in ("claude", "codex", "grok") and all(isinstance(prev.get(k), str) and prev[k] for k in ("cwd", "model_requested", "effort_requested", "session"))
+                and isinstance(prev.get("write"), bool)):
+            ap.error(f"--resume の記録に、続きから起動するのに要るもの（host・cwd・model・effort・write・session）が無い: {a.resume}")
+        if prev["host"] == "grok" and not (isinstance(prev.get("grok_home"), str) and Path(prev["grok_home"], "sandbox.toml").is_file()):
+            ap.error(f"--resume の記録の grok_home が無い（Grok は同じ home でしか再開できない）: {a.resume}")
+        a.host, a.cwd, a.model, a.effort, a.write = prev["host"], Path(prev["cwd"]), prev["model_requested"], prev["effort_requested"], prev["write"]
+        a.session, a.grok_home = prev["session"], prev.get("grok_home") and Path(prev["grok_home"])
+    elif not (a.host and a.cwd):
+        ap.error("--host と --cwd が要る（--resume のときは記録から取る）")
+    elif a.host in ("claude", "grok"):
+        a.session = str(uuid.uuid4())  # 起動の前に決める。時間切れで止めると、結果の JSON が出ず、session が分からなかった（Codex は出力の最初の行に出る）
     a.model = a.model or DEFAULTS[a.host][0]
     a.effort = a.effort or DEFAULTS[a.host][1]
     a.cwd = a.cwd.resolve()
@@ -828,7 +861,8 @@ def main() -> int:
     out_dir = (a.out or state_dir() / "delegations" / stamp).resolve()
     out_dir.mkdir(parents=True, exist_ok=False)
     rec = {"host": a.host, "cwd": str(a.cwd), "model_requested": a.model, "effort_requested": a.effort,
-           "write": a.write, "out": str(out_dir)}
+           "write": a.write, "out": str(out_dir), **({"resumed_from": str(a.resume.resolve())} if a.resume else {}),
+           "load": {"cpus": os.cpu_count(), "start": load_now()}}  # 時間切れが混雑によるかを後で見分ける材料
     rec["head"] = clean_head(a.cwd)  # 子を起こす前に（子が見る作業ツリー）
 
     snapshot, why, prep = None, None, None
@@ -869,19 +903,23 @@ def main() -> int:
     elif why:
         rec.update(status="unavailable", problems=[why])
     else:
-        child, left = None, []
+        child, left, timed_out = None, [], False
         try:
             # 子が残した背景のプロセスが、終了後の照合の後に書き換えないよう、プロセスグループごと止める。子の CLI が新しいセッションに
             # 切り離した子孫（Claude Code の Bash）はグループの外なので、Linux では自分の下に来たものを残らなくなるまで止める
             child = subprocess.Popen(cmd, cwd=a.cwd, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                      start_new_session=True)  # バイトで受ける（子の出力は UTF-8 とは限らない）
+            rec["session"] = a.session  # 後の照合で failed になっても、確かめた後に続きから起動できるように
             output, readers = {}, []
             try:
                 for k, f in (("stdout", child.stdout), ("stderr", child.stderr)):
                     readers.append(threading.Thread(target=lambda k=k, f=f: output.__setitem__(k, f.read()), daemon=True))
                     readers[-1].start()
                 # 出力が閉じるのでなく、子の CLI が終わるのを待つ（子孫が出力を開いたままでも）
-                wait_for_exit(child, a.timeout) if LINUX else child.wait(timeout=a.timeout)
+                try:
+                    wait_for_exit(child, a.timeout) if LINUX else child.wait(timeout=a.timeout)
+                except subprocess.TimeoutExpired:  # 止めた後も出力を読み、session を記録する（--resume で続きから起動できる）
+                    timed_out = True
             finally:
                 try:
                     os.killpg(child.pid, signal.SIGKILL)  # Linux では、まだ刈っていない（番号は使い回されていない）
@@ -899,7 +937,7 @@ def main() -> int:
                             rec.setdefault("stopped_after_exit", [])
                             left = [f"子の残りを確かめられない: {e!r}"[:300], f"詳細: {launcher_error(out_dir)}"]
             for t in readers:
-                t.join(timeout=10)  # 開いていた子孫が止まれば閉じる
+                t.join(timeout=0 if left else 10)  # 開いていた子孫が止まれば閉じる（止めきれなかったものは、待っても閉じない）
             if any(t.is_alive() for t in readers):
                 raise RuntimeError("子の CLI が終わった後も、ほかのプロセスが子の出力を開いたまま")
             stdout, stderr = output["stdout"], output["stderr"]
@@ -909,8 +947,11 @@ def main() -> int:
             got = {"claude": parse_claude, "codex": parse_codex, "grok": parse_grok}[a.host](p.stdout)
             # 警告の行（sandbox の適用失敗、効かなかった引数）があれば、権限の約束どおりに動いたか分からないので結果を使わない
             unsafe = [l for l in p.stderr.splitlines() if a.host == "grok" and GROK_WARNING.search(l)][-5:]
-            rec.update(exit_code=p.returncode, session=got["session"], model_effective=got["model_effective"], usage=got["usage"])
-            if QUOTA.search(p.stderr[-4000:] + " ".join(got["errors"])):
+            rec.update(exit_code=p.returncode, session=got["session"] or a.session, model_effective=got["model_effective"], usage=got["usage"])
+            if timed_out:  # 子の作業は会話記録に残っている。最初から起動し直さず、続きから起動する
+                rec.update(status="timeout", problems=[f"{a.timeout} 秒で終わらなかった。" + (f"--resume {out_dir} で続きから起動できる" if rec["session"]
+                                                                                       else "session が分からず、続きから起動できない")])
+            elif QUOTA.search(p.stderr[-4000:] + " ".join(got["errors"])):
                 rec.update(status="quota", problems=["利用枠の上限に当たった（別料金の API へは切り替えない）"])
             elif unsafe:
                 rec.update(status="failed", problems=["Grok が警告を出した（権限の約束どおりに動いたか分からない）"] + unsafe)
@@ -929,8 +970,6 @@ def main() -> int:
                     rec.update(status="not-run", problems=["対象の試験・検査を実行できなかった（読んだだけの報告）" if ran == "no"
                                                            else "報告に実行の欄（execution）が無い（読んだだけの報告として扱う）"])
                 (out_dir / "report.md").write_text(got["text"], encoding="utf-8", errors="backslashreplace")  # 単独のサロゲート
-        except subprocess.TimeoutExpired:
-            rec.update(status="failed", problems=[f"{a.timeout} 秒で終わらなかった"])
         except Exception as e:  # 想定外。委任の記録は書き、失敗として返す（トレースバックは out に残す）
             what = "子を起動できない" if child is None else "子の結果を読めない"
             rec.update(status="failed", problems=[f"{what}: {e!r}"[:300], f"詳細: {launcher_error(out_dir)}"])
@@ -998,6 +1037,7 @@ def main() -> int:
     if rec["head"] and clean_head(a.cwd) != rec["head"]:  # 確かめた後、子の終わりまでに作業ツリーが変わった（子が見たものが commit と違いうる）
         rec.update(head=None, head_lost="子の起動の前に確かめた後、終わりまでに対象の HEAD か作業ツリーが変わったか、終わりに確かめられなかった")
     rec["duration_s"] = round(time.time() - t0, 1)
+    rec["load"]["end"] = load_now()
     try:
         body = json.dumps(rec, ensure_ascii=False, indent=1)
     except (RecursionError, ValueError) as e:  # 子から来た値が深すぎる。外して、失敗として記録する

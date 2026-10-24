@@ -140,6 +140,9 @@ FAKE_CODEX = textwrap.dedent(r'''
         tempfile.mkdtemp()
     # ORPHAN
     print(json.dumps({"type": "thread.started", "thread_id": "**" if mode == "glob-session" else thread}, ensure_ascii=raw))
+    if mode == "hang":  # 時間切れ（本物は thread.started を最初に出してから作業する）
+        import time
+        sys.stdout.flush(); time.sleep(60)
     print(json.dumps({"type": "item.completed", "item": {"type": "agent_message", "text": text}}, ensure_ascii=raw))
     if mode == "deep-usage":  # 読めるが、記録（indent 付き）には書けない深さ
         print('{"type": "turn.completed", "usage": ' + "[" * 3000 + "]" * 3000 + "}")
@@ -256,6 +259,11 @@ FAKE_CLAUDE = textwrap.dedent(r'''
         print('{"a": ' + "[" * 100000 + "]" * 100000 + "}")
     # ORPHAN
     result = os.environ["FAKE_TEXT"]
+    argv = sys.argv[1:]
+    sid = next((argv[i + 1] for i, x in enumerate(argv[:-1]) if x in ("--session-id", "--resume")), "s-1")  # 本物は渡した session を返す
+    if mode == "hang":  # 時間切れ（本物の -p --output-format json は、終わるまで何も出さない）
+        import time
+        time.sleep(60)
     if mode == "unwritable-report":  # 試験の sitecustomize が書き出しを失敗させる印
         result = result.replace('"conclusion": "', '"__unwritable__": 1, "conclusion": "')
     if mode == "deep":  # 読めるが、記録（indent 付き）には書けない深さの報告
@@ -263,8 +271,8 @@ FAKE_CLAUDE = textwrap.dedent(r'''
     if mode == "surrogate":  # JS の JSON.stringify は単独のサロゲートを \ud83d の形で出す。本文と、報告の JSON の中の両方
         result = "\ud83d" + result.replace('"conclusion": "', '"conclusion": "\\ud83d')
     if os.environ.get("FAKE_EXIT"):  # 子が失敗した（後処理の理由と並ぶか確かめる）
-        print(json.dumps({"type": "result", "result": "", "session_id": "s-1", "is_error": True})); sys.exit(int(os.environ["FAKE_EXIT"]))
-    print(json.dumps({"type": "result", "result": result, "session_id": ["s"] if mode == "shapes" else "s-1", "is_error": False,
+        print(json.dumps({"type": "result", "result": "", "session_id": sid, "is_error": True})); sys.exit(int(os.environ["FAKE_EXIT"]))
+    print(json.dumps({"type": "result", "result": result, "session_id": ["s"] if mode == "shapes" else sid, "is_error": False,
                       "modelUsage": "x" if mode == "shapes" else {"claude-sonnet-5-5": {}}, "total_cost_usd": 0.01, "num_turns": 2},
                      ensure_ascii=not os.environ.get("FAKE_RAW")))
 ''').lstrip()
@@ -293,7 +301,11 @@ FAKE_GROK = textwrap.dedent(r'''
         os.unlink(auth)
         open(auth, "w").write('{"refreshed": true}')
     # ORPHAN
-    print(json.dumps({"text": os.environ["FAKE_TEXT"], "stopReason": "end_turn", "sessionId": "g-1",
+    if mode == "hang":  # 時間切れ（本物の -p --output-format json は、終わるまで何も出さない）
+        import time
+        time.sleep(60)
+    sid = next((sys.argv[i + 1] for i, x in enumerate(sys.argv[1:-1], 1) if x in ("-s", "-r")), "g-1")  # 本物は渡した session を返す
+    print(json.dumps({"text": os.environ["FAKE_TEXT"], "stopReason": "end_turn", "sessionId": sid,
                       "modelUsage": "x" if mode == "shapes" else {"grok-4.7-build": {}}, "total_cost_usd": 0.02, "num_turns": 3,
                       **({"sessionId": ["g"]} if mode == "shapes" else {})}))
 ''').lstrip()
@@ -409,15 +421,16 @@ class TestLaunch(unittest.TestCase):
         self.orphans()  # 試験が run_launch の途中で落ちても、偽の子孫を残さない（記録の置き場を消す前に読む）
         self.tmp.cleanup()
 
-    def run_launch(self, host, mode="good", extra=(), path=None, cwd=None, env_extra=None, proc_cwd=None):
+    def run_launch(self, host, mode="good", extra=(), path=None, cwd=None, env_extra=None, proc_cwd=None, raw=False):
         self.orphans()  # 前の回が途中で落ちて読まれなかった偽の子孫を、上書きする前に片付けに回す
         env = {**os.environ, "HOME": str(self.home), "PATH": path if path is not None else f"{self.bin}:/usr/bin:/bin", "BB_WRIT_CONFIG_DIR": str(self.cfg),
                "BB_WRIT_STATE_DIR": str(self.state), "FAKE_MODE": mode, "FAKE_ARGS": str(self.args_file),
                "FAKE_TEXT": GOOD.encode().decode("unicode_escape"), **(env_extra or {})}
         (self.bin / "fake_env.json").write_text(json.dumps({k: v for k, v in env.items() if k.startswith("FAKE_")}))
-        p = subprocess.run([sys.executable, str(LAUNCH), "--host", host, "--cwd", str(cwd or self.cwd), "--prompt-file", str(self.prompt), *extra],
+        target = ["--host", host, "--cwd", str(cwd or self.cwd)] if host else []  # host が無いのは --resume（記録から取る）
+        p = subprocess.run([sys.executable, str(LAUNCH), *target, "--prompt-file", str(self.prompt), *extra],
                            env=env, capture_output=True, text=True, timeout=120, cwd=proc_cwd)  # launcher が止まったら、試験ごと止まらずに落とす
-        return p.returncode, json.loads(p.stdout)
+        return p if raw else (p.returncode, json.loads(p.stdout))
 
     def test_launch_leaves_no_bytecode_in_the_plugin(self):
         subprocess.run(["rm", "-rf", str(ROOT / "scripts" / "__pycache__")], check=True)
@@ -565,8 +578,8 @@ class TestLaunch(unittest.TestCase):
                     self.assertIn("確かめられない", rec["problems"][0])
                 else:
                     self.assertEqual((rc, rec["status"]), (0, "ok"), rec)  # 報告は読め、落ちない
-                if mode == "shapes":
-                    self.assertIsNone(rec["session"])  # 文字列でない session は記録しない
+                if mode == "shapes":  # 文字列でない session は記録しない。Claude Code と Grok は、launcher が起動の前に決めて渡したもの
+                    self.assertEqual(rec["session"], None if host == "codex" else self.session_arg(host))
                 out = Path(rec["out"])
                 self.assertTrue((out / "record.json").is_file())
                 lines = (self.state / "delegations.jsonl").read_text().split("\n")
@@ -1488,7 +1501,7 @@ class TestLaunch(unittest.TestCase):
             ("claude", "orphan", (), self.cwd, "ok"),
             ("claude", "orphan", ("--write",), self.cwd, "ok"),
             ("claude", "orphan-pipe", ("--timeout", "20"), self.cwd, "ok"),  # 子孫が子の出力を開いたままでも、子の CLI の終わりで返る
-            ("claude", "orphan-hang", ("--timeout", "3"), self.cwd, "failed"),
+            ("claude", "orphan-hang", ("--timeout", "3"), self.cwd, "timeout"),
             ("codex", "orphan", (), self.cwd, "ok"),
             ("grok", "orphan", (), None, "ok"),
         )
@@ -1501,8 +1514,8 @@ class TestLaunch(unittest.TestCase):
                 took = time.time() - t0
                 pids = self.orphans()
                 self.assertEqual((len(pids), rec["status"]), (7, status), rec)
-                if status == "failed":  # 時間切れの理由だけ（止めた子の CLI は残りに並ばない）。期限を守る（所要時間で捕まえるのは、2 秒より大きな延びだけ）
-                    self.assertEqual(rec["problems"], ["3 秒で終わらなかった"], rec)
+                if status == "timeout":  # 時間切れの理由だけ（止めた子の CLI は残りに並ばない）。期限を守る（所要時間で捕まえるのは、2 秒より大きな延びだけ）
+                    self.assertEqual(rec["problems"], [f"3 秒で終わらなかった。--resume {rec['out']} で続きから起動できる"], rec)
                     self.assertLess(took, 5, rec)
                 for pid in pids:
                     with self.assertRaises(ProcessLookupError, msg=f"{pid} が残った: {rec}"):
@@ -1605,7 +1618,7 @@ class TestLaunch(unittest.TestCase):
                 rc, rec = self.run_launch(host, mode, extra=("--timeout", "2"),
                                           env_extra={"FAKE_SLEEP": sleep, "PYTHONPATH": str(site), "FAKE_SITE": what})
                 self.orphans()
-                self.assertEqual((rc, rec["status"]), (2, "failed"), rec)
+                self.assertEqual((rc, rec["status"]), (2, "timeout" if what == "waitid-storm" else "failed"), rec)  # 止めきれれば、続きから起動できる時間切れ
                 self.assertTrue(any(words in p for p in rec["problems"]), rec)
                 self.assertLess(time.time() - t0, 25 if what == "unkillable-cli" else 10, rec)  # 止まらない CLI は 10 秒待ち、残りを 5 秒止め続ける
                 if what == "unkillable-cli":  # 止まらない子の CLI（Popen の子。claude なら偽の dotenvx）を並べる
@@ -1800,6 +1813,64 @@ class TestLaunch(unittest.TestCase):
         self.run_launch("claude", "checkout", extra=["--write"], cwd=wt)
         self.assertEqual([p.name for p in (repo, wt) if (p / ".claude").exists()], [])
 
+    def session_arg(self, host) -> str:
+        """launcher が起動の前に決めて子に渡した session（Claude Code は --session-id、Grok は -s）。"""
+        argv = json.loads(self.args_file.read_text())
+        return argv[argv.index({"claude": "--session-id", "grok": "-s"}[host]) + 1]
+
+    def test_a_timed_out_child_continues_from_where_it_stopped(self):
+        # 時間切れで止めた子を最初から起動し直すと、それまでの作業（会話記録には残っている）を捨て、同じ時間をもう一度払った。
+        # 本物の claude -p・grok -p は終わるまで何も出さないので、session は起動の前に決めて渡し、Codex は最初の thread.started から取る。
+        # 続きは、同じ session・同じ権限の引数で、新しい依頼文だけを変えて起動する（実物の 3 つの CLI で、SIGKILL の後に文脈が続いた。2026-10-25）
+        for host, extra, where in (("claude", (), None), ("claude", ("--write",), "worktree"), ("codex", (), None), ("grok", (), "grok")):
+            with self.subTest(host=host, extra=extra):
+                cwd = {"worktree": lambda: self.worktree("resume")[1], "grok": self.grok_target}.get(where, lambda: self.cwd)()
+                self.prompt.write_text("x を確かめて")
+                rc, rec = self.run_launch(host, "hang", extra=[*extra, "--timeout", "2"], cwd=cwd)
+                first = json.loads(self.args_file.read_text())
+                session = "0199aaaa-bbbb-7ccc-8ddd-eeeeffff0000" if host == "codex" else self.session_arg(host)  # 偽の Codex の thread
+                self.assertEqual((rc, rec["status"], rec["session"]), (2, "timeout", session), rec)
+                self.assertIn(f"--resume {rec['out']} で続きから起動できる", rec["problems"][0])
+                self.assertEqual(rec["load"]["cpus"], os.cpu_count())  # 時間切れが混雑によるかを後で見分ける材料
+                self.assertIsInstance(rec["load"]["start"], float)
+                self.prompt.write_text("時間切れで止められた。続けて")
+                rc, again = self.run_launch(None, extra=["--resume", rec["out"]])
+                self.assertEqual((rc, again["status"], again["session"], again["resumed_from"]), (0, "ok", session, rec["out"]), again)
+                self.assertEqual([again[k] for k in ("host", "cwd", "model_requested", "effort_requested", "write")],
+                                 [rec[k] for k in ("host", "cwd", "model_requested", "effort_requested", "write")])
+                resumed = json.loads(self.args_file.read_text())
+                if host == "codex":  # exec resume は exec の引数を受けないので、exec の側に置いたまま、依頼の前に挟む
+                    self.assertEqual((resumed[:-3], resumed[-3:-1]), (first[:-1], ["resume", session]))
+                    prompt = resumed[-1]
+                else:
+                    flag, again_flag = {"claude": ("--session-id", "--resume"), "grok": ("-s", "-r")}[host]
+                    i = resumed.index("-p")
+                    prompt = resumed[i + 1]
+                    self.assertEqual(resumed[:i + 1] + resumed[i + 2:], [again_flag if x == flag else x for x in first[:i + 1] + first[i + 2:]])
+                    if host == "grok":  # 同じ GROK_HOME（引数の最後の ENV=）で。sandbox の profile はセッションに保存される
+                        self.assertEqual(rec["grok_home"], again["grok_home"])
+                self.assertTrue(prompt.startswith("時間切れで止められた。続けて"), prompt)
+
+    def test_resume_takes_the_launch_only_from_the_record(self):
+        """続きを違う権限・違う対象で起動しない。続きから起動できない記録では、子を起こさずに止める。"""
+        rc, rec = self.run_launch("claude", "hang", extra=["--timeout", "2"])
+        out = Path(rec["out"])
+        no_session = Path(self.tmp.name) / "no-session"
+        no_session.mkdir()
+        (no_session / "record.json").write_text(json.dumps({**rec, "session": None}))  # Codex が thread.started を出す前に止まった
+        no_home = Path(self.tmp.name) / "no-home"
+        no_home.mkdir()
+        (no_home / "record.json").write_text(json.dumps({**rec, "host": "grok", "grok_home": str(Path(self.tmp.name) / "gone")}))
+        for extra, words in ((["--resume", str(out), "--write"], "一緒に渡さない"), (["--resume", str(out), "--host", "claude"], "一緒に渡さない"),
+                             (["--resume", str(out), "--effort", "max"], "一緒に渡さない"), (["--resume", str(no_session)], "session"),
+                             (["--resume", str(no_home)], "grok_home"), (["--resume", str(Path(self.tmp.name) / "missing")], "読めない"), ([], "--host と --cwd が要る")):
+            with self.subTest(extra=extra):
+                self.args_file.unlink(missing_ok=True)
+                p = self.run_launch(None, extra=extra, raw=True)
+                self.assertEqual(p.returncode, 2, p.stderr)
+                self.assertIn(words, p.stderr)
+                self.assertFalse(self.args_file.exists())  # 子を起こさない
+
     def worktree(self, name="r"):
         repo, wt = self.cwd / name, self.cwd / (name + "-wt")
         subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
@@ -1889,7 +1960,7 @@ class TestLaunch(unittest.TestCase):
     def test_grok_ok_is_read_only_and_isolated(self):
         rc, rec = self.run_launch("grok", cwd=self.grok_target(),
                                   env_extra={"GROK_AGENT": "1", "XAI_API_KEY": "k", "GROK_SANDBOX": "off", "RUST_LOG": "debug"})
-        self.assertEqual((rc, rec["status"], rec["session"], rec["model_effective"]), (0, "ok", "g-1", ["grok-4.7-build"]), rec)
+        self.assertEqual((rc, rec["status"], rec["session"], rec["model_effective"]), (0, "ok", self.session_arg("grok"), ["grok-4.7-build"]), rec)
         argv, env = self.grok_argv()
         # 組み込みの read-only は適用できないと強制せずに続くので、適用できなければ起動を拒む独自の profile で渡す
         self.assertIn('extends = "read-only"', self.grok_profile_of(argv, env))
