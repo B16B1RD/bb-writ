@@ -157,7 +157,8 @@ def cwd_residue(cwd: Path, before: set[str]) -> list[str]:
     正常に終わると片付けるが、時間切れで止めると残った（2.1.310）。0 バイトのファイルが残ると task cleanup が未保存の変更とみなし、
     次の書き手の git add -A で commit に入りうる。黙って消さない（子が意図して作った空のファイルかもしれない）。
     守らない範囲: 前からあるディレクトリの下、index と照らすのは対象が作業ツリーの根（.git がある）のときだけ、Git の設定・環境を
-    書き換えた子や親（設定の FIFO・GIT_DIR）、pathspec の記号を含む名前、Python の再帰の上限を超える入れ子。git の時間切れと、
+    書き換えた子や親（設定の FIFO・GIT_DIR）、pathspec の記号を含む名前、Python の再帰の上限を超える入れ子、index にある場所を
+    含む新しいディレクトリの下の追跡外のもの（index とは直下の名前で照らす）。git の時間切れと、
     読めない場所での failed は試験で見ない。"""
     def bare(p: Path) -> bool:
         if p.is_symlink():
@@ -971,7 +972,8 @@ def main() -> int:
                 if rec["cwd_residue"]:
                     rec.update(status="failed", problems=rec.get("problems", []) + [
                         "書く子の起動の後、対象の直下に、中身の空の場所が新しく残った（Claude Code 2.1.310 の sandbox は、時間切れで止めると"
-                        "置き場所を残した）。中身を確かめて消す。0 バイトのファイルは task cleanup が拒否し、git add -A で commit に入る"] + rec["cwd_residue"][:20])
+                        "置き場所を残した）。子が意図して作ったもの（空の __init__.py など）でないか確かめ、違えば消す。0 バイトのファイルは "
+                        "task cleanup が拒否し、git add -A で commit に入る"] + rec["cwd_residue"][:20])
             try:
                 _, empty, unreadable = home_entries(skip)
                 # Claude Code 2.1.309 の sandbox は、設定を組むときに CLAUDE_CONFIG_DIR に関わらずホームに空のディレクトリ .claude/ssh を作る

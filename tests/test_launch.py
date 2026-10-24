@@ -204,7 +204,8 @@ FAKE_CLAUDE = textwrap.dedent(r'''
         os.makedirs("mixed"); open("mixed/empty", "w").close(); open("mixed/data", "w").write("x")  # 中身のあるものを含むディレクトリも
         os.symlink(".bashrc", "link")  # symlink は数えない
         if os.path.exists(".git"):  # 追跡させた空のファイルは、子が意図して足したもの
-            open("keep", "w").close(); subprocess.run(git + ["add", "keep"])
+            open("keep", "w").close(); os.makedirs("pkg"); open("pkg/__init__.py", "w").close()
+            subprocess.run(git + ["add", "keep", "pkg/__init__.py"])  # 新しいディレクトリの下に追跡させたものも
         if mode == "cwd-residue-hang":
             import time; time.sleep(60)
     if os.environ.get("FAKE_MODE") == "wrote":
