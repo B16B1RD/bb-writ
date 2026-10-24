@@ -5,7 +5,7 @@
   work.py renew   --dir <作業場所> --token <t> [--lease <分>]          → 引き継がれていれば拒否（3）。旧担当はここで止まる
   work.py release --dir <作業場所> --token <t>                         → コマンドが終わっていない op run があれば拒否（4）
   work.py status  --dir <作業場所>
-  work.py op begin   --dir <作業場所> --token <t> --key <操作の鍵> --what <何をするか> [--from <場所>] [--verified <c>] [--reviewed <c>|none:<理由>]
+  work.py op begin   --dir <作業場所> --token <t> --key <操作の鍵> --what <何をするか> [--from <場所>] [--verified <c>] [--reviewed <c>|none:<理由>] [--risk 低|中|高:<理由>]
                      → 同じ鍵が既にあれば拒否（4）
   work.py op run     （op begin と同じ引数） -- <コマンド>              → begin が通ったときだけ --from（無ければ作業場所）でコマンドを
                      シェルを通さず標準入力なしで実行し、終了コードと出力（stderr を含む）の末尾 20 行を done に記録する。
@@ -35,6 +35,7 @@ task と integrate の照合拒否は終了コード 6、担当の拒否は 3。
 公開する操作（鍵の種類が push・pr・merge・release）の op begin には --verified <検証した commit> が要る。作業場所の HEAD と違えば拒否する（6）。
 push・pr には --reviewed も要る（初回の push も）。届ける前の審査（入口の条件 (5)・(6)）を通した commit の ID（16 進）か、
 要らない理由を none:<理由> で書く。無い・形が違う・commit が見つからない・ID でなく参照に解決されたら拒否し（2）、作業場所の HEAD と違えば拒否する（6）。
+push・pr には --risk 低|中|高:<理由> も要る（変更の危険度。中・高は interrogate を通すので、none: と一緒なら拒否する（2）。理由の真偽は確かめない）。
 HEAD と違うときは審査の後に変えたファイルを、ほかの拒否と通ったときは、この作業場所の記録で最後に終えた push・pr（ブランチを問わない）から変えたファイルを示す（材料で、保証ではない）。
 op run・op begin を通さない git push には効かない。
 commit を書いたときは、launcher の委任の記録（delegations.jsonl）に、その commit を対象に起動して ok で返った読み取り専用の子が
@@ -723,6 +724,13 @@ def op_step(a, r: Path, live, now: float, action: str):
                             "（Agent ツールなど launcher を通らない子は記録に残らない）。審査が要らない変更なら none:<理由>"
                             + (f"。{unread}" if unread else "")}, 6)
             reviews = found
+        risk = re.fullmatch(r"(低|中|高):(.*)", a.risk or "", re.S)
+        if not risk or not risk.group(2).strip():
+            return ({"ok": False, "reason": "push・pr には --risk 低|中|高:<理由> が要る。危険度は書いた人でなく変更の中身で決める（interrogate の 5）。"
+                        "文書だけ・小さな追加は低、普通のコードは中、認証・課金・外部操作・データの削除・皆が使う土台は高"}, 2)
+        if risk.group(1) != "低" and reviewed.startswith("none:"):
+            return ({"ok": False, "reason": f"危険度が{risk.group(1)}の変更は interrogate を通す（入口の条件 (6)）。--reviewed に、審査を通した commit を書く"}, 2)
+        risk = risk.group(1) + ": " + risk.group(2).strip()
     if action == "begin" and known:
         return ({"ok": False, "reason": "同じ鍵の操作が既にある。外部の状態を照合してから進める（やり直さない）", "op": known}, 4)
     if action == "done" and not known:
@@ -741,6 +749,8 @@ def op_step(a, r: Path, live, now: float, action: str):
         e["reviewed"] = reviewed
     if reviews:
         e["reviews"] = reviews
+    if reviewed:
+        e["risk"] = risk
     with open(r / "ops.jsonl", "a", encoding="utf-8") as f:
         f.write(json.dumps(e, ensure_ascii=False) + "\n")
     res = {"ok": True, "op": ops(r)[a.key]}
@@ -1153,6 +1163,7 @@ def main() -> int:
     o.add_argument("--from", dest="frm", type=Path, help="外部操作を実行する場所（push・pr・comment・merge・release・issue で必須）")
     o.add_argument("--verified", help="検証した commit（push・pr・merge・release で必須。作業場所の HEAD と一致させる）")
     o.add_argument("--reviewed", help="届ける前の審査を通した commit か none:<理由>（push・pr で必須。commit は作業場所の HEAD と一致させ、launcher の審査役の記録が要る）")
+    o.add_argument("--risk", help="変更の危険度と理由 低|中|高:<理由>（push・pr で必須。中・高は --reviewed none: と一緒に使えない）")
     c = sub.add_parser("check")
     c.add_argument("--dir", type=Path, required=True)
     c.add_argument("--from", dest="frm", type=Path, required=True)

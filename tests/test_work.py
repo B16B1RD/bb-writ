@@ -17,9 +17,17 @@ WORK = Path(__file__).resolve().parents[1] / "scripts" / "work.py"
 
 
 
+def with_risk(t, args):
+    """--reviewed を渡す呼び出しに、push・pr に要る危険度の宣言（この試験の外の約束）を足す。宣言そのものを試す試験は auto_risk を偽にする。"""
+    if "--reviewed" not in args or "--risk" in args or not getattr(t, "auto_risk", True):
+        return args
+    i = args.index("--") if "--" in args else len(args)
+    return (*args[:i], "--risk", "低:試験の外", *args[i:])
+
+
 def decl(key):
     """push・pr に要る、届ける前の審査の宣言（この試験の外の約束）。"""
-    return ("--reviewed", "none:試験の外") if key.split(":")[0] in ("push", "pr") else ()
+    return ("--reviewed", "none:試験の外", "--risk", "低:試験の外") if key.split(":")[0] in ("push", "pr") else ()
 
 
 class TestWork(unittest.TestCase):
@@ -33,6 +41,7 @@ class TestWork(unittest.TestCase):
         self.tmp.cleanup()
 
     def w(self, *args):
+        args = with_risk(self, args)
         p = subprocess.run([sys.executable, str(WORK), *args[:1], *args[1:], "--dir", str(self.dir)] if args[0] != "op" else
                            [sys.executable, str(WORK), "op", args[1], "--dir", str(self.dir), *args[2:]], env=self.env, capture_output=True, text=True)
         return p.returncode, json.loads(p.stdout)
@@ -201,6 +210,7 @@ class TestAccountCheck(unittest.TestCase):
         self.tmp.cleanup()
 
     def w(self, *args):
+        args = with_risk(self, args)
         if "--reviewed" in args and getattr(self, "launcher_reviews", True):  # 審査役の記録との照合を試験しない試験では、記録を先に置く
             TestAccountCheck.review_record(self, args[args.index("--reviewed") + 1])
         p = subprocess.run([sys.executable, str(WORK), *args], env=self.env, capture_output=True, text=True, errors="replace",
@@ -625,6 +635,27 @@ class TestReviewedCommit(unittest.TestCase):
         self.assertEqual(self.publish(tok, key, "--reviewed", self.head())[0], 0)
         self.assertEqual(self.w("op", "done", "--dir", str(self.wt), "--token", tok, "--key", key, "--result", "ok")[0], 0)
 
+    def test_push_and_pr_need_the_risk_and_a_medium_or_high_risk_needs_a_review(self):
+        # 危険度も理由も書かずに interrogate を省いて push できた（#17）
+        self.auto_risk = False
+        tok = self.claim()
+        before = self.ops_file()
+        for key in ("push:feat@1", "pr:feat"):
+            for risk in ((), ("--risk", "中"), ("--risk", "中: "), ("--risk", "medium:普通のコード"), ("--risk", "低 理由")):
+                rc, r = self.publish(tok, key, "--reviewed", self.head(), *risk)
+                self.assertEqual(rc, 2, (key, risk))
+                self.assertIn("--risk", r["reason"], (key, risk))
+            for level in ("中", "高"):  # 中・高は interrogate を通すので、審査が要らない宣言とは並ばない
+                rc, r = self.publish(tok, key, "--reviewed", "none:文書だけ", "--risk", f"{level}:普通のコード")
+                self.assertEqual(rc, 2, (key, level))
+                self.assertIn(f"危険度が{level}の変更は interrogate を通す", r["reason"], (key, level))
+        self.assertEqual(self.ops_file(), before)
+        self.assertEqual(self.publish(tok, "push:feat@1", "--reviewed", "none:文書だけ", "--risk", "低:文書だけ")[0], 0)
+        self.assertEqual(self.publish(tok, "pr:feat", "--reviewed", self.head(), "--risk", "中: 普通のコード")[0], 0)
+        self.assertEqual(self.publish(tok, "push:feat@2", "--reviewed", self.head(), "--risk", "高:外部操作")[0], 0)
+        recs = {json.loads(x)["key"]: json.loads(x) for x in self.ops_file().decode().splitlines()}
+        self.assertEqual((recs["push:feat@1"]["risk"], recs["pr:feat"]["risk"]), ("低: 文書だけ", "中: 普通のコード"))
+
     def test_first_push_and_pr_without_a_declaration_are_refused_and_not_recorded(self):
         tok = self.claim()
         before = self.ops_file()
@@ -994,7 +1025,7 @@ class TestOpRun(unittest.TestCase):
         return next((Path(self.tmp.name).resolve() / "state" / "work").glob("*/lease.json"))
 
     def raw(self, *args, stdin=None):
-        return subprocess.run([sys.executable, str(WORK), *args], env=self.env, capture_output=True, text=True, input=stdin)
+        return subprocess.run([sys.executable, str(WORK), *with_risk(self, args)], env=self.env, capture_output=True, text=True, input=stdin)
 
     def test_every_refusal_of_begin_refuses_run_the_same_way(self):
         """op run の照合は op begin と同じ。拒否の理由を手で選んで試すと、試していない拒否の後だけコマンドを走らせる退行が通った。"""
@@ -1161,7 +1192,7 @@ class TestOpRun(unittest.TestCase):
                         "for i in range(2000): print('late output', i)\n"  # 親が止められた後に書く（パイプなら SIGPIPE で死んだ）
                         f"open({str(done)!r}, 'w')\nsys.exit(3)")
                 p = subprocess.Popen([sys.executable, str(WORK), "op", "run", "--dir", str(self.wt), "--token", tok, "--key", key,
-                                      "--what", "x", "--from", str(self.repo), "--verified", self.head(), "--reviewed", self.head(),
+                                      "--what", "x", "--from", str(self.repo), "--verified", self.head(), "--reviewed", self.head(), "--risk", "低:試験の外",
                                       *self.script(body)], env=self.env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 for _ in range(200):
                     if [o for o in self.pending() if o == key] and self.w("op", "pending", "--dir", str(self.wt))[1]["pending_ops"][0].get("running"):
@@ -1220,7 +1251,7 @@ class TestOpRun(unittest.TestCase):
 
     def start_run(self, tok, key, body, env=None, **kw):
         p = subprocess.Popen([sys.executable, str(WORK), "op", "run", "--dir", str(self.wt), "--token", tok, "--key", key,
-                              "--what", "x", "--from", str(self.repo), "--verified", self.head(), "--reviewed", self.head(),
+                              "--what", "x", "--from", str(self.repo), "--verified", self.head(), "--reviewed", self.head(), "--risk", "低:試験の外",
                               *self.script(body)], env={**self.env, **(env or {})}, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, **kw)
         self.addCleanup(p.stdout.close)  # 読み切らない試験もある。閉じないと ResourceWarning が出る
         return p
@@ -1634,7 +1665,7 @@ class TestOpRun(unittest.TestCase):
         """表示の途中で op run が止められても、記録できた出力の全体を残さない。"""
         tok = self.claim()
         p = subprocess.Popen([sys.executable, str(WORK), "op", "run", "--dir", str(self.wt), "--token", tok, "--key", "push:feat@1",
-                              "--what", "x", "--from", str(self.repo), "--verified", self.head(), "--reviewed", self.head(),
+                              "--what", "x", "--from", str(self.repo), "--verified", self.head(), "--reviewed", self.head(), "--risk", "低:試験の外",
                               *self.script("print('SECRET' * 2_000_000)")], env=self.env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
         self.addCleanup(p.stderr.close)
         p.stderr.read(1024)  # 表示が始まった
@@ -1784,7 +1815,7 @@ class TestOpRun(unittest.TestCase):
         for name in ("after-begin", "relay", "relay-told", "before-check", "before-start", "before-done"):
             (gate / name).write_text("")
         p = subprocess.Popen([sys.executable, str(WORK), "op", "run", "--dir", str(self.wt), "--token", tok, "--key", "push:feat@1",
-                              "--what", "x", "--from", str(self.repo), "--verified", self.head(), "--reviewed", self.head(),
+                              "--what", "x", "--from", str(self.repo), "--verified", self.head(), "--reviewed", self.head(), "--risk", "低:試験の外",
                               *self.script("print('SECRET')")], env={**self.env, "BB_WRIT_SUPERVISE_GATE": str(gate)},
                              stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
         self.wait_file(gate / "at-before-print")
@@ -1907,7 +1938,7 @@ class TestOpRun(unittest.TestCase):
         for name in ("after-begin", "relay", "relay-told", "before-check", "before-start", "before-done"):
             (gate / name).write_text("")
         p = subprocess.Popen([sys.executable, str(WORK), "op", "run", "--dir", str(self.wt), "--token", tok, "--key", "push:feat@1",
-                              "--what", "x", "--from", str(self.repo), "--verified", self.head(), "--reviewed", self.head(),
+                              "--what", "x", "--from", str(self.repo), "--verified", self.head(), "--reviewed", self.head(), "--risk", "低:試験の外",
                               *self.script("raise SystemExit(7)")], env={**self.env, "BB_WRIT_SUPERVISE_GATE": str(gate)},
                              stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
         self.wait_file(gate / "at-before-print")
@@ -1918,7 +1949,7 @@ class TestOpRun(unittest.TestCase):
             (gate / name).unlink(missing_ok=True)
             (gate / f"at-{name}").unlink(missing_ok=True)
         p = subprocess.Popen([sys.executable, str(WORK), "op", "run", "--dir", str(self.wt), "--token", tok, "--key", "push:feat@2",
-                              "--what", "x", "--from", str(self.repo), "--verified", self.head(), "--reviewed", self.head(),
+                              "--what", "x", "--from", str(self.repo), "--verified", self.head(), "--reviewed", self.head(), "--risk", "低:試験の外",
                               *self.script("print('fine')")], env={**self.env, "BB_WRIT_SUPERVISE_GATE": str(gate)},
                              stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
         self.wait_file(gate / "at-before-print")
@@ -1939,7 +1970,7 @@ class TestOpRun(unittest.TestCase):
                     (gate / name).write_text("")
                 key = f"push:feat@{n}"
                 p = subprocess.Popen([sys.executable, str(WORK), "op", "run", "--dir", str(self.wt), "--token", tok, "--key", key,
-                                      "--what", "x", "--from", str(self.repo), "--verified", self.head(), "--reviewed", self.head(),
+                                      "--what", "x", "--from", str(self.repo), "--verified", self.head(), "--reviewed", self.head(), "--risk", "低:試験の外",
                                       *self.script("print(1)")], env={**self.env, "BB_WRIT_SUPERVISE_GATE": str(gate)},
                                      stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
                 self.wait_file(gate / "at-before-print")
@@ -2014,7 +2045,7 @@ class TestOpRun(unittest.TestCase):
             (gate / name).write_text("")
         f = self.lease_file().parent / "ops.jsonl"
         p = subprocess.Popen([sys.executable, str(WORK), "op", "run", "--dir", str(self.wt), "--token", tok, "--key", "push:feat@1",
-                              "--what", "x", "--from", str(self.repo), "--verified", self.head(), "--reviewed", self.head(),
+                              "--what", "x", "--from", str(self.repo), "--verified", self.head(), "--reviewed", self.head(), "--risk", "低:試験の外",
                               *self.script("print(1)")], env={**self.env, "BB_WRIT_SUPERVISE_GATE": str(gate)},
                              stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
         self.wait_file(gate / "at-before-print")
@@ -2037,7 +2068,7 @@ class TestOpRun(unittest.TestCase):
             (gate / name).write_text("")
         f = self.lease_file().parent / "ops.jsonl"
         p = subprocess.Popen([sys.executable, str(WORK), "op", "run", "--dir", str(self.wt), "--token", tok, "--key", "push:feat@1",
-                              "--what", "x", "--from", str(self.repo), "--verified", self.head(), "--reviewed", self.head(),
+                              "--what", "x", "--from", str(self.repo), "--verified", self.head(), "--reviewed", self.head(), "--risk", "低:試験の外",
                               *self.script("print(1)")], env={**self.env, "BB_WRIT_SUPERVISE_GATE": str(gate)},
                              stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
         self.wait_file(gate / "at-before-print")
@@ -2080,7 +2111,7 @@ class TestOpRun(unittest.TestCase):
             (gate / name).write_text("")
         f = self.lease_file().parent / "ops.jsonl"
         p = subprocess.Popen([sys.executable, str(WORK), "op", "run", "--dir", str(self.wt), "--token", tok, "--key", "push:feat@1",
-                              "--what", "x", "--from", str(self.repo), "--verified", self.head(), "--reviewed", self.head(),
+                              "--what", "x", "--from", str(self.repo), "--verified", self.head(), "--reviewed", self.head(), "--risk", "低:試験の外",
                               *self.script("print(1)")], env={**self.env, "BB_WRIT_SUPERVISE_GATE": str(gate)},
                              stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
         self.wait_file(gate / "at-before-print")
@@ -2105,7 +2136,7 @@ class TestOpRun(unittest.TestCase):
                     (gate / name).write_text("")
                 key = f"push:feat@{n}"
                 p = subprocess.Popen([sys.executable, str(WORK), "op", "run", "--dir", str(self.wt), "--token", tok, "--key", key,
-                                      "--what", "x", "--from", str(self.repo), "--verified", self.head(), "--reviewed", self.head(),
+                                      "--what", "x", "--from", str(self.repo), "--verified", self.head(), "--reviewed", self.head(), "--risk", "低:試験の外",
                                       *self.script("print(1)")], env={**self.env, "BB_WRIT_SUPERVISE_GATE": str(gate)},
                                      stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
                 self.wait_file(gate / "at-before-print")
@@ -2185,7 +2216,7 @@ class TestOpRun(unittest.TestCase):
         for name in ("after-begin", "relay", "relay-told", "before-check", "before-start"):
             (gate / name).write_text("")
         p = subprocess.Popen([sys.executable, str(WORK), "op", "run", "--dir", str(self.wt), "--token", tok, "--key", "push:feat@1",
-                              "--what", "x", "--from", str(self.repo), "--verified", self.head(), "--reviewed", self.head(),
+                              "--what", "x", "--from", str(self.repo), "--verified", self.head(), "--reviewed", self.head(), "--risk", "低:試験の外",
                               *self.script("print(1)")], env={**self.env, "BB_WRIT_SUPERVISE_GATE": str(gate)},
                              stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
         self.wait_file(gate / "at-before-done")
