@@ -5,14 +5,15 @@
 過去の修正を戻した版をフラグで作り、それぞれが反例を出すことも試す（一度も落ちたことのない検査は、何も確かめていない）。
 TLA+ の同じモデル（TLC）とは、照合した commit で、今の版の状態数（MODELED_STATES）と、戻した版の違反と反例の動作の列が一致した。
 モデルを変えたら（動作を足す・削る・条件を変える）、状態数が変わって落ちる。同じ変更を TLA+ のモデルに入れて TLC と照らしてから、
-MODELED_STATES を書き換える。
+MODELED_STATES を書き換える（TLC は CI に置かないので、照らし直したかは試験で確かめない）。
 
 モデルが写す関数と、最後に照合した commit、その commit での各関数の本文のハッシュ（下の MODELED）。
 ハッシュは、関数の本文（デコレータを含む）からコメント・先頭の docstring・空行・行末の空白を除いたものに掛ける（Python の版によらない）。
 意味の同じ書式の変更（括弧・改行の位置）でも変わる。そのときも、照合した commit とハッシュを進める。
 dispatch は release と op done の分岐だけを、op_step は担当の token の照合と同じ鍵の begin・done の拒否だけを写すが、
 ハッシュは関数全体に掛ける（op_step は --reviewed などの写さない照合でも変わる）。locked は作業場所の排他、run_lock は鍵ごとに
-別のロックのファイル、ops は鍵ごとの最後の state、alive・check_token は担当が生きているかと done を書けるかを写す。
+別のロックのファイル、ops は鍵ごとの最後の state、read・write は lease.json の token と期限、alive・check_token は担当が
+生きているかと done を書けるかを写す（モデルが写す状態を読み書きする関数はすべて照らす）。
 写す関数が拒否を足すだけの変更は、モデルが許す動きを減らすだけなので、不変条件は保たれる（それでもハッシュは落ちる）。
 写さない段: シグナルの中継（supervise の 2 回目の fork）、記録の形式と壊れた記録、出力のファイル、ロックを開けない・読めないとき、
 op begin（op run を通さない）、integrate の排他と照合。
@@ -37,6 +38,8 @@ WORK = Path(__file__).resolve().parents[1] / "scripts" / "work.py"
 MODELED_AT = "3dc5f8d"
 MODELED_STATES = 84981
 MODELED = {
+    "read": "8372930316b7ee94",
+    "write": "6fc1cdb94b890176",
     "locked": "9eaa07012a88c87c",
     "ops": "19f01a5bc3cb84ad",
     "op_step": "2f1b8ddd8883b632",
@@ -271,7 +274,8 @@ class TestOpRunModel(unittest.TestCase):
         for flag, inv in REVERTED.items():
             with self.subTest(reverted=flag):
                 bad, _, trace = check({**NOW, flag: False})
-                self.assertEqual(bad, inv, f"修正を戻した版（{flag}）が {inv} の反例を出さない。モデルが修正の効き目を写していない")
+                self.assertEqual(bad, inv, f"修正を戻した版（{flag}）が {inv} の反例を出さない。モデルが修正の効き目を写していない"
+                                 + (f"。出た反例:\n{story(bad, trace)}" if bad else ""))
                 text = story(bad, trace)
                 self.assertRegex(text, r"^\w+ が破れた: .+\n1\. ")
                 self.assertEqual(len(text.splitlines()), len(trace) + 1)
