@@ -1458,7 +1458,7 @@ class TestLaunch(unittest.TestCase):
                 d.mkdir()
                 (d / "a.txt").write_text("x\n")  # 偽の子の報告が証拠に挙げるファイル
             (d / ".existing-empty").write_text("")  # 前からある空のファイルは数えない
-            return d
+            return d.resolve()  # launcher は symlink を解いた場所で報告する（macOS の一時ディレクトリは /private/var の下）
         for name, mode, extra, git in (("write", "cwd-residue", ("--write",), False),
                                        ("hang", "cwd-residue-hang", ("--write", "--timeout", "3"), False),
                                        ("tracked", "cwd-residue", ("--write",), True)):  # Git の作業ツリーでは、index にある空のファイルを数えない
