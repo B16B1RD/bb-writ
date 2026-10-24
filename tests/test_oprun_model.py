@@ -1,17 +1,19 @@
-"""op run・監督役・操作ごとのロック・担当の約束（scripts/work.py）を状態機械に写し、取りうる交互実行と途中の kill -9 を全部たどる。
+"""op run・監督役・操作ごとのロック・担当の約束（scripts/work.py）を状態機械に写し、モデルが写す段の交互実行と kill -9 を全部たどる。
 
 審査が 1 周に 1 つずつ交互実行を見つけ、そのたびに直していたため、このモデルが写す範囲は 1 回の全探索でたどる。
 範囲は担当 2・鍵 2・token 3。担当の期限切れはいつでも起こせる（実際の時間を写さない、保守的な写し方）。
 過去の修正を戻した版をフラグで作り、それぞれが反例を出すことも試す（一度も落ちたことのない検査は、何も確かめていない）。
 TLA+ の同じモデル（TLC）とは、MODELED_AT で、今の版の状態数（MODELED_STATES）と、戻した版の違反と反例の動作の列が一致した。
-動作を足す・削る・条件を変えると状態数が、不変条件（violated）を変えるとその本文のハッシュ（MODELED_INVARIANTS）が変わって落ちる。
-同じ変更を TLA+ のモデルに入れて TLC と照らしてから、両方を書き換える（TLC は CI に置かないので、照らし直したかは試験で確かめない）。
+モデル（MODEL_PARTS の関数と、それが読む定数）を変えると、その本文のハッシュ（MODELED_MODEL）が変わって落ちる。
+同じ変更を TLA+ のモデルに入れて TLC と照らしてから、MODELED_MODEL と MODELED_STATES を書き換える（TLC は CI に置かないので、
+照らし直したかは試験で確かめない）。
 
 MODELED は、モデルが写す経路の関数と、その本文のハッシュ。MODELED_AT は、ハッシュを最後に進めたときに読んだ commit の記録で、
 試験は確かめない（work.py と同じ commit で進めると、自分を含む commit は書けない。その親を書く）。
-ハッシュは、関数の本文（デコレータを含む）からコメント・先頭の docstring・空行・行末の空白を除いたものに掛ける（Python の版によらない）。
-意味の同じ書式の変更（括弧・引用符・改行の位置）でも変わる。そのときもハッシュを進める。work.py の最上位で、その名前を 2 か所で
-定義する（定義し直す・束ね直す）と落ちる。
+ハッシュは、関数の本文（デコレータを含む）と、本文が読むモジュールの水準の定数の代入の文から、コメント・先頭の docstring・空行・
+行末の空白を除いたものに掛ける（Python の版によらない）。意味の同じ書式の変更（括弧・引用符・改行の位置）でも変わる。そのときも
+ハッシュを進める。work.py のモジュールの水準（if・try などの中を含む）で、その名前を 2 か所で束ねると落ちる。
+ハッシュは、写す関数が変わったことを知らせて、モデルを見直させるためのもの。ハッシュを進めたときにモデルと照らしたかは確かめない。
 dispatch は claim・release・op done の分岐だけを、op_step は担当の token の照合と同じ鍵の begin・done の拒否だけを写すが、
 ハッシュは関数全体に掛ける（op_step は --reviewed などの写さない照合でも変わる）。locked は作業場所の排他、run_lock は鍵ごとに
 別のロックのファイル、ops は鍵ごとの最後の state、read・write は lease.json の token と期限、alive・check_token は担当が
@@ -41,59 +43,56 @@ WORK = Path(__file__).resolve().parents[1] / "scripts" / "work.py"
 
 MODELED_AT = "3dc5f8d"
 MODELED_STATES = 84981
-MODELED_INVARIANTS = "87bf0a032d962135"
+MODELED_MODEL = "bf1892257d184533"
 MODELED = {
     "read": "8372930316b7ee94",
     "write": "6fc1cdb94b890176",
     "locked": "9eaa07012a88c87c",
     "ops": "19f01a5bc3cb84ad",
-    "op_step": "2f1b8ddd8883b632",
+    "op_step": "a772adc2287e9722",
     "run_lock": "fdd3edfffe9c0b10",
-    "alive": "be56e37e0b082f93",
+    "alive": "f1f9574a8ad75670",
     "check_token": "6297f65bcd57f11c",
     "claim_at": "ce185fc18d5fc861",
     "run_holder": "ed7f517a536e94fd",
     "keep_lease": "1ff486dd87b26989",
-    "op_run": "a0902cd64d03f8c1",
+    "op_run": "c3b8e16c85d2c4e4",
     "finish": "cac6b578315e4a7d",
-    "supervise": "401e4f1a9702eb3f",
-    "dispatch": "c455d546b4c92cfc",
+    "supervise": "126b7e2bbc8b5c5a",
+    "dispatch": "b0a8e263adda9ffb",
 }
 
 
-def bound(tree: ast.Module, name: str) -> list:
-    """モジュールの最上位で name を束ねる文（def・class・代入・import）。"""
-    found = []
-    for n in tree.body:
+def bindings(tree: ast.Module) -> list:
+    """モジュールの水準で名前を束ねる文と、その名前の (文, 名前) の列。if・try などの中も見る。関数・クラスの中は見ない。"""
+    out, todo = [], list(tree.body)
+    while todo:
+        n = todo.pop(0)
         if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            names = [n.name]
-        elif isinstance(n, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
-            names = [t.id for x in (n.targets if isinstance(n, ast.Assign) else [n.target]) for t in ast.walk(x) if isinstance(t, ast.Name)]
+            out.append((n, n.name))
+            continue
+        if isinstance(n, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
+            targets = n.targets if isinstance(n, ast.Assign) else [n.target]
+            out += [(n, t.id) for x in targets for t in ast.walk(x) if isinstance(t, ast.Name)]
         elif isinstance(n, (ast.Import, ast.ImportFrom)):
-            names = [(a.asname or a.name).split(".")[0] for a in n.names]
-        else:
-            names = []
-        found += [n] if name in names else []
-    return found
+            out += [(n, (a.asname or a.name).split(".")[0]) for a in n.names]
+        for field in ("body", "orelse", "finalbody", "handlers"):  # 複合文の中の文
+            todo += [c for c in getattr(n, field, []) if isinstance(c, (ast.stmt, ast.excepthandler))]
+        if isinstance(n, ast.ExceptHandler) and n.name:
+            out.append((n, n.name))
+    return out
 
 
-def body(src: str, name: str) -> str:
-    """モジュールの最上位の関数 name の本文（デコレータを含む）から、コメント・先頭の docstring・空行・行末の空白を除いたもの。
-    最上位で name を束ねる文が、その def 1 つでなければ LookupError（後の定義が勝ち、照らした本文が動かなくなる）。"""
-    found = bound(ast.parse(src), name)
-    if len(found) != 1 or not isinstance(found[0], ast.FunctionDef):
-        raise LookupError(f"work.py の最上位で、{name} を束ねる文が def 1 つでない（{len(found)} か所）")
-    node = found[0]
-    start = min([node.lineno] + [d.lineno for d in node.decorator_list])
+def stripped(src: str, node: ast.AST, doc=None) -> str:
+    """node の行から、コメント・doc（先頭の docstring の式）の字句・空行・行末の空白を除いたもの。"""
+    start = min([node.lineno] + [d.lineno for d in getattr(node, "decorator_list", [])])
     text = "\n".join(src.splitlines()[start - 1:node.end_lineno]) + "\n"
-    first = node.body[0]
-    doc = isinstance(first, ast.Expr) and isinstance(first.value, ast.Constant) and isinstance(first.value.value, str)
     cut = []  # 除く字句の (始まり, 終わり)。行は text の中で 1 から、列は文字で数える
     at = "before" if doc else "none"  # 先頭の docstring の字句の前・中・後
     for t in tokenize.generate_tokens(io.StringIO(text).readline):
         if t.type == tokenize.COMMENT:
             cut.append((t.start, t.end))
-        elif at == "before" and t.type == tokenize.STRING and t.start[0] == first.lineno - start + 1:
+        elif at == "before" and t.type == tokenize.STRING and t.start[0] == doc.lineno - start + 1:
             at = "in"  # 同じ行の後ろの文（; の後）は残す
             cut.append((t.start, t.end))
         elif at == "in" and t.type == tokenize.STRING:  # 暗黙の連結
@@ -106,8 +105,34 @@ def body(src: str, name: str) -> str:
     return "\n".join(line.rstrip() for line in lines if line.strip())
 
 
+def body(src: str, name: str) -> str:
+    """モジュールの水準の関数 name の本文（デコレータを含む）から、コメント・先頭の docstring・空行・行末の空白を除いたものに、
+    本文が読むモジュールの水準の定数（MAX_LEASE_MIN など、代入で束ねた名前）の代入の文を、同じように除いて足したもの。
+    モジュールの水準で name を束ねる文が、その def 1 つでなければ LookupError（後の束ね直しが勝ち、照らした本文が動かなくなる）。"""
+    tree = ast.parse(src)
+    binds = bindings(tree)
+    found = [n for n, b in binds if b == name]
+    if len(found) != 1 or not isinstance(found[0], ast.FunctionDef):
+        raise LookupError(f"work.py のモジュールの水準で、{name} を束ねる文が def 1 つでない（{len(found)} か所）")
+    node = found[0]
+    first = node.body[0]
+    doc = first if isinstance(first, ast.Expr) and isinstance(first.value, ast.Constant) and isinstance(first.value.value, str) else None
+    read = {x.id for x in ast.walk(node) if isinstance(x, ast.Name) and isinstance(x.ctx, ast.Load)}
+    consts = sorted({id(n): n for n, b in binds if b in read and isinstance(n, (ast.Assign, ast.AnnAssign, ast.AugAssign))}.values(),
+                    key=lambda n: n.lineno)
+    return "\n".join([stripped(src, node, doc)] + [stripped(src, n) for n in consts])
+
+
 def fingerprint(src: str, name: str) -> str:
     return hashlib.sha256(body(src, name).encode("utf-8")).hexdigest()[:16]
+
+
+MODEL_PARTS = ("init", "held_key", "successors", "violated")  # この試験のモデル。変えたら TLC と照らし直す
+
+
+def model_fingerprint() -> str:
+    src = Path(__file__).read_text(encoding="utf-8")
+    return hashlib.sha256("\n".join(body(src, n) for n in MODEL_PARTS).encode("utf-8")).hexdigest()[:16]
 
 
 # ---- 状態機械 ----
@@ -299,9 +324,9 @@ class TestOpRunModel(unittest.TestCase):
     def test_the_model_is_the_one_checked_against_tlc(self):
         self.assertEqual(check(NOW)[1], MODELED_STATES, "モデルの状態数が、TLC と照らした数と違う。モデルを変えたなら、同じ変更を "
                          "TLA+ のモデルに入れて TLC と照らしてから MODELED_STATES を書き換える（tests/test_oprun_model.py の冒頭）")
-        self.assertEqual(fingerprint(Path(__file__).read_text(encoding="utf-8"), "violated"), MODELED_INVARIANTS,
-                         "不変条件（violated）が、TLC と照らしたものと違う。同じ変更を TLA+ のモデルに入れて TLC と照らしてから "
-                         "MODELED_INVARIANTS を書き換える（tests/test_oprun_model.py の冒頭）")
+        self.assertEqual(model_fingerprint(), MODELED_MODEL,
+                         f"モデル（{'・'.join(MODEL_PARTS)}）が、TLC と照らしたものと違う。同じ変更を TLA+ のモデルに入れて TLC と照らしてから "
+                         "MODELED_MODEL と MODELED_STATES を書き換える（tests/test_oprun_model.py の冒頭）")
 
     def test_each_reverted_fix_gives_a_counterexample(self):
         for flag, inv in REVERTED.items():
@@ -359,6 +384,9 @@ class TestFingerprint(unittest.TestCase):
         self.assertEqual(self.changed("    \"\"\"コマンドが終わったので、ロックのファイルを消す。", "    \"\"\"コマンドが終わったので、ロックのファイルを消す。\"\"\"; return\n    \"\"\""),
                          ["finish"])
 
+    def test_a_constant_the_modeled_functions_read_is_caught(self):
+        self.assertEqual(self.changed("MAX_LEASE_MIN = 24 * 60", "MAX_LEASE_MIN = 0"), ["alive"])
+
     def test_a_missing_function_is_reported(self):
         with self.assertRaises(LookupError):
             fingerprint(self.src.replace("def keep_lease(", "def keep_lease2("), "keep_lease")
@@ -367,7 +395,8 @@ class TestFingerprint(unittest.TestCase):
         tail = "\n\nif __name__ == \"__main__\":"
         self.assertEqual(self.src.count(tail), 1)
         for name, extra in (("claim_at", "def claim_at(r, d, holder, minutes):\n    return None"),
-                            ("finish", "finish = lambda r, spec: None"), ("write", "from os import write")):
+                            ("finish", "finish = lambda r, spec: None"), ("write", "from os import write"),
+                            ("run_holder", "if True:\n    run_holder = lambda r: None")):
             with self.subTest(extra=extra), self.assertRaises(LookupError):
                 fingerprint(self.src.replace(tail, "\n\n" + extra + tail), name)
 
