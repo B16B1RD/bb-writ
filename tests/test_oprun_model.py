@@ -12,7 +12,8 @@ MODELED は、モデルが写す経路の関数と、その本文のハッシュ
 試験は確かめない（work.py と同じ commit で進めると、自分を含む commit は書けない。その親を書く）。
 ハッシュは、関数の本文（デコレータを含む）と、本文が読むモジュールの水準の定数の代入の文から、コメント・先頭の docstring・空行・
 行末の空白を除いたものに掛ける（Python の版によらない）。意味の同じ書式の変更（括弧・引用符・改行の位置）でも変わる。そのときも
-ハッシュを進める。work.py のモジュールの水準（if・try などの中を含む）で、その名前を 2 か所で束ねると落ちる。
+ハッシュを進める。work.py のモジュールの水準（if・try などの中を含む）の def・class・代入・import の文で、その名前を 2 か所で
+束ねると落ちる（代入式 := や globals()・setattr による動的な束ね直しは見ない）。
 ハッシュは、写す関数が変わったことを知らせて、モデルを見直させるためのもの。ハッシュを進めたときにモデルと照らしたかは確かめない。
 dispatch は claim・release・op done の分岐だけを、op_step は担当の token の照合と同じ鍵の begin・done の拒否だけを写すが、
 ハッシュは関数全体に掛ける（op_step は --reviewed などの写さない照合でも変わる）。locked は作業場所の排他、run_lock は鍵ごとに
@@ -20,6 +21,8 @@ dispatch は claim・release・op done の分岐だけを、op_step は担当の
 生きているかと done を書けるかを写す。写す関数が拒否を足すだけの変更は、モデルが許す動きを減らすだけなので、不変条件は保たれる
 （それでもハッシュは落ちる）。監督役がコマンドを起こさずに done を書く経路（起こす前に止められた、Popen の失敗）は、
 StartCmd → CmdExit と cmd の値だけが違う状態に届き、不変条件は cmd が running かしか見ないので写さない。
+run_holder が外れたロックのファイルを消すのは、モデルでは独立した動作（Gc）で、実コードのように呼ぶたびにすぐ消すとは限らない
+（実コードの動きはモデルの動きに含まれ、写しすぎは不変条件を破る側にしか働かない）。
 写さない経路（ハッシュも掛けない。変えても、この試験は落ちない）: task_command（task start・resume の claim、cleanup の
 担当の削除）・current_lease・integrate の排他と照合、pending（外れたロックの片付けは run_holder として写す）、main の振り分け、
 シグナルの中継（supervise の 2 回目の fork）、記録の形式と壊れた記録、出力のファイル、ロックを開けない・読めないとき、
@@ -64,7 +67,8 @@ MODELED = {
 
 
 def bindings(tree: ast.Module) -> list:
-    """モジュールの水準で名前を束ねる文と、その名前の (文, 名前) の列。if・try などの中も見る。関数・クラスの中は見ない。"""
+    """モジュールの水準で名前を束ねる文と、その名前の (文, 名前) の列。def・class・代入・import の文を、if・try などの中も見る。
+    関数・クラスの中と、代入式（:=）・globals()・setattr による動的な束ね直しは見ない。"""
     out, todo = [], list(tree.body)
     while todo:
         n = todo.pop(0)
@@ -275,7 +279,7 @@ def check(f):
     return None, len(parent), []
 
 
-STEPS = {  # work.py の言葉で
+STEPS = {  # work.py の言葉で。文の言い回しは試験しない（番号付きの手順で出ることだけを試す）
     "Expire": "担当の期限が切れる（延長が間に合わない）",
     "Claim": "{a} が担当を取る（claim_at。token {t}）",
     "Release": "{a} が担当を手放す（dispatch の release）",
