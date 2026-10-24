@@ -129,7 +129,8 @@ FAKE_CODEX = textwrap.dedent(r'''
         undenied = {**perm, "file_system": {"type": "restricted", "entries": [e for e in entries if not (isinstance(e, dict) and e.get("access") == "deny")]}}
         turns = {"undenied-then-ok": [undenied, perm], "ok-then-undenied": [perm, undenied], "big-wide-line": [perm, {**big, "file_system": wide["file_system"]}], "net-open-then-ok": [net_open, perm], "ok-then-net-open": [perm, net_open], "wide-then-ok": [wide, perm], "ok-then-wide": [perm, wide], "narrow-then-ok": [narrow, perm], "ok-then-narrow": [perm, narrow],
                  "fs-unknown-then-ok": [fs_unknown, perm], "net-unknown-then-ok": [net_unknown, perm]}.get(mode, [perm])
-        open(os.path.join(sessions, "fake", f"rollout-1-{thread}.jsonl"), "w", errors="surrogateescape").write("".join(turn(x) for x in turns) + (bad or ""))
+        # 本物の exec resume は、同じ session の記録に turn を足す（FAKE_ROLLOUT_APPEND）
+        open(os.path.join(sessions, "fake", f"rollout-1-{thread}.jsonl"), "a" if os.environ.get("FAKE_ROLLOUT_APPEND") else "w", errors="surrogateescape").write("".join(turn(x) for x in turns) + (bad or ""))
     if mode == "parent-moves-git":  # 子の実行中に、親や並行するタスクが ref と設定を正当に動かす（子は何もしない）
         import subprocess
         subprocess.run(["git", "branch", "parent-work"], check=True)
@@ -140,7 +141,7 @@ FAKE_CODEX = textwrap.dedent(r'''
         tempfile.mkdtemp()
     # ORPHAN
     print(json.dumps({"type": "thread.started", "thread_id": "**" if mode == "glob-session" else thread}, ensure_ascii=raw))
-    if mode == "hang":  # 時間切れ（本物は thread.started を最初に出してから作業する）
+    if os.environ.get("FAKE_HANG"):  # 時間切れ（本物は thread.started を最初に出してから作業する）
         import time
         sys.stdout.flush(); time.sleep(60)
     print(json.dumps({"type": "item.completed", "item": {"type": "agent_message", "text": text}}, ensure_ascii=raw))
@@ -261,7 +262,7 @@ FAKE_CLAUDE = textwrap.dedent(r'''
     result = os.environ["FAKE_TEXT"]
     argv = sys.argv[1:]
     sid = next((argv[i + 1] for i, x in enumerate(argv[:-1]) if x in ("--session-id", "--resume")), "s-1")  # 本物は渡した session を返す
-    if mode == "hang":  # 時間切れ（本物の -p --output-format json は、終わるまで何も出さない）
+    if os.environ.get("FAKE_HANG"):  # 時間切れ（本物の -p --output-format json は、終わるまで何も出さない）
         import time
         time.sleep(60)
     if mode == "unwritable-report":  # 試験の sitecustomize が書き出しを失敗させる印
@@ -301,10 +302,16 @@ FAKE_GROK = textwrap.dedent(r'''
         os.unlink(auth)
         open(auth, "w").write('{"refreshed": true}')
     # ORPHAN
-    if mode == "hang":  # 時間切れ（本物の -p --output-format json は、終わるまで何も出さない）
-        import time
-        time.sleep(60)
     sid = next((sys.argv[i + 1] for i, x in enumerate(sys.argv[1:-1], 1) if x in ("-s", "-r")), "g-1")  # 本物は渡した session を返す
+    # 本物と同じく、session の記録を home の sessions/<対象>/<session>/ に書き、-r はそれが無ければ失敗する
+    where = os.path.join(os.environ["GROK_HOME"], "sessions", sys.argv[sys.argv.index("--cwd") + 1].replace("/", "%2F"), sid)
+    if "-r" in sys.argv and not os.path.isfile(os.path.join(where, "updates.jsonl")):
+        print(json.dumps({"type": "error", "message": "session not found"})); sys.exit(1)
+    os.makedirs(where, exist_ok=True)
+    open(os.path.join(where, "updates.jsonl"), "a").write("{}\n")
+    if os.environ.get("FAKE_HANG"):  # 時間切れ（本物の -p --output-format json は、終わるまで何も出さない）
+        import time
+        sys.stderr.flush(); time.sleep(60)
     print(json.dumps({"text": os.environ["FAKE_TEXT"], "stopReason": "end_turn", "sessionId": sid,
                       "modelUsage": "x" if mode == "shapes" else {"grok-4.7-build": {}}, "total_cost_usd": 0.02, "num_turns": 3,
                       **({"sessionId": ["g"]} if mode == "shapes" else {})}))
@@ -367,8 +374,13 @@ ORPHAN = textwrap.dedent(r'''
 
 FAKE_DOTENVX = textwrap.dedent(r'''
     #!/usr/bin/env python3
-    import subprocess, sys
+    import json, os, subprocess, sys
     args = sys.argv[1:]
+    if json.load(open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "fake_env.json"))).get("FAKE_CLOSE_OUT"):
+        # 子の出力を閉じてから待つ（出力の読み手は先に終わり、子の CLI だけが残る）
+        p = subprocess.Popen(args[args.index("--") + 1:], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        os.close(1); os.close(2)
+        sys.exit(p.wait())
     sys.exit(subprocess.run(args[args.index("--") + 1:]).returncode)  # 本物と同じく、子を起こして待つ（時間切れで止めると、claude が launcher の下に来る）
 ''').lstrip()
 
@@ -1608,15 +1620,17 @@ class TestLaunch(unittest.TestCase):
                     self.assertNotIn(pids[0], [int(p.split()[0]) for p in rec["stopped_after_exit"]], rec)
                 else:
                     self.assertEqual(rec["stopped_after_exit"], [], rec)
-        for host, mode, what, words in (("claude", "orphan-hang", "unkillable-cli", "子が起こしたプロセスを止められない"),
-                                        ("claude", "orphan-hang", "no-thread", "スレッドを起こせない"),
-                                        ("claude", "orphan-hang", "waitid-storm", "2 秒で終わらなかった")):
-            with self.subTest(host=host, mode=mode, what=what):  # 子の CLI は 60 秒眠る。止まらなければ待ち続けず、止まるなら止める
+        for host, mode, what, words, closed in (("claude", "orphan-hang", "unkillable-cli", "子が起こしたプロセスを止められない", False),
+                                                ("claude", "orphan-hang", "unkillable-cli", "子が起こしたプロセスを止められない", True),
+                                                ("claude", "orphan-hang", "no-thread", "スレッドを起こせない", False),
+                                                ("claude", "orphan-hang", "waitid-storm", "2 秒で終わらなかった", False)):
+            # 子の CLI は 60 秒眠る。止まらなければ待ち続けず（出力を閉じた CLI の終わりも待たない）、止まるなら止める
+            with self.subTest(host=host, mode=mode, what=what, closed=closed):
                 self.stop_fakes()  # 前の subTest が、止まらない子の CLI として残したもの
                 self.addCleanup(self.stop_fakes)
                 t0 = time.time()
                 rc, rec = self.run_launch(host, mode, extra=("--timeout", "2"),
-                                          env_extra={"FAKE_SLEEP": sleep, "PYTHONPATH": str(site), "FAKE_SITE": what})
+                                          env_extra={"FAKE_SLEEP": sleep, "PYTHONPATH": str(site), "FAKE_SITE": what, **({"FAKE_CLOSE_OUT": "1"} if closed else {})})
                 self.orphans()
                 self.assertEqual((rc, rec["status"]), (2, "timeout" if what == "waitid-storm" else "failed"), rec)  # 止めきれれば、続きから起動できる時間切れ
                 self.assertTrue(any(words in p for p in rec["problems"]), rec)
@@ -1624,6 +1638,7 @@ class TestLaunch(unittest.TestCase):
                 if what == "unkillable-cli":  # 止まらない子の CLI（Popen の子。claude なら偽の dotenvx）を並べる
                     cli = Path(str(self.args_file) + ".cli").read_text().split()[host == "claude"]
                     self.assertTrue(any(p.startswith(f"{cli} ") for p in rec["problems"]), rec)
+                    self.assertEqual(rec["session"], self.session_arg(host))  # 出力を読めなくても、起動の前に決めた session は残る
                 elif what == "no-thread":
                     self.assertEqual(self.fakes(), [], rec)
 
@@ -1822,54 +1837,137 @@ class TestLaunch(unittest.TestCase):
         # 時間切れで止めた子を最初から起動し直すと、それまでの作業（会話記録には残っている）を捨て、同じ時間をもう一度払った。
         # 本物の claude -p・grok -p は終わるまで何も出さないので、session は起動の前に決めて渡し、Codex は最初の thread.started から取る。
         # 続きは、同じ session・同じ権限の引数で、新しい依頼文だけを変えて起動する（実物の 3 つの CLI で、SIGKILL の後に文脈が続いた。2026-10-25）
+        hang = {"FAKE_HANG": "1", "FAKE_ROLLOUT_APPEND": "1"}
         for host, extra, where in (("claude", (), None), ("claude", ("--write",), "worktree"), ("codex", (), None), ("grok", (), "grok")):
             with self.subTest(host=host, extra=extra):
                 cwd = {"worktree": lambda: self.worktree("resume")[1], "grok": self.grok_target}.get(where, lambda: self.cwd)()
                 self.prompt.write_text("x を確かめて")
-                rc, rec = self.run_launch(host, "hang", extra=[*extra, "--timeout", "2"], cwd=cwd)
-                first = json.loads(self.args_file.read_text())
+                # 既定でない model・effort で起動する（続きが既定に戻ると見分けられるように）
+                rc, rec = self.run_launch(host, extra=[*extra, "--model", "m-test", "--effort", "high", "--timeout", "2"], cwd=cwd, env_extra=hang)
+                first, first_tmp = json.loads(self.args_file.read_text()), Path(str(self.args_file) + ".tmpdir").read_text() if host == "codex" else None
                 session = "0199aaaa-bbbb-7ccc-8ddd-eeeeffff0000" if host == "codex" else self.session_arg(host)  # 偽の Codex の thread
                 self.assertEqual((rc, rec["status"], rec["session"]), (2, "timeout", session), rec)
-                self.assertIn(f"--resume {rec['out']} で続きから起動できる", rec["problems"][0])
+                self.assertEqual(rec["problems"], [f"2 秒で終わらなかった。--resume {rec['out']} で続きから起動できる"])
                 self.assertEqual(rec["load"]["cpus"], os.cpu_count())  # 時間切れが混雑によるかを後で見分ける材料
                 self.assertIsInstance(rec["load"]["start"], float)
+                self.assertIsInstance(rec["load"]["end"], float)
+                if host == "grok":  # 前の home に子が書いたもの（sandbox の外の Grok が読む設定・hooks、記録の中の symlink）
+                    old = Path(rec["grok_home"])
+                    (old / "hooks").mkdir()
+                    (old / "hooks" / "x.toml").write_text("x")
+                    (old / "config.toml").write_text("x")
+                    secret = Path(self.tmp.name) / "secret"
+                    secret.write_text("s")
+                    next(old.glob(f"sessions/*/{session}")).joinpath("link").symlink_to(secret)
                 self.prompt.write_text("時間切れで止められた。続けて")
-                rc, again = self.run_launch(None, extra=["--resume", rec["out"]])
+                rc, again = self.run_launch(None, extra=["--resume", rec["out"]], env_extra={"FAKE_ROLLOUT_APPEND": "1"})
                 self.assertEqual((rc, again["status"], again["session"], again["resumed_from"]), (0, "ok", session, rec["out"]), again)
                 self.assertEqual([again[k] for k in ("host", "cwd", "model_requested", "effort_requested", "write")],
                                  [rec[k] for k in ("host", "cwd", "model_requested", "effort_requested", "write")])
+                self.assertEqual((again["model_requested"], again["effort_requested"]), ("m-test", "high"))
                 resumed = json.loads(self.args_file.read_text())
                 if host == "codex":  # exec resume は exec の引数を受けないので、exec の側に置いたまま、依頼の前に挟む
                     self.assertEqual((resumed[:-3], resumed[-3:-1]), (first[:-1], ["resume", session]))
                     prompt = resumed[-1]
+                    # 前の起動と同じ一時ディレクトリ（子がそこへ写した対象に、続きでも書ける）
+                    self.assertEqual((again["scratch"], Path(str(self.args_file) + ".tmpdir").read_text()), (rec["scratch"], first_tmp))
                 else:
                     flag, again_flag = {"claude": ("--session-id", "--resume"), "grok": ("-s", "-r")}[host]
                     i = resumed.index("-p")
                     prompt = resumed[i + 1]
+                    if host == "grok":  # 続きは新しい GROK_HOME で、前の home からその session の記録だけを写す
+                        argv, env = resumed[:-1], json.loads(resumed[-1][len("ENV="):])
+                        self.assertNotEqual(again["grok_home"], rec["grok_home"])
+                        self.assertEqual(env["GROK_HOME"], again["grok_home"])
+                        new = Path(again["grok_home"])
+                        self.assertEqual(sorted(p.name for p in new.iterdir()), ["auth.json", "sandbox.toml", "sessions"])
+                        copied = next(new.glob(f"sessions/*/{session}"))
+                        self.assertEqual(sorted(p.name for p in copied.iterdir()), ["updates.jsonl"])  # symlink は写さない
+                        self.assertEqual((copied / "updates.jsonl").read_text(), "{}\n{}\n")  # 前の記録に続けて書いた
+                        resumed, first = argv, first[:-1]
+                        i = resumed.index("-p")
                     self.assertEqual(resumed[:i + 1] + resumed[i + 2:], [again_flag if x == flag else x for x in first[:i + 1] + first[i + 2:]])
-                    if host == "grok":  # 同じ GROK_HOME（引数の最後の ENV=）で。sandbox の profile はセッションに保存される
-                        self.assertEqual(rec["grok_home"], again["grok_home"])
                 self.assertTrue(prompt.startswith("時間切れで止められた。続けて"), prompt)
+
+    def test_a_timeout_does_not_hide_other_failures(self):
+        """時間切れの後も、利用枠・権限の照合・ホームと Git の照合は時間切れより先に決まる（権限が分からない子を続きから起動させない）。"""
+        hang = {"FAKE_HANG": "1", "FAKE_ROLLOUT_APPEND": "1"}
+        for host, mode, extra, where, words in (("grok", "nosandbox", (), "grok", "Grok が警告を出した"),
+                                                ("codex", "ok-then-wide", (), None, "広い"),
+                                                ("claude", "home-residue", (), None, "ホームに空のファイル"),
+                                                ("claude", "tamper-main", ("--write",), "worktree", "自分のブランチ以外")):
+            with self.subTest(host=host, mode=mode):
+                cwd = {"worktree": lambda: self.worktree("hide-" + mode)[1], "grok": self.grok_target}.get(where, lambda: self.cwd)()
+                rc, rec = self.run_launch(host, mode, extra=[*extra, "--timeout", "2"], cwd=cwd, env_extra=hang)
+                self.assertEqual((rc, rec["status"]), (2, "failed"), rec)
+                self.assertTrue(any(words in p for p in rec["problems"]), rec)
+                self.assertTrue(any(p.startswith("2 秒で終わらなかった") for p in rec["problems"]), rec)
+                self.assertTrue(rec["session"], rec)  # 確かめて片付けた後に、続きから起動できる
+                if host == "codex":  # 権限の広い turn は、続きでも照らす（前の起動で照らし終えていない）
+                    self.assertNotIn("codex_turns", rec)
+                    rc, again = self.run_launch(None, extra=["--resume", rec["out"]], env_extra={"FAKE_ROLLOUT_APPEND": "1"})
+                    self.assertEqual((rc, again["status"]), (2, "failed"), again)
+                    self.assertIn("広い", again["problems"][0])
+
+    def test_a_codex_resume_judges_the_earlier_turns_by_their_own_launch(self):
+        # 読み取り専用の Codex の deny は起動の時点の中身から作るので、時間切れと続きの間に置き場が増えると、前の turn には新しい deny が無い。
+        # 前の起動で照らし終えた turn は、続きで照らし直さない（照らし直すと、権限の正しい続きがいつも failed になった）
+        (self.home / ".config" / "git").mkdir(parents=True)  # ~/.config の中を 1 つずつ拒む形にする
+        env = {"FAKE_HANG": "1", "FAKE_ROLLOUT_APPEND": "1"}
+        rc, rec = self.run_launch("codex", extra=["--timeout", "2"], env_extra=env)
+        self.assertEqual((rec["status"], rec["codex_turns"]), ("timeout", 1), rec)
+        (self.home / ".config" / "newtool").mkdir()
+        rc, again = self.run_launch(None, extra=["--resume", rec["out"]], env_extra={"FAKE_ROLLOUT_APPEND": "1"})
+        self.assertEqual((rc, again["status"], again["codex_turns"]), (0, "ok", 2), again)
+        self.assertIn(str((self.home / ".config" / "newtool").resolve()), fs_rules(json.loads(self.args_file.read_text())))
+
+    def test_a_resumed_review_counts_only_for_the_commit_it_started_on(self):
+        # 続きの子は、前の起動で前の commit を読んだ。間に commit を進めて続けると、その ok が新しい commit の審査として
+        # work.py の --reviewed を通った。続きの head は、前の起動と同じ commit のときだけ書く
+        repo = self.worktree("head")[0]
+        (repo / "a.txt").write_text("x\n")  # 偽の報告が証拠に挙げるファイル
+        subprocess.run(["git", "-C", str(repo), "add", "a.txt"], check=True)
+        subprocess.run(["git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "-q", "-m", "a"], check=True)
+        hang = {"FAKE_HANG": "1"}
+        rc, rec = self.run_launch("claude", extra=["--timeout", "2"], cwd=repo, env_extra=hang)
+        h1 = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"], capture_output=True, text=True, check=True).stdout.strip()
+        self.assertEqual((rec["status"], rec["head"]), ("timeout", h1), rec)
+        rc, again = self.run_launch(None, extra=["--resume", rec["out"]])
+        self.assertEqual((again["status"], again["head"]), ("ok", h1), again)
+        rc, rec = self.run_launch("claude", extra=["--timeout", "2"], cwd=repo, env_extra=hang)
+        subprocess.run(["git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "-q", "--allow-empty", "-m", "2"], check=True)
+        rc, again = self.run_launch(None, extra=["--resume", rec["out"]])
+        self.assertEqual((again["status"], again["head"]), ("ok", None), again)
+        self.assertIn(f"前の起動の head（{h1}）と違う", again["head_lost"])
 
     def test_resume_takes_the_launch_only_from_the_record(self):
         """続きを違う権限・違う対象で起動しない。続きから起動できない記録では、子を起こさずに止める。"""
-        rc, rec = self.run_launch("claude", "hang", extra=["--timeout", "2"])
+        rc, rec = self.run_launch("claude", extra=["--timeout", "2"], env_extra={"FAKE_HANG": "1"})
         out = Path(rec["out"])
-        no_session = Path(self.tmp.name) / "no-session"
-        no_session.mkdir()
-        (no_session / "record.json").write_text(json.dumps({**rec, "session": None}))  # Codex が thread.started を出す前に止まった
-        no_home = Path(self.tmp.name) / "no-home"
-        no_home.mkdir()
-        (no_home / "record.json").write_text(json.dumps({**rec, "host": "grok", "grok_home": str(Path(self.tmp.name) / "gone")}))
-        for extra, words in ((["--resume", str(out), "--write"], "一緒に渡さない"), (["--resume", str(out), "--host", "claude"], "一緒に渡さない"),
-                             (["--resume", str(out), "--effort", "max"], "一緒に渡さない"), (["--resume", str(no_session)], "session"),
-                             (["--resume", str(no_home)], "grok_home"), (["--resume", str(Path(self.tmp.name) / "missing")], "読めない"), ([], "--host と --cwd が要る")):
+        broken = {}
+        for name, change in (("no-session", {"session": None}),  # Codex が thread.started を出す前に止まった
+                             ("no-home", {"host": "grok", "grok_home": str(Path(self.tmp.name) / "gone")}),
+                             ("no-scratch", {"host": "codex", "write": False, "scratch": None})):
+            broken[name] = Path(self.tmp.name) / name
+            broken[name].mkdir()
+            (broken[name] / "record.json").write_text(json.dumps({**rec, **change}))
+        for extra, words in ((["--write"], "一緒に渡さない"), (["--host", "claude"], "一緒に渡さない"), (["--cwd", str(self.cwd)], "一緒に渡さない"),
+                             (["--model", "opus"], "一緒に渡さない"), (["--effort", "max"], "一緒に渡さない")):
+            with self.subTest(extra=extra):
+                self.args_file.unlink(missing_ok=True)
+                p = self.run_launch(None, extra=["--resume", str(out), *extra], raw=True)
+                self.assertEqual(p.returncode, 2, p.stderr)
+                self.assertIn(words, p.stderr)
+                self.assertFalse(self.args_file.exists())  # 子を起こさない
+        for extra, words in ((["--resume", str(broken["no-session"])], "session"), (["--resume", str(broken["no-home"])], "grok_home"),
+                             (["--resume", str(broken["no-scratch"])], "scratch"), (["--resume", str(Path(self.tmp.name) / "missing")], "読めない"),
+                             ([], "--host と --cwd が要る")):
             with self.subTest(extra=extra):
                 self.args_file.unlink(missing_ok=True)
                 p = self.run_launch(None, extra=extra, raw=True)
                 self.assertEqual(p.returncode, 2, p.stderr)
                 self.assertIn(words, p.stderr)
-                self.assertFalse(self.args_file.exists())  # 子を起こさない
+                self.assertFalse(self.args_file.exists())
 
     def worktree(self, name="r"):
         repo, wt = self.cwd / name, self.cwd / (name + "-wt")
