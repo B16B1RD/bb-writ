@@ -246,7 +246,10 @@ def note_gaps(body: str, reviewed: bool) -> list:
 
 
 def note_body(f: Path) -> str:
-    """記録の中身。無ければ空。UTF-8 でない字は置き換えて読む（欄が空かを見るだけなので、止めない）。読めなければ RecordError。"""
+    """記録の中身。無ければ空。UTF-8 でない字は置き換えて読む（欄が空かを見るだけなので、止めない）。
+    通常のファイルでない（ディレクトリ・壊れた symlink など）か、読めなければ RecordError。"""
+    if not f.is_file() and (f.exists() or f.is_symlink()):
+        raise RecordError(f"作業の記録 {f} が通常のファイルでない")
     try:
         return f.read_text(encoding="utf-8", errors="replace") if f.is_file() else ""
     except OSError as e:
@@ -255,7 +258,7 @@ def note_body(f: Path) -> str:
 
 def note(r: Path) -> dict:
     f = r / "note.md"
-    if not f.is_file():
+    if not f.exists() and not f.is_symlink():
         f.write_text(NOTE, encoding="utf-8")
     body = note_body(f)
     ev = r / "evidence"
@@ -456,12 +459,13 @@ def claim_at(r, d, holder, minutes):
         return {'ok': False, 'reason': f'op run の外部操作がまだ動いている: {held}。終わるのを待つ（終われば監督役が done を書く）',
                 'holder': old and old.get('holder'), 'pending_ops': pending_while(r, held)}, 3
     waiting = pending(r)  # 記録が壊れていれば、担当を書く前に止める（書いた後に落ちると、誰も token を受け取らない担当が残る）
+    n = note(r)  # 作業の記録も同じ
     new = {'token': secrets.token_hex(8), 'holder': holder, 'dir': str(d.resolve()),
            'claimed_at': now, 'expires_at': now + minutes * 60,
            'previous': old and {'holder': old.get('holder'), 'expired_at': old.get('expires_at')}}
     write(r / 'lease.json', new)
     return {'ok': True, 'token': new['token'], 'previous': new['previous'],
-            'pending_ops': waiting, 'note': note(r)}, 0
+            'pending_ops': waiting, 'note': n}, 0
 
 
 def git(d, *args, fds=()):

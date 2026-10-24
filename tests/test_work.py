@@ -976,6 +976,16 @@ class TestNoteBeforePublish(unittest.TestCase):
         tok, _ = self.claim(self.head_note(purpose="", triage="x").replace("# 作業の記録\n", "# 作業の記録\n  - 目的: 字下げ\n"))
         rc, res = self.publish(tok, "push:feat@3", self.head())
         self.assertEqual((rc, res["note"]["empty"]), (2, ["目的"]))
+        self.w("release", "--dir", str(self.wt), "--token", tok)
+        # 見出しは # の数によらず止める。欄の名前は ":" までで見る（名前で始まるだけの行は、欄でも次の欄の始まりでもない）
+        for i, body in enumerate((self.head_note(purpose="", triage="x").replace("- 制約:x", "# 見出し\n書いた\n- 制約:x"),
+                                  self.head_note(purpose="", triage="x").replace("# 作業の記録\n", "# 作業の記録\n- 目的外のこと: x\n"))):
+            tok, _ = self.claim(body)
+            rc, res = self.publish(tok, f"push:feat@h{i}", self.head())
+            self.assertEqual((rc, res["note"]["empty"]), (2, ["目的"]), body)
+            self.w("release", "--dir", str(self.wt), "--token", tok)
+        tok, _ = self.claim(self.head_note(purpose="\n- 制約のメモも目的の中身", triage="x"))
+        self.assertEqual(self.publish(tok, "push:feat@h2", self.head())[0], 0)
 
     def test_renew_names_the_empty_fields_without_refusing(self):
         tok, _ = self.claim()
@@ -1013,6 +1023,19 @@ class TestNoteBeforePublish(unittest.TestCase):
             self.assertIn("読めない", res["reason"])
         finally:
             self.note.chmod(0o644)
+
+    def test_a_note_that_is_not_a_regular_file_is_refused_before_the_lease_is_written(self):
+        tok, _ = self.claim(self.head_note())
+        self.w("release", "--dir", str(self.wt), "--token", tok)
+        self.note.unlink()
+        self.note.mkdir()
+        rc, res = self.w("claim", "--dir", str(self.wt), "--holder", "A")
+        self.assertEqual(rc, 1)
+        self.assertIn("通常のファイルでない", res["reason"])  # 1 行の JSON で理由を返す
+        self.assertFalse((self.note.parent / "lease.json").exists())  # token を受け取らない担当を残さない
+        rc, res = self.w("status", "--dir", str(self.wt))
+        self.assertEqual(rc, 1)
+        self.assertIn("通常のファイルでない", res["reason"])
 
     def test_other_operations_do_not_look_at_the_note(self):
         tok, _ = self.claim()
