@@ -1408,8 +1408,10 @@ class TestLaunch(unittest.TestCase):
 
     def test_claude_child_gets_no_parent_claude_env(self):
         # 親の CLAUDE_CODE_PLUGIN_DIRS（利用者の mod）や API の鍵を子に渡さない。渡すのは専用の設定ディレクトリだけ
-        self.run_launch("claude", env_extra={"CLAUDE_CODE_PLUGIN_DIRS": "~/.claude/mods/x", "CLAUDECODE": "1", "CLAUDE_EFFORT": "max", "ANTHROPIC_API_KEY": "k"})
-        self.assertEqual(json.loads(Path(str(self.args_file) + ".env").read_text()), ["CLAUDE_CONFIG_DIR"])
+        # 背景の処理を止める変数は、書く子にも読み取り専用の子にも渡す（json の出力が最後のターンの結果だけになり、報告が消えた）
+        for extra in ([], ["--write"]):
+            self.run_launch("claude", extra=extra, env_extra={"CLAUDE_CODE_PLUGIN_DIRS": "~/.claude/mods/x", "CLAUDECODE": "1", "CLAUDE_EFFORT": "max", "ANTHROPIC_API_KEY": "k"})
+            self.assertEqual(json.loads(Path(str(self.args_file) + ".env").read_text()), ["CLAUDE_CODE_DISABLE_BACKGROUND_TASKS", "CLAUDE_CONFIG_DIR"], extra)
 
     def test_write_grants_only_the_work_record(self):
         # 書く子に state 全体（タスクの一覧・統合の記録・他の worktree）を渡さない

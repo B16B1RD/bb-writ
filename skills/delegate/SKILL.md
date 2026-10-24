@@ -54,7 +54,7 @@ python3 <launch.py> --host codex|claude|grok --cwd <対象> --prompt-file <依�
 - **非対話実行:** `codex exec --json -m <model> -c model_reasoning_effort="<effort>" [-s read-only|workspace-write|danger-full-access] [-C <dir>] [--add-dir <dir>] "<依頼>" < /dev/null`。stdin を閉じないと「Reading additional input from stdin...」で待ち続ける（実測 2026-10-17）。承認を Codex 自身の自動レビューに任せるなら `--approve-for-me`（workspace-write を含むので `-s` と併用できない）。sandbox の中でネットワークが要るなら `-c sandbox_workspace_write.network_access=true`、作業領域の外に書く場所は `--add-dir`。構造化した結果が要るなら `--output-schema <file>`。利用者の設定と AGENTS を切るなら `--ignore-user-config`・`--ignore-rules`。Git 管理外で動かすなら `--skip-git-repo-check`。
 - **再開:** `codex exec resume <SESSION_ID>`（`--last` で直前）。
 - **プラグイン:** `codex plugin marketplace add <このリポジトリの絶対パス>` → `codex plugin add bb-writ@bb-writ`。`.claude-plugin/marketplace.json` と root の `plugin.json` をそのまま読む。写しが `$CODEX_HOME/plugins/cache/bb-writ/bb-writ/<版>/` に置かれるので、版を上げたら `codex plugin remove bb-writ@bb-writ` → `add`。Git の private リポジトリからの追加は未確認。
-- **Claude Code を子にする:** `CLAUDE_CONFIG_DIR=~/.config/bb-writ/claude-home dotenvx run -f ~/.config/bb-writ/.env -fk ~/.config/bb-writ/.env.keys -- claude -p "<依頼>" --output-format json --model <m> --effort <e>`。
+- **Claude Code を子にする:** `CLAUDE_CONFIG_DIR=~/.config/bb-writ/claude-home CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1 dotenvx run -f ~/.config/bb-writ/.env -fk ~/.config/bb-writ/.env.keys -- claude -p "<依頼>" --output-format json --model <m> --effort <e>`。背景の処理を止めるのは、終わりの知らせが次のターンを起こすと json の出力が最後のターンの結果だけになり、報告が消えるため（launcher も渡す）。
 
 ## Grok Build
 

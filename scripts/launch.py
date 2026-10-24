@@ -426,6 +426,9 @@ def command(a, prompt: str, scratch: Path) -> tuple[list[str], dict, str | None]
         # 鍵があると専用ログインの代わりに別料金の API へ落ちうる。専用ログインのトークンは dotenvx が子の環境にだけ入れる
         env = {k: v for k, v in env.items() if not k.startswith(("CLAUDE", "ANTHROPIC_"))}
         env["CLAUDE_CONFIG_DIR"] = str(cfg / "claude-home")
+        # 背景の処理（Bash の run_in_background など）を使わせない。終わりの知らせが次のターンを起こすと、--output-format json は
+        # 最後のターンの結果だけを返し、前のターンに書いた報告が消えた（2.1.310、審査役が 2 回 invalid-report。公式の headless の文書）
+        env["CLAUDE_CODE_DISABLE_BACKGROUND_TASKS"] = "1"
         if a.write:
             # 書く子に渡すのは、対象（作業場所）とその記録だけ。タスクの一覧・統合の記録・他の worktree は親だけが書く。
             # Bash は sandbox で同じ範囲に閉じ、--restricted でファイル系のツールも同じ範囲に閉じる（対象の .claude の設定も読まない）。
@@ -452,6 +455,7 @@ def command(a, prompt: str, scratch: Path) -> tuple[list[str], dict, str | None]
             # 子の Bash に渡す環境も最小限にする（読み取り専用の子は git と読むコマンドしか使わない）
             env = {k: v for k, v in env.items() if k in READ_ONLY_ENV or k.upper().endswith("_PROXY") or k.startswith("LC_")}
             env["CLAUDE_CONFIG_DIR"] = str(cfg / "claude-home")
+            env["CLAUDE_CODE_DISABLE_BACKGROUND_TASKS"] = "1"
             perm = ["--permission-mode", "dontAsk", "--restricted", "--tools", "Read,Grep,Glob,Bash,Skill"]
             settings = {"permissions": {"allow": ["Read", "Grep", "Glob", "Bash", "Skill"]},
                         "sandbox": {"enabled": True, "allowUnsandboxedCommands": False, "failIfUnavailable": True,

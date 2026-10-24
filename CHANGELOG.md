@@ -15,6 +15,10 @@ commit ごとの細かい変更は、各版の末尾の「commit の一覧」（
 - `claim`・`renew`・`status` は、空の必須の欄を `note.empty` で知らせる（拒否はしない）。launcher は、審査に数える子（読み取り専用で `ok`、届ける commit を見た子）が返ったとき、直す前に指摘の扱いを書くよう `next` で知らせる。
 - 入口 `bb-writ` を、要約の後にも全体が戻る約 4,500 字の骨組みにした。段ごとの 1 行と、審査の指摘が届いたときなどの「その場で」の確かめを置いた。検証の条件の全文・対象ごとの形・CI・証拠・返す前の判定は新しい手引き `playbook-verify` に、担当・記録・外に出してよいか・外部操作は新しい手引き `playbook-deliver` に、文を変えずに移した。
 
+### 直したこと
+
+- launcher で起動した Claude Code の子が、試験を背景で回したときに、報告が消えて `invalid-report` になっていたのを直した。背景の処理の終わりの知らせが次のターンを起こし、`--output-format json` は最後のターンの結果だけを返していた。子には `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1` を渡し、背景の処理を使わせない（長い試験は前景で流れる）。
+
 commit の一覧：https://github.com/B16B1RD/bb-writ/compare/bb-writ--v0.16.1...bb-writ--v0.17.0
 
 ## 0.16.1 - 2026-10-25
