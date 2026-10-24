@@ -151,6 +151,29 @@ def home_entries(skip: list[Path]) -> tuple[set[str], set[str], set[str]]:
     return every, empty, unreadable
 
 
+def cwd_residue(cwd: Path, before: set[str]) -> list[str]:
+    """書く子の起動で対象の直下に新しくでき、中身が空のまま（空のファイルと空のディレクトリだけ。入れ子を含む）で、Git が追跡していない場所。
+    Claude Code の sandbox は、守る対象のうち無いもの（.bashrc・.gitconfig・.claude/ の下など）を対象に空で作り、子の CLI が
+    正常に終わると片付けるが、時間切れで止めると残った（2.1.310）。0 バイトのファイルが残ると task cleanup が未保存の変更とみなし、
+    次の書き手の git add -A で commit に入りうる。黙って消さない（子が意図して作った空のファイルかもしれない）。
+    守らない範囲: 前からあるディレクトリの下、index と照らすのは対象が作業ツリーの根（.git がある）のときだけ、Git の設定・環境を
+    書き換えた子や親（設定の FIFO・GIT_DIR）、pathspec の記号を含む名前、Python の再帰の上限を超える入れ子。git の時間切れと、
+    読めない場所での failed は試験で見ない。"""
+    def bare(p: Path) -> bool:
+        if p.is_symlink():
+            return False
+        if p.is_dir():
+            return all(bare(c) for c in p.iterdir())
+        return p.is_file() and p.stat().st_size == 0
+    new = sorted(str(p) for p in cwd.iterdir() if str(p) not in before)
+    left = [p for p in new if bare(Path(p))]
+    if left and (cwd / ".git").exists():  # 追跡している（index にある）ものは子が意図して足したので数えない
+        out = subprocess.run(["git", "-C", str(cwd), "ls-files", "-z", "--", *[Path(p).name for p in left]], capture_output=True, text=True, check=True, timeout=GIT_TIMEOUT)
+        tracked = {cwd / n.split("/")[0] for n in out.stdout.split("\0") if n}
+        left = [p for p in left if Path(p) not in tracked]
+    return left
+
+
 def grok_ro_writable(home: Path) -> list[Path]:
     """Grok の read-only の sandbox でも書ける場所（公式文書 18-sandbox と、実物の sessions/sandbox-events.jsonl の read_write_paths）。"""
     roots = [Path("/tmp"), Path("/var/tmp"), Path(tempfile.gettempdir()), home]  # gettempdir は macOS の一時ディレクトリ
@@ -834,6 +857,7 @@ def main() -> int:
             # 子の前後でホームを比べ、新しくできて空のままの場所を残りとして報告する。黙って消さない（同じ時刻に別の道具が作ったものかもしれない）
             skip = [config_dir(), state_dir(), out_dir, a.cwd, Path.home() / ".cache"]
             home_before, _, unreadable_before = home_entries(skip)
+            cwd_before = {str(p) for p in a.cwd.iterdir()} if a.write else None  # 読み取り専用の子は書かず、同じ対象で並行する審査役の一時的な場所を数えてしまう
             if LINUX:
                 become_subreaper()
     except Exception as e:
@@ -936,6 +960,18 @@ def main() -> int:
             except Exception as e:  # 子が権限を変えたなど。残ったものは task cleanup が未保存の変更とみなす
                 rec.update(status="failed", problems=[f"子の起動で作られた空の .claude を片付けられない: {e!r}"[:300],
                                                       f"詳細: {launcher_error(out_dir)}"] + rec.get("problems", []))
+            if cwd_before is not None:
+                try:
+                    rec["cwd_residue"] = cwd_residue(a.cwd, cwd_before)
+                except Exception as e:
+                    rec.setdefault("cwd_residue", [])
+                    # 子が対象の場所を読めなくしたときは、先に並んだ理由（.claude を片付けられない、など）を前に残す
+                    rec.update(status="failed", problems=rec.get("problems", []) + [f"対象の残りを確かめられない: {e!r}"[:600],
+                                                                                     f"詳細: {launcher_error(out_dir)}"])
+                if rec["cwd_residue"]:
+                    rec.update(status="failed", problems=rec.get("problems", []) + [
+                        "書く子の起動の後、対象の直下に、中身の空の場所が新しく残った（Claude Code 2.1.310 の sandbox は、時間切れで止めると"
+                        "置き場所を残した）。中身を確かめて消す。0 バイトのファイルは task cleanup が拒否し、git add -A で commit に入る"] + rec["cwd_residue"][:20])
             try:
                 _, empty, unreadable = home_entries(skip)
                 # Claude Code 2.1.309 の sandbox は、設定を組むときに CLAUDE_CONFIG_DIR に関わらずホームに空のディレクトリ .claude/ssh を作る

@@ -198,6 +198,15 @@ FAKE_CLAUDE = textwrap.dedent(r'''
         home = os.environ["HOME"]
         open(os.path.join(home, ".bash_profile"), "w").close(); open(os.path.join(home, ".netrc"), "w").close()
         os.makedirs(os.path.join(home, ".config", "pip"))
+    if mode in ("cwd-residue", "cwd-residue-hang"):  # sandbox の置き場所を対象に空で作る。正常に終われば片付け、止められると残る（2.1.310）
+        open(".bashrc", "w").close(); os.makedirs(".claude/agents/x"); open(".claude/settings.json", "w").close()
+        open("note.txt", "w").write("x")  # 中身のあるものは残りでない
+        os.makedirs("mixed"); open("mixed/empty", "w").close(); open("mixed/data", "w").write("x")  # 中身のあるものを含むディレクトリも
+        os.symlink(".bashrc", "link")  # symlink は数えない
+        if os.path.exists(".git"):  # 追跡させた空のファイルは、子が意図して足したもの
+            open("keep", "w").close(); subprocess.run(git + ["add", "keep"])
+        if mode == "cwd-residue-hang":
+            import time; time.sleep(60)
     if os.environ.get("FAKE_MODE") == "wrote":
         open(".claude/.cc-writes/x", "w").write("x")
     if os.environ.get("FAKE_MODE") == "checkout":  # worktree の子は、元の checkout にも作る
@@ -1437,6 +1446,34 @@ class TestLaunch(unittest.TestCase):
             rc, rec = self.run_launch(host, "home-residue", cwd=cwd, env_extra={"HOME": str(home), "XAI_API_KEY": "k"})
             self.assertEqual((rec["status"], rec["home_residue"]), ("failed", [str(home / ".bash_profile")]), (host, rec))
             (home / ".bash_profile").unlink()
+
+    def test_empty_places_the_child_leaves_in_the_target_fail(self):
+        # 時間切れで止めた Claude Code の書く子が、対象に 0 バイトの .bashrc などと、空のディレクトリだけの .claude/ を残した（2.1.310）
+        def target(name, git=False):  # 前の場合の残りが次の場合の「前からあるもの」にならないよう、場合ごとに新しい対象を使う
+            if git:  # 書く子は worktree で起動する。.git がファイルの作業ツリー
+                d = self.worktree(name)[1]
+            else:
+                d = Path(self.tmp.name) / name
+                d.mkdir()
+                (d / "a.txt").write_text("x\n")  # 偽の子の報告が証拠に挙げるファイル
+            (d / ".existing-empty").write_text("")  # 前からある空のファイルは数えない
+            return d
+        for name, mode, extra, git in (("write", "cwd-residue", ("--write",), False),
+                                       ("hang", "cwd-residue-hang", ("--write", "--timeout", "3"), False),
+                                       ("tracked", "cwd-residue", ("--write",), True)):  # Git の作業ツリーでは、index にある空のファイルを数えない
+            with self.subTest(name):
+                d = target(name, git)
+                rc, rec = self.run_launch("claude", mode, extra=list(extra), cwd=d)
+                self.assertEqual((rc, rec["status"]), (2, "failed"), rec)
+                self.assertEqual(rec["cwd_residue"], [str(d / ".bashrc"), str(d / ".claude")])
+                for f in rec["cwd_residue"]:  # 黙って消さない
+                    self.assertTrue(Path(f).exists())
+        with self.subTest("read-only"):  # 読み取り専用の子は比べない（並行する審査役の一時的な場所を、互いの残りとして数えない）
+            rc, rec = self.run_launch("claude", "cwd-residue", cwd=target("read-only"))
+            self.assertEqual((rc, rec["status"], rec.get("cwd_residue")), (0, "ok", None), rec)
+        with self.subTest("nothing-left"):
+            rc, rec = self.run_launch("claude", extra=["--write"], cwd=target("clean"))
+            self.assertEqual((rc, rec["status"], rec["cwd_residue"]), (0, "ok", []), rec)
 
     @unittest.skipUnless(sys.platform.startswith("linux"), "子の CLI が切り離した子孫を止めるのは Linux だけ（PR_SET_CHILD_SUBREAPER）")
     def test_processes_the_child_detached_do_not_outlive_it(self):
