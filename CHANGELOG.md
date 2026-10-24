@@ -4,6 +4,18 @@ bb-writ を使う人に向けて、版ごとに変わったことを書く。新
 
 commit ごとの細かい変更は、各版の末尾の「commit の一覧」（前の版のタグとの比較）で見られる。
 
+## 0.16.1 - 2026-10-25
+
+### 直したこと
+
+- 道具・ライブラリ・API・OS とシェルの版の振る舞いに拠るコードを、仕様を読まずに書き、動かして落ちてから調べていたのを直した。入口の手順 3 と、bug・feature の手引きに、書く前に仕様（公式の文書・man・リリースノート）を読むと書いた。
+- CI を試し場にして、macOS だけの差（BSD の `ps`・`mktemp`、bash 3.2）を、調べるための job と commit の push で 1 つずつ見つけていたのを直した。private のリポジトリでは macOS の runner の分単価が Linux の約 10 倍で、利用額の上限を超えた。入口の「検証」に「CI を試し場にしない」を足した。
+  - 手元で確かめられる差は手元で潰してから CI に出す。調べるための job・step・commit を、push・pull_request で動く workflow に足さない。
+  - 手元に無い環境（macOS など）での確認が必須なら、最後にまとめて 1 回にする。push で動かない起動（`workflow_dispatch` だけの workflow など）か、その環境の利用者の手元で行う。workflow を足すことが依頼に無ければ聞く。
+  - PR のブランチへの 1 回の push で、push と pull_request の両方の起動条件が同じ job を動かすことがあるので、出す前に起動条件を読む。
+
+commit の一覧：https://github.com/B16B1RD/bb-writ/compare/bb-writ--v0.16.0...bb-writ--v0.16.1
+
 ## 0.16.0 - 2026-10-25
 
 ### 変えたこと
