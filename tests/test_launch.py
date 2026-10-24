@@ -291,7 +291,7 @@ FAKE_GROK = textwrap.dedent(r'''
 # 偽の CLI の共通の部分: Claude Code 2.1.309 の Bash のように、新しいセッションでプロセスを起こし、その下に 6 段の鎖（実物の sandbox の木と
 # 同じくらいの深さ。最後の段が sleep 600）を起こして、自分は先に終わる。上の段はコマンド名に ) を含め（/proc の stat を最初の ) で切ると
 # 読み違える）、主スレッドだけを終わらせて別のスレッドで動き続ける（ゾンビに見えるが生きていて、下の段もまだ付け替わらない）。
-# 鎖は SIGTERM を無視する（SIGKILL でなければ止まらない）
+# 鎖は止められるシグナルを全部無視する（SIGKILL でなければ止まらない）
 LATE = """
 import ctypes, os, platform, subprocess, sys, threading, time
 libc = ctypes.CDLL(None)
@@ -306,7 +306,7 @@ open(out + '.part', 'w').write(' '.join([str(os.getpid())] + open(out + '.chain'
 os.rename(out + '.part', out)
 libc.syscall({'x86_64': 60, 'aarch64': 93}[platform.machine()], 0)  # SYS_exit: 主スレッドだけ終わる
 """
-CHAIN = ("import os, signal, subprocess, sys; signal.signal(signal.SIGTERM, signal.SIG_IGN); d = int(sys.argv[1]); open(sys.argv[2], 'a').write(f'{os.getpid()} '); "
+CHAIN = ("import os, signal, subprocess, sys; [signal.signal(s, signal.SIG_IGN) for s in signal.valid_signals() if s not in (signal.SIGKILL, signal.SIGSTOP, signal.SIGCHLD)]; d = int(sys.argv[1]); open(sys.argv[2], 'a').write(f'{os.getpid()} '); "
          "os.execv(sys.argv[3], [sys.argv[3], '600']) if d == 0 else subprocess.run([sys.executable, '-c', sys.argv[4], str(d - 1), *sys.argv[2:]])")
 ORPHAN = textwrap.dedent(r'''
     open(os.environ["FAKE_ARGS"] + ".cli", "w").write(f"{os.getpid()} {os.getppid()}")  # 子の CLI（と dotenvx）
@@ -1463,7 +1463,7 @@ class TestLaunch(unittest.TestCase):
                 took = time.time() - t0
                 pids = self.orphans()
                 self.assertEqual((len(pids), rec["status"]), (7, status), rec)
-                if status == "failed":  # 時間切れの理由だけ（止めた子の CLI は残りに並ばない）。期限を守る
+                if status == "failed":  # 時間切れの理由だけ（止めた子の CLI は残りに並ばない）。期限を守る（所要時間で捕まえるのは、2 秒より大きな延びだけ）
                     self.assertEqual(rec["problems"], ["3 秒で終わらなかった"], rec)
                     self.assertLess(took, 5, rec)
                 for pid in pids:
@@ -1569,7 +1569,7 @@ class TestLaunch(unittest.TestCase):
                 self.orphans()
                 self.assertEqual((rc, rec["status"]), (2, "failed"), rec)
                 self.assertTrue(any(words in p for p in rec["problems"]), rec)
-                self.assertLess(time.time() - t0, 40, rec)
+                self.assertLess(time.time() - t0, 25 if what == "unkillable-cli" else 10, rec)  # 止まらない CLI は 10 秒待ち、残りを 5 秒止め続ける
                 if what == "unkillable-cli":  # 止まらない子の CLI（Popen の子。claude なら偽の dotenvx）を並べる
                     cli = Path(str(self.args_file) + ".cli").read_text().split()[host == "claude"]
                     self.assertTrue(any(p.startswith(f"{cli} ") for p in rec["problems"]), rec)

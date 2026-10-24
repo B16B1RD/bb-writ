@@ -704,7 +704,7 @@ def become_subreaper() -> None:
 
 def wait_for_exit(child: subprocess.Popen, timeout: float) -> None:
     """子の CLI が終わるのを、刈らずに待つ（Linux）。刈らないので、止め終わるまで子の CLI とそのプロセスグループの番号は別のプロセスに
-    使い回されない。待つ間に自分の下へ来て終わった孤児は刈る（subreaper なので、刈らないとゾンビが溜まる）。"""
+    使い回されず、終了コードも後の child.wait に残る。待つ間に自分の下へ来て終わった孤児は刈る（subreaper なので、刈らないとゾンビが溜まる）。"""
     deadline = time.monotonic() + timeout
     while True:
         r = os.waitid(os.P_ALL, 0, os.WEXITED | os.WNOHANG | os.WNOWAIT)
