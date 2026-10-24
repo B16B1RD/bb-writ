@@ -242,6 +242,8 @@ FAKE_CLAUDE = textwrap.dedent(r'''
         if os.path.exists(f):
             os.unlink(f)
         os.mkfifo(f)
+    if mode == "lock-target-dir":  # 対象の直下に、中を読めないディレクトリを作る（残りを確かめられない）
+        os.mkdir("locked-new"); os.chmod("locked-new", 0)
     if mode == "lock-claude-dir":  # 後片付けの場所を読めなくする
         os.chmod(".claude", 0)
     if mode == "bad-head":  # 自分の作業場所の HEAD を UTF-8 でない中身にする
@@ -263,6 +265,8 @@ FAKE_CLAUDE = textwrap.dedent(r'''
     if mode == "shapes":  # 深すぎる行
         print('{"a": ' + "[" * 100000 + "]" * 100000 + "}")
     # ORPHAN
+    if mode == "blockout":  # 結果の置き場をふさぐ（launcher の想定外の失敗を起こす）
+        os.makedirs(os.path.join(os.environ["FAKE_OUT"], "stdout.jsonl"))
     result = os.environ["FAKE_TEXT"]
     argv = sys.argv[1:]
     sid = next((argv[i + 1] for i, x in enumerate(argv[:-1]) if x in ("--session-id", "--resume")), "s-1")  # 本物は渡した session を返す
@@ -291,6 +295,8 @@ FAKE_GROK = textwrap.dedent(r'''
     env = {k: v for k, v in os.environ.items() if k.startswith("GROK_") or k in ("XAI_API_KEY", "RUST_LOG")}
     open(os.environ["FAKE_ARGS"], "w").write(json.dumps(sys.argv[1:] + ["ENV=" + json.dumps(env, sort_keys=True)]))
     mode = os.environ.get("FAKE_MODE", "good")
+    if os.environ.get("FAKE_STDERR"):  # 作業の途中で出す行（利用枠の文言など）
+        print(os.environ["FAKE_STDERR"], file=sys.stderr, flush=True)
     if mode == "home-ssh":  # 並行する Claude Code の子が作ったものを、この委任が見る
         os.makedirs(os.path.join(os.environ["HOME"], ".claude", "ssh"), mode=0o700)
     if mode == "home-residue":  # どの子の CLI の sandbox も、ホームに空のファイルを残しうる
@@ -313,9 +319,6 @@ FAKE_GROK = textwrap.dedent(r'''
         print(json.dumps({"type": "error", "message": "session not found"})); sys.exit(1)
     os.makedirs(where, exist_ok=True)
     open(os.path.join(where, "updates.jsonl"), "a").write("{}\n")
-    if mode != "no-profile-event":  # 本物は sandbox を強制すると、この起動の home に ProfileApplied を書く（1.0.70）
-        open(os.path.join(os.environ["GROK_HOME"], "sessions", "sandbox-events.jsonl"), "a").write(json.dumps(
-            {"event_type": "ProfileApplied", "profile": sys.argv[sys.argv.index("--sandbox") + 1], "enforced": mode != "profile-not-enforced"}) + "\n")
     if os.environ.get("FAKE_HANG"):  # 時間切れ（本物の -p --output-format json は、終わるまで何も出さない）
         import time
         sys.stderr.flush(); time.sleep(60)
@@ -708,8 +711,15 @@ class TestLaunch(unittest.TestCase):
     def test_a_child_locking_its_leftovers_still_writes_the_record(self):
         rc, rec = self.run_launch("claude", "lock-claude-dir")
         os.chmod(self.cwd / ".claude", 0o755)
-        self.assertEqual(rec["status"], "failed", rec)
+        self.assertEqual((rec["status"], rec["resumable"]), ("failed", False), rec)  # 子が権限を変えた。続きから起動させない
         self.assertIn("片付けられない", rec["problems"][0])
+        target = Path(self.tmp.name) / "locked-target"
+        target.mkdir()
+        (target / "a.txt").write_text("x\n")
+        rc, rec = self.run_launch("claude", "lock-target-dir", extra=["--write"], cwd=target)
+        os.chmod(target / "locked-new", 0o755)
+        self.assertEqual((rec["status"], rec["resumable"]), ("failed", False), rec)
+        self.assertIn("対象の残りを確かめられない", " ".join(rec["problems"]))
         self.assertIn(rec["out"], (self.state / "delegations.jsonl").read_text())
 
     def test_a_child_that_cannot_be_started_is_recorded(self):
@@ -767,11 +777,14 @@ class TestLaunch(unittest.TestCase):
     def test_an_unexpected_failure_after_the_child_still_writes_the_record(self):
         out = Path(self.tmp.name) / "out-blocked"
         rc, rec = self.run_launch("codex", mode="blockout", extra=("--out", str(out)), env_extra={"FAKE_OUT": str(out)})
-        self.assertEqual((rc, rec["status"]), (2, "failed"), rec)
+        self.assertEqual((rc, rec["status"], rec["resumable"]), (2, "failed", False), rec)
         self.assertIn("子の結果を読めない", rec["problems"][0])
         self.assertIn("Traceback", (out / "launcher-error.log").read_text())  # 詳細を残す
         self.assertTrue((out / "record.json").is_file())
         self.assertIn(str(out.resolve()), (self.state / "delegations.jsonl").read_text())  # --out は symlink を解いた形で記録する
+        out = Path(self.tmp.name) / "out-blocked-claude"  # session を起動の前に決めた子でも、想定外の失敗の後は続けさせない
+        rc, rec = self.run_launch("claude", mode="blockout", extra=("--out", str(out)), env_extra={"FAKE_OUT": str(out)})
+        self.assertEqual((rc, rec["status"], rec["resumable"], bool(rec["session"])), (2, "failed", False, True), rec)
 
     def test_report_check_does_not_crash_on_odd_reports(self):
         launch = load_launch()
@@ -1260,7 +1273,7 @@ class TestLaunch(unittest.TestCase):
                                           ("relative-path", "確かめられない"), ("fs-odd-type", "確かめられない"))):
             with self.subTest(mode=mode):  # 記録は session ごと
                 rc, rec = self.run_launch("codex", mode=mode, env_extra={"FAKE_THREAD": f"0199aaaa-bbbb-7ccc-8ddd-eeeeffff{1000 + i}"})
-                self.assertEqual((rc, rec["status"]), (2, "failed"), rec)
+                self.assertEqual((rc, rec["status"], rec["resumable"]), (2, "failed", False), rec)  # 権限が分からない子は続けさせない
                 self.assertIn(sign, rec["problems"][0])
                 self.assertNotIn("report", rec)  # 報告を使わない
                 self.assertTrue((Path(rec["out"]) / "report.md").is_file())  # 中身は残す
@@ -1618,7 +1631,7 @@ class TestLaunch(unittest.TestCase):
             with self.subTest(what=what):
                 rc, rec = self.run_launch("claude", "orphan", env_extra={"FAKE_SLEEP": sleep, "PYTHONPATH": str(site), "FAKE_SITE": what})
                 pids = self.orphans()
-                self.assertEqual((rc, rec["status"]), (2, "failed"), rec)
+                self.assertEqual((rc, rec["status"], rec["resumable"]), (2, "failed", False), rec)  # 残ったかもしれないので続けさせない
                 self.assertTrue(any(words in p for p in rec["problems"]), rec)
                 if what == "no-subreaper":  # 子を起こさない
                     self.assertEqual(pids, [], rec)
@@ -1726,7 +1739,7 @@ class TestLaunch(unittest.TestCase):
         finally:
             (home / ".config").chmod(0o755)
             (home / ".locked-before").chmod(0o755)
-        self.assertEqual(rec["status"], "failed", rec)
+        self.assertEqual((rec["status"], rec["resumable"]), ("failed", False), rec)
         self.assertIn("ホームの残りを確かめられない", rec["problems"][0])
         try:
             rc, rec = self.run_launch("claude", "home-lock-root", env_extra={"HOME": str(home)})
@@ -1964,7 +1977,7 @@ class TestLaunch(unittest.TestCase):
             rc, rec = self.run_launch("codex", extra=["--timeout", "2"], env_extra=hang)
             rc, again = self.run_launch(None, extra=["--resume", rec["out"]], env_extra={"FAKE_ROLLOUT_APPEND": "1", "FAKE_THREAD": "0199aaaa-bbbb-7ccc-8ddd-eeeeffff0001"})
             self.assertEqual((rc, again["status"], again["resumable"]), (2, "failed", False), again)
-            self.assertIn("前と違う session", again["problems"][0])
+            self.assertIn("前と違う（0199aaaa-bbbb-7ccc-8ddd-eeeeffff0001）", again["problems"][0])
         with self.subTest("codex-two-rollouts"):  # 同じ thread の記録ファイルが 2 つ（前の turn を数で除けない）
             rc, rec = self.run_launch("codex", extra=["--timeout", "2"], env_extra=hang)
             other = self.cfg / "codex-home" / "sessions" / "other"
@@ -1975,12 +1988,44 @@ class TestLaunch(unittest.TestCase):
             self.assertEqual((rc, again["status"]), (2, "failed"), again)
             self.assertIn("記録ファイルが 1 つでない（2 個）", again["problems"][0])
         cwd = self.grok_target()
-        for mode in ("no-profile-event", "profile-not-enforced"):
-            with self.subTest("grok-no-profile", mode=mode):  # 続きで sandbox を強制した記録が無い（写した記録の中身は子が書けた）
-                rc, rec = self.run_launch("grok", extra=["--timeout", "2"], cwd=cwd, env_extra=hang)
-                rc, again = self.run_launch(None, mode, extra=["--resume", rec["out"]])
-                self.assertEqual((rc, again["status"], again["resumable"]), (2, "failed", False), again)
-                self.assertIn("ProfileApplied", " ".join(again["problems"]))
+        with self.subTest("grok-session-unknown"):  # 続きが session を返さない（前と同じか確かめられない）
+            rc, rec = self.run_launch("grok", extra=["--timeout", "2"], cwd=cwd, env_extra=hang)
+            rc, again = self.run_launch(None, "shapes", extra=["--resume", rec["out"]])
+            self.assertEqual((rc, again["status"], again["resumable"]), (2, "failed", False), again)
+            self.assertIn("session を確かめられないか", again["problems"][0])
+        quota = "ERROR: You've hit your usage limit."
+        # 続けさせない事実は、どの status の枝が選ばれても残る（利用枠・終了コードが先に決まっても、権限が分からない子を続けさせない）
+        for host, mode, env, status, words in (("grok", "nosandbox", {"FAKE_STDERR": quota}, "quota", "could not be applied"),
+                                               ("codex", "wide-profile", {"FAKE_STDERR": quota}, "quota", "広い"),
+                                               ("codex", "wide-profile", {"FAKE_EXIT": "1"}, "failed", "広い"),
+                                               ("codex", "wide-profile", {"FAKE_STDERR": quota, **hang}, "quota", "広い")):
+            with self.subTest("doubt-under-another-status", host=host, env=sorted(env)):
+                rc, rec = self.run_launch(host, mode, extra=["--timeout", "2"], cwd=cwd if host == "grok" else None,
+                                          env_extra={**env, "FAKE_THREAD": "0199aaaa-bbbb-7ccc-8ddd-eeeeffff3000"})
+                self.assertEqual((rec["status"], rec["resumable"]), (status, False), rec)
+                self.assertTrue(any(words in p for p in rec["problems"]), rec)
+                self.assertNotIn("codex_turns", rec)
+                self.args_file.unlink()
+                self.assertEqual(self.run_launch(None, extra=["--resume", rec["out"]], raw=True).returncode, 2)
+                self.assertFalse(self.args_file.exists())  # 子を起こさない
+        with self.subTest("exit-code-in-resume"):  # 続きも、報告の形が整っていても終了コードで失敗にする
+            rc, rec = self.run_launch("codex", extra=["--timeout", "2"], env_extra={**hang, "FAKE_THREAD": "0199aaaa-bbbb-7ccc-8ddd-eeeeffff6000"})
+            rc, again = self.run_launch(None, extra=["--resume", rec["out"]], env_extra={"FAKE_ROLLOUT_APPEND": "1", "FAKE_THREAD": "0199aaaa-bbbb-7ccc-8ddd-eeeeffff6000", "FAKE_EXIT": "3"})
+            self.assertEqual((again["status"], again["problems"][0]), ("failed", "終了コード 3"), again)
+        with self.subTest("other-thread-under-quota"):
+            rc, rec = self.run_launch("codex", extra=["--timeout", "2"], env_extra=hang)
+            rc, again = self.run_launch(None, extra=["--resume", rec["out"]], env_extra={
+                "FAKE_ROLLOUT_APPEND": "1", "FAKE_THREAD": "0199aaaa-bbbb-7ccc-8ddd-eeeeffff0002", "FAKE_STDERR": quota})
+            self.assertEqual((again["status"], again["resumable"]), ("quota", False), again)
+        with self.subTest("no-new-turn"):  # 続きが turn を書かずに止まっても、照らし終えた turn の数は残り、その記録から続けられる
+            (self.home / ".config" / "git").mkdir(parents=True, exist_ok=True)
+            rc, rec = self.run_launch("codex", extra=["--timeout", "2"], env_extra={**hang, "FAKE_THREAD": "0199aaaa-bbbb-7ccc-8ddd-eeeeffff4000"})
+            rc, mid = self.run_launch(None, "no-rollout", extra=["--resume", rec["out"]], env_extra={
+                "FAKE_ROLLOUT_APPEND": "1", "FAKE_THREAD": "0199aaaa-bbbb-7ccc-8ddd-eeeeffff4000", "FAKE_STDERR": quota})
+            self.assertEqual((mid["status"], mid["resumable"], mid["codex_turns"]), ("quota", True, 1), mid)
+            (self.home / ".config" / "newtool-4000").mkdir()
+            rc, again = self.run_launch(None, extra=["--resume", mid["out"]], env_extra={"FAKE_ROLLOUT_APPEND": "1", "FAKE_THREAD": "0199aaaa-bbbb-7ccc-8ddd-eeeeffff4000"})
+            self.assertEqual((again["status"], again["codex_turns"]), ("ok", 2), again)
         for name, plant in (("not-a-uuid", None), ("two-places", "two"), ("linked-sessions", "sessions"), ("linked-place", "place")):
             with self.subTest(name):  # 前の home の記録が 1 つだけ、symlink を通らずに見つからなければ、新しい home を作らずに止める
                 rc, rec = self.run_launch("grok", extra=["--timeout", "2"], cwd=cwd, env_extra=hang)
@@ -2006,7 +2051,8 @@ class TestLaunch(unittest.TestCase):
                 self.assertIn("1 つだけ見つからない", again["problems"][0])
                 self.assertEqual(sorted((self.state / "grok-homes").iterdir()), homes)  # 空の home を残さない
         with self.subTest("quota-and-timeout"):  # 利用枠の文言は時間切れより先に決まる。利用枠が戻れば続けられる
-            rc, rec = self.run_launch("codex", extra=["--timeout", "2"], env_extra={**hang, "FAKE_STDERR": "ERROR: You've hit your usage limit."})
+            rc, rec = self.run_launch("codex", extra=["--timeout", "2"], env_extra={**hang, "FAKE_STDERR": "ERROR: You've hit your usage limit.",
+                                                                     "FAKE_THREAD": "0199aaaa-bbbb-7ccc-8ddd-eeeeffff5000"})  # 本物の thread は起動ごとに別
             self.assertEqual((rc, rec["status"], rec["resumable"]), (2, "quota", True), rec)
             self.assertIn("2 秒で終わらなかった", rec["problems"])
         with self.subTest("dirty-then-clean"):  # 前の起動が未 commit の変更を見たなら、続きの時点で clean でも head を書かない
@@ -2212,7 +2258,7 @@ class TestLaunch(unittest.TestCase):
 
     def test_crash_is_failed(self):
         rc, rec = self.run_launch("codex", "crash")
-        self.assertEqual((rc, rec["status"]), (2, "failed"))
+        self.assertEqual((rc, rec["status"], rec["resumable"]), (2, "failed", False))  # session が分からない
         self.assertIn("boom", rec["problems"])
         rc, rec = self.run_launch("codex", env_extra={"FAKE_EXIT": "3"})  # 報告は形が整っていても、終了コードで失敗にする
         self.assertEqual((rc, rec["status"], rec["problems"][0]), (2, "failed", "終了コード 3"), rec)

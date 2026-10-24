@@ -322,7 +322,8 @@ def copy_grok_session(src: Path, old: Path, new: Path) -> None:
     """続きの新しい home に、前の home からその session の記録だけを写す。前の home の設定・hooks・trusted_folders.toml は
     子の sandbox から書けたので、続きの起動に読ませない（新しい home と、写した記録で -r が続いた。2026-10-25、1.0.70）。
     写すのは通常のファイルとディレクトリだけで、symlink は写さない（子が置いた symlink を、sandbox の外の Grok が開かないように）。
-    記録の中身も子が書けたので、続きでは sandbox が効いたこと（grok_profile_applied）を照らす。"""
+    記録の中身も子が書けた。続きの sandbox は新しい home の sandbox.toml の独自の profile に拠り、Grok は独自の profile を
+    適用できなければ起動を拒む（公式文書 18-sandbox）。記録の中身が -r に何をさせるかは確かめていない。"""
     for top, dirs, files in os.walk(src):
         dirs[:] = [d for d in dirs if not os.path.islink(os.path.join(top, d))]
         to = new / Path(top).relative_to(old)
@@ -330,22 +331,6 @@ def copy_grok_session(src: Path, old: Path, new: Path) -> None:
         for f in files:
             if not os.path.islink(os.path.join(top, f)) and os.path.isfile(os.path.join(top, f)):
                 shutil.copyfile(os.path.join(top, f), to / f)
-
-
-def grok_profile_applied(home: Path) -> bool:
-    """その home に、bbwrit の profile を強制した記録（sessions/sandbox-events.jsonl の ProfileApplied で enforced）があるか。"""
-    try:
-        lines = (home / "sessions" / "sandbox-events.jsonl").read_text(encoding="utf-8", errors="replace").split("\n")
-    except OSError:
-        return False
-    for line in lines:
-        try:
-            e = obj(json.loads(line))
-        except (ValueError, RecursionError):
-            continue
-        if e.get("event_type") == "ProfileApplied" and e.get("profile") == "bbwrit" and e.get("enforced") is True:
-            return True
-    return False
 
 
 def grok_home(login: Path, extends: str, read_write: list[Path]) -> tuple[Path, str]:
@@ -1004,37 +989,34 @@ def main() -> int:
             got = {"claude": parse_claude, "codex": parse_codex, "grok": parse_grok}[a.host](p.stdout)
             # 警告の行（sandbox の適用失敗、効かなかった引数）があれば、権限の約束どおりに動いたか分からないので結果を使わない
             unsafe = [l for l in p.stderr.splitlines() if a.host == "grok" and GROK_WARNING.search(l)][-5:]
-            if a.host == "grok" and a.grok_home and not grok_profile_applied(Path(env["GROK_HOME"])):  # 写した記録の中身は子が書けた
-                unsafe.append("続きの起動で、sandbox の profile を強制した記録（sessions/sandbox-events.jsonl の ProfileApplied）が無い")
             rec.update(exit_code=p.returncode, session=got["session"] or a.session, model_effective=got["model_effective"], usage=got["usage"])
             # 読み取り専用の Codex の実効の権限。続きでは、前の起動で照らし終えた turn（その起動の deny で照らした）を除く
-            breach = a.host == "codex" and not a.write and codex_breach(got["permissions"][a.codex_turns:], a.codex_denies)
+            new_turns = got.get("permissions", [])[a.codex_turns:]  # 続きで新しい turn が無ければ、照らすものが無い（前の起動の数を引き継ぐ）
+            breach = a.host == "codex" and not a.write and (codex_breach(new_turns, a.codex_denies) if new_turns or not a.codex_turns else None)
             if breach is None and a.codex_turns and got["rollouts"] != 1:  # 前の turn を除けるのは、同じ記録ファイルに足したときだけ（0.164.0 の実物）
                 breach = f"続きの Codex の記録ファイルが 1 つでない（{got['rollouts']} 個）。前の起動で照らした turn を除けず、実効の権限を確かめられない"
             if a.host == "codex" and not a.write and not breach:
                 rec["codex_turns"] = len(got["permissions"])
             stopped = [f"{a.timeout} 秒で終わらなかった"] if timed_out else []
+            # 続きの session は、子の結果で確かめられたときだけ前と同じとみなす（時間切れの Claude Code・Grok は結果を出さない）
+            other = a.resume and (got["session"] or not timed_out) and got["session"] != a.session
+            doubts = ((["Grok の sandbox が約束どおりに効いたか分からない（警告）"] + unsafe if unsafe else [])
+                      + ([f"続きの子の session を確かめられないか、前と違う（{got['session']}）"] if other else []) + ([breach] if breach else []))
+            # 続けさせない理由は、選ばれた status の枝でなく、事実から決める（利用枠の枝が先に決まっても残す）
+            blocked += [k for k, fact in (("unsafe", unsafe), ("session", other), ("breach", breach)) if fact]
             # 利用枠・権限の照合は、時間切れより先に見る（権限の約束どおりに動いたか分からない子を、続きから起動させない）
             if QUOTA.search(p.stderr[-4000:] + " ".join(got["errors"])):
-                rec.update(status="quota", problems=["利用枠の上限に当たった（別料金の API へは切り替えない）"] + stopped)
-            elif unsafe:
-                blocked.append("unsafe")
-                rec.update(status="failed", problems=["Grok の sandbox が約束どおりに効いたか分からない（警告か、適用の記録が無い）"] + unsafe + stopped)
-            elif a.resume and got["session"] and got["session"] != a.session:  # 前の会話の続きか、前の起動の照合を引き継げるか分からない
-                blocked.append("session")
-                rec.update(status="failed", problems=[f"続きの子が、前と違う session（{got['session']}）で動いた"] + stopped)
-            elif timed_out and breach:
-                blocked.append("breach")
-                rec.update(status="failed", problems=[breach] + stopped)
+                rec.update(status="quota", problems=["利用枠の上限に当たった（別料金の API へは切り替えない）"] + doubts + stopped)
+            elif unsafe or other or (timed_out and breach):  # 権限・続きの session が分からない子を、続きから起動させない
+                rec.update(status="failed", problems=doubts + stopped)
             elif timed_out:  # 子の作業は会話記録に残っている。最初から起動し直さず、続きから起動する
                 rec.update(status="timeout", problems=[stopped[0] + "。" + (f"--resume {out_dir} で続きから起動できる" if rec["session"]
                                                                            else "session が分からず、続きから起動できない")])
             elif p.returncode != 0 or got.get("is_error") or not got["text"]:
                 tail = [l for l in p.stderr.strip().splitlines() if "injected env" not in l and "Reading additional input" not in l][-5:]
-                rec.update(status="failed", problems=[f"終了コード {p.returncode}"] + got["errors"] + tail)
+                rec.update(status="failed", problems=[f"終了コード {p.returncode}"] + got["errors"] + tail + doubts)
             elif breach:
                 # 対象の設定が profile を広げた・狭めた（読み取り専用の結果として使わない）。報告は report.md に残す
-                blocked.append("breach")
                 rec.update(status="failed", problems=[breach])
                 (out_dir / "report.md").write_text(got["text"], encoding="utf-8", errors="backslashreplace")
             else:
