@@ -3,29 +3,33 @@
 審査が 1 周に 1 つずつ交互実行を見つけ、そのたびに直していたため、このモデルが写す範囲は 1 回の全探索でたどる。
 範囲は担当 2・鍵 2・token 3。担当の期限切れはいつでも起こせる（実際の時間を写さない、保守的な写し方）。
 過去の修正を戻した版をフラグで作り、それぞれが反例を出すことも試す（一度も落ちたことのない検査は、何も確かめていない）。
-TLA+ の同じモデル（TLC）とは、照合した commit で、今の版の状態数（MODELED_STATES）と、戻した版の違反と反例の動作の列が一致した。
-モデルを変えたら（動作を足す・削る・条件を変える）、状態数が変わって落ちる。同じ変更を TLA+ のモデルに入れて TLC と照らしてから、
-MODELED_STATES を書き換える（TLC は CI に置かないので、照らし直したかは試験で確かめない）。
+TLA+ の同じモデル（TLC）とは、MODELED_AT で、今の版の状態数（MODELED_STATES）と、戻した版の違反と反例の動作の列が一致した。
+動作を足す・削る・条件を変えると状態数が、不変条件（violated）を変えるとその本文のハッシュ（MODELED_INVARIANTS）が変わって落ちる。
+同じ変更を TLA+ のモデルに入れて TLC と照らしてから、両方を書き換える（TLC は CI に置かないので、照らし直したかは試験で確かめない）。
 
-モデルが写す関数と、最後に照合した commit、その commit での各関数の本文のハッシュ（下の MODELED）。
+MODELED は、モデルが写す経路の関数と、その本文のハッシュ。MODELED_AT は、ハッシュを最後に進めたときに読んだ commit の記録で、
+試験は確かめない（work.py と同じ commit で進めると、自分を含む commit は書けない。その親を書く）。
 ハッシュは、関数の本文（デコレータを含む）からコメント・先頭の docstring・空行・行末の空白を除いたものに掛ける（Python の版によらない）。
-意味の同じ書式の変更（括弧・改行の位置）でも変わる。そのときも、照合した commit とハッシュを進める。
-dispatch は release と op done の分岐だけを、op_step は担当の token の照合と同じ鍵の begin・done の拒否だけを写すが、
+意味の同じ書式の変更（括弧・引用符・改行の位置）でも変わる。そのときもハッシュを進める。work.py の最上位で、その名前を 2 か所で
+定義する（定義し直す・束ね直す）と落ちる。
+dispatch は claim・release・op done の分岐だけを、op_step は担当の token の照合と同じ鍵の begin・done の拒否だけを写すが、
 ハッシュは関数全体に掛ける（op_step は --reviewed などの写さない照合でも変わる）。locked は作業場所の排他、run_lock は鍵ごとに
 別のロックのファイル、ops は鍵ごとの最後の state、read・write は lease.json の token と期限、alive・check_token は担当が
-生きているかと done を書けるかを写す（モデルが写す状態を読み書きする関数はすべて照らす）。
-写す関数が拒否を足すだけの変更は、モデルが許す動きを減らすだけなので、不変条件は保たれる（それでもハッシュは落ちる）。
-写さない段: シグナルの中継（supervise の 2 回目の fork）、記録の形式と壊れた記録、出力のファイル、ロックを開けない・読めないとき、
-op begin（op run を通さない）、integrate の排他と照合。
+生きているかと done を書けるかを写す。写す関数が拒否を足すだけの変更は、モデルが許す動きを減らすだけなので、不変条件は保たれる
+（それでもハッシュは落ちる）。監督役がコマンドを起こさずに done を書く経路（起こす前に止められた、Popen の失敗）は、
+StartCmd → CmdExit と cmd の値だけが違う状態に届き、不変条件は cmd が running かしか見ないので写さない。
+写さない経路（ハッシュも掛けない。変えても、この試験は落ちない）: task_command（task start・resume の claim、cleanup の
+担当の削除）・current_lease・integrate の排他と照合、pending（外れたロックの片付けは run_holder として写す）、main の振り分け、
+シグナルの中継（supervise の 2 回目の fork）、記録の形式と壊れた記録、出力のファイル、ロックを開けない・読めないとき、
+op begin（op run を通さない）。
 
 照合が落ちたら、変わった関数を読み、モデル（successors）が今の本文を写していることを確かめる（違えば直して全探索を通す）。
-そのうえで、照合した commit とハッシュを一緒に書き換える。写す分岐に関係しない変更（dispatch の status など）でも同じにする。
+そのうえでハッシュと MODELED_AT を書き換える。写す分岐に関係しない変更（dispatch の status など）でも同じにする。
 """
 
 import ast
 import hashlib
 import io
-import subprocess
 import sys
 import tokenize
 import unittest
@@ -37,6 +41,7 @@ WORK = Path(__file__).resolve().parents[1] / "scripts" / "work.py"
 
 MODELED_AT = "3dc5f8d"
 MODELED_STATES = 84981
+MODELED_INVARIANTS = "87bf0a032d962135"
 MODELED = {
     "read": "8372930316b7ee94",
     "write": "6fc1cdb94b890176",
@@ -56,24 +61,49 @@ MODELED = {
 }
 
 
+def bound(tree: ast.Module, name: str) -> list:
+    """モジュールの最上位で name を束ねる文（def・class・代入・import）。"""
+    found = []
+    for n in tree.body:
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            names = [n.name]
+        elif isinstance(n, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
+            names = [t.id for x in (n.targets if isinstance(n, ast.Assign) else [n.target]) for t in ast.walk(x) if isinstance(t, ast.Name)]
+        elif isinstance(n, (ast.Import, ast.ImportFrom)):
+            names = [(a.asname or a.name).split(".")[0] for a in n.names]
+        else:
+            names = []
+        found += [n] if name in names else []
+    return found
+
+
 def body(src: str, name: str) -> str:
-    """モジュールの最上位の関数 name の本文（デコレータを含む）から、コメント・先頭の docstring・空行・行末の空白を除いたもの。"""
-    node = next((n for n in ast.parse(src).body if isinstance(n, ast.FunctionDef) and n.name == name), None)
-    if node is None:
-        raise LookupError(f"work.py に関数 {name} が無い")
+    """モジュールの最上位の関数 name の本文（デコレータを含む）から、コメント・先頭の docstring・空行・行末の空白を除いたもの。
+    最上位で name を束ねる文が、その def 1 つでなければ LookupError（後の定義が勝ち、照らした本文が動かなくなる）。"""
+    found = bound(ast.parse(src), name)
+    if len(found) != 1 or not isinstance(found[0], ast.FunctionDef):
+        raise LookupError(f"work.py の最上位で、{name} を束ねる文が def 1 つでない（{len(found)} か所）")
+    node = found[0]
     start = min([node.lineno] + [d.lineno for d in node.decorator_list])
-    lines = src.splitlines()[start - 1:node.end_lineno]
+    text = "\n".join(src.splitlines()[start - 1:node.end_lineno]) + "\n"
     first = node.body[0]
-    if isinstance(first, ast.Expr) and isinstance(first.value, ast.Constant) and isinstance(first.value.value, str):
-        drop = set(range(first.lineno - start, first.end_lineno - start + 1))
-        lines = ["" if i in drop else line for i, line in enumerate(lines)]
-    text = "\n".join(lines) + "\n"
-    cuts = {}  # 行ごとの、コメントが始まる列
+    doc = isinstance(first, ast.Expr) and isinstance(first.value, ast.Constant) and isinstance(first.value.value, str)
+    cut = []  # 除く字句の (始まり, 終わり)。行は text の中で 1 から、列は文字で数える
+    at = "before" if doc else "none"  # 先頭の docstring の字句の前・中・後
     for t in tokenize.generate_tokens(io.StringIO(text).readline):
         if t.type == tokenize.COMMENT:
-            cuts[t.start[0] - 1] = t.start[1]
-    kept = [line[:cuts[i]].rstrip() if i in cuts else line.rstrip() for i, line in enumerate(text.splitlines())]
-    return "\n".join(line for line in kept if line)
+            cut.append((t.start, t.end))
+        elif at == "before" and t.type == tokenize.STRING and t.start[0] == first.lineno - start + 1:
+            at = "in"  # 同じ行の後ろの文（; の後）は残す
+            cut.append((t.start, t.end))
+        elif at == "in" and t.type == tokenize.STRING:  # 暗黙の連結
+            cut.append((t.start, t.end))
+        elif at == "in" and t.type != tokenize.NL:
+            at = "after"
+    lines = text.splitlines()
+    for (r0, c0), (r1, c1) in reversed(cut):
+        lines[r0 - 1:r1] = [lines[r0 - 1][:c0] + lines[r1 - 1][c1:]]
+    return "\n".join(line.rstrip() for line in lines if line.strip())
 
 
 def fingerprint(src: str, name: str) -> str:
@@ -264,11 +294,14 @@ def story(bad, trace):
 class TestOpRunModel(unittest.TestCase):
     def test_the_modeled_code_keeps_the_invariants_in_every_interleaving(self):
         bad, n, trace = check(NOW)
-        self.assertIsNone(bad, f"{n} 状態目で反例。scripts/work.py か、モデルの写し方を直す:\n" + (story(bad, trace) if bad else ""))
+        self.assertIsNone(bad, f"{n} 状態をたどって反例。scripts/work.py か、モデルの写し方を直す:\n" + (story(bad, trace) if bad else ""))
 
     def test_the_model_is_the_one_checked_against_tlc(self):
         self.assertEqual(check(NOW)[1], MODELED_STATES, "モデルの状態数が、TLC と照らした数と違う。モデルを変えたなら、同じ変更を "
                          "TLA+ のモデルに入れて TLC と照らしてから MODELED_STATES を書き換える（tests/test_oprun_model.py の冒頭）")
+        self.assertEqual(fingerprint(Path(__file__).read_text(encoding="utf-8"), "violated"), MODELED_INVARIANTS,
+                         "不変条件（violated）が、TLC と照らしたものと違う。同じ変更を TLA+ のモデルに入れて TLC と照らしてから "
+                         "MODELED_INVARIANTS を書き換える（tests/test_oprun_model.py の冒頭）")
 
     def test_each_reverted_fix_gives_a_counterexample(self):
         for flag, inv in REVERTED.items():
@@ -292,21 +325,7 @@ class TestOpRunModel(unittest.TestCase):
         drift = [f"{name}: 照合した {old} / 今 {fingerprint(src, name)}" for name, old in MODELED.items() if fingerprint(src, name) != old]
         if drift:
             self.fail(f"scripts/work.py のモデルが写す関数が、照合した commit {MODELED_AT} から変わった。"
-                      "モデルを見直して、照合した commit とハッシュを進める（tests/test_oprun_model.py の冒頭）:\n" + "\n".join(drift))
-
-
-    def test_the_hashes_are_those_of_the_checked_commit(self):
-        root = WORK.parents[1]
-        try:
-            shallow = subprocess.run(["git", "rev-parse", "--is-shallow-repository"], cwd=root, capture_output=True, text=True, check=True)
-        except (OSError, subprocess.CalledProcessError) as e:
-            self.skipTest(f"git の履歴を読めない: {e}")
-        if shallow.stdout.strip() == "true":  # CI の actions/checkout は履歴を 1 つだけ取る
-            self.skipTest("浅い clone なので、照合した commit を読めない")
-        old = subprocess.run(["git", "show", f"{MODELED_AT}:scripts/work.py"], cwd=root, capture_output=True, text=True)
-        self.assertEqual(old.returncode, 0, f"照合した commit {MODELED_AT} の scripts/work.py を読めない: {old.stderr.strip()}")
-        self.assertEqual({name: fingerprint(old.stdout, name) for name in MODELED}, MODELED,
-                         f"MODELED のハッシュが、照合した commit {MODELED_AT} の本文のものでない。照合した commit とハッシュを一緒に進める")
+                      "モデルを見直して、照合した commit（MODELED_AT）とハッシュを進める（tests/test_oprun_model.py の冒頭）:\n" + "\n".join(drift))
 
 
 class TestFingerprint(unittest.TestCase):
@@ -336,9 +355,21 @@ class TestFingerprint(unittest.TestCase):
         self.assertEqual(self.changed("def tail(f: Path, lines: int = 20, budget: int = MAX_TAIL) -> str:",
                                       "def tail(f: Path, lines: int = 30, budget: int = MAX_TAIL) -> str:"), [])
 
+    def test_code_after_the_docstring_on_its_line_is_caught(self):
+        self.assertEqual(self.changed("    \"\"\"コマンドが終わったので、ロックのファイルを消す。", "    \"\"\"コマンドが終わったので、ロックのファイルを消す。\"\"\"; return\n    \"\"\""),
+                         ["finish"])
+
     def test_a_missing_function_is_reported(self):
         with self.assertRaises(LookupError):
             fingerprint(self.src.replace("def keep_lease(", "def keep_lease2("), "keep_lease")
+
+    def test_a_second_binding_of_a_modeled_name_is_reported(self):
+        tail = "\n\nif __name__ == \"__main__\":"
+        self.assertEqual(self.src.count(tail), 1)
+        for name, extra in (("claim_at", "def claim_at(r, d, holder, minutes):\n    return None"),
+                            ("finish", "finish = lambda r, spec: None"), ("write", "from os import write")):
+            with self.subTest(extra=extra), self.assertRaises(LookupError):
+                fingerprint(self.src.replace(tail, "\n\n" + extra + tail), name)
 
 
 if __name__ == "__main__":
