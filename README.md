@@ -132,7 +132,7 @@ Claude Code は、普通の依頼文だけでは入口を使わない。入口�
 
 入口のスキル `bb-writ` が呼ばれると、依頼を言い直し、最初に手引きを呼び、リポジトリを読み、必要な原則だけを読んで進め、「何を実行し、どの結果を見て、依頼を満たすと判断したか」を返す。
 
-- 手引き：`playbook-investigation`（読んで答える）・`playbook-bug`（不具合を直す）・`playbook-feature`（振る舞いを足す・変える）・`playbook-docs-skill`（文書・スキルを直す）・`playbook-session-pickup`（続きを引き受ける）・`playbook-pause-safely`（安全に止める）・`playbook-eval`（スキルや設定の変種を同じ依頼で走らせ、目隠しで比べる）。
+- 手引き：`playbook-investigation`（読んで答える）・`playbook-bug`（不具合を直す）・`playbook-feature`（振る舞いを足す・変える）・`playbook-docs-skill`（文書・スキルを直す）・`playbook-verify`（確かめて返す。検証の条件の全文）・`playbook-deliver`（担当・記録・push や PR などの外部操作）・`playbook-session-pickup`（続きを引き受ける）・`playbook-pause-safely`（安全に止める）・`playbook-eval`（スキルや設定の変種を同じ依頼で走らせ、目隠しで比べる）。
 - 委任と審査：`delegate`（別系統の CLI の起動）、`interrogate`（2 系統の審査役）。
 - 検証：`create-verification-skill`（対象のリポジトリに検証スキルを作って 1 回通す）。
 - 学び：`reflect`（振り返って行き先へ送る）、`correct`（繰り返す誤りを起こせなくする）。

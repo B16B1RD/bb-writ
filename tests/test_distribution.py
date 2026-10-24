@@ -91,7 +91,7 @@ class TestSkills(unittest.TestCase):
             self.assertLess(body.index(anchor), end, anchor)
 
     def test_skills_invoked_after_the_entry_say_to_reinvoke_it_after_compaction(self):
-        """要約の後に入口が合計の枠から落ちたときのため、手引き 6 本・delegate・interrogate の本文の先頭 4,000 字以内に
+        """要約の後に入口が合計の枠から落ちたときのため、手引き 8 本・delegate・interrogate の本文の先頭 4,000 字以内に
         呼び直しの文を置く。単独でも呼ばれる delegate・interrogate は、入口から始めた仕事に限る。
         playbook-pause-safely・playbook-eval・reflect・correct・unknowns・原則・検証スキルには置いていない。
         目印の文を書き換えたら、ここの目印も直す。"""
@@ -100,6 +100,7 @@ class TestSkills(unittest.TestCase):
         names = {
             "playbook-feature": plain, "playbook-bug": plain, "playbook-docs-skill": plain,
             "playbook-investigation": plain, "playbook-parallel": plain, "playbook-session-pickup": plain,
+            "playbook-verify": plain, "playbook-deliver": plain,
             "delegate": scoped, "interrogate": scoped,
         }
         for name, sentence in names.items():
