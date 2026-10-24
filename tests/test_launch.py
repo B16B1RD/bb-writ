@@ -27,6 +27,8 @@ FAKE_CODEX = textwrap.dedent(r'''
     open(os.environ["FAKE_ARGS"] + ".allenv", "w").write(json.dumps(sorted(k for k in os.environ if not k.startswith("FAKE_"))))
     open(os.environ["FAKE_ARGS"], "w").write(json.dumps(sys.argv[1:]))
     mode = os.environ.get("FAKE_MODE", "good")
+    if os.environ.get("FAKE_STDERR"):  # 作業の途中で出す行（利用枠の文言など）
+        print(os.environ["FAKE_STDERR"], file=sys.stderr, flush=True)
     if mode == "home-ssh":  # 並行する Claude Code の子が作ったものを、この委任が見る
         os.makedirs(os.path.join(os.environ["HOME"], ".claude", "ssh"), mode=0o700)
     if mode == "home-residue":  # どの子の CLI の sandbox も、ホームに空のファイルを残しうる
@@ -155,6 +157,8 @@ FAKE_CODEX = textwrap.dedent(r'''
         print(json.dumps({"type": "thread.started", "thread_id": ["t"]}))
     if mode == "badbytes":  # UTF-8 でないバイト（途中で切れた多バイト文字）
         sys.stdout.flush(); sys.stdout.buffer.write(b"\xe3\x81\n"); sys.stderr.buffer.write(b"warn \xff\n")
+    if os.environ.get("FAKE_EXIT"):  # 形の整った報告を出してから、失敗で終わる
+        sys.exit(int(os.environ["FAKE_EXIT"]))
 ''').lstrip()
 
 FAKE_CLAUDE = textwrap.dedent(r'''
@@ -309,6 +313,9 @@ FAKE_GROK = textwrap.dedent(r'''
         print(json.dumps({"type": "error", "message": "session not found"})); sys.exit(1)
     os.makedirs(where, exist_ok=True)
     open(os.path.join(where, "updates.jsonl"), "a").write("{}\n")
+    if mode != "no-profile-event":  # 本物は sandbox を強制すると、この起動の home に ProfileApplied を書く（1.0.70）
+        open(os.path.join(os.environ["GROK_HOME"], "sessions", "sandbox-events.jsonl"), "a").write(json.dumps(
+            {"event_type": "ProfileApplied", "profile": sys.argv[sys.argv.index("--sandbox") + 1], "enforced": mode != "profile-not-enforced"}) + "\n")
     if os.environ.get("FAKE_HANG"):  # 時間切れ（本物の -p --output-format json は、終わるまで何も出さない）
         import time
         sys.stderr.flush(); time.sleep(60)
@@ -1892,7 +1899,7 @@ class TestLaunch(unittest.TestCase):
     def test_a_timeout_does_not_hide_other_failures(self):
         """時間切れの後も、利用枠・権限の照合・ホームと Git の照合は時間切れより先に決まる（権限が分からない子を続きから起動させない）。"""
         hang = {"FAKE_HANG": "1", "FAKE_ROLLOUT_APPEND": "1"}
-        for host, mode, extra, where, words in (("grok", "nosandbox", (), "grok", "Grok が警告を出した"),
+        for host, mode, extra, where, words in (("grok", "nosandbox", (), "grok", "Grok の sandbox が約束どおりに効いたか分からない"),
                                                 ("codex", "ok-then-wide", (), None, "広い"),
                                                 ("claude", "home-residue", (), None, "ホームに空のファイル"),
                                                 ("claude", "tamper-main", ("--write",), "worktree", "自分のブランチ以外")):
@@ -1902,12 +1909,22 @@ class TestLaunch(unittest.TestCase):
                 self.assertEqual((rc, rec["status"]), (2, "failed"), rec)
                 self.assertTrue(any(words in p for p in rec["problems"]), rec)
                 self.assertTrue(any(p.startswith("2 秒で終わらなかった") for p in rec["problems"]), rec)
-                self.assertTrue(rec["session"], rec)  # 確かめて片付けた後に、続きから起動できる
-                if host == "codex":  # 権限の広い turn は、続きでも照らす（前の起動で照らし終えていない）
-                    self.assertNotIn("codex_turns", rec)
-                    rc, again = self.run_launch(None, extra=["--resume", rec["out"]], env_extra={"FAKE_ROLLOUT_APPEND": "1"})
-                    self.assertEqual((rc, again["status"]), (2, "failed"), again)
-                    self.assertIn("広い", again["problems"][0])
+                self.assertTrue(rec["session"], rec)
+                if mode == "home-residue":  # 空の残りは、確かめて片付けた後に続きから起動できる
+                    self.assertTrue(rec["resumable"], rec)
+                    for f in sorted(rec["home_residue"], reverse=True):
+                        (Path(f).rmdir if Path(f).is_dir() else Path(f).unlink)()
+                    rc, again = self.run_launch(None, extra=["--resume", rec["out"]])
+                    self.assertEqual((rc, again["status"]), (0, "ok"), again)
+                    continue
+                # 権限が約束どおりだったか分からない・Git の管理情報が変わった起動は、続きから起動させない（続きの結果に前の不明が残らない）
+                self.assertFalse(rec["resumable"], rec)
+                self.assertNotIn("codex_turns", rec)
+                self.args_file.unlink()
+                p = self.run_launch(None, extra=["--resume", rec["out"]], raw=True)
+                self.assertEqual(p.returncode, 2, p.stderr)
+                self.assertIn("続きから起動できない", p.stderr)
+                self.assertFalse(self.args_file.exists())  # 子を起こさない
 
     def test_a_codex_resume_judges_the_earlier_turns_by_their_own_launch(self):
         # 読み取り専用の Codex の deny は起動の時点の中身から作るので、時間切れと続きの間に置き場が増えると、前の turn には新しい deny が無い。
@@ -1940,12 +1957,77 @@ class TestLaunch(unittest.TestCase):
         self.assertEqual((again["status"], again["head"]), ("ok", None), again)
         self.assertIn(f"前の起動の head（{h1}）と違う", again["head_lost"])
 
+    def test_a_resume_checks_what_it_takes_over_from_the_last_launch(self):
+        # 続きが前の起動から引き継ぐもの（Codex の照らし終えた turn、Grok の記録）は、引き継げる形かを続きの起動で確かめる
+        hang = {"FAKE_HANG": "1", "FAKE_ROLLOUT_APPEND": "1"}
+        with self.subTest("codex-other-thread"):  # 続きの子が別の thread で動いた（前の turn を除けるか分からない）
+            rc, rec = self.run_launch("codex", extra=["--timeout", "2"], env_extra=hang)
+            rc, again = self.run_launch(None, extra=["--resume", rec["out"]], env_extra={"FAKE_ROLLOUT_APPEND": "1", "FAKE_THREAD": "0199aaaa-bbbb-7ccc-8ddd-eeeeffff0001"})
+            self.assertEqual((rc, again["status"], again["resumable"]), (2, "failed", False), again)
+            self.assertIn("前と違う session", again["problems"][0])
+        with self.subTest("codex-two-rollouts"):  # 同じ thread の記録ファイルが 2 つ（前の turn を数で除けない）
+            rc, rec = self.run_launch("codex", extra=["--timeout", "2"], env_extra=hang)
+            other = self.cfg / "codex-home" / "sessions" / "other"
+            other.mkdir()
+            shutil.copy(next((self.cfg / "codex-home" / "sessions" / "fake").glob("rollout-*")), other / "rollout-2-0199aaaa-bbbb-7ccc-8ddd-eeeeffff0000.jsonl")
+            rc, again = self.run_launch(None, extra=["--resume", rec["out"]], env_extra={"FAKE_ROLLOUT_APPEND": "1"})
+            shutil.rmtree(other)
+            self.assertEqual((rc, again["status"]), (2, "failed"), again)
+            self.assertIn("記録ファイルが 1 つでない（2 個）", again["problems"][0])
+        cwd = self.grok_target()
+        for mode in ("no-profile-event", "profile-not-enforced"):
+            with self.subTest("grok-no-profile", mode=mode):  # 続きで sandbox を強制した記録が無い（写した記録の中身は子が書けた）
+                rc, rec = self.run_launch("grok", extra=["--timeout", "2"], cwd=cwd, env_extra=hang)
+                rc, again = self.run_launch(None, mode, extra=["--resume", rec["out"]])
+                self.assertEqual((rc, again["status"], again["resumable"]), (2, "failed", False), again)
+                self.assertIn("ProfileApplied", " ".join(again["problems"]))
+        for name, plant in (("not-a-uuid", None), ("two-places", "two"), ("linked-sessions", "sessions"), ("linked-place", "place")):
+            with self.subTest(name):  # 前の home の記録が 1 つだけ、symlink を通らずに見つからなければ、新しい home を作らずに止める
+                rc, rec = self.run_launch("grok", extra=["--timeout", "2"], cwd=cwd, env_extra=hang)
+                old = Path(rec["grok_home"])
+                place = next(old.glob(f"sessions/*/{rec['session']}")).parent
+                record = dict(rec)
+                if plant is None:
+                    record["session"] = "*"
+                elif plant == "two":
+                    shutil.copytree(place, old / "sessions" / "elsewhere")
+                elif plant == "sessions":
+                    (old / "sessions").rename(old / "real-sessions")
+                    (old / "sessions").symlink_to(old / "real-sessions")
+                else:
+                    place.rename(old / "real-place")  # sessions の外へ（中に置くと、行き先そのものが記録として見つかる）
+                    place.symlink_to(old / "real-place")
+                out = Path(self.tmp.name) / ("rec-" + name)
+                out.mkdir()
+                (out / "record.json").write_text(json.dumps(record))
+                homes = sorted((self.state / "grok-homes").iterdir())
+                rc, again = self.run_launch(None, extra=["--resume", str(out)])
+                self.assertEqual((rc, again["status"]), (2, "unavailable"), again)
+                self.assertIn("1 つだけ見つからない", again["problems"][0])
+                self.assertEqual(sorted((self.state / "grok-homes").iterdir()), homes)  # 空の home を残さない
+        with self.subTest("quota-and-timeout"):  # 利用枠の文言は時間切れより先に決まる。利用枠が戻れば続けられる
+            rc, rec = self.run_launch("codex", extra=["--timeout", "2"], env_extra={**hang, "FAKE_STDERR": "ERROR: You've hit your usage limit."})
+            self.assertEqual((rc, rec["status"], rec["resumable"]), (2, "quota", True), rec)
+            self.assertIn("2 秒で終わらなかった", rec["problems"])
+        with self.subTest("dirty-then-clean"):  # 前の起動が未 commit の変更を見たなら、続きの時点で clean でも head を書かない
+            repo = self.worktree("dirty")[0]
+            (repo / "a.txt").write_text("x\n")
+            rc, rec = self.run_launch("claude", extra=["--timeout", "2"], cwd=repo, env_extra=hang)
+            self.assertEqual((rec["status"], rec["head"]), ("timeout", None), rec)
+            subprocess.run(["git", "-C", str(repo), "add", "a.txt"], check=True)
+            subprocess.run(["git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "-q", "-m", "a"], check=True)
+            rc, again = self.run_launch(None, extra=["--resume", rec["out"]])
+            self.assertEqual((again["status"], again["head"]), ("ok", None), again)
+
     def test_resume_takes_the_launch_only_from_the_record(self):
         """続きを違う権限・違う対象で起動しない。続きから起動できない記録では、子を起こさずに止める。"""
         rc, rec = self.run_launch("claude", extra=["--timeout", "2"], env_extra={"FAKE_HANG": "1"})
         out = Path(rec["out"])
         broken = {}
         for name, change in (("no-session", {"session": None}),  # Codex が thread.started を出す前に止まった
+                             ("not-resumable", {"resumable": False}), ("old-record", {"resumable": None}),
+                             *((f"no-{k}", {k: None}) for k in ("host", "cwd", "model_requested", "effort_requested", "write")),
+                             ("write-not-bool", {"write": "false"}), ("host-unknown", {"host": "other"}),
                              ("no-home", {"host": "grok", "grok_home": str(Path(self.tmp.name) / "gone")}),
                              ("no-scratch", {"host": "codex", "write": False, "scratch": None})):
             broken[name] = Path(self.tmp.name) / name
@@ -1960,6 +2042,9 @@ class TestLaunch(unittest.TestCase):
                 self.assertIn(words, p.stderr)
                 self.assertFalse(self.args_file.exists())  # 子を起こさない
         for extra, words in ((["--resume", str(broken["no-session"])], "session"), (["--resume", str(broken["no-home"])], "grok_home"),
+                             (["--resume", str(broken["not-resumable"])], "続きから起動できない"), (["--resume", str(broken["old-record"])], "続きから起動できない"),
+                             *((["--resume", str(broken[n])], "要るもの") for n in ("no-host", "no-cwd", "no-model_requested", "no-effort_requested",
+                                                                                   "no-write", "write-not-bool", "host-unknown")),
                              (["--resume", str(broken["no-scratch"])], "scratch"), (["--resume", str(Path(self.tmp.name) / "missing")], "読めない"),
                              ([], "--host と --cwd が要る")):
             with self.subTest(extra=extra):
@@ -2129,6 +2214,8 @@ class TestLaunch(unittest.TestCase):
         rc, rec = self.run_launch("codex", "crash")
         self.assertEqual((rc, rec["status"]), (2, "failed"))
         self.assertIn("boom", rec["problems"])
+        rc, rec = self.run_launch("codex", env_extra={"FAKE_EXIT": "3"})  # 報告は形が整っていても、終了コードで失敗にする
+        self.assertEqual((rc, rec["status"], rec["problems"][0]), (2, "failed", "終了コード 3"), rec)
 
     def test_quota_is_reported_not_retried_elsewhere(self):
         rc, rec = self.run_launch("codex", "quota")

@@ -310,23 +310,42 @@ def git_changes(before: dict, after: dict, common: Path) -> list[str]:
     return out
 
 
-def copy_grok_session(old: Path, new: Path, session: str) -> bool:
-    """続きの新しい home に、前の home からその session の記録（sessions/<対象>/<session>/）だけを写す。前の home の設定・hooks・
-    trusted_folders.toml は子の sandbox から書けたので、続きの起動に読ませない（新しい home と、写した記録で -r が続いた。2026-10-25、1.0.70）。
-    写すのは通常のファイルとディレクトリだけで、symlink は写さない（子が置いた symlink を、sandbox の外の Grok が開かないように）。"""
+def grok_session_dir(old: Path, session: str) -> Path | None:
+    """前の home の、その session の記録（sessions/<対象>/<session>/）。1 つだけ、symlink を通らずに見つかったときだけ返す。"""
     if not re.fullmatch(r"[0-9a-fA-F-]{36}", session) or (old / "sessions").is_symlink():  # glob に記号を渡さない
-        return False
+        return None
     found = [d for d in old.glob(f"sessions/*/{session}") if d.is_dir() and not d.is_symlink() and not d.parent.is_symlink()]
-    if len(found) != 1:
-        return False
-    for top, dirs, files in os.walk(found[0]):
+    return found[0] if len(found) == 1 else None
+
+
+def copy_grok_session(src: Path, old: Path, new: Path) -> None:
+    """続きの新しい home に、前の home からその session の記録だけを写す。前の home の設定・hooks・trusted_folders.toml は
+    子の sandbox から書けたので、続きの起動に読ませない（新しい home と、写した記録で -r が続いた。2026-10-25、1.0.70）。
+    写すのは通常のファイルとディレクトリだけで、symlink は写さない（子が置いた symlink を、sandbox の外の Grok が開かないように）。
+    記録の中身も子が書けたので、続きでは sandbox が効いたこと（grok_profile_applied）を照らす。"""
+    for top, dirs, files in os.walk(src):
         dirs[:] = [d for d in dirs if not os.path.islink(os.path.join(top, d))]
         to = new / Path(top).relative_to(old)
         to.mkdir(parents=True, exist_ok=True)
         for f in files:
             if not os.path.islink(os.path.join(top, f)) and os.path.isfile(os.path.join(top, f)):
                 shutil.copyfile(os.path.join(top, f), to / f)
-    return True
+
+
+def grok_profile_applied(home: Path) -> bool:
+    """その home に、bbwrit の profile を強制した記録（sessions/sandbox-events.jsonl の ProfileApplied で enforced）があるか。"""
+    try:
+        lines = (home / "sessions" / "sandbox-events.jsonl").read_text(encoding="utf-8", errors="replace").split("\n")
+    except OSError:
+        return False
+    for line in lines:
+        try:
+            e = obj(json.loads(line))
+        except (ValueError, RecursionError):
+            continue
+        if e.get("event_type") == "ProfileApplied" and e.get("profile") == "bbwrit" and e.get("enforced") is True:
+            return True
+    return False
 
 
 def grok_home(login: Path, extends: str, read_write: list[Path]) -> tuple[Path, str]:
@@ -491,6 +510,9 @@ def command(a, prompt: str, scratch: Path) -> tuple[list[str], dict, str | None]
         login = cfg / "grok-auth"
         if not (login / "auth.json").is_file():
             return [], env, f"専用ログインが無い: {login}/auth.json（GROK_HOME={login} grok login）"
+        src = a.grok_home and grok_session_dir(a.grok_home, a.session)
+        if a.grok_home and not src:
+            return [], env, f"前の home {a.grok_home} に session {a.session} の記録が 1 つだけ見つからない（symlink の下は見ない）"
         if a.write:
             own, common, why = worktree_dirs(a.cwd)
             if why:
@@ -502,8 +524,8 @@ def command(a, prompt: str, scratch: Path) -> tuple[list[str], dict, str | None]
                 if a.cwd == d or d in a.cwd.parents or a.cwd in d.parents:
                     return [], env, f"対象と {d} が重なる。Grok の read-only の sandbox はそこへの書き込みを止めないので、読み取り専用にできない"
             home, profile = grok_home(login, "read-only", [])
-        if a.grok_home and not copy_grok_session(a.grok_home, home, a.session):
-            return [], env, f"前の home {a.grok_home} に session {a.session} の記録が無い"
+        if src:
+            copy_grok_session(src, a.grok_home, home)
         # 親の GROK_*（GROK_AGENT・GROK_SANDBOX・GROK_CONFIG など）と API キーを渡さない。API キーがあるとログインの代わりに別料金の API へ落ちる
         env = {k: v for k, v in env.items() if not k.startswith("GROK_") and k not in ("XAI_API_KEY", "RUST_LOG")}
         env.update(GROK_HOME=str(home), GROK_MEMORY="0", **GROK_COMPAT_OFF)
@@ -617,10 +639,11 @@ def parse_codex(out: str) -> dict:
             usage = e.get("usage")
         elif e.get("type") in ("error", "turn.failed"):
             errors.append(str(e.get("message") or obj(e.get("error")).get("message") or "")[:300])
-    eff, perms = None, []
+    eff, perms, files = None, [], []
     # 実効値は記録の turn_context から（メタデータだけを読む）。session は UUID の形のときだけ探す（glob に記号を渡さず、別の記録の末尾に当たらない）
     if session and re.fullmatch(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}", session):
-        for f in (config_dir() / "codex-home" / "sessions").glob(f"**/rollout-*-{session}.jsonl"):
+        files = list((config_dir() / "codex-home" / "sessions").glob(f"**/rollout-*-{session}.jsonl"))
+        for f in files:
             for line in rollout_lines(f):
                 try:
                     e = obj(json.loads(line.decode("utf-8")))
@@ -649,7 +672,8 @@ def parse_codex(out: str) -> dict:
         eff["network"] = None if None in nets else next((n for n in sorted(nets) if n != "restricted"), "restricted")
     # 照合（codex_breach）に渡す turn ごとの権限（項目の全部は記録に書かない）
     turns = [{"writable": w, "network": n, "rules": r or []} for w, n, r in perms] if eff is not None else []
-    return {"text": text, "session": session, "model_effective": eff, "usage": usage, "errors": errors, "permissions": turns}
+    return {"text": text, "session": session, "model_effective": eff, "usage": usage, "errors": errors, "permissions": turns,
+            "rollouts": len(files)}
 
 
 def parse_grok(out: str) -> dict:
@@ -858,6 +882,10 @@ def main() -> int:
         if not (prev.get("host") in ("claude", "codex", "grok") and all(isinstance(prev.get(k), str) and prev[k] for k in ("cwd", "model_requested", "effort_requested", "session"))
                 and isinstance(prev.get("write"), bool)):
             ap.error(f"--resume の記録に、続きから起動するのに要るもの（host・cwd・model・effort・write・session）が無い: {a.resume}")
+        if prev.get("resumable") is not True:
+            ap.error(f"前の起動の記録は続きから起動できない（{(prev.get('problems') or ['理由が記録に無い'])[0]}"[:300]
+                     + "）。権限の照合に当たった・止めきれないプロセスがあった・Git の管理情報が変わったなどの記録は、確かめてから最初から起動し直す: "
+                     + str(a.resume))
         if prev["host"] == "grok" and not (isinstance(prev.get("grok_home"), str) and Path(prev["grok_home"]).is_dir()):
             ap.error(f"--resume の記録の grok_home が無い（Grok は前の home の session の記録から続ける）: {a.resume}")
         if prev["host"] == "codex" and not prev["write"] and not isinstance(prev.get("scratch"), str):
@@ -891,6 +919,7 @@ def main() -> int:
     rec = {"host": a.host, "cwd": str(a.cwd), "model_requested": a.model, "effort_requested": a.effort,
            "write": a.write, "out": str(out_dir), **({"resumed_from": str(a.resume.resolve())} if a.resume else {}),
            "load": {"cpus": os.cpu_count(), "start": load_now()}}  # 時間切れが混雑によるかを後で見分ける材料
+    blocked = []  # 続きから起動させない理由（権限が分からない、プロセスを止めきれない、Git の管理情報が変わった、照合できない）
     rec["head"] = clean_head(a.cwd)  # 子を起こす前に（子が見る作業ツリー）
 
     snapshot, why, prep = None, None, None
@@ -975,9 +1004,13 @@ def main() -> int:
             got = {"claude": parse_claude, "codex": parse_codex, "grok": parse_grok}[a.host](p.stdout)
             # 警告の行（sandbox の適用失敗、効かなかった引数）があれば、権限の約束どおりに動いたか分からないので結果を使わない
             unsafe = [l for l in p.stderr.splitlines() if a.host == "grok" and GROK_WARNING.search(l)][-5:]
+            if a.host == "grok" and a.grok_home and not grok_profile_applied(Path(env["GROK_HOME"])):  # 写した記録の中身は子が書けた
+                unsafe.append("続きの起動で、sandbox の profile を強制した記録（sessions/sandbox-events.jsonl の ProfileApplied）が無い")
             rec.update(exit_code=p.returncode, session=got["session"] or a.session, model_effective=got["model_effective"], usage=got["usage"])
             # 読み取り専用の Codex の実効の権限。続きでは、前の起動で照らし終えた turn（その起動の deny で照らした）を除く
             breach = a.host == "codex" and not a.write and codex_breach(got["permissions"][a.codex_turns:], a.codex_denies)
+            if breach is None and a.codex_turns and got["rollouts"] != 1:  # 前の turn を除けるのは、同じ記録ファイルに足したときだけ（0.164.0 の実物）
+                breach = f"続きの Codex の記録ファイルが 1 つでない（{got['rollouts']} 個）。前の起動で照らした turn を除けず、実効の権限を確かめられない"
             if a.host == "codex" and not a.write and not breach:
                 rec["codex_turns"] = len(got["permissions"])
             stopped = [f"{a.timeout} 秒で終わらなかった"] if timed_out else []
@@ -985,8 +1018,13 @@ def main() -> int:
             if QUOTA.search(p.stderr[-4000:] + " ".join(got["errors"])):
                 rec.update(status="quota", problems=["利用枠の上限に当たった（別料金の API へは切り替えない）"] + stopped)
             elif unsafe:
-                rec.update(status="failed", problems=["Grok が警告を出した（権限の約束どおりに動いたか分からない）"] + unsafe + stopped)
+                blocked.append("unsafe")
+                rec.update(status="failed", problems=["Grok の sandbox が約束どおりに効いたか分からない（警告か、適用の記録が無い）"] + unsafe + stopped)
+            elif a.resume and got["session"] and got["session"] != a.session:  # 前の会話の続きか、前の起動の照合を引き継げるか分からない
+                blocked.append("session")
+                rec.update(status="failed", problems=[f"続きの子が、前と違う session（{got['session']}）で動いた"] + stopped)
             elif timed_out and breach:
+                blocked.append("breach")
                 rec.update(status="failed", problems=[breach] + stopped)
             elif timed_out:  # 子の作業は会話記録に残っている。最初から起動し直さず、続きから起動する
                 rec.update(status="timeout", problems=[stopped[0] + "。" + (f"--resume {out_dir} で続きから起動できる" if rec["session"]
@@ -996,6 +1034,7 @@ def main() -> int:
                 rec.update(status="failed", problems=[f"終了コード {p.returncode}"] + got["errors"] + tail)
             elif breach:
                 # 対象の設定が profile を広げた・狭めた（読み取り専用の結果として使わない）。報告は report.md に残す
+                blocked.append("breach")
                 rec.update(status="failed", problems=[breach])
                 (out_dir / "report.md").write_text(got["text"], encoding="utf-8", errors="backslashreplace")
             else:
@@ -1008,10 +1047,12 @@ def main() -> int:
                 (out_dir / "report.md").write_text(got["text"], encoding="utf-8", errors="backslashreplace")  # 単独のサロゲート
         except Exception as e:  # 想定外。委任の記録は書き、失敗として返す（トレースバックは out に残す）
             what = "子を起動できない" if child is None else "子の結果を読めない"
+            blocked.append("error")
             rec.update(status="failed", problems=[f"{what}: {e!r}"[:300], f"詳細: {launcher_error(out_dir)}"])
         finally:
             # 後処理は、子が書き換えた場所を触る。どの段が失敗しても、記録は書き、失敗として返す
             if left:  # 照合の後にも書き換えうる
+                blocked.append("left")
                 rec.update(status="failed", problems=["子の CLI が終わった後、子が起こしたプロセスを止められない。下のプロセスを確かめて止める"]
                            + left[:20] + rec.get("problems", []))
             if snapshot:
@@ -1027,6 +1068,7 @@ def main() -> int:
                     changed = [f"Git の管理情報を読めない（子が壊したかもしれない）: {e!r}"[:300], f"詳細: {launcher_error(out_dir)}"]
                     headline = "子の後に Git の管理情報を照合できない。"
                 if changed:
+                    blocked.append("git")
                     rec.update(status="failed", problems=[headline + "この作業場所で git を動かす前に、下の場所を確かめる（偽の設定が sandbox の外で動きうる）"]
                                + changed[:20] + rec.get("problems", []))
             try:
@@ -1034,6 +1076,7 @@ def main() -> int:
                     if d.is_dir() and not d.is_symlink() and not any(d.iterdir()):
                         d.rmdir()
             except Exception as e:  # 子が権限を変えたなど。残ったものは task cleanup が未保存の変更とみなす
+                blocked.append("cleanup")
                 rec.update(status="failed", problems=[f"子の起動で作られた空の .claude を片付けられない: {e!r}"[:300],
                                                       f"詳細: {launcher_error(out_dir)}"] + rec.get("problems", []))
             if cwd_before is not None:
@@ -1041,6 +1084,7 @@ def main() -> int:
                     rec["cwd_residue"] = cwd_residue(a.cwd, cwd_before)
                 except Exception as e:
                     rec.setdefault("cwd_residue", [])
+                    blocked.append("cwd")
                     # 子が対象の場所を読めなくしたときは、先に並んだ理由（.claude を片付けられない、など）を前に残す
                     rec.update(status="failed", problems=rec.get("problems", []) + [f"対象の残りを確かめられない: {e!r}"[:600],
                                                                                      f"詳細: {launcher_error(out_dir)}"])
@@ -1064,6 +1108,7 @@ def main() -> int:
                     raise PermissionError(f"読めない場所が増えた: {sorted(unreadable - unreadable_before)[:20]}")
             except Exception as e:
                 rec.setdefault("home_residue", [])
+                blocked.append("home")
                 rec.update(status="failed", problems=[f"ホームの残りを確かめられない: {e!r}"[:600], f"詳細: {launcher_error(out_dir)}"]
                            + rec.get("problems", []))
             if rec["home_residue"]:
@@ -1076,6 +1121,8 @@ def main() -> int:
         rec.update(head=None, head_lost=f"前の起動の head（{a.prev_head}）と違う。続きの子は前の起動で別のものを見た")
     rec["duration_s"] = round(time.time() - t0, 1)
     rec["load"]["end"] = load_now()
+    # 続きから起動してよいのは、session があり、権限・プロセス・Git・照合のどれにも当たらなかった起動だけ（空の残りは、片付けてから続けられる）
+    rec["resumable"] = bool(rec.get("session")) and not blocked
     try:
         body = json.dumps(rec, ensure_ascii=False, indent=1)
     except (RecursionError, ValueError) as e:  # 子から来た値が深すぎる。外して、失敗として記録する
