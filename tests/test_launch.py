@@ -1814,7 +1814,8 @@ class TestLaunch(unittest.TestCase):
         return repo, wt
 
     def test_only_a_child_counted_as_a_review_is_told_to_write_the_triage(self):
-        """work.py が審査に数える子（読み取り専用・ok・head あり）にだけ、直す前に指摘の扱いを書けと出す。"""
+        """work.py が審査に数える子（読み取り専用・ok・head あり）にだけ、直す前に指摘の扱いを書けと出す。
+        next は案内の文で、文言は「指摘の扱い」の欄の名前のほかは確かめない。"""
         repo, wt = self.worktree("next")
         (repo / ".git" / "info" / "exclude").write_text("a.txt\n")  # 偽の子の報告が証拠に指すファイル。変更に数えない
         rc, rec = self.run_launch("claude", cwd=wt)

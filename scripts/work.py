@@ -245,11 +245,19 @@ def note_gaps(body: str, reviewed: bool) -> list:
     return gaps
 
 
+def note_body(f: Path) -> str:
+    """記録の中身。無ければ空。UTF-8 でない字は置き換えて読む（欄が空かを見るだけなので、止めない）。読めなければ RecordError。"""
+    try:
+        return f.read_text(encoding="utf-8", errors="replace") if f.is_file() else ""
+    except OSError as e:
+        raise RecordError(f"作業の記録 {f} を読めない: {e}") from None
+
+
 def note(r: Path) -> dict:
     f = r / "note.md"
     if not f.is_file():
         f.write_text(NOTE, encoding="utf-8")
-    body = f.read_text(encoding="utf-8")
+    body = note_body(f)
     ev = r / "evidence"
     ev.mkdir(exist_ok=True)
     gaps = note_gaps(body, False)
@@ -759,9 +767,9 @@ def op_step(a, r: Path, live, now: float, action: str):
             return ({"ok": False, "reason": f"危険度が{risk.group(1)}の変更は interrogate を通す（入口の条件 (6)）。--reviewed に、審査を通した commit を書く"}, 2)
         risk = risk.group(1) + ": " + risk.group(2).strip()
         f = r / "note.md"
-        gaps = note_gaps(f.read_text(encoding="utf-8") if f.is_file() else "", bool(reviews))
+        gaps = note_gaps(note_body(f), bool(reviews))
         if gaps:
-            return ({"ok": False, "reason": f"作業の記録 {f} の欄が空か無い: {'、'.join(gaps)}。目的・制約・確かめ方は担当を取った直後に、"
+            return ({"ok": False, "note": {"path": str(f), "empty": gaps}, "reason": f"作業の記録 {f} の欄が空か無い: {'、'.join(gaps)}。目的・制約・確かめ方は担当を取った直後に、"
                         "審査を通した commit を出すときの指摘の扱いは直す前に、その欄へ書く（`playbook-deliver` の「記録を残す」と入口の条件 (6)。"
                         "欄の名前の行が無ければ、雛形の行を足す）"}, 2)
     if action == "begin" and known:
@@ -1247,9 +1255,9 @@ def dispatch(a, r: Path, run_argv):
             if held:  # 手放すと、監督役が結果を記録できない
                 return out({"ok": False, "reason": f"op run の外部操作がまだ動いている: {held}。終わるのを待ってから手放す"}, 4)
             if a.cmd == "renew":
+                n = note(r)  # 単位ごとに呼ばれるので、空の欄をここで知らせる（拒否はしない）。読めなければ期限を書く前に止まる
                 live["expires_at"] = now + a.lease * 60
                 write(r / "lease.json", live)
-                n = note(r)  # 単位ごとに呼ばれるので、空の欄をここで知らせる（拒否はしない）
                 return out({"ok": True, **({"note": {"path": n["path"], "empty": n["empty"]}} if "empty" in n else {})})
             (r / "lease.json").unlink()
             return out({"ok": True})
