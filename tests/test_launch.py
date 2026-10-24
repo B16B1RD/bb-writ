@@ -161,7 +161,7 @@ FAKE_CLAUDE = textwrap.dedent(r'''
     open(os.environ["FAKE_ARGS"] + ".allenv", "w").write(json.dumps(sorted(k for k in os.environ if not k.startswith("FAKE_"))))
     open(os.environ["FAKE_ARGS"], "w").write(json.dumps(sys.argv[1:]))
     open(os.environ["FAKE_ARGS"] + ".scrub", "w").write(os.environ.get("CLAUDE_CODE_SUBPROCESS_ENV_SCRUB", ""))
-    open(os.environ["FAKE_ARGS"] + ".env", "w").write(json.dumps(sorted(k for k in os.environ if k.startswith(("CLAUDE", "ANTHROPIC_")))))
+    open(os.environ["FAKE_ARGS"] + ".env", "w").write(json.dumps({k: v for k, v in sorted(os.environ.items()) if k.startswith(("CLAUDE", "ANTHROPIC_"))}))
     os.makedirs(".claude/.cc-writes", exist_ok=True)  # 2.1.302 の --restricted が対象に作る空のディレクトリ
     import subprocess
     mode = os.environ.get("FAKE_MODE")
@@ -1411,7 +1411,8 @@ class TestLaunch(unittest.TestCase):
         # 背景の処理を止める変数は、書く子にも読み取り専用の子にも渡す（json の出力が最後のターンの結果だけになり、報告が消えた）
         for extra in ([], ["--write"]):
             self.run_launch("claude", extra=extra, env_extra={"CLAUDE_CODE_PLUGIN_DIRS": "~/.claude/mods/x", "CLAUDECODE": "1", "CLAUDE_EFFORT": "max", "ANTHROPIC_API_KEY": "k"})
-            self.assertEqual(json.loads(Path(str(self.args_file) + ".env").read_text()), ["CLAUDE_CODE_DISABLE_BACKGROUND_TASKS", "CLAUDE_CONFIG_DIR"], extra)
+            env = json.loads(Path(str(self.args_file) + ".env").read_text())
+            self.assertEqual((sorted(env), env["CLAUDE_CODE_DISABLE_BACKGROUND_TASKS"]), (["CLAUDE_CODE_DISABLE_BACKGROUND_TASKS", "CLAUDE_CONFIG_DIR"], "1"), extra)
 
     def test_write_grants_only_the_work_record(self):
         # 書く子に state 全体（タスクの一覧・統合の記録・他の worktree）を渡さない

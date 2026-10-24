@@ -226,18 +226,30 @@ REQUIRED = FIELDS[:3]  # push・pr の前に空なら拒否する欄。審査を
 TRIAGE = FIELDS[3]
 
 
+def field_line(name: str):
+    """欄の名前の行。名前は括弧の前までで見て、括弧の中（説明）は省いてよい（「- 指摘の扱い: …」も欄）。"""
+    short = name.split("（")[0]
+    return re.compile(rf"- {re.escape(short)}(?:（[^）]*）)?:")
+
+
+FIELD_LINES = [field_line(f) for f in FIELDS]
+HEADING = re.compile(r"#+\s")  # Markdown の見出し。「#123 …」は見出しでない
+
+
 def note_gaps(body: str, reviewed: bool) -> list:
     """記録の必須の欄のうち、空か無いものの名前。欄の中身は、名前の行の ":" の後から、次の雛形の欄か見出しの行の前まで
-    （表や字下げした行も中身に数える）。中身の真偽・書いた順・どの審査の指摘かは見ない（忘れて飛ばすのを止める）。"""
+    （表や字下げした行も中身に数える）。中身の真偽・書いた順・どの審査の指摘かは見ない（忘れて飛ばすのを止める）。
+    同じ欄が 2 回あれば最初だけを見る。"""
     lines, gaps = body.splitlines(), []
     for name in REQUIRED + ([TRIAGE] if reviewed else []):
-        at = next((i for i, l in enumerate(lines) if l.startswith(f"- {name}:")), None)
+        pat = field_line(name)
+        at, m = next(((i, m) for i, l in enumerate(lines) if (m := pat.match(l))), (None, None))
         if at is None:
             gaps.append(name)
             continue
-        text = [lines[at][len(name) + 3:]]
+        text = [lines[at][m.end():]]
         for l in lines[at + 1:]:
-            if l.startswith("#") or any(l.startswith(f"- {f}:") for f in FIELDS):
+            if HEADING.match(l) or any(p.match(l) for p in FIELD_LINES):
                 break
             text.append(l)
         if not "".join(text).strip():
@@ -246,7 +258,7 @@ def note_gaps(body: str, reviewed: bool) -> list:
 
 
 def note_body(f: Path) -> str:
-    """記録の中身。無ければ空。UTF-8 でない字は置き換えて読む（欄が空かを見るだけなので、止めない）。
+    """記録の中身。無ければ空。UTF-8 でない字は置き換えて読む（欄が空かを見るだけなので、止めない。置き換えか無視かは結果を変えない）。
     通常のファイルでない（ディレクトリ・壊れた symlink など）か、読めなければ RecordError。"""
     if not f.is_file() and (f.exists() or f.is_symlink()):
         raise RecordError(f"作業の記録 {f} が通常のファイルでない")
@@ -259,7 +271,10 @@ def note_body(f: Path) -> str:
 def note(r: Path) -> dict:
     f = r / "note.md"
     if not f.exists() and not f.is_symlink():
-        f.write_text(NOTE, encoding="utf-8")
+        try:
+            f.write_text(NOTE, encoding="utf-8")
+        except OSError as e:
+            raise RecordError(f"作業の記録 {f} を作れない: {e}") from None
     body = note_body(f)
     ev = r / "evidence"
     ev.mkdir(exist_ok=True)

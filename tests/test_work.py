@@ -984,8 +984,20 @@ class TestNoteBeforePublish(unittest.TestCase):
             rc, res = self.publish(tok, f"push:feat@h{i}", self.head())
             self.assertEqual((rc, res["note"]["empty"]), (2, ["目的"]), body)
             self.w("release", "--dir", str(self.wt), "--token", tok)
-        tok, _ = self.claim(self.head_note(purpose="\n- 制約のメモも目的の中身", triage="x"))
-        self.assertEqual(self.publish(tok, "push:feat@h2", self.head())[0], 0)
+        for i, purpose in enumerate(("\n- 制約のメモも目的の中身", "\n#123 の件（見出しでない）")):
+            tok, _ = self.claim(self.head_note(purpose=purpose, triage="x"))
+            self.assertEqual(self.publish(tok, f"push:feat@c{i}", self.head())[0], 0, purpose)
+            self.w("release", "--dir", str(self.wt), "--token", tok)
+        tok, _ = self.claim(self.head_note())
+        self.w("release", "--dir", str(self.wt), "--token", tok)
+        # 欄の名前は括弧の中を省いてよい。省いた行も欄なので、前の欄の中身に数えない
+        short = "- 指摘の扱い: F1 対応する\n"
+        tok, _ = self.claim(self.head_note(check="").replace("- 決めたことと根拠", short + "- 決めたことと根拠"))
+        rc, res = self.publish(tok, "push:feat@short", self.head())
+        self.assertEqual((rc, res["note"]["empty"]), (2, ["できたと分かる確かめ方（述語）"]))
+        self.w("release", "--dir", str(self.wt), "--token", tok)
+        tok, _ = self.claim(self.head_note().replace("- 決めたことと根拠", short + "- 決めたことと根拠"))
+        self.assertEqual(self.publish(tok, "push:feat@short-ok", self.head())[0], 0)
 
     def test_renew_names_the_empty_fields_without_refusing(self):
         tok, _ = self.claim()
@@ -1036,6 +1048,27 @@ class TestNoteBeforePublish(unittest.TestCase):
         rc, res = self.w("status", "--dir", str(self.wt))
         self.assertEqual(rc, 1)
         self.assertIn("通常のファイルでない", res["reason"])
+        self.note.rmdir()
+        self.note.symlink_to(self.note.parent / "nowhere")  # 壊れた symlink も通常のファイルでない
+        rc, res = self.w("status", "--dir", str(self.wt))
+        self.assertEqual(rc, 1)
+        self.assertIn("通常のファイルでない", res["reason"])
+        self.assertFalse((self.note.parent / "nowhere").exists())  # 行き先に雛形を書かない
+        self.note.unlink()
+        if os.geteuid() == 0:
+            return  # root は権限で書けなくならない
+        tok, _ = self.claim()
+        lease = self.note.parent / "lease.json"
+        before = lease.read_bytes()
+        self.note.unlink()
+        self.note.parent.chmod(0o500)  # 消えた記録を作り直せない
+        try:
+            rc, res = self.w("renew", "--dir", str(self.wt), "--token", tok)
+            self.assertEqual(rc, 1)
+            self.assertIn("作れない", res["reason"])
+            self.assertEqual(lease.read_bytes(), before)
+        finally:
+            self.note.parent.chmod(0o755)
 
     def test_other_operations_do_not_look_at_the_note(self):
         tok, _ = self.claim()
