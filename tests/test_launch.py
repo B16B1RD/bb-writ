@@ -429,6 +429,7 @@ class TestLaunch(unittest.TestCase):
         last = lambda: json.loads((self.state / "delegations.jsonl").read_text().splitlines()[-1])
         rc, rec = self.run_launch("claude")
         self.assertEqual((rc, rec["head"]), (0, None))  # Git の作業ツリーでない
+        self.assertNotIn("next", rec)  # 審査に数えない子には、指摘の扱いを書けと出さない
         git = lambda *a, cwd=self.cwd: subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", *a], cwd=cwd, check=True,
                                                       capture_output=True, text=True).stdout.strip()
         unborn = Path(self.tmp.name) / "unborn"  # まだ commit が無い（ほかに変更の無い作業ツリー）
@@ -454,6 +455,7 @@ class TestLaunch(unittest.TestCase):
                 rc, rec = self.run_launch(host)
                 self.assertEqual((rc, rec["head"], last()["head"]), (0, git("rev-parse", "HEAD"), rec["head"]), rec)
                 self.assertIs(last()["write"], False)
+                self.assertIn("指摘の扱い", rec["next"])  # 審査に数える子が返ったその場で、直す前に書く欄を出す
         no_untracked = Path(self.tmp.name) / "gitconfig"
         no_untracked.write_text("[status]\n\tshowUntrackedFiles = no\n")
         clean = Path(self.tmp.name) / "clean"
@@ -470,11 +472,13 @@ class TestLaunch(unittest.TestCase):
                     make()
                     rc, rec = self.run_launch("claude", env_extra=env)
                     self.assertEqual((rc, rec["head"]), (0, None), rec)
+                    self.assertNotIn("next", rec)
                     git("reset", "-q", "--hard")
                     (self.cwd / "new.txt").unlink(missing_ok=True)
         rc, rec = self.run_launch("claude", mode="wrote")  # 子の実行の間に作業ツリーが変わった
         self.assertEqual((rc, rec["head"]), (0, None), rec)
         self.assertIn("変わった", rec["head_lost"])
+        self.assertNotIn("next", rec)
         subprocess.run(["rm", "-rf", str(self.cwd / ".claude")], check=True)
         rc, rec = self.run_launch("claude", mode="own-commit")  # 子の実行の間に HEAD が別の commit に動いた（作業ツリーは変更なし）
         self.assertEqual((rc, git("status", "--porcelain"), rec["head"]), (0, "", None), rec)
@@ -511,6 +515,7 @@ class TestLaunch(unittest.TestCase):
         self.assertEqual(rec["head"], None, rec)
         rc, rec = self.run_launch("claude", extra=["--write"])  # 書く子（ここでは起動しない）は write が真
         self.assertIs(last()["write"], True)
+        self.assertNotIn("next", rec)  # 書く子は審査に数えない
         sub = Path(self.tmp.name) / "sub"  # サブモジュールの中の変更は、無視する設定があっても数える
         sub.mkdir()
         git("init", "-q", cwd=sub)
@@ -1807,6 +1812,21 @@ class TestLaunch(unittest.TestCase):
         subprocess.run(["git", "-C", str(repo), "worktree", "add", "-q", "-b", "bb-writ/t1", str(wt)], check=True)
         (wt / "a.txt").write_text("x\n")
         return repo, wt
+
+    def test_only_a_child_counted_as_a_review_is_told_to_write_the_triage(self):
+        """work.py が審査に数える子（読み取り専用・ok・head あり）にだけ、直す前に指摘の扱いを書けと出す。"""
+        repo, wt = self.worktree("next")
+        (repo / ".git" / "info" / "exclude").write_text("a.txt\n")  # 偽の子の報告が証拠に指すファイル。変更に数えない
+        rc, rec = self.run_launch("claude", cwd=wt)
+        self.assertEqual((rec["status"], bool(rec["head"])), ("ok", True), rec)
+        self.assertIn("指摘の扱い", rec["next"])
+        rc, rec = self.run_launch("claude", extra=["--write"], cwd=wt)  # 書く子は、head があっても審査に数えない
+        self.assertEqual((rec["status"], bool(rec["head"])), ("ok", True), rec)
+        self.assertNotIn("next", rec)
+        body = {"conclusion": "c", "evidence": [{"what": "読んだ", "where": "a.txt:1"}], "unknowns": []}  # 実行の欄が無い報告
+        rc, rec = self.run_launch("claude", cwd=wt, env_extra={"FAKE_TEXT": "```json\n" + json.dumps(body) + "\n```"})
+        self.assertEqual((rec["status"], bool(rec["head"])), ("not-run", True), rec)
+        self.assertNotIn("next", rec)
 
     def test_write_refuses_the_original_checkout(self):
         repo, wt = self.worktree()

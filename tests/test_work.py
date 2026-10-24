@@ -25,6 +25,10 @@ def with_risk(t, args):
     return (*args[:i], "--risk", "低:試験の外", *args[i:])
 
 
+FILLED_NOTE = ("# 作業の記録\n\n- 目的: 試験の外\n- 制約: 試験の外\n- できたと分かる確かめ方（述語）: 試験の外\n"
+               "- 指摘の扱い（審査の指摘ごとに、対応する・記録のみ・退ける と理由を、直す前に）: 試験の外\n")
+
+
 def decl(key):
     """push・pr に要る、届ける前の審査の宣言（この試験の外の約束）。"""
     return ("--reviewed", "none:試験の外", "--risk", "低:試験の外") if key.split(":")[0] in ("push", "pr") else ()
@@ -235,7 +239,10 @@ class TestAccountCheck(unittest.TestCase):
         return str(out)
 
     def claim(self):
-        return self.w("claim", "--dir", str(self.wt), "--holder", "A")[1]["token"]
+        r = self.w("claim", "--dir", str(self.wt), "--holder", "A")[1]
+        if getattr(self, "fill_note", True):  # push・pr に要る記録の必須の欄（この試験の外の約束）。記録そのものを試す試験は偽にする
+            Path(r["note"]["path"]).write_text(FILLED_NOTE, encoding="utf-8")
+        return r["token"]
 
     def begin(self, tok, key, *frm):
         return self.w("op", "begin", "--dir", str(self.wt), "--token", tok, "--key", key, "--what", "x", *frm)
@@ -889,6 +896,94 @@ def permissions_bind():
 
 
 PERMISSIONS_BIND = permissions_bind()
+
+
+TRIAGE_LINE = "- 指摘の扱い（審査の指摘ごとに、対応する・記録のみ・退ける と理由を、直す前に）:"
+
+
+class TestNoteBeforePublish(unittest.TestCase):
+    """push・pr は、作業の記録の目的・制約・確かめ方と、審査を通した commit なら指摘の扱いが空なら出せない。
+    言い直し・記録・指摘の扱いの一覧を飛ばしたまま、長いセッションで作業が進んだ。照らすのは欄が空かどうかだけで、
+    中身の真偽・書いた順・どの周の審査の指摘かは見ない（前の周の扱いが残っていれば通る）。"""
+    setUp, tearDown, w, begin, head, review_record = (TestAccountCheck.setUp, TestAccountCheck.tearDown, TestAccountCheck.w,
+                                                      TestAccountCheck.begin, TestVerifiedCommit.head, TestAccountCheck.review_record)
+    fill_note = False
+
+    def claim(self, body=None):
+        r = self.w("claim", "--dir", str(self.wt), "--holder", "A")[1]
+        self.note = Path(r["note"]["path"])
+        if body is not None:
+            self.note.write_text(body, encoding="utf-8")
+        return r["token"], r
+
+    def publish(self, tok, key, reviewed):
+        return self.begin(tok, key, "--from", str(self.repo), "--verified", self.head(), "--reviewed", reviewed)
+
+    def head_note(self, purpose="x", limits="x", check="x", triage=None):
+        return (f"# 作業の記録\n\n- 目的:{purpose}\n- 制約:{limits}\n- できたと分かる確かめ方（述語）:{check}\n"
+                + ("" if triage is None else f"{TRIAGE_LINE}{triage}\n") + "- 決めたことと根拠: y\n")
+
+    def test_the_template_as_claimed_is_refused_and_names_the_empty_fields(self):
+        tok, r = self.claim()
+        self.assertEqual(r["note"]["empty"], ["目的", "制約", "できたと分かる確かめ方（述語）"])  # 担当を取った場で知らせる
+        for key in ("push:feat@1", "pr:feat"):
+            rc, res = self.publish(tok, key, "none:文書だけ")
+            self.assertEqual(rc, 2, key)
+            self.assertIn(str(self.note), res["reason"])
+            for name in ("目的", "制約", "できたと分かる確かめ方（述語）"):
+                self.assertIn(name, res["reason"], key)
+        self.assertEqual(self.pending(), [])  # 記録しない
+
+    def test_each_required_field_alone_left_empty_is_refused(self):
+        for empty in ("purpose", "limits", "check"):
+            with self.subTest(empty=empty):
+                tok, _ = self.claim(self.head_note(**{empty: "   "}))  # 空白だけは空
+                rc, res = self.publish(tok, f"push:feat@{empty}", "none:文書だけ")
+                self.assertEqual(rc, 2, res)
+                name = {"purpose": "目的", "limits": "制約", "check": "できたと分かる確かめ方（述語）"}[empty]
+                self.assertEqual(res["reason"].split("の欄が空か無い: ")[1].split("。")[0], name)
+                self.w("release", "--dir", str(self.wt), "--token", tok)
+
+    def test_filled_fields_pass_and_the_triage_is_not_needed_without_a_reviewed_commit(self):
+        tok, r = self.claim(self.head_note())
+        self.assertNotIn("empty", self.w("status", "--dir", str(self.wt))[1]["note"])
+        self.assertEqual(self.publish(tok, "push:feat@1", "none:文書だけ")[0], 0)
+
+    def test_a_reviewed_commit_needs_the_triage(self):
+        for triage in (None, "", "  "):  # 欄の行が無い（前の雛形の記録）、空、空白だけ
+            with self.subTest(triage=triage):
+                tok, _ = self.claim(self.head_note(triage=triage))
+                rc, res = self.publish(tok, f"pr:feat@{triage!r}", self.head())
+                self.assertEqual(rc, 2, res)
+                self.assertEqual(res["reason"].split("の欄が空か無い: ")[1].split("。")[0], "指摘の扱い（審査の指摘ごとに、対応する・記録のみ・退ける と理由を、直す前に）")
+                self.w("release", "--dir", str(self.wt), "--token", tok)
+        tok, _ = self.claim(self.head_note(triage=" F1 対応する: 実際の入力で落ちる"))
+        self.assertEqual(self.publish(tok, "push:feat@ok", self.head())[0], 0)
+
+    def test_lines_under_a_field_count_until_the_next_field_or_heading(self):
+        table = "\n| 指摘 | 扱い |\n|---|---|\n| F1 | 対応する |\n  - 字下げした行"
+        tok, _ = self.claim(self.head_note(purpose="\n  - 字下げした目的", triage=table))
+        self.assertEqual(self.publish(tok, "push:feat@1", self.head())[0], 0)
+        self.w("release", "--dir", str(self.wt), "--token", tok)
+        # 見出しの下や次の欄に書いたものは、空の欄の中身に数えない
+        body = self.head_note(purpose="", triage="x").replace("- 制約:x", "## 目的\n書いた\n- 制約:x")
+        tok, _ = self.claim(body)
+        rc, res = self.publish(tok, "push:feat@2", self.head())
+        self.assertEqual((rc, res["reason"].split("の欄が空か無い: ")[1].split("。")[0]), (2, "目的"))
+
+    def test_renew_names_the_empty_fields_without_refusing(self):
+        tok, _ = self.claim()
+        rc, r = self.w("renew", "--dir", str(self.wt), "--token", tok)
+        self.assertEqual((rc, r["note"]["empty"]), (0, ["目的", "制約", "できたと分かる確かめ方（述語）"]))
+        self.note.write_text(self.head_note(), encoding="utf-8")
+        self.assertEqual(self.w("renew", "--dir", str(self.wt), "--token", tok), (0, {"ok": True}))
+
+    def test_other_operations_do_not_look_at_the_note(self):
+        tok, _ = self.claim()
+        self.assertEqual(self.w("op", "begin", "--dir", str(self.wt), "--token", tok, "--key", "local:x", "--what", "x")[0], 0)
+        self.assertEqual(self.begin(tok, "comment:pr-1", "--from", str(self.repo))[0], 0)
+
+    pending = TestReviewedCommit.pending
 
 
 class TestOpRun(unittest.TestCase):

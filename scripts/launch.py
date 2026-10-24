@@ -997,6 +997,9 @@ def main() -> int:
                            + rec["home_residue"][:20] + rec.get("problems", []))
     if rec["head"] and clean_head(a.cwd) != rec["head"]:  # 確かめた後、子の終わりまでに作業ツリーが変わった（子が見たものが commit と違いうる）
         rec.update(head=None, head_lost="子の起動の前に確かめた後、終わりまでに対象の HEAD か作業ツリーが変わったか、終わりに確かめられなかった")
+    if rec["status"] == "ok" and not a.write and rec["head"]:  # work.py が審査に数える子。指摘が届いたその場で、次にすることを出す
+        rec["next"] = ("審査の指摘なら、直す前に、作業の記録（claim の note.path）の「指摘の扱い」の欄に、指摘ごとに"
+                       "対応する・記録のみ・退ける と理由を書く（入口の条件 (6)。push・pr はこの欄が空なら拒否される）")
     rec["duration_s"] = round(time.time() - t0, 1)
     try:
         body = json.dumps(rec, ensure_ascii=False, indent=1)
