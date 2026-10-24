@@ -227,13 +227,13 @@ TRIAGE = FIELDS[3]
 
 
 def field_line(name: str):
-    """欄の名前の行。名前は括弧の前までで見て、括弧の中（説明）は省いてよい（「- 指摘の扱い: …」も欄）。"""
-    short = name.split("（")[0]
-    return re.compile(rf"- {re.escape(short)}(?:（[^）]*）)?:")
+    """欄の名前の行。雛形の括弧の中（説明）は省いてよい（「- 指摘の扱い: …」も欄）。別の文言の括弧は受けない。"""
+    short, paren = name.split("（")[0], name[len(name.split("（")[0]):]
+    return re.compile(rf"- {re.escape(short)}(?:{re.escape(paren)})?:" if paren else rf"- {re.escape(short)}:")
 
 
 FIELD_LINES = [field_line(f) for f in FIELDS]
-HEADING = re.compile(r"#+\s")  # Markdown の見出し。「#123 …」は見出しでない
+HEADING = re.compile(r"#+(\s|$)")  # Markdown の見出し（「#」だけの空の見出しも）。「#123 …」は見出しでない
 
 
 def note_gaps(body: str, reviewed: bool) -> list:

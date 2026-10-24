@@ -984,7 +984,7 @@ class TestNoteBeforePublish(unittest.TestCase):
             rc, res = self.publish(tok, f"push:feat@h{i}", self.head())
             self.assertEqual((rc, res["note"]["empty"]), (2, ["目的"]), body)
             self.w("release", "--dir", str(self.wt), "--token", tok)
-        for i, purpose in enumerate(("\n- 制約のメモも目的の中身", "\n#123 の件（見出しでない）")):
+        for i, purpose in enumerate(("\n- 制約のメモも目的の中身", "\n#123 の件（見出しでない）", "\nメモ # 2（行の途中の # は見出しでない）")):
             tok, _ = self.claim(self.head_note(purpose=purpose, triage="x"))
             self.assertEqual(self.publish(tok, f"push:feat@c{i}", self.head())[0], 0, purpose)
             self.w("release", "--dir", str(self.wt), "--token", tok)
@@ -998,6 +998,20 @@ class TestNoteBeforePublish(unittest.TestCase):
         self.w("release", "--dir", str(self.wt), "--token", tok)
         tok, _ = self.claim(self.head_note().replace("- 決めたことと根拠", short + "- 決めたことと根拠"))
         self.assertEqual(self.publish(tok, "push:feat@short-ok", self.head())[0], 0)
+        self.w("release", "--dir", str(self.wt), "--token", tok)
+        # 別の文言の括弧の欄・「#」だけの空の見出しの下・2 回目の同じ欄は、空の欄を埋めない（同じ欄は最初だけを見る）
+        tok, _ = self.claim(self.head_note(check="", triage="x").replace("# 作業の記録\n", "# 作業の記録\n- できたと分かる確かめ方（未定）: x\n"))
+        rc, res = self.publish(tok, "push:feat@paren", self.head())
+        self.assertEqual((rc, res["note"]["empty"]), (2, ["できたと分かる確かめ方（述語）"]))
+        self.w("release", "--dir", str(self.wt), "--token", tok)
+        for i, body in enumerate((self.head_note(purpose="", triage="x").replace("# 作業の記録\n", "# 作業の記録\n- 目的（別物）: x\n"),
+                                  self.head_note(purpose="", triage="x").replace("- 制約:x", "#\n見出しの下\n- 制約:x"),
+                                  self.head_note(purpose="", triage="x") + "- 目的: 後から書いた\n")):
+            tok, _ = self.claim(body)
+            rc, res = self.publish(tok, f"push:feat@x{i}", self.head())
+            self.assertEqual((rc, res["note"]["empty"]), (2, ["目的"]), body)
+            self.w("release", "--dir", str(self.wt), "--token", tok)
+        tok, _ = self.claim(self.head_note())
 
     def test_renew_names_the_empty_fields_without_refusing(self):
         tok, _ = self.claim()
