@@ -3,15 +3,19 @@
 審査が 1 周に 1 つずつ交互実行を見つけ、そのたびに直していたため、このモデルが写す範囲は 1 回の全探索でたどる。
 範囲は担当 2・鍵 2・token 3。担当の期限切れはいつでも起こせる（実際の時間を写さない、保守的な写し方）。
 過去の修正を戻した版をフラグで作り、それぞれが反例を出すことも試す（一度も落ちたことのない検査は、何も確かめていない）。
-TLA+ の同じモデル（TLC）とは、照合した commit で、今の版の状態数と戻した版の違反と反例の長さが一致した。
+TLA+ の同じモデル（TLC）とは、照合した commit で、今の版の状態数（MODELED_STATES）と、戻した版の違反と反例の動作の列が一致した。
+モデルを変えたら（動作を足す・削る・条件を変える）、状態数が変わって落ちる。同じ変更を TLA+ のモデルに入れて TLC と照らしてから、
+MODELED_STATES を書き換える。
 
 モデルが写す関数と、最後に照合した commit、その commit での各関数の本文のハッシュ（下の MODELED）。
-ハッシュは、関数の本文からコメント・先頭の docstring・空行・行末の空白を除いたものに掛ける（Python の版によらない）。
-dispatch は release と op done の分岐だけを写すが、ハッシュは関数全体に掛ける。alive・check_token は、担当が生きているかと
-done を書けるかの判定（op_step が done で呼ぶのは check_token と記録の照合だけ）を写す。op_step そのものは、--reviewed などの
-写さない照合が多く、変わるたびに落ちるので照らさない。
-写さない段: シグナルの中継（supervise の 2 回目の fork）、記録の形式、出力のファイル、op begin（op run を通さない）、
-integrate の排他と照合。
+ハッシュは、関数の本文（デコレータを含む）からコメント・先頭の docstring・空行・行末の空白を除いたものに掛ける（Python の版によらない）。
+意味の同じ書式の変更（括弧・改行の位置）でも変わる。そのときも、照合した commit とハッシュを進める。
+dispatch は release と op done の分岐だけを、op_step は担当の token の照合と同じ鍵の begin・done の拒否だけを写すが、
+ハッシュは関数全体に掛ける（op_step は --reviewed などの写さない照合でも変わる）。locked は作業場所の排他、run_lock は鍵ごとに
+別のロックのファイル、ops は鍵ごとの最後の state、alive・check_token は担当が生きているかと done を書けるかを写す。
+写す関数が拒否を足すだけの変更は、モデルが許す動きを減らすだけなので、不変条件は保たれる（それでもハッシュは落ちる）。
+写さない段: シグナルの中継（supervise の 2 回目の fork）、記録の形式と壊れた記録、出力のファイル、ロックを開けない・読めないとき、
+op begin（op run を通さない）、integrate の排他と照合。
 
 照合が落ちたら、変わった関数を読み、モデル（successors）が今の本文を写していることを確かめる（違えば直して全探索を通す）。
 そのうえで、照合した commit とハッシュを一緒に書き換える。写す分岐に関係しない変更（dispatch の status など）でも同じにする。
@@ -20,6 +24,7 @@ integrate の排他と照合。
 import ast
 import hashlib
 import io
+import subprocess
 import sys
 import tokenize
 import unittest
@@ -30,7 +35,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent)); import process_limit  
 WORK = Path(__file__).resolve().parents[1] / "scripts" / "work.py"
 
 MODELED_AT = "3dc5f8d"
+MODELED_STATES = 84981
 MODELED = {
+    "locked": "9eaa07012a88c87c",
+    "ops": "19f01a5bc3cb84ad",
+    "op_step": "2f1b8ddd8883b632",
+    "run_lock": "fdd3edfffe9c0b10",
     "alive": "be56e37e0b082f93",
     "check_token": "6297f65bcd57f11c",
     "claim_at": "ce185fc18d5fc861",
@@ -44,14 +54,15 @@ MODELED = {
 
 
 def body(src: str, name: str) -> str:
-    """モジュールの最上位の関数 name の本文から、コメント・先頭の docstring・空行・行末の空白を除いたもの。"""
+    """モジュールの最上位の関数 name の本文（デコレータを含む）から、コメント・先頭の docstring・空行・行末の空白を除いたもの。"""
     node = next((n for n in ast.parse(src).body if isinstance(n, ast.FunctionDef) and n.name == name), None)
     if node is None:
         raise LookupError(f"work.py に関数 {name} が無い")
-    lines = src.splitlines()[node.lineno - 1:node.end_lineno]
+    start = min([node.lineno] + [d.lineno for d in node.decorator_list])
+    lines = src.splitlines()[start - 1:node.end_lineno]
     first = node.body[0]
     if isinstance(first, ast.Expr) and isinstance(first.value, ast.Constant) and isinstance(first.value.value, str):
-        drop = set(range(first.lineno - node.lineno, first.end_lineno - node.lineno + 1))
+        drop = set(range(first.lineno - start, first.end_lineno - start + 1))
         lines = ["" if i in drop else line for i, line in enumerate(lines)]
     text = "\n".join(lines) + "\n"
     cuts = {}  # 行ごとの、コメントが始まる列
@@ -71,7 +82,7 @@ def fingerprint(src: str, name: str) -> str:
 #   lease_tok: lease.json の token（0 は無い）  lease_alive: 期限内か  next_tok: 次に払い出す token
 #   tok_of: 担当ごとの、最後に受け取った token  rec: 鍵ごとの ops.jsonl の state（none・begun・done）
 #   lock_file: 鍵ごとのロックのファイルがあるか  holders: 鍵ごとの、そのロックの flock を持つもの（oprun・sup・cmd・left）
-#   oprun: 鍵ごとの op run（none・spawning・spawned・dead）  sup: 鍵ごとの監督役（none・started・waiting・wrote・exited・killed）
+#   oprun: 鍵ごとの op run（none・spawning・spawned・dead・failed）  sup: 鍵ごとの監督役（none・started・waiting・wrote・exited・killed）
 #   sup_tok: 鍵ごとの、監督役が受け取った token  cmd: 鍵ごとのコマンド（none・running・exited）
 #   left: 鍵ごとの、コマンドが残したプロセス（credential daemon など）が生きているか
 
@@ -132,6 +143,8 @@ def successors(s, f):
                 yield ("OpRunBegin", a, k), mk(rec=upd(rec, k, "begun"), lock_file=upd(lock_file, k, True),
                                                holders=upd(holders, k, frozenset({"oprun"})), oprun=upd(oprun, k, "spawning"),
                                                sup_tok=upd(sup_tok, k, tok_of[a]))
+                # begun を書いた後、ロックのファイルを作る前に kill -9 される（排他は OS が外す）。作った後の死は OpRunKilled と同じ
+                yield ("OpRunKilledInBegin", a, k), mk(rec=upd(rec, k, "begun"), oprun=upd(oprun, k, "dead"))
             if not mutex and live and rec[k] == "begun" and not held_key(s, k, f):  # dispatch の op done（照合で閉じる）
                 yield ("ManualDone", a, k), mk(rec=upd(rec, k, "done"))
     for k in range(len(KEYS)):
@@ -141,6 +154,9 @@ def successors(s, f):
             yield ("OpRunKilled", k), mk(oprun=upd(oprun, k, "dead"), holders=upd(holders, k, h - {"oprun"}))
             yield ("Spawn", k), mk(oprun=upd(oprun, k, "spawned"), sup=upd(sup, k, "started"),
                                    holders=upd(holders, k, (h - {"oprun"}) | {"sup"}))
+            if not mutex:  # 監督役を起こせない（OSError）。排他の中で done（exit 127）を書き、ロックのファイルを消し、fd を閉じる
+                yield ("SpawnFails", k), mk(oprun=upd(oprun, k, "failed"), rec=upd(rec, k, "done") if lease_tok == sup_tok[k] else rec,
+                                            lock_file=upd(lock_file, k, False), holders=upd(holders, k, h - {"oprun"}))
         if sup[k] == "started":
             yield ("StartCmd", k), mk(sup=upd(sup, k, "waiting"), cmd=upd(cmd, k, "running"),
                                       holders=upd(holders, k, h | {"cmd"} if hold else h))
@@ -207,7 +223,9 @@ STEPS = {  # work.py の言葉で
     "Release": "{a} が担当を手放す（dispatch の release）",
     "OpRunBegin": "{a} が鍵 {k} で op run を始める（op_run の排他の中で begun を書き、ロックのファイルを作って flock を持つ）",
     "ManualDone": "{a} が鍵 {k} を op done で閉じる（dispatch の done）",
+    "OpRunKilledInBegin": "{a} が鍵 {k} で op run を始め、begun を書いた後、ロックのファイルを作る前に kill -9 される",
     "OpRunKilled": "鍵 {k} の op run が、監督役を起こす前に kill -9 される",
+    "SpawnFails": "鍵 {k} の op run が監督役を起こせず、done（exit 127）を書いてロックのファイルを消す",
     "Spawn": "鍵 {k} の監督役が起動し、ロックの fd を受け継ぐ（op run は fd を閉じる）",
     "StartCmd": "鍵 {k} の監督役がコマンドを起こす（supervise の Popen）",
     "Leftover": "鍵 {k} のコマンドが、プロセスを残す（credential daemon など）",
@@ -230,7 +248,7 @@ def story(bad, trace):
     """反例を、番号付きの手順の文にする。"""
     rows = []
     for i, (name, *args) in enumerate(trace, 1):
-        by_agent = name in ("Claim", "Release", "OpRunBegin", "ManualDone")  # 動作の引数は (担当, token)・(担当, 鍵)・(担当,)・(鍵,)
+        by_agent = name in ("Claim", "Release", "OpRunBegin", "OpRunKilledInBegin", "ManualDone")  # 動作の引数は (担当, token)・(担当, 鍵)・(担当,)・(鍵,)
         who = {"a": AGENTS[args[0]]} if by_agent else {}
         if name == "Claim":
             who["t"] = args[1]
@@ -244,6 +262,10 @@ class TestOpRunModel(unittest.TestCase):
     def test_the_modeled_code_keeps_the_invariants_in_every_interleaving(self):
         bad, n, trace = check(NOW)
         self.assertIsNone(bad, f"{n} 状態目で反例。scripts/work.py か、モデルの写し方を直す:\n" + (story(bad, trace) if bad else ""))
+
+    def test_the_model_is_the_one_checked_against_tlc(self):
+        self.assertEqual(check(NOW)[1], MODELED_STATES, "モデルの状態数が、TLC と照らした数と違う。モデルを変えたなら、同じ変更を "
+                         "TLA+ のモデルに入れて TLC と照らしてから MODELED_STATES を書き換える（tests/test_oprun_model.py の冒頭）")
 
     def test_each_reverted_fix_gives_a_counterexample(self):
         for flag, inv in REVERTED.items():
@@ -267,6 +289,20 @@ class TestOpRunModel(unittest.TestCase):
         if drift:
             self.fail(f"scripts/work.py のモデルが写す関数が、照合した commit {MODELED_AT} から変わった。"
                       "モデルを見直して、照合した commit とハッシュを進める（tests/test_oprun_model.py の冒頭）:\n" + "\n".join(drift))
+
+
+    def test_the_hashes_are_those_of_the_checked_commit(self):
+        root = WORK.parents[1]
+        try:
+            shallow = subprocess.run(["git", "rev-parse", "--is-shallow-repository"], cwd=root, capture_output=True, text=True, check=True)
+        except (OSError, subprocess.CalledProcessError) as e:
+            self.skipTest(f"git の履歴を読めない: {e}")
+        if shallow.stdout.strip() == "true":  # CI の actions/checkout は履歴を 1 つだけ取る
+            self.skipTest("浅い clone なので、照合した commit を読めない")
+        old = subprocess.run(["git", "show", f"{MODELED_AT}:scripts/work.py"], cwd=root, capture_output=True, text=True)
+        self.assertEqual(old.returncode, 0, f"照合した commit {MODELED_AT} の scripts/work.py を読めない: {old.stderr.strip()}")
+        self.assertEqual({name: fingerprint(old.stdout, name) for name in MODELED}, MODELED,
+                         f"MODELED のハッシュが、照合した commit {MODELED_AT} の本文のものでない。照合した commit とハッシュを一緒に進める")
 
 
 class TestFingerprint(unittest.TestCase):
