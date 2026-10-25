@@ -905,32 +905,39 @@ PREMISE_LINE = "- 仕組みの要否（審査が 3 周に達したら、直し�
 
 
 class TestPremiseAfterRounds(unittest.TestCase):
-    """審査が 3 周に達した commit（タスクの基点より後で、審査役の記録の head に現れる commit が 3 つ）を出すときは、
-    記録の仕組みの要否の欄が空なら拒否する。審査の周ごとに仕組みへ直しを足し、仕組みが目的に要るかを誰も問わないまま
-    周が止まらなかった。照らすのは欄が空かどうかだけで、比べた値の真偽は見ない。基点より前の commit の審査は数えない。"""
+    """task start の作業場所を --cwd にして審査役・確かめ役を立てた、互いに異なる commit が 3 つに達したら、審査を通した commit の
+    push・pr は、記録の仕組みの要否の欄が空なら拒否する。審査の周ごとに仕組みへ直しを足し、仕組みが目的に要るかを誰も問わないまま
+    周が止まらなかった。照らすのは欄が空かどうかだけで、比べた値の真偽は見ない。拒否は note.empty の欄の名前で見る。"""
     setUp, tearDown, w, review_record = TestAccountCheck.setUp, TestAccountCheck.tearDown, TestAccountCheck.w, TestAccountCheck.review_record
     launcher_reviews = False  # 審査役の記録は、この試験が置く
 
     def start(self):
         r = self.w("task", "start", "--dir", str(self.repo), "--holder", "A")[1]
         self.wt, self.tok, self.note = Path(r["dir"]), r["token"], Path(r["note"]["path"])
-        return r["base"]
+        return r
 
-    def commit(self, name):
-        for cmd in (["git", "add", name], ["git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", name]):
-            if cmd[1] == "add":
-                (self.wt / name).write_text(name, encoding="utf-8")
-            subprocess.run(cmd, env=self.env, cwd=self.wt, check=True, capture_output=True)
-        return subprocess.run(["git", "rev-parse", "HEAD"], env=self.env, cwd=self.wt, capture_output=True, text=True).stdout.strip()
+    def git(self, *args, cwd=None):
+        return subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", *args], env=self.env, cwd=cwd or self.wt,
+                              check=True, capture_output=True, text=True).stdout.strip()
+
+    def commit(self, name, amend=False):
+        (self.wt / name).write_text(name, encoding="utf-8")
+        self.git("add", name)
+        self.git("commit", "-q", *(["--amend", "--no-edit"] if amend else ["-m", name]))
+        return self.git("rev-parse", "HEAD")
 
     def publish(self, key, head, premise=None):
         self.note.write_text(FILLED_NOTE + ("" if premise is None else f"{PREMISE_LINE}{premise}\n"), encoding="utf-8")
         return self.w("op", "begin", "--dir", str(self.wt), "--token", self.tok, "--key", key, "--what", "x",
                       "--from", str(self.repo), "--verified", head, "--reviewed", head)
 
+    def refused(self, key, head, premise=None):
+        rc, res = self.publish(key, head, premise)
+        return rc == 2 and res.get("note", {}).get("empty") == [PREMISE_LINE[2:-1]]
+
     def test_the_third_reviewed_commit_needs_the_premise_and_earlier_ones_do_not(self):
-        base = self.start()
-        self.review_record(base)  # 基点の commit の審査は、このタスクの周に数えない
+        r = self.start()
+        self.review_record(r["base"])  # 基点そのものの審査は数えない
         heads = []
         for i in range(2):
             heads.append(self.commit(f"f{i}"))
@@ -942,11 +949,65 @@ class TestPremiseAfterRounds(unittest.TestCase):
         self.review_record(heads[2])
         for premise in (None, "", "  "):  # 欄の行が無い（前の雛形の記録）、空、空白だけ
             with self.subTest(premise=premise):
-                rc, res = self.publish(f"push:feat@{premise!r}", heads[2], premise)
-                self.assertEqual(rc, 2, res)
-                self.assertEqual(res["note"]["empty"], [PREMISE_LINE[2:-1]])
+                self.assertTrue(self.refused(f"push:feat@{premise!r}", heads[2], premise))
         rc, res = self.publish("push:feat@3", heads[2], " 列あり 590 秒・列なし 715 秒・job を分ける形 470 秒。別の形に替える")
         self.assertEqual(rc, 0, res)
+
+    def test_the_field_can_use_the_short_name_and_several_lines(self):
+        self.start()
+        for i in range(3):
+            self.review_record(head := self.commit(f"s{i}"))
+        for i, body in enumerate(("- 仕組みの要否: 外す\n", f"{PREMISE_LINE}\n| 形 | 秒 |\n|---|---|\n| 列 | 590 |\n")):
+            with self.subTest(body=body):
+                self.note.write_text(FILLED_NOTE + body, encoding="utf-8")
+                rc, res = self.w("op", "begin", "--dir", str(self.wt), "--token", self.tok, "--key", f"pr:feat@{i}", "--what", "x",
+                                 "--from", str(self.repo), "--verified", head, "--reviewed", head)
+                self.assertEqual(rc, 0, res)
+
+    def test_only_ok_read_only_reviews_with_this_place_and_a_full_id_count(self):
+        self.start()
+        heads = [self.commit(f"o{i}") for i in range(4)]
+        self.review_record(heads[0])
+        self.review_record(heads[3])
+        self.review_record(heads[1], status="failed")
+        self.review_record(heads[2], write=True)
+        self.review_record(heads[1], cwd=str(self.repo))  # ほかの場所（main の取り込みで履歴に入るほかのタスクの審査も同じ）
+        with open(Path(self.env["BB_WRIT_STATE_DIR"]) / "delegations.jsonl", "a", encoding="utf-8") as f:
+            f.write(json.dumps({"head": heads[2][:12], "status": "ok", "write": False, "cwd": str(self.wt)}) + "\n")  # 短い ID
+        self.assertEqual(self.publish("push:feat@o", heads[3])[0], 0)  # 数えるのは 2 つだけ
+        self.w("op", "done", "--dir", str(self.wt), "--token", self.tok, "--key", "push:feat@o", "--result", "ok")
+        self.review_record(heads[1])
+        self.assertTrue(self.refused("push:feat@o3", heads[3]))
+
+    def test_reviews_of_commits_amended_away_still_count(self):
+        self.start()
+        self.review_record(self.commit("a"))
+        self.review_record(self.commit("a2", amend=True))
+        head = self.commit("a3", amend=True)
+        self.review_record(head)
+        self.assertTrue(self.refused("push:feat@amend", head))
+
+    def test_a_reviewed_commit_merged_in_from_another_task_does_not_count(self):
+        other = self.start()
+        theirs = [self.commit(f"t{i}") for i in range(2)]
+        for h in theirs:
+            self.review_record(h)
+        self.git("merge", "-q", "--ff-only", other["branch"], cwd=self.repo)  # ほかのタスクを main に統合した
+        self.w("release", "--dir", str(self.wt), "--token", self.tok)
+        self.start()
+        self.review_record(self.commit("m1"))
+        self.git("merge", "-q", "--no-edit", "main")  # 統合の前に main を取り込む（playbook-parallel）
+        head = self.git("rev-parse", "HEAD")
+        self.review_record(head)
+        self.assertEqual(self.publish("push:feat@merged", head)[0], 0)  # 自分の周は 2
+
+    def test_removing_the_task_json_of_the_place_does_not_stop_the_count(self):
+        self.start()
+        for i in range(3):
+            self.review_record(head := self.commit(f"j{i}"))
+        for f in (Path(self.env["BB_WRIT_STATE_DIR"]) / "work").glob("*/task.json"):
+            f.unlink()  # 書く子が書き換えうる場所。タスクは親の一覧から作業場所の dir で引く
+        self.assertTrue(self.refused("push:feat@notask", head))
 
     def test_a_place_not_made_by_task_start_is_not_counted(self):
         TestAccountCheck.review_record(self, subprocess.run(["git", "rev-parse", "HEAD"], env=self.env, cwd=self.wt,
@@ -956,7 +1017,7 @@ class TestPremiseAfterRounds(unittest.TestCase):
         heads = [self.commit(f"g{i}") for i in range(3)]
         for h in heads:
             self.review_record(h)
-        self.assertEqual(self.publish("push:feat@claim", heads[2])[0], 0)  # 基点が分からないので数えない
+        self.assertEqual(self.publish("push:feat@claim", heads[2])[0], 0)  # task start でない場所は数えない
 
 
 class TestNoteBeforePublish(unittest.TestCase):

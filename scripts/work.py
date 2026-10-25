@@ -42,7 +42,7 @@ commit を書いたときは、launcher の委任の記録（delegations.jsonl�
 無ければ拒否する（6）。通ったら、その子の記録の場所を reviews に残す。審査の中身（子が十分に攻めたか）と none: の理由の真偽は確かめない。
 短い往復で審査を忘れたまま、または書き手が自分の確かめを審査の代わりにして出すのを止める。
 push・pr は、作業の記録（note.md）の目的・制約・確かめ方の欄が空か無ければ拒否する（2）。--reviewed が commit なら、指摘の扱いの欄も。
-その commit までの審査が 3 周に達していたら（task start の作業場所で、基点より後の commit のうち審査役の記録の head に現れるものが 3 つ）、仕組みの要否の欄も。
+審査が 3 周に達していたら（task start の作業場所を --cwd にして審査役・確かめ役を立てた、互いに異なる commit が 3 つ）、仕組みの要否の欄も。
 欄が空かどうかだけを見て、中身の真偽・書いた順・どの周の審査の指摘かは見ない。claim・renew は空の欄を note.empty で知らせる（拒否しない）。
 言い直し・記録・指摘の扱いの一覧を飛ばしたまま、長いセッションで作業が進んだため。仕組みの要否は、審査の周ごとに仕組みへ直しを足し、
 仕組みが目的に要るかを誰も問わないまま周が止まらなかったため（原則の文を足すだけでは、長い作業の中で判断が変わらなかった）。
@@ -203,29 +203,41 @@ def reviews_of(commit: str) -> tuple:
     return found, (f"委任の記録 {f} に、読めない行か、out の record.json を読めない行が {broken} 行ある" if broken else "")
 
 
-def review_rounds(d: Path, commit: str) -> int:
-    """審査の周の数。タスクの基点より後で commit までの履歴にある commit のうち、委任の記録に、ok で返った読み取り専用の子の
-    head として現れるものの数（周ごとに直した commit を審査し直すので、審査した commit の数を周の数とする）。
-    task start で作った作業場所でなければ、基点が分からないので数えない。記録の読み方は reviews_of と同じ（手で書いた行も数える）。"""
-    try:
-        base = task_at(d)["base"]
-    except (ValueError, OSError, KeyError, TypeError):
+def review_rounds(d: Path) -> int:
+    """審査の周の数。委任の記録のうち、この作業場所を --cwd にして ok で返った読み取り専用の子の head（launcher が書く完全な ID）の、
+    互いに異なるものの数（タスクの基点そのものの審査は除く）。審査役も条件 (5) の確かめ役も数え、amend・rebase で前の周の commit が
+    履歴から外れても数える。別の場所（ほかのタスク、写し）を --cwd にした審査は数えない。
+    task start で作った作業場所（親のタスクの一覧に dir があるもの）でなければ数えない。記録は行だけを見る（手で書いた行も数える）。
+    作業場所の task.json は書く子が書き換えうるので読まない。"""
+    c = checkout_or_none(d)
+    if not c or not (root(c) / "tasks").is_dir():
         return 0
-    heads = set()
+    base = None
+    for f in (root(c) / "tasks").glob("*.json"):
+        try:
+            t = read(f)
+            if isinstance(t, dict) and Path(t["dir"]).resolve() == d.resolve():
+                base = t.get("base")
+                break
+        except (OSError, ValueError, KeyError, TypeError):
+            continue
+    if base is None:
+        return 0
     try:
         rows = read_regular(state_dir() / "delegations.jsonl").split(b"\n")
     except OSError:
         return 0
+    heads = set()
     for line in rows:
         try:
             e = json.loads(line.decode("utf-8")) if line.strip() else None
         except (ValueError, RecursionError):
             continue
-        if (isinstance(e, dict) and isinstance(e.get("head"), str) and re.fullmatch(r"[0-9a-f]{7,64}", e["head"])
-                and e.get("status") == "ok" and e.get("write") is False):
+        if (isinstance(e, dict) and isinstance(e.get("head"), str) and re.fullmatch(r"[0-9a-f]{40,64}", e["head"])
+                and e.get("status") == "ok" and e.get("write") is False and isinstance(e.get("cwd"), str)
+                and e["head"] != base and Path(e["cwd"]).resolve() == d.resolve()):
             heads.add(e["head"])
-    return sum(1 for h in heads if sh(["git", "merge-base", "--is-ancestor", h, commit], d)[0] == 0
-               and sh(["git", "merge-base", "--is-ancestor", h, base], d)[0] != 0)
+    return len(heads)
 
 
 def pending(r: Path) -> list:
@@ -253,7 +265,7 @@ FIELDS = re.findall(r"^- (.+?):$", NOTE, re.M)  # 雛形の欄の名前
 REQUIRED = FIELDS[:3]  # push・pr の前に空なら拒否する欄。審査を通した commit を宣言したときは、指摘の扱いも
 TRIAGE = FIELDS[3]
 PREMISE = FIELDS[4]
-PREMISE_ROUNDS = 3  # interrogate の 5 の「3 周目でも Important が出たら前提を疑う」と同じ周
+PREMISE_ROUNDS = 3  # この数の審査役を立てた後は、直しが仕組みに重なっていないかを確かめさせる（interrogate の 5 が前提を疑う 3 周目と同じ数。Important の有無は見ない）
 
 
 def field_line(name: str):
@@ -816,7 +828,7 @@ def op_step(a, r: Path, live, now: float, action: str):
             return ({"ok": False, "reason": f"危険度が{risk.group(1)}の変更は interrogate を通す（入口の条件 (6)）。--reviewed に、審査を通した commit を書く"}, 2)
         risk = risk.group(1) + ": " + risk.group(2).strip()
         f = r / "note.md"
-        gaps = note_gaps(note_body(f), bool(reviews), review_rounds(Path(a.dir), reviewed) if reviews else 0)
+        gaps = note_gaps(note_body(f), bool(reviews), review_rounds(Path(a.dir)) if reviews else 0)
         if gaps:
             return ({"ok": False, "note": {"path": str(f), "empty": gaps}, "reason": f"作業の記録 {f} の欄が空か無い: {'、'.join(gaps)}。目的・制約・確かめ方は担当を取った直後に、"
                         "審査を通した commit を出すときの指摘の扱いは直す前に、審査が 3 周に達したら仕組みの要否も、その欄へ書く（`playbook-deliver` の「記録を残す」と入口の条件 (6)、"
