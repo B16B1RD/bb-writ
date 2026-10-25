@@ -1556,7 +1556,11 @@ class TestLaunch(unittest.TestCase):
                 self.assertEqual((len(pids), rec["status"]), (7, status), rec)
                 if status == "timeout":  # 時間切れの理由だけ（止めた子の CLI は残りに並ばない）。期限を守る（所要時間で捕まえるのは、2 秒より大きな延びだけ）
                     self.assertEqual(rec["problems"], ["3 秒で終わらなかった", f"--resume {rec['out']} で続きから起動できる"], rec)
-                    self.assertLess(took, 5, rec)
+                    # 期限は launcher が測る時間で見る。launcher の処理は毎回約 3.43 秒で終わるが、その後、Python のコードの外で
+                    # ときどき約 2 秒延びて 5 秒を越えた（9cc1037 でも同じ。15 回に 1〜2 回。原因は突き止めていない。2026-10-25）。
+                    # 壁時計では、返らないことだけを捕まえる
+                    self.assertLess(rec["duration_s"], 5, rec)
+                    self.assertLess(took, 10, rec)
                 for pid in pids:
                     with self.assertRaises(ProcessLookupError, msg=f"{pid} が残った: {rec}"):
                         os.kill(pid, 0)

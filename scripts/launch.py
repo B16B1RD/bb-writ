@@ -323,7 +323,8 @@ def copy_grok_session(src: Path, old: Path, new: Path) -> None:
     子の sandbox から書けたので、続きの起動に読ませない（新しい home と、写した記録で -r が続いた。2026-10-25、1.0.70）。
     写すのは通常のファイルとディレクトリだけで、symlink は写さない（子が置いた symlink を、sandbox の外の Grok が開かないように）。
     記録の中身も子が書けた。続きの sandbox は新しい home の sandbox.toml の独自の profile に拠り、Grok は独自の profile を
-    適用できなければ起動を拒む（公式文書 18-sandbox）。記録の中身が -r に何をさせるかは確かめていない。"""
+    適用できなければ起動を拒む（公式文書 18-sandbox）。記録の sandbox_profile を書き換えると Grok は再開を拒み、続きは記録の grok_home が指す
+    前の home を開かなかった（2026-10-25、1.0.70）。記録のほかの中身が -r に何をさせるかは確かめていない。"""
     for top, dirs, files in os.walk(src):
         dirs[:] = [d for d in dirs if not os.path.islink(os.path.join(top, d))]
         to = new / Path(top).relative_to(old)
