@@ -42,8 +42,10 @@ commit を書いたときは、launcher の委任の記録（delegations.jsonl�
 無ければ拒否する（6）。通ったら、その子の記録の場所を reviews に残す。審査の中身（子が十分に攻めたか）と none: の理由の真偽は確かめない。
 短い往復で審査を忘れたまま、または書き手が自分の確かめを審査の代わりにして出すのを止める。
 push・pr は、作業の記録（note.md）の目的・制約・確かめ方の欄が空か無ければ拒否する（2）。--reviewed が commit なら、指摘の扱いの欄も。
+その commit までの審査が 3 周に達していたら（task start の作業場所で、基点より後の commit のうち審査役の記録の head に現れるものが 3 つ）、仕組みの要否の欄も。
 欄が空かどうかだけを見て、中身の真偽・書いた順・どの周の審査の指摘かは見ない。claim・renew は空の欄を note.empty で知らせる（拒否しない）。
-言い直し・記録・指摘の扱いの一覧を飛ばしたまま、長いセッションで作業が進んだため。
+言い直し・記録・指摘の扱いの一覧を飛ばしたまま、長いセッションで作業が進んだため。仕組みの要否は、審査の周ごとに仕組みへ直しを足し、
+仕組みが目的に要るかを誰も問わないまま周が止まらなかったため（原則の文を足すだけでは、長い作業の中で判断が変わらなかった）。
 検証の後に成果物が変わったら、証拠を取り直してから出す（plan-v3 6.2）。merge は、GitHub 側でも gh pr merge --match-head-commit <同じ commit> で止める。
 
 外部に出る操作（鍵の種類が push・pr・comment・merge・release・issue）の op begin には --from が要り、check を通す。
@@ -201,6 +203,31 @@ def reviews_of(commit: str) -> tuple:
     return found, (f"委任の記録 {f} に、読めない行か、out の record.json を読めない行が {broken} 行ある" if broken else "")
 
 
+def review_rounds(d: Path, commit: str) -> int:
+    """審査の周の数。タスクの基点より後で commit までの履歴にある commit のうち、委任の記録に、ok で返った読み取り専用の子の
+    head として現れるものの数（周ごとに直した commit を審査し直すので、審査した commit の数を周の数とする）。
+    task start で作った作業場所でなければ、基点が分からないので数えない。記録の読み方は reviews_of と同じ（手で書いた行も数える）。"""
+    try:
+        base = task_at(d)["base"]
+    except (ValueError, OSError, KeyError, TypeError):
+        return 0
+    heads = set()
+    try:
+        rows = read_regular(state_dir() / "delegations.jsonl").split(b"\n")
+    except OSError:
+        return 0
+    for line in rows:
+        try:
+            e = json.loads(line.decode("utf-8")) if line.strip() else None
+        except (ValueError, RecursionError):
+            continue
+        if (isinstance(e, dict) and isinstance(e.get("head"), str) and re.fullmatch(r"[0-9a-f]{7,64}", e["head"])
+                and e.get("status") == "ok" and e.get("write") is False):
+            heads.add(e["head"])
+    return sum(1 for h in heads if sh(["git", "merge-base", "--is-ancestor", h, commit], d)[0] == 0
+               and sh(["git", "merge-base", "--is-ancestor", h, base], d)[0] != 0)
+
+
 def pending(r: Path) -> list:
     """始めたが終わりの記録が無い操作。op run の監督役がまだ動かしている操作には running: true を付ける。"""
     held = run_holder(r)
@@ -215,6 +242,7 @@ NOTE = """# 作業の記録
 - 制約:
 - できたと分かる確かめ方（述語）:
 - 指摘の扱い（審査の指摘ごとに、対応する・記録のみ・退ける と理由を、直す前に）:
+- 仕組みの要否（審査が 3 周に達したら、直しを書く前に、目的の値で仕組みあり・なし・別の形を比べて）:
 - 決めたことと根拠:
 - 済んだことと証拠:
 - 今の状態（ブランチ・commit・PR）:
@@ -224,6 +252,8 @@ NOTE = """# 作業の記録
 FIELDS = re.findall(r"^- (.+?):$", NOTE, re.M)  # 雛形の欄の名前
 REQUIRED = FIELDS[:3]  # push・pr の前に空なら拒否する欄。審査を通した commit を宣言したときは、指摘の扱いも
 TRIAGE = FIELDS[3]
+PREMISE = FIELDS[4]
+PREMISE_ROUNDS = 3  # interrogate の 5 の「3 周目でも Important が出たら前提を疑う」と同じ周
 
 
 def field_line(name: str):
@@ -236,12 +266,12 @@ FIELD_LINES = [field_line(f) for f in FIELDS]
 HEADING = re.compile(r"#+(\s|$)")  # Markdown の見出し（「#」だけの空の見出しも）。「#123 …」は見出しでない
 
 
-def note_gaps(body: str, reviewed: bool) -> list:
+def note_gaps(body: str, reviewed: bool, rounds: int = 0) -> list:
     """記録の必須の欄のうち、空か無いものの名前。欄の中身は、名前の行の ":" の後から、次の雛形の欄か見出しの行の前まで
     （表や字下げした行も中身に数える）。中身の真偽・書いた順・どの審査の指摘かは見ない（忘れて飛ばすのを止める）。
-    同じ欄が 2 回あれば最初だけを見る。"""
+    同じ欄が 2 回あれば最初だけを見る。審査の周が PREMISE_ROUNDS に達した commit では、仕組みの要否の欄も。"""
     lines, gaps = body.splitlines(), []
-    for name in REQUIRED + ([TRIAGE] if reviewed else []):
+    for name in REQUIRED + ([TRIAGE] if reviewed else []) + ([PREMISE] if reviewed and rounds >= PREMISE_ROUNDS else []):
         pat = field_line(name)
         at, m = next(((i, m) for i, l in enumerate(lines) if (m := pat.match(l))), (None, None))
         if at is None:
@@ -786,10 +816,11 @@ def op_step(a, r: Path, live, now: float, action: str):
             return ({"ok": False, "reason": f"危険度が{risk.group(1)}の変更は interrogate を通す（入口の条件 (6)）。--reviewed に、審査を通した commit を書く"}, 2)
         risk = risk.group(1) + ": " + risk.group(2).strip()
         f = r / "note.md"
-        gaps = note_gaps(note_body(f), bool(reviews))
+        gaps = note_gaps(note_body(f), bool(reviews), review_rounds(Path(a.dir), reviewed) if reviews else 0)
         if gaps:
             return ({"ok": False, "note": {"path": str(f), "empty": gaps}, "reason": f"作業の記録 {f} の欄が空か無い: {'、'.join(gaps)}。目的・制約・確かめ方は担当を取った直後に、"
-                        "審査を通した commit を出すときの指摘の扱いは直す前に、その欄へ書く（`playbook-deliver` の「記録を残す」と入口の条件 (6)。"
+                        "審査を通した commit を出すときの指摘の扱いは直す前に、審査が 3 周に達したら仕組みの要否も、その欄へ書く（`playbook-deliver` の「記録を残す」と入口の条件 (6)、"
+                        "`principle-attack-the-premise`。"
                         "欄の名前の行が無ければ、雛形の行を足す）"}, 2)
     if action == "begin" and known:
         return ({"ok": False, "reason": "同じ鍵の操作が既にある。外部の状態を照合してから進める（やり直さない）", "op": known}, 4)

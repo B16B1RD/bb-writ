@@ -901,6 +901,64 @@ PERMISSIONS_BIND = permissions_bind()
 TRIAGE_LINE = "- 指摘の扱い（審査の指摘ごとに、対応する・記録のみ・退ける と理由を、直す前に）:"
 
 
+PREMISE_LINE = "- 仕組みの要否（審査が 3 周に達したら、直しを書く前に、目的の値で仕組みあり・なし・別の形を比べて）:"
+
+
+class TestPremiseAfterRounds(unittest.TestCase):
+    """審査が 3 周に達した commit（タスクの基点より後で、審査役の記録の head に現れる commit が 3 つ）を出すときは、
+    記録の仕組みの要否の欄が空なら拒否する。審査の周ごとに仕組みへ直しを足し、仕組みが目的に要るかを誰も問わないまま
+    周が止まらなかった。照らすのは欄が空かどうかだけで、比べた値の真偽は見ない。基点より前の commit の審査は数えない。"""
+    setUp, tearDown, w, review_record = TestAccountCheck.setUp, TestAccountCheck.tearDown, TestAccountCheck.w, TestAccountCheck.review_record
+    launcher_reviews = False  # 審査役の記録は、この試験が置く
+
+    def start(self):
+        r = self.w("task", "start", "--dir", str(self.repo), "--holder", "A")[1]
+        self.wt, self.tok, self.note = Path(r["dir"]), r["token"], Path(r["note"]["path"])
+        return r["base"]
+
+    def commit(self, name):
+        for cmd in (["git", "add", name], ["git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", name]):
+            if cmd[1] == "add":
+                (self.wt / name).write_text(name, encoding="utf-8")
+            subprocess.run(cmd, env=self.env, cwd=self.wt, check=True, capture_output=True)
+        return subprocess.run(["git", "rev-parse", "HEAD"], env=self.env, cwd=self.wt, capture_output=True, text=True).stdout.strip()
+
+    def publish(self, key, head, premise=None):
+        self.note.write_text(FILLED_NOTE + ("" if premise is None else f"{PREMISE_LINE}{premise}\n"), encoding="utf-8")
+        return self.w("op", "begin", "--dir", str(self.wt), "--token", self.tok, "--key", key, "--what", "x",
+                      "--from", str(self.repo), "--verified", head, "--reviewed", head)
+
+    def test_the_third_reviewed_commit_needs_the_premise_and_earlier_ones_do_not(self):
+        base = self.start()
+        self.review_record(base)  # 基点の commit の審査は、このタスクの周に数えない
+        heads = []
+        for i in range(2):
+            heads.append(self.commit(f"f{i}"))
+            self.review_record(heads[-1])
+        self.review_record(heads[1])  # 同じ commit を重ねて審査しても、周は増えない
+        self.assertEqual(self.publish("push:feat@2", heads[1])[0], 0)  # 2 周目までは要らない
+        self.w("op", "done", "--dir", str(self.wt), "--token", self.tok, "--key", "push:feat@2", "--result", "ok")
+        heads.append(self.commit("f2"))
+        self.review_record(heads[2])
+        for premise in (None, "", "  "):  # 欄の行が無い（前の雛形の記録）、空、空白だけ
+            with self.subTest(premise=premise):
+                rc, res = self.publish(f"push:feat@{premise!r}", heads[2], premise)
+                self.assertEqual(rc, 2, res)
+                self.assertEqual(res["note"]["empty"], [PREMISE_LINE[2:-1]])
+        rc, res = self.publish("push:feat@3", heads[2], " 列あり 590 秒・列なし 715 秒・job を分ける形 470 秒。別の形に替える")
+        self.assertEqual(rc, 0, res)
+
+    def test_a_place_not_made_by_task_start_is_not_counted(self):
+        TestAccountCheck.review_record(self, subprocess.run(["git", "rev-parse", "HEAD"], env=self.env, cwd=self.wt,
+                                                            capture_output=True, text=True).stdout.strip())
+        r = self.w("claim", "--dir", str(self.wt), "--holder", "A")[1]
+        self.tok, self.note = r["token"], Path(r["note"]["path"])
+        heads = [self.commit(f"g{i}") for i in range(3)]
+        for h in heads:
+            self.review_record(h)
+        self.assertEqual(self.publish("push:feat@claim", heads[2])[0], 0)  # 基点が分からないので数えない
+
+
 class TestNoteBeforePublish(unittest.TestCase):
     """push・pr は、作業の記録の目的・制約・確かめ方と、審査を通した commit なら指摘の扱いが空なら出せない。
     言い直し・記録・指摘の扱いの一覧を飛ばしたまま、長いセッションで作業が進んだ。照らすのは欄が空かどうかだけで、
