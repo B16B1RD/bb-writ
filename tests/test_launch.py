@@ -38,7 +38,7 @@ FAKE_CODEX = textwrap.dedent(r'''
     if mode == "quota":
         print("ERROR: You've hit your usage limit.", file=sys.stderr); sys.exit(1)
     if mode == "apierror":
-        print(json.dumps({"type": "turn.failed", "error": {"message": "model is not supported"}})); sys.exit(1)
+        print(json.dumps({"type": "turn.failed", "error": {"message": os.environ.get("FAKE_ERROR", "model is not supported")}})); sys.exit(1)
     text = {"good": os.environ["FAKE_TEXT"], "nojson": "結論だけ", "badpath": os.environ["FAKE_TEXT"].replace("a.txt", "missing.txt"),
             "absent": os.environ["FAKE_TEXT"].replace("a.txt:1", "missing.txt"),
             "nofence": os.environ["FAKE_TEXT"].rstrip("`").rstrip()}.get(mode, os.environ["FAKE_TEXT"])
@@ -282,8 +282,8 @@ FAKE_CLAUDE = textwrap.dedent(r'''
         result = result.replace('"conclusion": "', '"z": ' + "[" * 3000 + "]" * 3000 + ', "conclusion": "')
     if mode == "surrogate":  # JS の JSON.stringify は単独のサロゲートを \ud83d の形で出す。本文と、報告の JSON の中の両方
         result = "\ud83d" + result.replace('"conclusion": "', '"conclusion": "\\ud83d')
-    if os.environ.get("FAKE_EXIT"):  # 子が失敗した（後処理の理由と並ぶか確かめる）
-        print(json.dumps({"type": "result", "result": "", "session_id": sid, "is_error": True})); sys.exit(int(os.environ["FAKE_EXIT"]))
+    if os.environ.get("FAKE_EXIT"):  # 子が失敗した（後処理の理由と並ぶか確かめる）。FAKE_ERROR は失敗の結果の文
+        print(json.dumps({"type": "result", "result": os.environ.get("FAKE_ERROR", ""), "session_id": sid, "is_error": True})); sys.exit(int(os.environ["FAKE_EXIT"]))
     print(json.dumps({"type": "result", "result": result, "session_id": ["s"] if mode == "shapes" else sid, "is_error": False,
                       "modelUsage": "x" if mode == "shapes" else {"claude-sonnet-5-5": {}}, "total_cost_usd": 0.01, "num_turns": 2},
                      ensure_ascii=not os.environ.get("FAKE_RAW")))
@@ -1998,9 +1998,13 @@ class TestLaunch(unittest.TestCase):
             shutil.rmtree(other)
             self.assertEqual((rc, again["status"]), (2, "failed"), again)
             self.assertIn("記録ファイルが 1 つでない（2 個）", again["problems"][0])
-        cwd = self.grok_target()
+        grok = []  # Grok の対象は Grok の場面の中で作る（ホームに書けない環境では、その場面だけが飛ぶ。外で作ると後ろの場面がみな飛んだ）
+
+        def grok_cwd():
+            grok[:] = grok or [self.grok_target()]
+            return grok[0]
         with self.subTest("grok-session-unknown"):  # 続きが session を返さない（前と同じか確かめられない）
-            rc, rec = self.run_launch("grok", extra=["--timeout", "2"], cwd=cwd, env_extra=hang)
+            rc, rec = self.run_launch("grok", extra=["--timeout", "2"], cwd=grok_cwd(), env_extra=hang)
             rc, again = self.run_launch(None, "shapes", extra=["--resume", rec["out"]])
             self.assertEqual((rc, again["status"], again["resumable"]), (2, "failed", False), again)
             self.assertIn("session を確かめられないか", again["problems"][0])
@@ -2012,8 +2016,8 @@ class TestLaunch(unittest.TestCase):
                                                ("codex", "wide-profile", {"FAKE_EXIT": "1"}, "failed", "広い"),
                                                ("codex", "wide-profile", {"FAKE_STDERR": quota, **hang}, "quota", "広い")):
             with self.subTest("doubt-under-another-status", host=host, env=sorted(env)):
-                rc, rec = self.run_launch(host, mode, extra=["--timeout", "2"], cwd=cwd if host == "grok" else None,
-                                          env_extra={**env, "FAKE_THREAD": "0199aaaa-bbbb-7ccc-8ddd-eeeeffff3000"})
+                rc, rec = self.run_launch(host, mode, extra=["--timeout", "2"], cwd=grok_cwd() if host == "grok" else None,
+                                          env_extra={**env, "FAKE_THREAD": f"0199aaaa-bbbb-7ccc-8ddd-eeeeffff3{len(env)}{int('HANG' in str(env))}{int('EXIT' in str(env))}"})
                 self.assertEqual((rec["status"], rec["resumable"]), (status, False), rec)
                 self.assertTrue(any(words in p for p in rec["problems"]), rec)
                 self.assertFalse([p for p in rec["problems"] if "--resume" in p], rec)  # 続けられない記録に、続きの案内を付けない
@@ -2077,7 +2081,7 @@ class TestLaunch(unittest.TestCase):
             self.assertIn("boom", again["problems"])
         for name, plant in (("not-a-uuid", None), ("two-places", "two"), ("linked-sessions", "sessions"), ("linked-place", "place")):
             with self.subTest(name):  # 前の home の記録が 1 つだけ、symlink を通らずに見つからなければ、新しい home を作らずに止める
-                rc, rec = self.run_launch("grok", extra=["--timeout", "2"], cwd=cwd, env_extra=hang)
+                rc, rec = self.run_launch("grok", extra=["--timeout", "2"], cwd=grok_cwd(), env_extra=hang)
                 old = Path(rec["grok_home"])
                 place = next(old.glob(f"sessions/*/{rec['session']}")).parent
                 record = dict(rec)
@@ -2317,14 +2321,22 @@ class TestLaunch(unittest.TestCase):
     def test_quota_is_reported_not_retried_elsewhere(self):
         rc, rec = self.run_launch("codex", "quota")
         self.assertEqual(rec["status"], "quota")
+        # 結果が失敗（is_error）なら、終了コード 0 で本文があっても成功ではない（利用枠の文言を照らす）
+        rc, rec = self.run_launch("claude", env_extra={"FAKE_EXIT": "0", "FAKE_ERROR": "API Error: 429 rate_limit_error"})
+        self.assertEqual(rec["status"], "quota", rec)
         # 利用枠の文言を照らすのは、子が成功しなかったときだけ。成功した子の報告は、stderr の一語では捨てない
         for i, (line, extra, status) in enumerate((("WARN failed to refresh rate limits", {}, "ok"), ("request finished in 1429ms", {}, "ok"),
                                                    ("Reconnecting... 1/5 (unexpected status 429 Too Many Requests)", {}, "ok"),
                                                    ("stream error: last status: 429 Too Many Requests", {"FAKE_EXIT": "1"}, "quota"),
-                                                   ("API Error: 429 rate_limit_error", {"FAKE_HANG": "1"}, "quota"))):  # 時間切れ（成功していない）
+                                                   ("API Error: 429 rate_limit_error", {"FAKE_HANG": "1"}, "quota"),  # 時間切れ（成功していない）
+                                                   ("", {"FAKE_TEXT": "", "FAKE_STDERR": "rate limit"}, "quota"),  # 終了コード 0 でも本文が無い
+                                                   ("", {"FAKE_MODE": "apierror", "FAKE_ERROR": "exceeded retry limit, last status: 429 Too Many Requests"}, "quota"))):  # CLI のエラーにだけある
             with self.subTest(line=line, extra=sorted(extra)):
-                rc, rec = self.run_launch("codex", extra=["--timeout", "2"], env_extra={"FAKE_STDERR": line, "FAKE_THREAD": f"0199aaaa-bbbb-7ccc-8ddd-eeeeffff{9100 + i}", **extra})
+                mode = extra.pop("FAKE_MODE", "good")
+                rc, rec = self.run_launch("codex", mode, extra=["--timeout", "2"], env_extra={"FAKE_STDERR": line, "FAKE_THREAD": f"0199aaaa-bbbb-7ccc-8ddd-eeeeffff{9100 + i}", **extra})
                 self.assertEqual(rec["status"], status, rec)
+                if extra.get("FAKE_EXIT"):  # 利用枠でも、失敗の終了コードと CLI の文言を残す
+                    self.assertIn(f"終了コード {extra['FAKE_EXIT']}", rec["problems"], rec)
                 if status == "ok":
                     self.assertTrue((Path(rec["out"]) / "report.md").is_file())  # 報告を捨てない
 

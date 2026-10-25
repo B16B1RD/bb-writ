@@ -1007,14 +1007,14 @@ def main() -> int:
             blocked += [k for k, fact in (("unsafe", unsafe), ("session", other), ("breach", breach)) if fact]
             # 利用枠・権限の照合は、時間切れより先に見る（権限の約束どおりに動いたか分からない子を、続きから起動させない）。
             # 利用枠の文言を照らすのは、子が成功しなかったときだけ（成功した子の報告を、stderr の「429」「rate limit」などの一語で捨てていた）
-            succeeded = not timed_out and p.returncode == 0 and not got.get("is_error") and got["text"]
-            if not succeeded and QUOTA.search(p.stderr[-4000:] + " ".join(got["errors"])):
-                rec.update(status="quota", problems=["利用枠の上限に当たった（別料金の API へは切り替えない）"] + doubts + stopped)
+            cli_failed = p.returncode != 0 or got.get("is_error") or not got["text"]  # 下の終了コードの枝と同じ条件
+            if (timed_out or cli_failed) and QUOTA.search(p.stderr[-4000:] + " ".join(got["errors"])):
+                rec.update(status="quota", problems=["利用枠の上限に当たった（別料金の API へは切り替えない）"] + doubts + ended + stopped)
             elif unsafe or other or (timed_out and breach):  # 権限・続きの session が分からない子を、続きから起動させない
                 rec.update(status="failed", problems=doubts + ended + stopped)
             elif timed_out:  # 子の作業は会話記録に残っている。最初から起動し直さず、続きから起動する（案内は、続けられると決めた後に付ける）
                 rec.update(status="timeout", problems=stopped + ([] if rec["session"] else ["session が分からず、続きから起動できない"]))
-            elif p.returncode != 0 or got.get("is_error") or not got["text"]:
+            elif cli_failed:
                 rec.update(status="failed", problems=(ended or [f"終了コード {p.returncode}"] + got["errors"] + tail) + doubts)
             elif breach:
                 # 対象の設定が profile を広げた・狭めた（読み取り専用の結果として使わない）。報告は report.md に残す
