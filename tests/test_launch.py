@@ -4,6 +4,7 @@ import errno
 import json
 import shlex
 import shutil
+import signal
 import os
 import subprocess
 import sys
@@ -1985,8 +1986,8 @@ class TestLaunch(unittest.TestCase):
         # 続きが前の起動から引き継ぐもの（Codex の照らし終えた turn、Grok の記録）は、引き継げる形かを続きの起動で確かめる
         hang = {"FAKE_HANG": "1", "FAKE_ROLLOUT_APPEND": "1"}
         with self.subTest("codex-other-thread"):  # 続きの子が別の thread で動いた（前の turn を除けるか分からない）
-            rc, rec = self.run_launch("codex", extra=["--timeout", "2"], env_extra=hang)
-            rc, again = self.run_launch(None, extra=["--resume", rec["out"]], env_extra={"FAKE_ROLLOUT_APPEND": "1", "FAKE_THREAD": "0199aaaa-bbbb-7ccc-8ddd-eeeeffff0001"})
+            rc, rec = self.run_launch("codex", extra=["--timeout", "2"], env_extra={**hang, "FAKE_THREAD": "0199aaaa-bbbb-7ccc-8ddd-eeeeffff9001"})
+            rc, again = self.run_launch(None, extra=["--resume", rec["out"]], env_extra={"FAKE_ROLLOUT_APPEND": "1", "FAKE_THREAD": "0199aaaa-bbbb-7ccc-8ddd-eeeeffff0001"})  # 前と違う thread
             self.assertEqual((rc, again["status"], again["resumable"]), (2, "failed", False), again)
             self.assertIn("前と違う（0199aaaa-bbbb-7ccc-8ddd-eeeeffff0001）", again["problems"][0])
         with self.subTest("codex-two-rollouts"):  # 同じ thread の記録ファイルが 2 つ（前の turn を数で除けない）
@@ -2041,8 +2042,8 @@ class TestLaunch(unittest.TestCase):
             rc, again = self.run_launch(None, extra=["--resume", rec["out"]], env_extra={"FAKE_SID": "other", "FAKE_EXIT": "0"})
             self.assertEqual((again["status"], again["resumable"]), ("failed", False), again)
             self.assertIn("終了コード 0", again["problems"])
-        with self.subTest("other-thread-under-quota"):
-            rc, rec = self.run_launch("codex", extra=["--timeout", "2"], env_extra=hang)
+        with self.subTest("other-thread-under-quota"):  # thread は起動ごとに別（同じ thread の記録に、前の subTest の turn が足されている）
+            rc, rec = self.run_launch("codex", extra=["--timeout", "2"], env_extra={**hang, "FAKE_THREAD": "0199aaaa-bbbb-7ccc-8ddd-eeeeffff9000"})
             rc, again = self.run_launch(None, extra=["--resume", rec["out"]], env_extra={
                 "FAKE_ROLLOUT_APPEND": "1", "FAKE_THREAD": "0199aaaa-bbbb-7ccc-8ddd-eeeeffff0002", "FAKE_STDERR": quota})
             self.assertEqual((again["status"], again["resumable"]), ("quota", False), again)
@@ -2112,6 +2113,40 @@ class TestLaunch(unittest.TestCase):
             subprocess.run(["git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "-q", "-m", "a"], check=True)
             rc, again = self.run_launch(None, extra=["--resume", rec["out"]])
             self.assertEqual((again["status"], again["head"]), ("ok", None), again)
+
+    def test_a_stopped_launcher_records_and_stops_the_child(self):
+        # 親のコマンドの時間切れ（Claude Code の Bash は既定 2 分・上限 10 分）で launcher が止められると、記録が残らず、
+        # 続きから起動できず、子は動き続けた。待つ間に SIGTERM・SIGINT・SIGHUP を受けたら、時間切れと同じく子を止めて記録する
+        sleep = shutil.which("sleep")
+        for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+            with self.subTest(sig=sig.name):
+                env = {**os.environ, "HOME": str(self.home), "PATH": f"{self.bin}:/usr/bin:/bin", "BB_WRIT_CONFIG_DIR": str(self.cfg),
+                       "BB_WRIT_STATE_DIR": str(self.state), "FAKE_MODE": "orphan-hang", "FAKE_SLEEP": sleep, "FAKE_ARGS": str(self.args_file),
+                       "FAKE_TEXT": GOOD.encode().decode("unicode_escape")}
+                (self.bin / "fake_env.json").write_text(json.dumps({k: v for k, v in env.items() if k.startswith("FAKE_")}))
+                self.args_file.unlink(missing_ok=True)
+                Path(str(self.args_file) + ".orphan").unlink(missing_ok=True)
+                p = subprocess.Popen([sys.executable, str(LAUNCH), "--host", "claude", "--cwd", str(self.cwd), "--prompt-file", str(self.prompt),
+                                      "--timeout", "600"], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                for _ in range(400):  # 子とその子孫が起きるまで待つ
+                    if Path(str(self.args_file) + ".orphan").exists():
+                        break
+                    time.sleep(0.05)
+                t0 = time.time()
+                p.send_signal(sig)
+                time.sleep(0.2)
+                p.send_signal(sig)  # 止めて記録を書く間に重ねて来ても、書き終える
+                out, err = p.communicate(timeout=60)
+                pids = self.orphans()
+                self.assertLess(time.time() - t0, 30, err)
+                rec = json.loads(out)
+                self.assertEqual((p.returncode, rec["status"], rec["resumable"], rec["session"]), (2, "timeout", True, self.session_arg("claude")), rec)
+                self.assertEqual(rec["problems"], [f"launcher が {sig.name} で止められた", f"--resume {rec['out']} で続きから起動できる"])
+                self.assertEqual(sorted(int(x.split()[0]) for x in rec["stopped_after_exit"]), sorted(pids), rec)  # 子孫も止めた
+                for pid in pids:
+                    with self.assertRaises(ProcessLookupError, msg=f"{pid} が残った: {rec}"):
+                        os.kill(pid, 0)
+                self.assertIn(rec["out"], (self.state / "delegations.jsonl").read_text())
 
     def test_resume_takes_the_launch_only_from_the_record(self):
         """続きを違う権限・違う対象で起動しない。続きから起動できない記録では、子を起こさずに止める。"""
@@ -2315,6 +2350,8 @@ class TestLaunch(unittest.TestCase):
     def test_quota_is_reported_not_retried_elsewhere(self):
         rc, rec = self.run_launch("codex", "quota")
         self.assertEqual(rec["status"], "quota")
+        rc, rec = self.run_launch("codex", env_extra={"FAKE_STDERR": "request finished in 1429ms"})  # 時間の数字の中の 429 は利用枠ではない
+        self.assertEqual(rec["status"], "ok", rec)
 
     def test_report_without_json_is_invalid(self):
         rc, rec = self.run_launch("codex", "nojson")
