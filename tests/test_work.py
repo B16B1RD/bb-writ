@@ -979,7 +979,8 @@ class TestPremiseAfterRounds(unittest.TestCase):
         self.w("op", "done", "--dir", str(self.wt), "--token", self.tok, "--key", "push:feat@o", "--result", "ok")
         self.review_record(heads[1])
         self.assertTrue(self.refused("push:feat@o3", heads[3]))
-        rel = os.path.relpath(self.wt, self.tmp.name)  # 相対の --dir でも同じ作業場所として数える（w() は tmp で動く）
+        rel = os.path.relpath(self.wt, Path(self.tmp.name).resolve())  # 相対の --dir でも同じ作業場所として数える（w() は tmp で動く。
+        # macOS の /var は /private/var への symlink で深さが違うので、実体のパスから相対にする）
         self.note.write_text(FILLED_NOTE, encoding="utf-8")
         rc, res = self.w("op", "begin", "--dir", rel, "--token", self.tok, "--key", "push:feat@rel", "--what", "x",
                          "--from", str(self.repo), "--verified", heads[3], "--reviewed", heads[3])
