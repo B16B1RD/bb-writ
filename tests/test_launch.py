@@ -2006,8 +2006,9 @@ class TestLaunch(unittest.TestCase):
             self.assertIn("session を確かめられないか", again["problems"][0])
         quota = "ERROR: You've hit your usage limit."
         # 続けさせない事実は、どの status の枝が選ばれても残る（利用枠・終了コードが先に決まっても、権限が分からない子を続けさせない）
-        for host, mode, env, status, words in (("grok", "nosandbox", {"FAKE_STDERR": quota}, "quota", "could not be applied"),
-                                               ("codex", "wide-profile", {"FAKE_STDERR": quota}, "quota", "広い"),
+        # 利用枠は、子が成功しなかったときだけ（時間切れか失敗で、利用枠の文言を出した）
+        for host, mode, env, status, words in (("grok", "nosandbox", {"FAKE_STDERR": quota, "FAKE_HANG": "1"}, "quota", "could not be applied"),
+                                               ("codex", "wide-profile", {"FAKE_STDERR": quota, "FAKE_EXIT": "1"}, "quota", "広い"),
                                                ("codex", "wide-profile", {"FAKE_EXIT": "1"}, "failed", "広い"),
                                                ("codex", "wide-profile", {"FAKE_STDERR": quota, **hang}, "quota", "広い")):
             with self.subTest("doubt-under-another-status", host=host, env=sorted(env)):
@@ -2044,9 +2045,10 @@ class TestLaunch(unittest.TestCase):
         with self.subTest("other-thread-under-quota"):  # thread は起動ごとに別（同じ thread の記録に、前の subTest の turn が足されている）
             rc, rec = self.run_launch("codex", extra=["--timeout", "2"], env_extra={**hang, "FAKE_THREAD": "0199aaaa-bbbb-7ccc-8ddd-eeeeffff9000"})
             rc, again = self.run_launch(None, extra=["--resume", rec["out"]], env_extra={
-                "FAKE_ROLLOUT_APPEND": "1", "FAKE_THREAD": "0199aaaa-bbbb-7ccc-8ddd-eeeeffff0002", "FAKE_STDERR": quota})
+                "FAKE_ROLLOUT_APPEND": "1", "FAKE_THREAD": "0199aaaa-bbbb-7ccc-8ddd-eeeeffff0002", "FAKE_STDERR": quota, "FAKE_EXIT": "1"})
             self.assertEqual((again["status"], again["resumable"]), ("quota", False), again)
-        for env in ({"FAKE_STDERR": quota}, {}):  # 続きが turn を書かずに報告を返す・止まる（その子の権限を照らせない）
+            self.assertTrue(any("前と違う（0199aaaa-bbbb-7ccc-8ddd-eeeeffff0002）" in p for p in again["problems"]), again)
+        for env in ({"FAKE_STDERR": quota, "FAKE_EXIT": "1"}, {}):  # 続きが turn を書かずに利用枠で止まる・報告を返す（その子の権限を照らせない）
             with self.subTest("no-new-turn", env=sorted(env)):
                 (self.home / ".config" / "git").mkdir(parents=True, exist_ok=True)
                 thread = {"FAKE_THREAD": "0199aaaa-bbbb-7ccc-8ddd-eeeeffff4%03d" % len(env)}
@@ -2315,14 +2317,16 @@ class TestLaunch(unittest.TestCase):
     def test_quota_is_reported_not_retried_elsewhere(self):
         rc, rec = self.run_launch("codex", "quota")
         self.assertEqual(rec["status"], "quota")
-        # 429 は HTTP の文脈のときだけ利用枠とみなす（本物の CLI の文言の形）。時間・行番号・pid の数字は利用枠ではない
-        for i, (line, status) in enumerate((("API Error: 429 {\"type\":\"error\",\"error\":{\"type\":\"rate_limit_error\"}}", "quota"),
-                                            ("stream error: last status: 429 Too Many Requests", "quota"), ("HTTP 429", "quota"),
-                                            ("request finished in 1429ms", "ok"), ("took 429 ms", "ok"), ("took 429.5ms", "ok"),
-                                            ('File "x.py", line 429', "ok"), ("pid 429 exited", "ok"), ("exit status 4290", "ok"))):
-            with self.subTest(line=line):
-                rc, rec = self.run_launch("codex", env_extra={"FAKE_STDERR": line, "FAKE_THREAD": f"0199aaaa-bbbb-7ccc-8ddd-eeeeffff{9100 + i}"})
+        # 利用枠の文言を照らすのは、子が成功しなかったときだけ。成功した子の報告は、stderr の一語では捨てない
+        for i, (line, extra, status) in enumerate((("WARN failed to refresh rate limits", {}, "ok"), ("request finished in 1429ms", {}, "ok"),
+                                                   ("Reconnecting... 1/5 (unexpected status 429 Too Many Requests)", {}, "ok"),
+                                                   ("stream error: last status: 429 Too Many Requests", {"FAKE_EXIT": "1"}, "quota"),
+                                                   ("API Error: 429 rate_limit_error", {"FAKE_HANG": "1"}, "quota"))):  # 時間切れ（成功していない）
+            with self.subTest(line=line, extra=sorted(extra)):
+                rc, rec = self.run_launch("codex", extra=["--timeout", "2"], env_extra={"FAKE_STDERR": line, "FAKE_THREAD": f"0199aaaa-bbbb-7ccc-8ddd-eeeeffff{9100 + i}", **extra})
                 self.assertEqual(rec["status"], status, rec)
+                if status == "ok":
+                    self.assertTrue((Path(rec["out"]) / "report.md").is_file())  # 報告を捨てない
 
     def test_report_without_json_is_invalid(self):
         rc, rec = self.run_launch("codex", "nojson")

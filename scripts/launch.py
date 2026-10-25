@@ -40,8 +40,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from work import root as work_record  # noqa: E402  作業場所ごとの記録の置き場（担当・記録・証拠）
 
 DEFAULTS = {"claude": ("sonnet", "medium"), "codex": ("gpt-6-sol", "medium"), "grok": ("grok-4.7", "medium")}
-# 429 は HTTP の文脈の形だけ（「took 429 ms」「line 429」「1429ms」のような数字には当たらない）
-QUOTA = re.compile(r"usage limit|rate limit|quota|exceeded your|too many requests|(?:status|code|http|error)\W{0,3}429\b|\b429\s+too many|limit reached|out of credits", re.I)
+QUOTA = re.compile(r"usage limit|rate limit|quota|exceeded your|too many requests|429|limit reached|out of credits", re.I)
 CONTRACT = """
 
 ---
@@ -1006,8 +1005,10 @@ def main() -> int:
                       + ([f"続きの子の session を確かめられないか、前と違う（{got['session']}）"] if other else []) + ([breach] if breach else []))
             # 続けさせない理由は、選ばれた status の枝でなく、事実から決める（利用枠の枝が先に決まっても残す）
             blocked += [k for k, fact in (("unsafe", unsafe), ("session", other), ("breach", breach)) if fact]
-            # 利用枠・権限の照合は、時間切れより先に見る（権限の約束どおりに動いたか分からない子を、続きから起動させない）
-            if QUOTA.search(p.stderr[-4000:] + "\n" + "\n".join(got["errors"])):  # 繋ぎ目で語がつながらないように
+            # 利用枠・権限の照合は、時間切れより先に見る（権限の約束どおりに動いたか分からない子を、続きから起動させない）。
+            # 利用枠の文言を照らすのは、子が成功しなかったときだけ（成功した子の報告を、stderr の「429」「rate limit」などの一語で捨てていた）
+            succeeded = not timed_out and p.returncode == 0 and not got.get("is_error") and got["text"]
+            if not succeeded and QUOTA.search(p.stderr[-4000:] + " ".join(got["errors"])):
                 rec.update(status="quota", problems=["利用枠の上限に当たった（別料金の API へは切り替えない）"] + doubts + stopped)
             elif unsafe or other or (timed_out and breach):  # 権限・続きの session が分からない子を、続きから起動させない
                 rec.update(status="failed", problems=doubts + ended + stopped)
