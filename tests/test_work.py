@@ -974,10 +974,16 @@ class TestPremiseAfterRounds(unittest.TestCase):
         self.review_record(heads[1], cwd=str(self.repo))  # ほかの場所（main の取り込みで履歴に入るほかのタスクの審査も同じ）
         with open(Path(self.env["BB_WRIT_STATE_DIR"]) / "delegations.jsonl", "a", encoding="utf-8") as f:
             f.write(json.dumps({"head": heads[2][:12], "status": "ok", "write": False, "cwd": str(self.wt)}) + "\n")  # 短い ID
+            f.write(json.dumps({"head": heads[2], "status": "ok", "write": False}) + "\n")  # cwd の無い行
         self.assertEqual(self.publish("push:feat@o", heads[3])[0], 0)  # 数えるのは 2 つだけ
         self.w("op", "done", "--dir", str(self.wt), "--token", self.tok, "--key", "push:feat@o", "--result", "ok")
         self.review_record(heads[1])
         self.assertTrue(self.refused("push:feat@o3", heads[3]))
+        rel = os.path.relpath(self.wt, self.tmp.name)  # 相対の --dir でも同じ作業場所として数える（w() は tmp で動く）
+        self.note.write_text(FILLED_NOTE, encoding="utf-8")
+        rc, res = self.w("op", "begin", "--dir", rel, "--token", self.tok, "--key", "push:feat@rel", "--what", "x",
+                         "--from", str(self.repo), "--verified", heads[3], "--reviewed", heads[3])
+        self.assertEqual((rc, res.get("note", {}).get("empty")), (2, [PREMISE_LINE[2:-1]]), res)
 
     def test_reviews_of_commits_amended_away_still_count(self):
         self.start()
@@ -1008,6 +1014,17 @@ class TestPremiseAfterRounds(unittest.TestCase):
         for f in (Path(self.env["BB_WRIT_STATE_DIR"]) / "work").glob("*/task.json"):
             f.unlink()  # 書く子が書き換えうる場所。タスクは親の一覧から作業場所の dir で引く
         self.assertTrue(self.refused("push:feat@notask", head))
+
+    def test_the_main_checkout_claimed_beside_a_task_is_not_counted(self):
+        self.start()  # 同じリポジトリにタスクがある。元の checkout は task start の作業場所でない
+        self.w("release", "--dir", str(self.wt), "--token", self.tok)
+        self.wt = self.repo
+        r = self.w("claim", "--dir", str(self.repo), "--holder", "A")[1]
+        self.tok, self.note = r["token"], Path(r["note"]["path"])
+        heads = [self.commit(f"c{i}") for i in range(3)]
+        for h in heads:
+            self.review_record(h)
+        self.assertEqual(self.publish("push:main@claim", heads[2])[0], 0)
 
     def test_a_place_not_made_by_task_start_is_not_counted(self):
         TestAccountCheck.review_record(self, subprocess.run(["git", "rev-parse", "HEAD"], env=self.env, cwd=self.wt,
