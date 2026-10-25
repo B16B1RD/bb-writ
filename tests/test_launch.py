@@ -4,7 +4,6 @@ import errno
 import json
 import shlex
 import shutil
-import signal
 import os
 import subprocess
 import sys
@@ -2114,40 +2113,6 @@ class TestLaunch(unittest.TestCase):
             rc, again = self.run_launch(None, extra=["--resume", rec["out"]])
             self.assertEqual((again["status"], again["head"]), ("ok", None), again)
 
-    def test_a_stopped_launcher_records_and_stops_the_child(self):
-        # 親のコマンドの時間切れ（Claude Code の Bash は既定 2 分・上限 10 分）で launcher が止められると、記録が残らず、
-        # 続きから起動できず、子は動き続けた。待つ間に SIGTERM・SIGINT・SIGHUP を受けたら、時間切れと同じく子を止めて記録する
-        sleep = shutil.which("sleep")
-        for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
-            with self.subTest(sig=sig.name):
-                env = {**os.environ, "HOME": str(self.home), "PATH": f"{self.bin}:/usr/bin:/bin", "BB_WRIT_CONFIG_DIR": str(self.cfg),
-                       "BB_WRIT_STATE_DIR": str(self.state), "FAKE_MODE": "orphan-hang", "FAKE_SLEEP": sleep, "FAKE_ARGS": str(self.args_file),
-                       "FAKE_TEXT": GOOD.encode().decode("unicode_escape")}
-                (self.bin / "fake_env.json").write_text(json.dumps({k: v for k, v in env.items() if k.startswith("FAKE_")}))
-                self.args_file.unlink(missing_ok=True)
-                Path(str(self.args_file) + ".orphan").unlink(missing_ok=True)
-                p = subprocess.Popen([sys.executable, str(LAUNCH), "--host", "claude", "--cwd", str(self.cwd), "--prompt-file", str(self.prompt),
-                                      "--timeout", "600"], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-                for _ in range(400):  # 子とその子孫が起きるまで待つ
-                    if Path(str(self.args_file) + ".orphan").exists():
-                        break
-                    time.sleep(0.05)
-                t0 = time.time()
-                p.send_signal(sig)
-                time.sleep(0.2)
-                p.send_signal(sig)  # 止めて記録を書く間に重ねて来ても、書き終える
-                out, err = p.communicate(timeout=60)
-                pids = self.orphans()
-                self.assertLess(time.time() - t0, 30, err)
-                rec = json.loads(out)
-                self.assertEqual((p.returncode, rec["status"], rec["resumable"], rec["session"]), (2, "timeout", True, self.session_arg("claude")), rec)
-                self.assertEqual(rec["problems"], [f"launcher が {sig.name} で止められた", f"--resume {rec['out']} で続きから起動できる"])
-                self.assertEqual(sorted(int(x.split()[0]) for x in rec["stopped_after_exit"]), sorted(pids), rec)  # 子孫も止めた
-                for pid in pids:
-                    with self.assertRaises(ProcessLookupError, msg=f"{pid} が残った: {rec}"):
-                        os.kill(pid, 0)
-                self.assertIn(rec["out"], (self.state / "delegations.jsonl").read_text())
-
     def test_resume_takes_the_launch_only_from_the_record(self):
         """続きを違う権限・違う対象で起動しない。続きから起動できない記録では、子を起こさずに止める。"""
         rc, rec = self.run_launch("claude", extra=["--timeout", "2"], env_extra={"FAKE_HANG": "1"})
@@ -2350,8 +2315,14 @@ class TestLaunch(unittest.TestCase):
     def test_quota_is_reported_not_retried_elsewhere(self):
         rc, rec = self.run_launch("codex", "quota")
         self.assertEqual(rec["status"], "quota")
-        rc, rec = self.run_launch("codex", env_extra={"FAKE_STDERR": "request finished in 1429ms"})  # 時間の数字の中の 429 は利用枠ではない
-        self.assertEqual(rec["status"], "ok", rec)
+        # 429 は HTTP の文脈のときだけ利用枠とみなす（本物の CLI の文言の形）。時間・行番号・pid の数字は利用枠ではない
+        for i, (line, status) in enumerate((("API Error: 429 {\"type\":\"error\",\"error\":{\"type\":\"rate_limit_error\"}}", "quota"),
+                                            ("stream error: last status: 429 Too Many Requests", "quota"), ("HTTP 429", "quota"),
+                                            ("request finished in 1429ms", "ok"), ("took 429 ms", "ok"), ("took 429.5ms", "ok"),
+                                            ('File "x.py", line 429', "ok"), ("pid 429 exited", "ok"), ("exit status 4290", "ok"))):
+            with self.subTest(line=line):
+                rc, rec = self.run_launch("codex", env_extra={"FAKE_STDERR": line, "FAKE_THREAD": f"0199aaaa-bbbb-7ccc-8ddd-eeeeffff{9100 + i}"})
+                self.assertEqual(rec["status"], status, rec)
 
     def test_report_without_json_is_invalid(self):
         rc, rec = self.run_launch("codex", "nojson")

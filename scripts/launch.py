@@ -6,7 +6,7 @@
   python3 launch.py --resume <前の起動の out> --prompt-file <続きの依頼> [--out <dir>] [--timeout 秒]
 
 標準出力に 1 行の JSON を出す。status は ok / not-run / invalid-report / timeout / failed / quota / unavailable。ok のときだけ終了コード 0。
-timeout は、時間切れで止め（launcher が SIGTERM・SIGINT・SIGHUP で止められたときも）、ほかの照合に当たらなかったもの。記録の session で、--resume が同じ session・同じ権限の続きを起動する。
+timeout は、時間切れで止め、ほかの照合に当たらなかったもの。記録の session で、--resume が同じ session・同じ権限の続きを起動する。
 報告を使えるのは ok と、読んだだけの報告として使う not-run。
 子には、最後に ```json {"conclusion": ..., "evidence": [{"what": ..., "where": ...}], "unknowns": [...], "execution": {...}} ``` を書かせる。
 JSON が返ったことを成功にしない: 結論が空、証拠が無い、証拠の where がファイルを指すのに存在しない、実行の欄の形が違う、は invalid-report。
@@ -40,7 +40,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from work import root as work_record  # noqa: E402  作業場所ごとの記録の置き場（担当・記録・証拠）
 
 DEFAULTS = {"claude": ("sonnet", "medium"), "codex": ("gpt-6-sol", "medium"), "grok": ("grok-4.7", "medium")}
-QUOTA = re.compile(r"usage limit|rate limit|quota|exceeded your|too many requests|\b429\b|limit reached|out of credits", re.I)  # 「1429ms」には当たらない
+# 429 は HTTP の文脈の形だけ（「took 429 ms」「line 429」「1429ms」のような数字には当たらない）
+QUOTA = re.compile(r"usage limit|rate limit|quota|exceeded your|too many requests|(?:status|code|http|error)\W{0,3}429\b|\b429\s+too many|limit reached|out of credits", re.I)
 CONTRACT = """
 
 ---
@@ -762,17 +763,6 @@ def become_subreaper() -> None:
         raise OSError(ctypes.get_errno(), "prctl(PR_SET_CHILD_SUBREAPER) が失敗した")
 
 
-class Stopped(Exception):
-    """子を待つ間に、launcher 自身が止められた（親のコマンドの時間切れ、Ctrl-C、端末を閉じた）。"""
-
-
-STOP_SIGNALS = (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)
-
-
-def stop_waiting(signum, frame):
-    raise Stopped(signal.Signals(signum).name)
-
-
 def load_now() -> float | None:
     """1 分平均の負荷（取れない OS では null）。"""
     try:
@@ -956,7 +946,7 @@ def main() -> int:
     elif why:
         rec.update(status="unavailable", problems=[why])
     else:
-        child, left, timed_out, stopped_by = None, [], False, None
+        child, left, timed_out = None, [], False
         try:
             # 子が残した背景のプロセスが、終了後の照合の後に書き換えないよう、プロセスグループごと止める。子の CLI が新しいセッションに
             # 切り離した子孫（Claude Code の Bash）はグループの外なので、Linux では自分の下に来たものを残らなくなるまで止める
@@ -970,18 +960,9 @@ def main() -> int:
                     readers[-1].start()
                 # 出力が閉じるのでなく、子の CLI が終わるのを待つ（子孫が出力を開いたままでも）
                 try:
-                    # 待つ間に launcher 自身が止められたら（親のコマンドの時間切れなど）、時間切れと同じく子を止めて記録する。
-                    # 止めずに終わると、記録が残らず続きから起動できず、子は動き続けた
-                    for s in STOP_SIGNALS:
-                        signal.signal(s, stop_waiting)
                     wait_for_exit(child, a.timeout) if LINUX else child.wait(timeout=a.timeout)
                 except subprocess.TimeoutExpired:  # 止めた後も出力を読み、session を記録する（--resume で続きから起動できる）
                     timed_out = True
-                except Stopped as e:
-                    timed_out = stopped_by = str(e)
-                finally:
-                    for s in STOP_SIGNALS:  # 子を止めて記録を書き終えるまで、重ねて来たものは受けない
-                        signal.signal(s, signal.SIG_IGN)
             finally:
                 try:
                     os.killpg(child.pid, signal.SIGKILL)  # Linux では、まだ刈っていない（番号は使い回されていない）
@@ -1016,7 +997,7 @@ def main() -> int:
                 breach = f"続きの Codex の記録ファイルが 1 つでない（{got['rollouts']} 個）。前の起動で照らした turn を除けず、実効の権限を確かめられない"
             if a.host == "codex" and not a.write and not breach:
                 rec["codex_turns"] = len(got["permissions"])
-            stopped = ([f"launcher が {stopped_by} で止められた"] if stopped_by else [f"{a.timeout} 秒で終わらなかった"]) if timed_out else []
+            stopped = [f"{a.timeout} 秒で終わらなかった"] if timed_out else []
             tail = [l for l in p.stderr.strip().splitlines() if "injected env" not in l and "Reading additional input" not in l][-5:]
             ended = [f"終了コード {p.returncode}"] + got["errors"] + tail if not timed_out and (p.returncode != 0 or got.get("is_error")) else []
             # 続きの session は、子の結果で確かめられたときだけ前と同じとみなす（時間切れの Claude Code・Grok は結果を出さない）
@@ -1026,7 +1007,7 @@ def main() -> int:
             # 続けさせない理由は、選ばれた status の枝でなく、事実から決める（利用枠の枝が先に決まっても残す）
             blocked += [k for k, fact in (("unsafe", unsafe), ("session", other), ("breach", breach)) if fact]
             # 利用枠・権限の照合は、時間切れより先に見る（権限の約束どおりに動いたか分からない子を、続きから起動させない）
-            if QUOTA.search(p.stderr[-4000:] + " ".join(got["errors"])):
+            if QUOTA.search(p.stderr[-4000:] + "\n" + "\n".join(got["errors"])):  # 繋ぎ目で語がつながらないように
                 rec.update(status="quota", problems=["利用枠の上限に当たった（別料金の API へは切り替えない）"] + doubts + stopped)
             elif unsafe or other or (timed_out and breach):  # 権限・続きの session が分からない子を、続きから起動させない
                 rec.update(status="failed", problems=doubts + ended + stopped)
