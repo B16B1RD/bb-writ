@@ -995,15 +995,17 @@ class TestPremiseAfterRounds(unittest.TestCase):
 
     def test_a_reviewed_commit_merged_in_from_another_task_does_not_count(self):
         other = self.start()
-        theirs = [self.commit(f"t{i}") for i in range(2)]
-        for h in theirs:
-            self.review_record(h)
+        mine = self.start()  # 両方のタスクを同じ基点から始める
+        self.wt, self.tok = Path(other["dir"]), other["token"]
+        for i in range(2):
+            self.review_record(self.commit(f"t{i}"))
         self.git("merge", "-q", "--ff-only", other["branch"], cwd=self.repo)  # ほかのタスクを main に統合した
-        self.w("release", "--dir", str(self.wt), "--token", self.tok)
-        self.start()
+        self.wt, self.tok, self.note = Path(mine["dir"]), mine["token"], Path(mine["note"]["path"])
         self.review_record(self.commit("m1"))
+        before = self.git("rev-parse", "HEAD")
         self.git("merge", "-q", "--no-edit", "main")  # 統合の前に main を取り込む（playbook-parallel）
         head = self.git("rev-parse", "HEAD")
+        self.assertNotEqual(head, before)  # 取り込みで、ほかのタスクの審査済みの commit が履歴に入った
         self.review_record(head)
         self.assertEqual(self.publish("push:feat@merged", head)[0], 0)  # 自分の周は 2
 
