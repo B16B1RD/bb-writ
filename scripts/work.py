@@ -41,6 +41,9 @@ op run・op begin を通さない git push には効かない。
 commit を書いたときは、launcher の委任の記録（delegations.jsonl）に、その commit を対象に起動して ok で返った読み取り専用の子が
 無ければ拒否する（6）。通ったら、その子の記録の場所を reviews に残す。審査の中身（子が十分に攻めたか）と none: の理由の真偽は確かめない。
 短い往復で審査を忘れたまま、または書き手が自分の確かめを審査の代わりにして出すのを止める。
+push・pr は、作業の記録（note.md）の目的・制約・確かめ方の欄が空か無ければ拒否する（2）。--reviewed が commit なら、指摘の扱いの欄も。
+欄が空かどうかだけを見て、中身の真偽・書いた順・どの周の審査の指摘かは見ない。claim・renew は空の欄を note.empty で知らせる（拒否しない）。
+言い直し・記録・指摘の扱いの一覧を飛ばしたまま、長いセッションで作業が進んだため。
 検証の後に成果物が変わったら、証拠を取り直してから出す（plan-v3 6.2）。merge は、GitHub 側でも gh pr merge --match-head-commit <同じ commit> で止める。
 
 外部に出る操作（鍵の種類が push・pr・comment・merge・release・issue）の op begin には --from が要り、check を通す。
@@ -211,23 +214,73 @@ NOTE = """# 作業の記録
 - 目的:
 - 制約:
 - できたと分かる確かめ方（述語）:
+- 指摘の扱い（審査の指摘ごとに、対応する・記録のみ・退ける と理由を、直す前に）:
 - 決めたことと根拠:
 - 済んだことと証拠:
 - 今の状態（ブランチ・commit・PR）:
 - 次の一手:
 - ホストと session ID:
 """
+FIELDS = re.findall(r"^- (.+?):$", NOTE, re.M)  # 雛形の欄の名前
+REQUIRED = FIELDS[:3]  # push・pr の前に空なら拒否する欄。審査を通した commit を宣言したときは、指摘の扱いも
+TRIAGE = FIELDS[3]
+
+
+def field_line(name: str):
+    """欄の名前の行。雛形の括弧の中（説明）は省いてよい（「- 指摘の扱い: …」も欄）。別の文言の括弧は受けない。"""
+    short, paren = name.split("（")[0], name[len(name.split("（")[0]):]
+    return re.compile(rf"- {re.escape(short)}(?:{re.escape(paren)})?:" if paren else rf"- {re.escape(short)}:")
+
+
+FIELD_LINES = [field_line(f) for f in FIELDS]
+HEADING = re.compile(r"#+(\s|$)")  # Markdown の見出し（「#」だけの空の見出しも）。「#123 …」は見出しでない
+
+
+def note_gaps(body: str, reviewed: bool) -> list:
+    """記録の必須の欄のうち、空か無いものの名前。欄の中身は、名前の行の ":" の後から、次の雛形の欄か見出しの行の前まで
+    （表や字下げした行も中身に数える）。中身の真偽・書いた順・どの審査の指摘かは見ない（忘れて飛ばすのを止める）。
+    同じ欄が 2 回あれば最初だけを見る。"""
+    lines, gaps = body.splitlines(), []
+    for name in REQUIRED + ([TRIAGE] if reviewed else []):
+        pat = field_line(name)
+        at, m = next(((i, m) for i, l in enumerate(lines) if (m := pat.match(l))), (None, None))
+        if at is None:
+            gaps.append(name)
+            continue
+        text = [lines[at][m.end():]]
+        for l in lines[at + 1:]:
+            if HEADING.match(l) or any(p.match(l) for p in FIELD_LINES):
+                break
+            text.append(l)
+        if not "".join(text).strip():
+            gaps.append(name)
+    return gaps
+
+
+def note_body(f: Path) -> str:
+    """記録の中身。無ければ空。UTF-8 でない字は置き換えて読む（欄が空かを見るだけなので、止めない。置き換えか無視かは結果を変えない）。
+    通常のファイルでない（ディレクトリ・壊れた symlink など）か、読めなければ RecordError。"""
+    if not f.is_file() and (f.exists() or f.is_symlink()):
+        raise RecordError(f"作業の記録 {f} が通常のファイルでない")
+    try:
+        return f.read_text(encoding="utf-8", errors="replace") if f.is_file() else ""
+    except OSError as e:
+        raise RecordError(f"作業の記録 {f} を読めない: {e}") from None
 
 
 def note(r: Path) -> dict:
     f = r / "note.md"
-    if not f.is_file():
-        f.write_text(NOTE, encoding="utf-8")
-    body = f.read_text(encoding="utf-8")
+    if not f.exists() and not f.is_symlink():
+        try:
+            f.write_text(NOTE, encoding="utf-8")
+        except OSError as e:
+            raise RecordError(f"作業の記録 {f} を作れない: {e}") from None
+    body = note_body(f)
     ev = r / "evidence"
     ev.mkdir(exist_ok=True)
+    gaps = note_gaps(body, False)
     return {"path": str(f), "filled": body.strip() != NOTE.strip(), "body": body if body.strip() != NOTE.strip() else None,
-            "evidence_dir": str(ev)}
+            "evidence_dir": str(ev), **({"empty": gaps} if gaps else {})}
 
 
 EXTERNAL = {"push", "pr", "comment", "merge", "release", "issue"}  # GitHub に出る操作の種類（鍵の ":" の前）
@@ -421,12 +474,13 @@ def claim_at(r, d, holder, minutes):
         return {'ok': False, 'reason': f'op run の外部操作がまだ動いている: {held}。終わるのを待つ（終われば監督役が done を書く）',
                 'holder': old and old.get('holder'), 'pending_ops': pending_while(r, held)}, 3
     waiting = pending(r)  # 記録が壊れていれば、担当を書く前に止める（書いた後に落ちると、誰も token を受け取らない担当が残る）
+    n = note(r)  # 作業の記録も同じ
     new = {'token': secrets.token_hex(8), 'holder': holder, 'dir': str(d.resolve()),
            'claimed_at': now, 'expires_at': now + minutes * 60,
            'previous': old and {'holder': old.get('holder'), 'expired_at': old.get('expires_at')}}
     write(r / 'lease.json', new)
     return {'ok': True, 'token': new['token'], 'previous': new['previous'],
-            'pending_ops': waiting, 'note': note(r)}, 0
+            'pending_ops': waiting, 'note': n}, 0
 
 
 def git(d, *args, fds=()):
@@ -731,6 +785,12 @@ def op_step(a, r: Path, live, now: float, action: str):
         if risk.group(1) != "低" and reviewed.startswith("none:"):
             return ({"ok": False, "reason": f"危険度が{risk.group(1)}の変更は interrogate を通す（入口の条件 (6)）。--reviewed に、審査を通した commit を書く"}, 2)
         risk = risk.group(1) + ": " + risk.group(2).strip()
+        f = r / "note.md"
+        gaps = note_gaps(note_body(f), bool(reviews))
+        if gaps:
+            return ({"ok": False, "note": {"path": str(f), "empty": gaps}, "reason": f"作業の記録 {f} の欄が空か無い: {'、'.join(gaps)}。目的・制約・確かめ方は担当を取った直後に、"
+                        "審査を通した commit を出すときの指摘の扱いは直す前に、その欄へ書く（`playbook-deliver` の「記録を残す」と入口の条件 (6)。"
+                        "欄の名前の行が無ければ、雛形の行を足す）"}, 2)
     if action == "begin" and known:
         return ({"ok": False, "reason": "同じ鍵の操作が既にある。外部の状態を照合してから進める（やり直さない）", "op": known}, 4)
     if action == "done" and not known:
@@ -1214,10 +1274,11 @@ def dispatch(a, r: Path, run_argv):
             if held:  # 手放すと、監督役が結果を記録できない
                 return out({"ok": False, "reason": f"op run の外部操作がまだ動いている: {held}。終わるのを待ってから手放す"}, 4)
             if a.cmd == "renew":
+                n = note(r)  # 単位ごとに呼ばれるので、空の欄をここで知らせる（拒否はしない）。読めなければ期限を書く前に止まる
                 live["expires_at"] = now + a.lease * 60
                 write(r / "lease.json", live)
-            else:
-                (r / "lease.json").unlink()
+                return out({"ok": True, **({"note": {"path": n["path"], "empty": n["empty"]}} if "empty" in n else {})})
+            (r / "lease.json").unlink()
             return out({"ok": True})
         if a.action == "pending":
             return out({"pending_ops": pending(r)})

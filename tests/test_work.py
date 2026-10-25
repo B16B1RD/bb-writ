@@ -25,6 +25,10 @@ def with_risk(t, args):
     return (*args[:i], "--risk", "低:試験の外", *args[i:])
 
 
+FILLED_NOTE = ("# 作業の記録\n\n- 目的: 試験の外\n- 制約: 試験の外\n- できたと分かる確かめ方（述語）: 試験の外\n"
+               "- 指摘の扱い（審査の指摘ごとに、対応する・記録のみ・退ける と理由を、直す前に）: 試験の外\n")
+
+
 def decl(key):
     """push・pr に要る、届ける前の審査の宣言（この試験の外の約束）。"""
     return ("--reviewed", "none:試験の外", "--risk", "低:試験の外") if key.split(":")[0] in ("push", "pr") else ()
@@ -235,7 +239,10 @@ class TestAccountCheck(unittest.TestCase):
         return str(out)
 
     def claim(self):
-        return self.w("claim", "--dir", str(self.wt), "--holder", "A")[1]["token"]
+        r = self.w("claim", "--dir", str(self.wt), "--holder", "A")[1]
+        if getattr(self, "fill_note", True):  # push・pr に要る記録の必須の欄（この試験の外の約束）。記録そのものを試す試験は偽にする
+            Path(r["note"]["path"]).write_text(FILLED_NOTE, encoding="utf-8")
+        return r["token"]
 
     def begin(self, tok, key, *frm):
         return self.w("op", "begin", "--dir", str(self.wt), "--token", tok, "--key", key, "--what", "x", *frm)
@@ -889,6 +896,200 @@ def permissions_bind():
 
 
 PERMISSIONS_BIND = permissions_bind()
+
+
+TRIAGE_LINE = "- 指摘の扱い（審査の指摘ごとに、対応する・記録のみ・退ける と理由を、直す前に）:"
+
+
+class TestNoteBeforePublish(unittest.TestCase):
+    """push・pr は、作業の記録の目的・制約・確かめ方と、審査を通した commit なら指摘の扱いが空なら出せない。
+    言い直し・記録・指摘の扱いの一覧を飛ばしたまま、長いセッションで作業が進んだ。照らすのは欄が空かどうかだけで、
+    中身の真偽・書いた順・どの周の審査の指摘かは見ない（前の周の扱いが残っていれば通る）。拒否の文言は確かめず、
+    拒否の JSON の note.empty（雛形の順の欄の名前）を見る。"""
+    setUp, tearDown, w, begin, head, review_record = (TestAccountCheck.setUp, TestAccountCheck.tearDown, TestAccountCheck.w,
+                                                      TestAccountCheck.begin, TestVerifiedCommit.head, TestAccountCheck.review_record)
+    fill_note = False
+
+    def claim(self, body=None):
+        r = self.w("claim", "--dir", str(self.wt), "--holder", "A")[1]
+        self.note = Path(r["note"]["path"])
+        if body is not None:
+            self.note.write_text(body, encoding="utf-8")
+        return r["token"], r
+
+    def publish(self, tok, key, reviewed):
+        return self.begin(tok, key, "--from", str(self.repo), "--verified", self.head(), "--reviewed", reviewed)
+
+    def head_note(self, purpose="x", limits="x", check="x", triage=None):
+        return (f"# 作業の記録\n\n- 目的:{purpose}\n- 制約:{limits}\n- できたと分かる確かめ方（述語）:{check}\n"
+                + ("" if triage is None else f"{TRIAGE_LINE}{triage}\n") + "- 決めたことと根拠: y\n")
+
+    def test_the_template_as_claimed_is_refused_and_names_the_empty_fields(self):
+        tok, r = self.claim()
+        self.assertEqual(r["note"]["empty"], ["目的", "制約", "できたと分かる確かめ方（述語）"])  # 担当を取った場で知らせる
+        for key in ("push:feat@1", "pr:feat"):
+            rc, res = self.publish(tok, key, "none:文書だけ")
+            self.assertEqual(rc, 2, key)
+            self.assertIn(str(self.note), res["reason"])
+            for name in ("目的", "制約", "できたと分かる確かめ方（述語）"):
+                self.assertIn(name, res["reason"], key)
+        self.assertEqual(self.pending(), [])  # 記録しない
+
+    def test_each_required_field_alone_left_empty_is_refused(self):
+        for empty in ("purpose", "limits", "check"):
+            with self.subTest(empty=empty):
+                tok, _ = self.claim(self.head_note(**{empty: "   "}))  # 空白だけは空
+                rc, res = self.publish(tok, f"push:feat@{empty}", "none:文書だけ")
+                self.assertEqual(rc, 2, res)
+                name = {"purpose": "目的", "limits": "制約", "check": "できたと分かる確かめ方（述語）"}[empty]
+                self.assertEqual(res["note"]["empty"], [name])
+                self.w("release", "--dir", str(self.wt), "--token", tok)
+
+    def test_filled_fields_pass_and_the_triage_is_not_needed_without_a_reviewed_commit(self):
+        tok, r = self.claim(self.head_note())
+        self.assertNotIn("empty", self.w("status", "--dir", str(self.wt))[1]["note"])
+        self.assertEqual(self.publish(tok, "push:feat@1", "none:文書だけ")[0], 0)
+
+    def test_a_reviewed_commit_needs_the_triage(self):
+        for triage in (None, "", "  "):  # 欄の行が無い（前の雛形の記録）、空、空白だけ
+            with self.subTest(triage=triage):
+                tok, _ = self.claim(self.head_note(triage=triage))
+                rc, res = self.publish(tok, f"pr:feat@{triage!r}", self.head())
+                self.assertEqual(rc, 2, res)
+                self.assertEqual(res["note"]["empty"], ["指摘の扱い（審査の指摘ごとに、対応する・記録のみ・退ける と理由を、直す前に）"])
+                self.w("release", "--dir", str(self.wt), "--token", tok)
+        tok, _ = self.claim(self.head_note(triage=" F1 対応する: 実際の入力で落ちる"))
+        self.assertEqual(self.publish(tok, "push:feat@ok", self.head())[0], 0)
+
+    def test_lines_under_a_field_count_until_the_next_field_or_heading(self):
+        table = "\n| 指摘 | 扱い |\n|---|---|\n| F1 | 対応する |\n  - 字下げした行"
+        tok, _ = self.claim(self.head_note(purpose="\n  - 字下げした目的", triage=table))
+        self.assertEqual(self.publish(tok, "push:feat@1", self.head())[0], 0)
+        self.w("release", "--dir", str(self.wt), "--token", tok)
+        # 見出しの下や次の欄に書いたものは、空の欄の中身に数えない
+        body = self.head_note(purpose="", triage="x").replace("- 制約:x", "## 目的\n書いた\n- 制約:x")
+        tok, _ = self.claim(body)
+        rc, res = self.publish(tok, "push:feat@2", self.head())
+        self.assertEqual((rc, res["note"]["empty"]), (2, ["目的"]))
+        self.w("release", "--dir", str(self.wt), "--token", tok)
+        # 字下げした行や行の途中の欄の名前は、欄に数えない（その前にあっても、雛形の行の欄を見る）
+        tok, _ = self.claim(self.head_note(purpose="", triage="x").replace("# 作業の記録\n", "# 作業の記録\n  - 目的: 字下げ\n"))
+        rc, res = self.publish(tok, "push:feat@3", self.head())
+        self.assertEqual((rc, res["note"]["empty"]), (2, ["目的"]))
+        self.w("release", "--dir", str(self.wt), "--token", tok)
+        # 見出しは # の数によらず止める。欄の名前は ":" までで見る（名前で始まるだけの行は、欄でも次の欄の始まりでもない）
+        for i, body in enumerate((self.head_note(purpose="", triage="x").replace("- 制約:x", "# 見出し\n書いた\n- 制約:x"),
+                                  self.head_note(purpose="", triage="x").replace("# 作業の記録\n", "# 作業の記録\n- 目的外のこと: x\n"))):
+            tok, _ = self.claim(body)
+            rc, res = self.publish(tok, f"push:feat@h{i}", self.head())
+            self.assertEqual((rc, res["note"]["empty"]), (2, ["目的"]), body)
+            self.w("release", "--dir", str(self.wt), "--token", tok)
+        for i, purpose in enumerate(("\n- 制約のメモも目的の中身", "\n#123 の件（見出しでない）", "\nメモ # 2（行の途中の # は見出しでない）")):
+            tok, _ = self.claim(self.head_note(purpose=purpose, triage="x"))
+            self.assertEqual(self.publish(tok, f"push:feat@c{i}", self.head())[0], 0, purpose)
+            self.w("release", "--dir", str(self.wt), "--token", tok)
+        tok, _ = self.claim(self.head_note())
+        self.w("release", "--dir", str(self.wt), "--token", tok)
+        # 欄の名前は括弧の中を省いてよい。省いた行も欄なので、前の欄の中身に数えない
+        short = "- 指摘の扱い: F1 対応する\n"
+        tok, _ = self.claim(self.head_note(check="").replace("- 決めたことと根拠", short + "- 決めたことと根拠"))
+        rc, res = self.publish(tok, "push:feat@short", self.head())
+        self.assertEqual((rc, res["note"]["empty"]), (2, ["できたと分かる確かめ方（述語）"]))
+        self.w("release", "--dir", str(self.wt), "--token", tok)
+        tok, _ = self.claim(self.head_note().replace("- 決めたことと根拠", short + "- 決めたことと根拠"))
+        self.assertEqual(self.publish(tok, "push:feat@short-ok", self.head())[0], 0)
+        self.w("release", "--dir", str(self.wt), "--token", tok)
+        # 別の文言の括弧の欄・「#」だけの空の見出しの下・2 回目の同じ欄は、空の欄を埋めない（同じ欄は最初だけを見る）
+        tok, _ = self.claim(self.head_note(check="", triage="x").replace("# 作業の記録\n", "# 作業の記録\n- できたと分かる確かめ方（未定）: x\n"))
+        rc, res = self.publish(tok, "push:feat@paren", self.head())
+        self.assertEqual((rc, res["note"]["empty"]), (2, ["できたと分かる確かめ方（述語）"]))
+        self.w("release", "--dir", str(self.wt), "--token", tok)
+        for i, body in enumerate((self.head_note(purpose="", triage="x").replace("# 作業の記録\n", "# 作業の記録\n- 目的（別物）: x\n"),
+                                  self.head_note(purpose="", triage="x").replace("- 制約:x", "#\n見出しの下\n- 制約:x"),
+                                  self.head_note(purpose="", triage="x") + "- 目的: 後から書いた\n")):
+            tok, _ = self.claim(body)
+            rc, res = self.publish(tok, f"push:feat@x{i}", self.head())
+            self.assertEqual((rc, res["note"]["empty"]), (2, ["目的"]), body)
+            self.w("release", "--dir", str(self.wt), "--token", tok)
+        tok, _ = self.claim(self.head_note())
+
+    def test_renew_names_the_empty_fields_without_refusing(self):
+        tok, _ = self.claim()
+        rc, r = self.w("renew", "--dir", str(self.wt), "--token", tok)
+        self.assertEqual((rc, r["note"]["empty"]), (0, ["目的", "制約", "できたと分かる確かめ方（述語）"]))
+        self.note.write_text(self.head_note(), encoding="utf-8")
+        rc, r = self.w("renew", "--dir", str(self.wt), "--token", tok)
+        self.assertEqual(rc, 0)
+        self.assertNotIn("note", r)
+
+    def test_status_names_the_empty_fields(self):
+        self.claim()
+        self.assertEqual(self.w("status", "--dir", str(self.wt))[1]["note"]["empty"], ["目的", "制約", "できたと分かる確かめ方（述語）"])
+
+    def test_a_missing_or_unreadable_note_is_refused_with_a_reason(self):
+        tok, _ = self.claim(self.head_note())
+        self.note.unlink()  # 記録のファイルが無いのは、欄が無いのと同じ
+        rc, res = self.publish(tok, "push:feat@gone", "none:文書だけ")
+        self.assertEqual((rc, res["note"]["empty"]), (2, ["目的", "制約", "できたと分かる確かめ方（述語）"]))
+        # UTF-8 でない字があっても、欄が書いてあれば通す（置き換えて読む）
+        self.note.write_bytes(self.head_note().encode("utf-8") + b"\xff\xfe\n")
+        self.assertEqual(self.publish(tok, "push:feat@bytes", "none:文書だけ")[0], 0)
+        if os.geteuid() == 0:
+            return  # root は権限で読めなくならない
+        lease = next(self.note.parent.glob("lease.json"))
+        before = lease.read_bytes()
+        self.note.chmod(0)
+        try:
+            rc, res = self.w("renew", "--dir", str(self.wt), "--token", tok, "--lease", "1")
+            self.assertEqual(rc, 1)
+            self.assertIn("読めない", res["reason"])  # 1 行の JSON で理由を返す
+            self.assertEqual(lease.read_bytes(), before)  # 読めなければ期限を書かない
+            rc, res = self.publish(tok, "push:feat@unreadable", "none:文書だけ")
+            self.assertEqual(rc, 1)
+            self.assertIn("読めない", res["reason"])
+        finally:
+            self.note.chmod(0o644)
+
+    def test_a_note_that_is_not_a_regular_file_is_refused_before_the_lease_is_written(self):
+        tok, _ = self.claim(self.head_note())
+        self.w("release", "--dir", str(self.wt), "--token", tok)
+        self.note.unlink()
+        self.note.mkdir()
+        rc, res = self.w("claim", "--dir", str(self.wt), "--holder", "A")
+        self.assertEqual(rc, 1)
+        self.assertIn("通常のファイルでない", res["reason"])  # 1 行の JSON で理由を返す
+        self.assertFalse((self.note.parent / "lease.json").exists())  # token を受け取らない担当を残さない
+        rc, res = self.w("status", "--dir", str(self.wt))
+        self.assertEqual(rc, 1)
+        self.assertIn("通常のファイルでない", res["reason"])
+        self.note.rmdir()
+        self.note.symlink_to(self.note.parent / "nowhere")  # 壊れた symlink も通常のファイルでない
+        rc, res = self.w("status", "--dir", str(self.wt))
+        self.assertEqual(rc, 1)
+        self.assertIn("通常のファイルでない", res["reason"])
+        self.assertFalse((self.note.parent / "nowhere").exists())  # 行き先に雛形を書かない
+        self.note.unlink()
+        if os.geteuid() == 0:
+            return  # root は権限で書けなくならない
+        tok, _ = self.claim()
+        lease = self.note.parent / "lease.json"
+        before = lease.read_bytes()
+        self.note.unlink()
+        self.note.parent.chmod(0o500)  # 消えた記録を作り直せない
+        try:
+            rc, res = self.w("renew", "--dir", str(self.wt), "--token", tok)
+            self.assertEqual(rc, 1)
+            self.assertIn("作れない", res["reason"])
+            self.assertEqual(lease.read_bytes(), before)
+        finally:
+            self.note.parent.chmod(0o755)
+
+    def test_other_operations_do_not_look_at_the_note(self):
+        tok, _ = self.claim()
+        self.assertEqual(self.w("op", "begin", "--dir", str(self.wt), "--token", tok, "--key", "local:x", "--what", "x")[0], 0)
+        self.assertEqual(self.begin(tok, "comment:pr-1", "--from", str(self.repo))[0], 0)
+
+    pending = TestReviewedCommit.pending
 
 
 class TestOpRun(unittest.TestCase):

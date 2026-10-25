@@ -38,7 +38,7 @@ python3 <launch.py> --resume <前の記録の out> --prompt-file <続きの依�
 
 ## 担当の貸し出しと外部操作の記録
 
-`scripts/work.py`（launcher と同じ置き場）。子に書く仕事を任せるときは、親が担当を持ったままにせず、子に `claim` させる（同じ作業場所に親と子が同時に書かない）。別タスクを子に任せるときは、親が `playbook-parallel` の `task start` で専用 worktree を作って `release` し、子はその worktree を `--cwd` にして起動し、そこで `claim` する（元の checkout で起動すると、その記録の置き場にタスクの一覧が含まれる）。`task start`・`task resume`・`integrate`・`task cleanup` は親が行う（子はタスクの一覧と統合の記録に書けない）。子が終わったら、親が同じ worktree で `claim` し直して確かめ、統合する。作業場所の記録（`lease.json`・`ops.jsonl`）は子が書き換えうるので、子に任せている間はその作業場所で外部操作を始めたままにしない。担当の期限は 24 時間までで、それを超える記録は切れたものとみなす（子が期限を遠い将来にして、親の取り直しを止められないように）。CLI 名や担当の表示名が同じでも、タスクと token で区別する。使い方は入口 `bb-writ` の「離席・中断・訂正」。
+`scripts/work.py`（launcher と同じ置き場）。子に書く仕事を任せるときは、親が担当を持ったままにせず、子に `claim` させる（同じ作業場所に親と子が同時に書かない）。別タスクを子に任せるときは、親が `playbook-parallel` の `task start` で専用 worktree を作って `release` し、子はその worktree を `--cwd` にして起動し、そこで `claim` する（元の checkout で起動すると、その記録の置き場にタスクの一覧が含まれる）。`task start`・`task resume`・`integrate`・`task cleanup` は親が行う（子はタスクの一覧と統合の記録に書けない）。子が終わったら、親が同じ worktree で `claim` し直して確かめ、統合する。作業場所の記録（`lease.json`・`ops.jsonl`）は子が書き換えうるので、子に任せている間はその作業場所で外部操作を始めたままにしない。担当の期限は 24 時間までで、それを超える記録は切れたものとみなす（子が期限を遠い将来にして、親の取り直しを止められないように）。CLI 名や担当の表示名が同じでも、タスクと token で区別する。使い方は`playbook-deliver`。
 
 外部操作（push・PR・コメントなど）は元の checkout から `op run --from <元の checkout> -- <コマンド>` で実行する（照合を通ったときだけ実行し、終了コードを記録する）。成果物を出す操作は `--verified <検証した commit>` も付け、push・PR は `--reviewed <届ける前の審査を通した commit の ID か none:<理由>>` と `--risk 低|中|高:<理由>` も付ける（`HEAD` などの参照は受けない。commit は、それを対象に launcher で起動して `ok` で返った読み取り専用の子の記録が要る）。外部操作は親が行い、子には頼まない（子の付与は作業場所の中だけ）。`work.py check --dir <作業場所> --from <実行する場所>` で、そこで使われる GitHub のアカウントと書き込み権限を事前に見られる。子の起動に `GH_CONFIG_DIR` や `GH_TOKEN` を足してアカウントを決めない（利用者の環境の切り替えを上書きし、別の名前で外に出る）。
 
@@ -56,7 +56,7 @@ python3 <launch.py> --resume <前の記録の out> --prompt-file <続きの依�
 - **非対話実行:** `codex exec --json -m <model> -c model_reasoning_effort="<effort>" [-s read-only|workspace-write|danger-full-access] [-C <dir>] [--add-dir <dir>] "<依頼>" < /dev/null`。stdin を閉じないと「Reading additional input from stdin...」で待ち続ける（実測 2026-10-17）。承認を Codex 自身の自動レビューに任せるなら `--approve-for-me`（workspace-write を含むので `-s` と併用できない）。sandbox の中でネットワークが要るなら `-c sandbox_workspace_write.network_access=true`、作業領域の外に書く場所は `--add-dir`。構造化した結果が要るなら `--output-schema <file>`。利用者の設定と AGENTS を切るなら `--ignore-user-config`・`--ignore-rules`。Git 管理外で動かすなら `--skip-git-repo-check`。
 - **再開:** `codex exec resume <SESSION_ID>`（`--last` で直前）。`resume` は `-C`・`--add-dir`・`--approve-for-me` を受けないので、launcher は `exec` の引数を `exec` の側に置いたまま、依頼の前に `resume <id>` を挟む（0.164.0 で、読み取り専用の権限の照合も、書く子の書き込みも、続きで同じだった。2026-10-25）。
 - **プラグイン:** `codex plugin marketplace add <このリポジトリの絶対パス>` → `codex plugin add bb-writ@bb-writ`。`.claude-plugin/marketplace.json` と root の `plugin.json` をそのまま読む。写しが `$CODEX_HOME/plugins/cache/bb-writ/bb-writ/<版>/` に置かれるので、版を上げたら `codex plugin remove bb-writ@bb-writ` → `add`。Git の private リポジトリからの追加は未確認。
-- **Claude Code を子にする:** `CLAUDE_CONFIG_DIR=~/.config/bb-writ/claude-home dotenvx run -f ~/.config/bb-writ/.env -fk ~/.config/bb-writ/.env.keys -- claude -p "<依頼>" --output-format json --model <m> --effort <e>`。
+- **Claude Code を子にする:** `CLAUDE_CONFIG_DIR=~/.config/bb-writ/claude-home CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1 dotenvx run -f ~/.config/bb-writ/.env -fk ~/.config/bb-writ/.env.keys -- claude -p "<依頼>" --output-format json --model <m> --effort <e>`。背景の処理を止めるのは、終わりの知らせが次のターンを起こすと json の出力が最後のターンの結果だけになり、報告が消えるため（launcher も渡す）。
 
 ## Grok Build
 

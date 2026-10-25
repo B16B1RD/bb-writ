@@ -453,6 +453,9 @@ def command(a, prompt: str, scratch: Path) -> tuple[list[str], dict, str | None]
         # 鍵があると専用ログインの代わりに別料金の API へ落ちうる。専用ログインのトークンは dotenvx が子の環境にだけ入れる
         env = {k: v for k, v in env.items() if not k.startswith(("CLAUDE", "ANTHROPIC_"))}
         env["CLAUDE_CONFIG_DIR"] = str(cfg / "claude-home")
+        # 背景の処理（Bash の run_in_background など）を使わせない。終わりの知らせが次のターンを起こすと、--output-format json は
+        # 最後のターンの結果だけを返し、前のターンに書いた報告が消えた（2.1.310、審査役が 2 回 invalid-report。公式の headless の文書）
+        env["CLAUDE_CODE_DISABLE_BACKGROUND_TASKS"] = "1"
         if a.write:
             # 書く子に渡すのは、対象（作業場所）とその記録だけ。タスクの一覧・統合の記録・他の worktree は親だけが書く。
             # Bash は sandbox で同じ範囲に閉じ、--restricted でファイル系のツールも同じ範囲に閉じる（対象の .claude の設定も読まない）。
@@ -479,6 +482,7 @@ def command(a, prompt: str, scratch: Path) -> tuple[list[str], dict, str | None]
             # 子の Bash に渡す環境も最小限にする（読み取り専用の子は git と読むコマンドしか使わない）
             env = {k: v for k, v in env.items() if k in READ_ONLY_ENV or k.upper().endswith("_PROXY") or k.startswith("LC_")}
             env["CLAUDE_CONFIG_DIR"] = str(cfg / "claude-home")
+            env["CLAUDE_CODE_DISABLE_BACKGROUND_TASKS"] = "1"
             perm = ["--permission-mode", "dontAsk", "--restricted", "--tools", "Read,Grep,Glob,Bash,Skill"]
             settings = {"permissions": {"allow": ["Read", "Grep", "Glob", "Bash", "Skill"]},
                         "sandbox": {"enabled": True, "allowUnsandboxedCommands": False, "failIfUnavailable": True,
@@ -1103,6 +1107,9 @@ def main() -> int:
         rec.update(head=None, head_lost="子の起動の前に確かめた後、終わりまでに対象の HEAD か作業ツリーが変わったか、終わりに確かめられなかった")
     elif rec["head"] and a.resume and rec["head"] != a.prev_head:  # 続きの子は、前の起動で別の commit（か未 commit の変更）を見た
         rec.update(head=None, head_lost=f"前の起動の head（{a.prev_head}）と違う。続きの子は前の起動で別のものを見た")
+    if rec["status"] == "ok" and not a.write and rec["head"]:  # work.py が審査に数える子。指摘が届いたその場で、次にすることを出す
+        rec["next"] = ("審査の指摘なら、直す前に、作業の記録（claim の note.path）の「指摘の扱い」の欄に、指摘ごとに"
+                       "対応する・記録のみ・退ける と理由を書く（入口の条件 (6)。push・pr はこの欄が空なら拒否される）")
     rec["duration_s"] = round(time.time() - t0, 1)
     rec["load"]["end"] = load_now()
     # 続きから起動してよいのは、session があり、権限・プロセス・Git・照合のどれにも当たらなかった起動だけ（空の残りは、片付けてから続けられる）
@@ -1112,6 +1119,7 @@ def main() -> int:
     except (RecursionError, ValueError) as e:  # 子から来た値が深すぎる。外して、失敗として記録する（想定外の失敗なので続けさせない）
         rec.update({k: None for k in ("report", "usage", "model_effective") if k in rec}, status="failed", resumable=False,
                    problems=[f"子の結果を記録に書けない（外した）: {e!r}"[:300]] + rec.get("problems", []))
+        rec.pop("next", None)  # 審査に数えない子になった
     if rec["resumable"] and rec["status"] != "ok":
         rec["problems"] = rec.get("problems", []) + [f"--resume {out_dir} で続きから起動できる"]
     body = json.dumps(rec, ensure_ascii=False, indent=1)

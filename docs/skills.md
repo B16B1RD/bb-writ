@@ -218,6 +218,8 @@
 | `playbook-bug` | 不具合を直す。再現してから原因を絞る | 「〜にならない。直して」 |
 | `playbook-feature` | 振る舞いを足す・変える | 「〜を足して」「〜できるようにして」 |
 | `playbook-docs-skill` | README・手引き・SKILL.md を書く・直す | 「README のこの節を直して」 |
+| `playbook-verify` | 確かめて返す。検証の条件 (1)〜(6) の全文・対象ごとの形・CI・証拠・返す前の判定 | 変更を確かめる・届ける前の審査を決める・返す前（入口が呼ぶ） |
+| `playbook-deliver` | 担当・作業の記録・外に出してよいか・push や PR などの外部操作 | 「push して」「PR を出して」（入口が呼ぶ） |
 | `playbook-parallel` | 書く前に、タスク専用の作業場所（Git の worktree）と担当を取る。統合と片付けも | 書く依頼のすべて |
 | `playbook-pause-safely` | 区切りで止め、続きを再開できる状態にする | 「いったん止めて」 |
 | `playbook-session-pickup` | 前のセッションの続きを、記録と実物から引き受ける | 「続きをやって」「PR #34 の続き」 |

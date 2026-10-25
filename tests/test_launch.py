@@ -172,7 +172,7 @@ FAKE_CLAUDE = textwrap.dedent(r'''
     open(os.environ["FAKE_ARGS"] + ".allenv", "w").write(json.dumps(sorted(k for k in os.environ if not k.startswith("FAKE_"))))
     open(os.environ["FAKE_ARGS"], "w").write(json.dumps(sys.argv[1:]))
     open(os.environ["FAKE_ARGS"] + ".scrub", "w").write(os.environ.get("CLAUDE_CODE_SUBPROCESS_ENV_SCRUB", ""))
-    open(os.environ["FAKE_ARGS"] + ".env", "w").write(json.dumps(sorted(k for k in os.environ if k.startswith(("CLAUDE", "ANTHROPIC_")))))
+    open(os.environ["FAKE_ARGS"] + ".env", "w").write(json.dumps({k: v for k, v in sorted(os.environ.items()) if k.startswith(("CLAUDE", "ANTHROPIC_"))}))
     os.makedirs(".claude/.cc-writes", exist_ok=True)  # 2.1.302 の --restricted が対象に作る空のディレクトリ
     import subprocess
     mode = os.environ.get("FAKE_MODE")
@@ -467,6 +467,7 @@ class TestLaunch(unittest.TestCase):
         last = lambda: json.loads((self.state / "delegations.jsonl").read_text().splitlines()[-1])
         rc, rec = self.run_launch("claude")
         self.assertEqual((rc, rec["head"]), (0, None))  # Git の作業ツリーでない
+        self.assertNotIn("next", rec)  # 審査に数えない子には、指摘の扱いを書けと出さない
         git = lambda *a, cwd=self.cwd: subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", *a], cwd=cwd, check=True,
                                                       capture_output=True, text=True).stdout.strip()
         unborn = Path(self.tmp.name) / "unborn"  # まだ commit が無い（ほかに変更の無い作業ツリー）
@@ -492,6 +493,7 @@ class TestLaunch(unittest.TestCase):
                 rc, rec = self.run_launch(host)
                 self.assertEqual((rc, rec["head"], last()["head"]), (0, git("rev-parse", "HEAD"), rec["head"]), rec)
                 self.assertIs(last()["write"], False)
+                self.assertIn("指摘の扱い", rec["next"])  # 審査に数える子が返ったその場で、直す前に書く欄を出す
         no_untracked = Path(self.tmp.name) / "gitconfig"
         no_untracked.write_text("[status]\n\tshowUntrackedFiles = no\n")
         clean = Path(self.tmp.name) / "clean"
@@ -508,11 +510,13 @@ class TestLaunch(unittest.TestCase):
                     make()
                     rc, rec = self.run_launch("claude", env_extra=env)
                     self.assertEqual((rc, rec["head"]), (0, None), rec)
+                    self.assertNotIn("next", rec)
                     git("reset", "-q", "--hard")
                     (self.cwd / "new.txt").unlink(missing_ok=True)
         rc, rec = self.run_launch("claude", mode="wrote")  # 子の実行の間に作業ツリーが変わった
         self.assertEqual((rc, rec["head"]), (0, None), rec)
         self.assertIn("変わった", rec["head_lost"])
+        self.assertNotIn("next", rec)
         subprocess.run(["rm", "-rf", str(self.cwd / ".claude")], check=True)
         rc, rec = self.run_launch("claude", mode="own-commit")  # 子の実行の間に HEAD が別の commit に動いた（作業ツリーは変更なし）
         self.assertEqual((rc, git("status", "--porcelain"), rec["head"]), (0, "", None), rec)
@@ -549,6 +553,7 @@ class TestLaunch(unittest.TestCase):
         self.assertEqual(rec["head"], None, rec)
         rc, rec = self.run_launch("claude", extra=["--write"])  # 書く子（ここでは起動しない）は write が真
         self.assertIs(last()["write"], True)
+        self.assertNotIn("next", rec)  # 書く子は審査に数えない
         sub = Path(self.tmp.name) / "sub"  # サブモジュールの中の変更は、無視する設定があっても数える
         sub.mkdir()
         git("init", "-q", cwd=sub)
@@ -1455,8 +1460,11 @@ class TestLaunch(unittest.TestCase):
 
     def test_claude_child_gets_no_parent_claude_env(self):
         # 親の CLAUDE_CODE_PLUGIN_DIRS（利用者の mod）や API の鍵を子に渡さない。渡すのは専用の設定ディレクトリだけ
-        self.run_launch("claude", env_extra={"CLAUDE_CODE_PLUGIN_DIRS": "~/.claude/mods/x", "CLAUDECODE": "1", "CLAUDE_EFFORT": "max", "ANTHROPIC_API_KEY": "k"})
-        self.assertEqual(json.loads(Path(str(self.args_file) + ".env").read_text()), ["CLAUDE_CONFIG_DIR"])
+        # 背景の処理を止める変数は、書く子にも読み取り専用の子にも渡す（json の出力が最後のターンの結果だけになり、報告が消えた）
+        for extra in ([], ["--write"]):
+            self.run_launch("claude", extra=extra, env_extra={"CLAUDE_CODE_PLUGIN_DIRS": "~/.claude/mods/x", "CLAUDECODE": "1", "CLAUDE_EFFORT": "max", "ANTHROPIC_API_KEY": "k"})
+            env = json.loads(Path(str(self.args_file) + ".env").read_text())
+            self.assertEqual((sorted(env), env["CLAUDE_CODE_DISABLE_BACKGROUND_TASKS"]), (["CLAUDE_CODE_DISABLE_BACKGROUND_TASKS", "CLAUDE_CONFIG_DIR"], "1"), extra)
 
     def test_write_grants_only_the_work_record(self):
         # 書く子に state 全体（タスクの一覧・統合の記録・他の worktree）を渡さない
@@ -1899,6 +1907,9 @@ class TestLaunch(unittest.TestCase):
                                  [rec[k] for k in ("host", "cwd", "model_requested", "effort_requested", "write")])
                 self.assertEqual((again["model_requested"], again["effort_requested"]), ("m-test", "high"))
                 self.assertEqual(again["problems"], [])  # ok の記録に続きの案内を付けない
+                if host == "claude":  # 続きの子にも背景の処理を使わせない（書く子・読み取り専用の子のどちらも）
+                    env = json.loads(Path(str(self.args_file) + ".env").read_text())
+                    self.assertEqual(env.get("CLAUDE_CODE_DISABLE_BACKGROUND_TASKS"), "1", extra)
                 resumed = json.loads(self.args_file.read_text())
                 if host == "codex":  # exec resume は exec の引数を受けないので、exec の側に置いたまま、依頼の前に挟む
                     self.assertEqual((resumed[:-3], resumed[-3:-1]), (first[:-1], ["resume", session]))
@@ -1979,11 +1990,15 @@ class TestLaunch(unittest.TestCase):
         self.assertEqual((rec["status"], rec["head"]), ("timeout", h1), rec)
         rc, again = self.run_launch(None, extra=["--resume", rec["out"]])
         self.assertEqual((again["status"], again["head"]), ("ok", h1), again)
+        self.assertIn("指摘の扱い", again["next"])  # 審査に数える続きの子には、直す前に書く欄を出す
+        # 続きの子にも背景の処理を使わせない（時間切れの後の続きは、長い試験の後で起きやすい）
+        self.assertEqual(json.loads(Path(str(self.args_file) + ".env").read_text())["CLAUDE_CODE_DISABLE_BACKGROUND_TASKS"], "1")
         rc, rec = self.run_launch("claude", extra=["--timeout", "2"], cwd=repo, env_extra=hang)
         subprocess.run(["git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "-q", "--allow-empty", "-m", "2"], check=True)
         rc, again = self.run_launch(None, extra=["--resume", rec["out"]])
         self.assertEqual((again["status"], again["head"]), ("ok", None), again)
         self.assertIn(f"前の起動の head（{h1}）と違う", again["head_lost"])
+        self.assertNotIn("next", again)  # head を外した続きの子は審査に数えない
 
     def test_a_resume_checks_what_it_takes_over_from_the_last_launch(self):
         # 続きが前の起動から引き継ぐもの（Codex の照らし終えた turn、Grok の記録）は、引き継げる形かを続きの起動で確かめる
@@ -2165,6 +2180,36 @@ class TestLaunch(unittest.TestCase):
         subprocess.run(["git", "-C", str(repo), "worktree", "add", "-q", "-b", "bb-writ/t1", str(wt)], check=True)
         (wt / "a.txt").write_text("x\n")
         return repo, wt
+
+    def test_only_a_child_counted_as_a_review_is_told_to_write_the_triage(self):
+        """work.py が審査に数える子（読み取り専用・ok・head あり）にだけ、直す前に指摘の扱いを書けと出す。
+        next は案内の文で、文言は「指摘の扱い」の欄の名前のほかは確かめない。"""
+        repo, wt = self.worktree("next")
+        (repo / ".git" / "info" / "exclude").write_text("a.txt\n")  # 偽の子の報告が証拠に指すファイル。変更に数えない
+        rc, rec = self.run_launch("claude", cwd=wt)
+        self.assertEqual((rec["status"], bool(rec["head"])), ("ok", True), rec)
+        self.assertIn("指摘の扱い", rec["next"])
+        rc, rec = self.run_launch("claude", extra=["--write"], cwd=wt)  # 書く子は、head があっても審査に数えない
+        self.assertEqual((rec["status"], bool(rec["head"])), ("ok", True), rec)
+        self.assertNotIn("next", rec)
+        body = {"conclusion": "c", "evidence": [{"what": "読んだ", "where": "a.txt:1"}], "unknowns": []}  # 実行の欄が無い報告
+        rc, rec = self.run_launch("claude", cwd=wt, env_extra={"FAKE_TEXT": "```json\n" + json.dumps(body) + "\n```"})
+        self.assertEqual((rec["status"], bool(rec["head"])), ("not-run", True), rec)
+        self.assertNotIn("next", rec)
+        site = Path(self.tmp.name) / "site-next"  # 記録に書けず failed にした子にも出さない（test_values_that_cannot_be_written_still_write_the_record と同じ仕掛け）
+        site.mkdir()
+        (site / "sitecustomize.py").write_text(textwrap.dedent('''
+            import json
+            _dumps = json.dumps
+            def dumps(o, *a, **k):
+                if k.get("indent") and "__unwritable__" in _dumps(o):
+                    raise RecursionError("maximum recursion depth exceeded")
+                return _dumps(o, *a, **k)
+            json.dumps = dumps
+        '''))
+        rc, rec = self.run_launch("codex", mode="unwritable-usage", cwd=wt, env_extra={"PYTHONPATH": str(site)})
+        self.assertEqual((rec["status"], bool(rec["head"])), ("failed", True), rec)
+        self.assertNotIn("next", rec)
 
     def test_write_refuses_the_original_checkout(self):
         repo, wt = self.worktree()
