@@ -142,6 +142,9 @@ FAKE_CODEX = textwrap.dedent(r'''
         import tempfile
         tempfile.mkdtemp()
     # ORPHAN
+    if os.environ.get("FAKE_HANG_EARLY"):  # thread.started を出す前に止まる
+        import time
+        time.sleep(60)
     print(json.dumps({"type": "thread.started", "thread_id": "**" if mode == "glob-session" else thread}, ensure_ascii=raw))
     if os.environ.get("FAKE_HANG"):  # 時間切れ（本物は thread.started を最初に出してから作業する）
         import time
@@ -269,7 +272,7 @@ FAKE_CLAUDE = textwrap.dedent(r'''
         os.makedirs(os.path.join(os.environ["FAKE_OUT"], "stdout.jsonl"))
     result = os.environ["FAKE_TEXT"]
     argv = sys.argv[1:]
-    sid = next((argv[i + 1] for i, x in enumerate(argv[:-1]) if x in ("--session-id", "--resume")), "s-1")  # 本物は渡した session を返す
+    sid = os.environ.get("FAKE_SID") or next((argv[i + 1] for i, x in enumerate(argv[:-1]) if x in ("--session-id", "--resume")), "s-1")  # 本物は渡した session を返す
     if os.environ.get("FAKE_HANG"):  # 時間切れ（本物の -p --output-format json は、終わるまで何も出さない）
         import time
         time.sleep(60)
@@ -663,6 +666,8 @@ class TestLaunch(unittest.TestCase):
                 rc, rec = self.run_launch(host, mode=mode, env_extra={"PYTHONPATH": str(site)})
                 self.assertEqual(rec["status"], status, rec)
                 self.assertTrue([p for p in rec["problems"] if problem in p], rec)
+                if status == "failed":  # 子から来た値を記録に書けないのは想定外の失敗。続けさせず、続きの案内も付けない
+                    self.assertEqual((rec["resumable"], [p for p in rec["problems"] if "--resume" in p]), (False, []), rec)
                 self.assertTrue((Path(rec["out"]) / "record.json").is_file())
                 self.assertIn(rec["out"], (self.state / "delegations.jsonl").read_text())
 
@@ -1513,6 +1518,7 @@ class TestLaunch(unittest.TestCase):
                 d = target(name, git)
                 rc, rec = self.run_launch("claude", mode, extra=list(extra), cwd=d)
                 self.assertEqual((rc, rec["status"], rec["resumable"]), (2, "failed", True), rec)  # 空の残りは、確かめて片付けた後に続けられる
+                self.assertEqual(rec["problems"][-1], f"--resume {rec['out']} で続きから起動できる")
                 self.assertEqual(rec["cwd_residue"], [str(d / ".bashrc"), str(d / ".claude")])
                 for f in rec["cwd_residue"]:  # 黙って消さない
                     self.assertTrue(Path(f).exists())
@@ -1888,6 +1894,7 @@ class TestLaunch(unittest.TestCase):
                 self.assertEqual([again[k] for k in ("host", "cwd", "model_requested", "effort_requested", "write")],
                                  [rec[k] for k in ("host", "cwd", "model_requested", "effort_requested", "write")])
                 self.assertEqual((again["model_requested"], again["effort_requested"]), ("m-test", "high"))
+                self.assertEqual(again["problems"], [])  # ok の記録に続きの案内を付けない
                 resumed = json.loads(self.args_file.read_text())
                 if host == "codex":  # exec resume は exec の引数を受けないので、exec の側に置いたまま、依頼の前に挟む
                     self.assertEqual((resumed[:-3], resumed[-3:-1]), (first[:-1], ["resume", session]))
@@ -1925,6 +1932,7 @@ class TestLaunch(unittest.TestCase):
                 self.assertEqual((rc, rec["status"]), (2, "failed"), rec)
                 self.assertTrue(any(words in p for p in rec["problems"]), rec)
                 self.assertTrue(any(p.startswith("2 秒で終わらなかった") for p in rec["problems"]), rec)
+                self.assertFalse([p for p in rec["problems"] if p.startswith("終了コード")], rec)  # 止めた子の終了コードは、CLI の失敗の理由ではない
                 self.assertTrue(rec["session"], rec)
                 if mode == "home-residue":  # 空の残りは、確かめて片付けた後に続きから起動できる
                     self.assertTrue(rec["resumable"], rec)
@@ -2016,6 +2024,23 @@ class TestLaunch(unittest.TestCase):
             rc, rec = self.run_launch("codex", extra=["--timeout", "2"], env_extra={**hang, "FAKE_THREAD": "0199aaaa-bbbb-7ccc-8ddd-eeeeffff6000"})
             rc, again = self.run_launch(None, extra=["--resume", rec["out"]], env_extra={"FAKE_ROLLOUT_APPEND": "1", "FAKE_THREAD": "0199aaaa-bbbb-7ccc-8ddd-eeeeffff6000", "FAKE_EXIT": "3"})
             self.assertEqual((again["status"], again["problems"][0]), ("failed", "終了コード 3"), again)
+        with self.subTest("other-thread-in-timed-out-resume"):  # 時間切れの続きでも、Codex が出した thread は照らす
+            rc, rec = self.run_launch("codex", extra=["--timeout", "2"], env_extra={**hang, "FAKE_THREAD": "0199aaaa-bbbb-7ccc-8ddd-eeeeffff8000"})
+            rc, again = self.run_launch(None, "wide-then-ok", extra=["--resume", rec["out"], "--timeout", "2"], env_extra={
+                **hang, "FAKE_THREAD": "0199aaaa-bbbb-7ccc-8ddd-eeeeffff8001"})
+            self.assertEqual((again["status"], again["resumable"]), ("failed", False), again)
+            self.assertIn("前と違う（0199aaaa-bbbb-7ccc-8ddd-eeeeffff8001）", again["problems"][0])
+        with self.subTest("codex-stopped-before-thread"):  # session が分からない時間切れは、続けられないと書く（読み取り専用なら権限も照らせず failed）
+            rc, rec = self.run_launch("codex", extra=["--write", "--timeout", "2"], cwd=self.worktree("early")[1], env_extra={"FAKE_HANG_EARLY": "1"})
+            self.assertEqual((rec["status"], rec["resumable"], rec["session"]), ("timeout", False, None), rec)
+            self.assertEqual(rec["problems"], ["2 秒で終わらなかった", "session が分からず、続きから起動できない"])
+            rc, rec = self.run_launch("codex", extra=["--timeout", "2"], env_extra={"FAKE_HANG_EARLY": "1"})
+            self.assertEqual((rec["status"], rec["resumable"]), ("failed", False), rec)
+        with self.subTest("error-result-in-resume"):  # 結果が失敗（is_error）なら、終了コード 0 でも CLI の失敗として残す
+            rc, rec = self.run_launch("claude", extra=["--timeout", "2"], env_extra=hang)
+            rc, again = self.run_launch(None, extra=["--resume", rec["out"]], env_extra={"FAKE_SID": "other", "FAKE_EXIT": "0"})
+            self.assertEqual((again["status"], again["resumable"]), ("failed", False), again)
+            self.assertIn("終了コード 0", again["problems"])
         with self.subTest("other-thread-under-quota"):
             rc, rec = self.run_launch("codex", extra=["--timeout", "2"], env_extra=hang)
             rc, again = self.run_launch(None, extra=["--resume", rec["out"]], env_extra={
@@ -2054,8 +2079,9 @@ class TestLaunch(unittest.TestCase):
                 old = Path(rec["grok_home"])
                 place = next(old.glob(f"sessions/*/{rec['session']}")).parent
                 record = dict(rec)
-                if plant is None:
-                    record["session"] = "*"
+                if plant is None:  # UUID の形でない session（同じ名前の記録の場所はある）
+                    record["session"] = "-" * 36
+                    shutil.copytree(place / rec["session"], place / record["session"])
                 elif plant == "two":
                     shutil.copytree(place, old / "sessions" / "elsewhere")
                 elif plant == "sessions":
@@ -2270,6 +2296,7 @@ class TestLaunch(unittest.TestCase):
         rc, rec = self.run_launch("grok", "nosandbox", cwd=self.grok_target())
         self.assertEqual((rc, rec["status"]), (2, "failed"))
         self.assertTrue(any("could not be applied" in x for x in rec["problems"]), rec)
+        self.assertFalse([p for p in rec["problems"] if p.startswith("終了コード")], rec)  # CLI は正常に終わった
         rc, rec = self.run_launch("grok", "leadernote", cwd=self.grok_target())
         self.assertEqual(rec["status"], "ok", rec)
 
@@ -2280,7 +2307,7 @@ class TestLaunch(unittest.TestCase):
 
     def test_crash_is_failed(self):
         rc, rec = self.run_launch("codex", "crash")
-        self.assertEqual((rc, rec["status"], rec["resumable"]), (2, "failed", False))  # session が分からない
+        self.assertEqual((rc, rec["status"], rec["resumable"]), (2, "failed", False))  # 実効の権限を照らせない
         self.assertIn("boom", rec["problems"])
         rc, rec = self.run_launch("codex", env_extra={"FAKE_EXIT": "3"})  # 報告は形が整っていても、終了コードで失敗にする
         self.assertEqual((rc, rec["status"], rec["problems"][0]), (2, "failed", "終了コード 3"), rec)

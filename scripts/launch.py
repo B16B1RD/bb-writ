@@ -312,7 +312,7 @@ def git_changes(before: dict, after: dict, common: Path) -> list[str]:
 
 def grok_session_dir(old: Path, session: str) -> Path | None:
     """前の home の、その session の記録（sessions/<対象>/<session>/）。1 つだけ、symlink を通らずに見つかったときだけ返す。"""
-    if not re.fullmatch(r"[0-9a-fA-F-]{36}", session) or (old / "sessions").is_symlink():  # glob に記号を渡さない
+    if not re.fullmatch(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}", session) or (old / "sessions").is_symlink():  # glob に記号を渡さない
         return None
     found = [d for d in old.glob(f"sessions/*/{session}") if d.is_dir() and not d.is_symlink() and not d.parent.is_symlink()]
     return found[0] if len(found) == 1 else None
