@@ -16,13 +16,13 @@ commit ごとの細かい変更は、各版の末尾の「commit の一覧」（
 - `claim`・`renew`・`status` は、空の必須の欄を `note.empty` で知らせる（拒否はしない）。launcher は、審査に数える子（読み取り専用で `ok`、届ける commit を見た子）が返ったとき、直す前に指摘の扱いを書くよう `next` で知らせる。
 - launcher で起動した子を時間切れ（`--timeout` 秒。既定 1800）で止めたとき、`status` を `timeout` にし、記録に `session` を残すようになった。最初から起動し直さず、`python3 <launch.py> --resume <その記録の out> --prompt-file <続きの依頼文>` で続きから起動できる（Claude Code・Codex・Grok Build）。続きの子が前の起動と別の commit を見たときは、記録の `head` を書かない。
   - 続けてよいかは記録の `resumable` で決まる。Grok の警告・読み取り専用の Codex の権限の照合・続きの session の食い違い・Git の管理情報の変化・止めきれないプロセスなどに当たった起動は、どの `status` になっても続けられない（`--resume` は子を起こさずに止まる）。続けられる記録にだけ、`problems` に `--resume` の案内が付く。
-  - `--timeout` は、launcher を呼ぶコマンドの時間の上限より 1 分以上短くする。launcher 自身が止められると、記録が残らず続けられない（SIGTERM・SIGHUP では子の CLI が動き続ける）。上限のあるコマンドでは `--out <まだ無いディレクトリ>` で記録の置き場を先に決める。
+  - `--timeout` は、launcher を呼ぶコマンドの時間の上限より 1 分以上短くする。launcher 自身が止められると、記録が残らず続けられない（SIGTERM・SIGHUP では子の CLI が動き続ける）。上限のあるコマンドでは `--out <まだ無いディレクトリ>` で記録の置き場を先に決める（launcher が終わったのに標準出力を受け取れなかったとき、その記録から続けられる。止められたときは記録も無い）。
   - 記録に `load`（CPU 数と、起動時と終了時の 1 分平均の負荷）が残る。時間切れが混雑によるかを見分ける材料。
 - 入口 `bb-writ` を、要約の後にも全体が戻る約 5,000 字の骨組みにした。段ごとの 1 行と、審査の指摘が届いたときなどの「その場で」の確かめを置いた。検証の条件の全文・対象ごとの形・CI・証拠・返す前の判定は新しい手引き `playbook-verify` に、担当・記録・外に出してよいか・外部操作は新しい手引き `playbook-deliver` に、文を変えずに移した。
 
 ### 直したこと
 
-- launcher が、成功した子の報告を、stderr の「rate limits」「429」などの一語で利用枠（`quota`）として捨てていたのを直した。利用枠と判定するのは、子が成功しなかったとき（時間切れか、終了コードが 0 でない・`is_error`・本文が空）だけにした。利用枠と判定したときも、終了コードと CLI の文言を `problems` に残す。
+- launcher が、成功した子の報告を、stderr の「rate limits」「429」などの一語で利用枠（`quota`）として捨てていたのを直した。利用枠と判定するのは、子が成功しなかったとき（時間切れか、終了コードが 0 でない・`is_error`・本文が空）だけにした。子が失敗して（終了コードが 0 でないか `is_error`）利用枠と判定したときも、終了コードと CLI の文言を `problems` に残す。
 - launcher で起動した Claude Code の子が、試験を背景で回したときに、報告が消えて `invalid-report` になっていたのを直した。背景の処理の終わりの知らせが次のターンを起こし、`--output-format json` は最後のターンの結果だけを返していた。子には `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1` を渡し、背景の処理を使わせない（長い試験は前景で流れる）。
 
 commit の一覧：https://github.com/B16B1RD/bb-writ/compare/bb-writ--v0.16.1...bb-writ--v0.17.0
