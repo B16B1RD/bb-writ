@@ -1983,11 +1983,15 @@ class TestLaunch(unittest.TestCase):
         self.assertEqual((rec["status"], rec["head"]), ("timeout", h1), rec)
         rc, again = self.run_launch(None, extra=["--resume", rec["out"]])
         self.assertEqual((again["status"], again["head"]), ("ok", h1), again)
+        self.assertIn("指摘の扱い", again["next"])  # 審査に数える続きの子には、直す前に書く欄を出す
+        # 続きの子にも背景の処理を使わせない（時間切れの後の続きは、長い試験の後で起きやすい）
+        self.assertEqual(json.loads(Path(str(self.args_file) + ".env").read_text())["CLAUDE_CODE_DISABLE_BACKGROUND_TASKS"], "1")
         rc, rec = self.run_launch("claude", extra=["--timeout", "2"], cwd=repo, env_extra=hang)
         subprocess.run(["git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "-q", "--allow-empty", "-m", "2"], check=True)
         rc, again = self.run_launch(None, extra=["--resume", rec["out"]])
         self.assertEqual((again["status"], again["head"]), ("ok", None), again)
         self.assertIn(f"前の起動の head（{h1}）と違う", again["head_lost"])
+        self.assertNotIn("next", again)  # head を外した続きの子は審査に数えない
 
     def test_a_resume_checks_what_it_takes_over_from_the_last_launch(self):
         # 続きが前の起動から引き継ぐもの（Codex の照らし終えた turn、Grok の記録）は、引き継げる形かを続きの起動で確かめる
@@ -2178,6 +2182,20 @@ class TestLaunch(unittest.TestCase):
         body = {"conclusion": "c", "evidence": [{"what": "読んだ", "where": "a.txt:1"}], "unknowns": []}  # 実行の欄が無い報告
         rc, rec = self.run_launch("claude", cwd=wt, env_extra={"FAKE_TEXT": "```json\n" + json.dumps(body) + "\n```"})
         self.assertEqual((rec["status"], bool(rec["head"])), ("not-run", True), rec)
+        self.assertNotIn("next", rec)
+        site = Path(self.tmp.name) / "site-next"  # 記録に書けず failed にした子にも出さない（test_values_that_cannot_be_written_still_write_the_record と同じ仕掛け）
+        site.mkdir()
+        (site / "sitecustomize.py").write_text(textwrap.dedent('''
+            import json
+            _dumps = json.dumps
+            def dumps(o, *a, **k):
+                if k.get("indent") and "__unwritable__" in _dumps(o):
+                    raise RecursionError("maximum recursion depth exceeded")
+                return _dumps(o, *a, **k)
+            json.dumps = dumps
+        '''))
+        rc, rec = self.run_launch("codex", mode="unwritable-usage", cwd=wt, env_extra={"PYTHONPATH": str(site)})
+        self.assertEqual((rec["status"], bool(rec["head"])), ("failed", True), rec)
         self.assertNotIn("next", rec)
 
     def test_write_refuses_the_original_checkout(self):
