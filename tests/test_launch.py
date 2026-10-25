@@ -1903,6 +1903,9 @@ class TestLaunch(unittest.TestCase):
                                  [rec[k] for k in ("host", "cwd", "model_requested", "effort_requested", "write")])
                 self.assertEqual((again["model_requested"], again["effort_requested"]), ("m-test", "high"))
                 self.assertEqual(again["problems"], [])  # ok の記録に続きの案内を付けない
+                if host == "claude":  # 続きの子にも背景の処理を使わせない（書く子・読み取り専用の子のどちらも）
+                    env = json.loads(Path(str(self.args_file) + ".env").read_text())
+                    self.assertEqual(env.get("CLAUDE_CODE_DISABLE_BACKGROUND_TASKS"), "1", extra)
                 resumed = json.loads(self.args_file.read_text())
                 if host == "codex":  # exec resume は exec の引数を受けないので、exec の側に置いたまま、依頼の前に挟む
                     self.assertEqual((resumed[:-3], resumed[-3:-1]), (first[:-1], ["resume", session]))
