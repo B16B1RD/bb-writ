@@ -991,13 +991,14 @@ def main() -> int:
             unsafe = [l for l in p.stderr.splitlines() if a.host == "grok" and GROK_WARNING.search(l)][-5:]
             rec.update(exit_code=p.returncode, session=got["session"] or a.session, model_effective=got["model_effective"], usage=got["usage"])
             # 読み取り専用の Codex の実効の権限。続きでは、前の起動で照らし終えた turn（その起動の deny で照らした）を除く
-            new_turns = got.get("permissions", [])[a.codex_turns:]  # 続きで新しい turn が無ければ、照らすものが無い（前の起動の数を引き継ぐ）
-            breach = a.host == "codex" and not a.write and (codex_breach(new_turns, a.codex_denies) if new_turns or not a.codex_turns else None)
+            breach = a.host == "codex" and not a.write and codex_breach(got.get("permissions", [])[a.codex_turns:], a.codex_denies)
             if breach is None and a.codex_turns and got["rollouts"] != 1:  # 前の turn を除けるのは、同じ記録ファイルに足したときだけ（0.164.0 の実物）
                 breach = f"続きの Codex の記録ファイルが 1 つでない（{got['rollouts']} 個）。前の起動で照らした turn を除けず、実効の権限を確かめられない"
             if a.host == "codex" and not a.write and not breach:
                 rec["codex_turns"] = len(got["permissions"])
             stopped = [f"{a.timeout} 秒で終わらなかった"] if timed_out else []
+            tail = [l for l in p.stderr.strip().splitlines() if "injected env" not in l and "Reading additional input" not in l][-5:]
+            ended = [f"終了コード {p.returncode}"] + got["errors"] + tail if not timed_out and (p.returncode != 0 or got.get("is_error")) else []
             # 続きの session は、子の結果で確かめられたときだけ前と同じとみなす（時間切れの Claude Code・Grok は結果を出さない）
             other = a.resume and (got["session"] or not timed_out) and got["session"] != a.session
             doubts = ((["Grok の sandbox が約束どおりに効いたか分からない（警告）"] + unsafe if unsafe else [])
@@ -1008,13 +1009,11 @@ def main() -> int:
             if QUOTA.search(p.stderr[-4000:] + " ".join(got["errors"])):
                 rec.update(status="quota", problems=["利用枠の上限に当たった（別料金の API へは切り替えない）"] + doubts + stopped)
             elif unsafe or other or (timed_out and breach):  # 権限・続きの session が分からない子を、続きから起動させない
-                rec.update(status="failed", problems=doubts + stopped)
-            elif timed_out:  # 子の作業は会話記録に残っている。最初から起動し直さず、続きから起動する
-                rec.update(status="timeout", problems=[stopped[0] + "。" + (f"--resume {out_dir} で続きから起動できる" if rec["session"]
-                                                                           else "session が分からず、続きから起動できない")])
+                rec.update(status="failed", problems=doubts + ended + stopped)
+            elif timed_out:  # 子の作業は会話記録に残っている。最初から起動し直さず、続きから起動する（案内は、続けられると決めた後に付ける）
+                rec.update(status="timeout", problems=stopped + ([] if rec["session"] else ["session が分からず、続きから起動できない"]))
             elif p.returncode != 0 or got.get("is_error") or not got["text"]:
-                tail = [l for l in p.stderr.strip().splitlines() if "injected env" not in l and "Reading additional input" not in l][-5:]
-                rec.update(status="failed", problems=[f"終了コード {p.returncode}"] + got["errors"] + tail + doubts)
+                rec.update(status="failed", problems=(ended or [f"終了コード {p.returncode}"] + got["errors"] + tail) + doubts)
             elif breach:
                 # 対象の設定が profile を広げた・狭めた（読み取り専用の結果として使わない）。報告は report.md に残す
                 rec.update(status="failed", problems=[breach])
@@ -1106,11 +1105,13 @@ def main() -> int:
     # 続きから起動してよいのは、session があり、権限・プロセス・Git・照合のどれにも当たらなかった起動だけ（空の残りは、片付けてから続けられる）
     rec["resumable"] = bool(rec.get("session")) and not blocked
     try:
-        body = json.dumps(rec, ensure_ascii=False, indent=1)
-    except (RecursionError, ValueError) as e:  # 子から来た値が深すぎる。外して、失敗として記録する
-        rec.update({k: None for k in ("report", "usage", "model_effective") if k in rec}, status="failed",
+        json.dumps(rec, ensure_ascii=False, indent=1)
+    except (RecursionError, ValueError) as e:  # 子から来た値が深すぎる。外して、失敗として記録する（想定外の失敗なので続けさせない）
+        rec.update({k: None for k in ("report", "usage", "model_effective") if k in rec}, status="failed", resumable=False,
                    problems=[f"子の結果を記録に書けない（外した）: {e!r}"[:300]] + rec.get("problems", []))
-        body = json.dumps(rec, ensure_ascii=False, indent=1)
+    if rec["resumable"] and rec["status"] != "ok":
+        rec["problems"] = rec.get("problems", []) + [f"--resume {out_dir} で続きから起動できる"]
+    body = json.dumps(rec, ensure_ascii=False, indent=1)
     # 子の文字列には単独のサロゲートがありうる（JS の JSON.stringify が出す）。書き出しで落ちず、\udXXX の形で残す
     (out_dir / "record.json").write_text(body, encoding="utf-8", errors="backslashreplace")
     with open(state_dir() / "delegations.jsonl", "a", encoding="utf-8") as f:  # 1 行 1 件。U+2028 なども生で入れない
