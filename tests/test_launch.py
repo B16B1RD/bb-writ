@@ -1934,11 +1934,11 @@ class TestLaunch(unittest.TestCase):
                 self.assertEqual(rec["session"], Path(str(self.args_file) + ".started").read_text())
                 self.assertTrue((Path(rec["out"]) / "record.json").is_file())
         real_git = shutil.which("git")  # 偽の git の中から呼ぶ本物（PATH を変える前に引いた絶対パス）
-        (self.bin / "git").write_text(f"#!/bin/sh\n[ -e \"{self.args_file}.done\" ] && sleep 3\nexec {real_git} \"$@\"\n")
+        # 偽の子が引数を書いた後（子の起動の後）の git だけを遅くする。子が終わってから印を置くと、印より先に照合を終えうる（macOS の CI）
+        (self.bin / "git").write_text(f"#!/bin/sh\n[ -e \"{self.args_file}\" ] && sleep 3\nexec {real_git} \"$@\"\n")
         (self.bin / "git").chmod(0o755)
         try:  # 子が終わった後、照合の git が遅い間に受けたシグナルは、子を止めたと記録しない
-            Path(str(self.args_file) + ".done").unlink(missing_ok=True)
-            self.args_file.unlink(missing_ok=True)  # 前の起動の引数（残っていると、子の起動の前に送ってしまう）
+            self.args_file.unlink(missing_ok=True)  # 前の起動の引数（残っていると、子の起動の前の git も遅くなり、子の起動の前に送ってしまう）
             env = {**os.environ, "HOME": str(self.home), "PATH": f"{self.bin}:/usr/bin:/bin", "BB_WRIT_CONFIG_DIR": str(self.cfg),
                    "BB_WRIT_STATE_DIR": str(self.state), "FAKE_MODE": "good", "FAKE_ARGS": str(self.args_file),
                    "FAKE_TEXT": GOOD.encode().decode("unicode_escape")}
@@ -1950,7 +1950,6 @@ class TestLaunch(unittest.TestCase):
             deadline = time.time() + 30
             while not Path(str(self.args_file)).exists() and time.time() < deadline:  # 偽の子が起動した（引数を書いた）
                 time.sleep(0.05)
-            Path(str(self.args_file) + ".done").touch()  # ここから git は遅くなる
             time.sleep(2)  # 偽の子は終わり、launcher は照合の git（3 秒）を待っている
             self.assertIsNone(p.poll())  # launcher はまだ記録を書いていない
             p.send_signal(signal.SIGTERM)
@@ -1960,7 +1959,6 @@ class TestLaunch(unittest.TestCase):
             self.assertFalse(any("シグナル" in x for x in rec.get("problems", [])), rec)
         finally:
             (self.bin / "git").unlink()
-            Path(str(self.args_file) + ".done").unlink(missing_ok=True)
             subprocess.run(["rm", "-rf", str(self.cwd / ".git")], check=True)
         rc, rec = launch("stop", signal.SIGHUP, ignore_hup=True, then=signal.SIGTERM)  # nohup で無視させた HUP は無視のまま
         self.assertEqual((rec["status"], rec["stopped_by_signal"]), ("failed", int(signal.SIGTERM)), rec)
