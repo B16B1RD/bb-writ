@@ -276,12 +276,13 @@ FAKE_CLAUDE = textwrap.dedent(r'''
     sid = os.environ.get("FAKE_SID") or next((argv[i + 1] for i, x in enumerate(argv[:-1]) if x in ("--session-id", "--resume")), "s-1")  # 本物は渡した session を返す
     if mode in ("stop", "stop-deaf"):  # 動く間だけ対象に一時の置き場を持ち、TERM で片付けて終わる（Claude Code 2.1.310 の .claude/.cc-writes）
         import signal, time
-        stage = os.path.join(os.getcwd(), ".claude", ".cc-writes")  # 上で作った
+        stage = os.environ["FAKE_ARGS"] + ".stage"  # 子だけが消す印（launcher の片付けと見分ける）
+        open(stage, "w").close()
         def term(n, f):
             open(os.environ["FAKE_ARGS"] + ".term", "a").write(f"{n}\n")
             if mode == "stop":
-                os.rmdir(stage)
-                os.rmdir(os.path.dirname(stage))
+                time.sleep(1)  # 片付けに時間がかかる（launcher が待たずに KILL すると、印が残る）
+                os.unlink(stage)
                 sys.exit(143)
         signal.signal(signal.SIGTERM, term)
         open(os.environ["FAKE_ARGS"] + ".started", "w").write(sid)
@@ -409,8 +410,9 @@ FAKE_DOTENVX = textwrap.dedent(r'''
         sys.exit(p.wait())
     import signal
     p = subprocess.Popen(args[args.index("--") + 1:])  # 本物と同じく、子を起こして待つ（時間切れで止めると、claude が launcher の下に来る）
-    for s in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT):  # 本物と同じく、受けたシグナルを子に伝える
-        signal.signal(s, lambda n, f: p.send_signal(n))
+    import time
+    for s in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT):  # 本物と同じく、受けたシグナルを子に伝える（少し遅れて。グループにも送られると、子は 2 回受ける）
+        signal.signal(s, lambda n, f: (time.sleep(0.3), p.send_signal(n)))
     sys.exit(p.wait())
 ''').lstrip()
 
@@ -1895,36 +1897,48 @@ class TestLaunch(unittest.TestCase):
         """launcher が子を待つ間に TERM・HUP・INT を受けたら、子のプロセスグループに TERM を伝え、子が片付けて終わるのを待ち、
         照合して記録を書く（続きから起動できる）。中断で launcher と子をまとめて止めると、子の CLI（Claude Code 2.1.310）が
         対象に .claude/.cc-writes を残し、記録も残らなかった。TERM を無視する子は、--timeout の残りまでで止める。"""
-        def launch(mode, sig, timeout="60"):
-            for f in (".started", ".term"):
+        def launch(mode, sig, timeout="60", ignore_hup=False, then=None):
+            for f in (".started", ".term", ".stage"):
                 Path(str(self.args_file) + f).unlink(missing_ok=True)
             env = {**os.environ, "HOME": str(self.home), "PATH": f"{self.bin}:/usr/bin:/bin", "BB_WRIT_CONFIG_DIR": str(self.cfg),
                    "BB_WRIT_STATE_DIR": str(self.state), "FAKE_MODE": mode, "FAKE_ARGS": str(self.args_file),
                    "FAKE_TEXT": GOOD.encode().decode("unicode_escape")}
             (self.bin / "fake_env.json").write_text(json.dumps({k: v for k, v in env.items() if k.startswith("FAKE_")}))
             p = subprocess.Popen([sys.executable, str(LAUNCH), "--host", "claude", "--cwd", str(self.cwd), "--prompt-file", str(self.prompt),
-                                  "--timeout", timeout], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                                  "--timeout", timeout], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                                 preexec_fn=(lambda: signal.signal(signal.SIGHUP, signal.SIG_IGN)) if ignore_hup else None)
             deadline = time.time() + 30
             while not Path(str(self.args_file) + ".started").exists() and time.time() < deadline:
                 time.sleep(0.05)
-            self.assertTrue((self.cwd / ".claude" / ".cc-writes").is_dir())
+            self.assertTrue(Path(str(self.args_file) + ".stage").exists())
             p.send_signal(sig)
+            if then:  # 無視されたシグナルの後も、子は動き続ける
+                time.sleep(1)
+                self.assertTrue(Path(str(self.args_file) + ".stage").exists())
+                self.assertFalse(Path(str(self.args_file) + ".term").exists())
+                p.send_signal(then)
             out, _ = p.communicate(timeout=90)
             return p.returncode, json.loads(out)
         for sig in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT):
             with self.subTest(sig=sig):
                 rc, rec = launch("stop", sig)
-                self.assertEqual(Path(str(self.args_file) + ".term").read_text(), f"{int(signal.SIGTERM)}\n")  # 子には TERM だけを伝える
-                self.assertFalse((self.cwd / ".claude").exists())  # 子が片付けてから終わった
+                self.assertEqual(Path(str(self.args_file) + ".term").read_text(), f"{int(signal.SIGTERM)}\n")  # 子には TERM を 1 回だけ伝える
+                self.assertFalse(Path(str(self.args_file) + ".stage").exists())  # launcher は、子が片付けて終わるのを待った
+                self.assertFalse((self.cwd / ".claude").exists())
+                self.assertEqual(rec["stopped_by_signal"], int(sig))
                 self.assertEqual((rc, rec["status"]), (2, "failed"), rec)
                 self.assertIn(rec["exit_code"], (143, -signal.SIGTERM), rec)  # 子の CLI が TERM で終わった（包む dotenvx は 143 で返す）
                 self.assertIn(f"launcher がシグナル {int(sig)} を受けて、子に TERM を伝えて止めた", rec["problems"])
                 self.assertTrue(rec["resumable"], rec)
                 self.assertEqual(rec["session"], Path(str(self.args_file) + ".started").read_text())
                 self.assertTrue((Path(rec["out"]) / "record.json").is_file())
+        rc, rec = launch("stop", signal.SIGHUP, ignore_hup=True, then=signal.SIGTERM)  # nohup で無視させた HUP は無視のまま
+        self.assertEqual((rec["status"], rec["stopped_by_signal"]), ("failed", int(signal.SIGTERM)), rec)
         rc, rec = launch("stop-deaf", signal.SIGTERM, timeout="4")  # TERM を無視する子は、--timeout の残りで止める
         self.assertEqual(rec["status"], "timeout", rec)
         self.assertIn(f"launcher がシグナル {int(signal.SIGTERM)} を受けて、子に TERM を伝えて止めた", rec["problems"])
+        self.assertTrue(any(x.startswith("シグナルを受けて TERM を伝えた後、終わらなかったので止めた") for x in rec["problems"]), rec)
+        self.assertFalse(any(x.endswith("秒で終わらなかった") for x in rec["problems"]), rec)
         subprocess.run(["rm", "-rf", str(self.cwd / ".claude")], check=True)
 
     def test_a_timed_out_child_continues_from_where_it_stopped(self):

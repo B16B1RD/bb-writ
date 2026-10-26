@@ -960,21 +960,23 @@ def main() -> int:
             child = subprocess.Popen(cmd, cwd=a.cwd, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                      start_new_session=True)  # バイトで受ける（子の出力は UTF-8 とは限らない）
             rec["session"] = a.session  # 後の照合で failed になっても、確かめた後に続きから起動できるように
-            # 子を待つ間に止められたら（中断・呼び出し側の時間の上限）、子のプロセスグループに TERM を伝え、子が片付けて終わるのを
-            # 待ってから、照合して記録を書く（続きから起動できる）。launcher だけが止まると子は動き続け、記録も残らず、launcher と子を
-            # まとめて KILL すると、子の CLI（Claude Code 2.1.310）が対象に .claude/.cc-writes を残した。子が終わった後に受けたシグナルは、
-            # 記録を書き終えるまで待たせる。子を起動する前と、Popen から下の登録までの間に受けたシグナルは、これまでどおり launcher を止める
+            # 子を待つ間に止められたら（中断・呼び出し側の時間の上限）、直下の子に TERM を伝え、子が片付けて終わるのを待ってから、
+            # 照合して記録を書く（続きから起動できる）。launcher だけが止まると子は動き続け、記録も残らず、launcher と子をまとめて KILL
+            # すると、子の CLI（Claude Code 2.1.310）が対象に .claude/.cc-writes を残した。グループには送らない（dotenvx が子へ伝え直し、
+            # 子の CLI が TERM を 2 回受ける）。子を刈った後に受けたシグナルは子を止めていないので記録せず、記録を書き終えるまで待たせる
+            # （照合の間にもう一度 Ctrl-C を押すと、後処理の git も止まり、照合できない failed になる）。起動時に無視されていたシグナル
+            # （nohup の HUP）は無視のまま。子を起動する前と、Popen から下の登録までの間に受けたシグナルは、これまでどおり launcher を止める
             def forward(n, _frame):
-                if "sig" in stop:
+                if "sig" in stop or stop.get("reaped"):
                     return
                 stop.update(sig=n, at=time.monotonic())
-                if not stop.get("reaped"):
-                    try:
-                        os.killpg(child.pid, signal.SIGTERM)
-                    except ProcessLookupError:
-                        pass
+                try:
+                    os.kill(child.pid, signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
             for s in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT):
-                signal.signal(s, forward)
+                if signal.getsignal(s) is not signal.SIG_IGN:
+                    signal.signal(s, forward)
             output, readers = {}, []
             try:
                 for k, f in (("stdout", child.stdout), ("stderr", child.stderr)):
@@ -1020,7 +1022,8 @@ def main() -> int:
                 breach = f"続きの Codex の記録ファイルが 1 つでない（{got['rollouts']} 個）。前の起動で照らした turn を除けず、実効の権限を確かめられない"
             if a.host == "codex" and not a.write and not breach:
                 rec["codex_turns"] = len(got["permissions"])
-            stopped = [f"{a.timeout} 秒で終わらなかった"] if timed_out else []
+            stopped = ([] if not timed_out else [f"{a.timeout} 秒で終わらなかった"] if "sig" not in stop
+                       else [f"シグナルを受けて TERM を伝えた後、終わらなかったので止めた（猶予は {STOP_GRACE} 秒か --timeout の残りの短い方）"])
             tail = [l for l in p.stderr.strip().splitlines() if "injected env" not in l and "Reading additional input" not in l][-5:]
             ended = [f"終了コード {p.returncode}"] + got["errors"] + tail if not timed_out and (p.returncode != 0 or got.get("is_error")) else []
             # 続きの session は、子の結果で確かめられたときだけ前と同じとみなす（時間切れの Claude Code・Grok は結果を出さない）
@@ -1083,7 +1086,8 @@ def main() -> int:
                     try:
                         if d.is_dir() and not d.is_symlink() and not any(d.iterdir()):
                             d.rmdir()
-                    except FileNotFoundError:  # 同じ対象で並行する別の launcher が先に消した（空の置き場が無いという目的は満たす）
+                    except FileNotFoundError:  # 同じ対象で並行する別の launcher が先に消した（空の置き場が無いという目的は満たす。
+                        # 消し合う瞬間は偽の CLI で決まって起こせず、試験は無い。実物の Claude Code の子 3 人の同時起動で確かめた）
                         pass
             except Exception as e:  # 子が権限を変えたなど。残ったものは task cleanup が未保存の変更とみなす
                 blocked.append("cleanup")
