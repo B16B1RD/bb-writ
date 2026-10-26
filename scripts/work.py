@@ -36,6 +36,8 @@ task と integrate の照合拒否は終了コード 6、担当の拒否は 3。
 push・pr には --reviewed も要る（初回の push も）。届ける前の審査（入口の条件 (5)・(6)）を通した commit の ID（16 進）か、
 要らない理由を none:<理由> で書く。無い・形が違う・commit が見つからない・ID でなく参照に解決されたら拒否し（2）、作業場所の HEAD と違えば拒否する（6）。
 push・pr には --risk 低|中|高:<理由> も要る（変更の危険度。中・高は interrogate を通すので、none: と一緒なら拒否する（2）。理由の真偽は確かめない）。
+中・高で commit を書いたときは、その commit の子の記録のうち、launcher に --interrogate を付けて立てた審査役のものが無ければ拒否する（6。
+条件 (5) の子の記録は、interrogate の審査の代わりにならない）。宣言の真偽（依頼文が interrogate の観点を持っていたか）は見ない。
 HEAD と違うときは審査の後に変えたファイルを、ほかの拒否と通ったときは、この作業場所の記録で最後に終えた push・pr（ブランチを問わない）から変えたファイルを示す（材料で、保証ではない）。
 op run・op begin を通さない git push には効かない。
 commit を書いたときは、launcher の委任の記録（delegations.jsonl）に、その commit を対象に起動して ok で返った読み取り専用の子が
@@ -167,22 +169,23 @@ def read_regular(f: Path) -> bytes:
 
 def reviews_of(commit: str) -> tuple:
     """launcher の委任の記録（delegations.jsonl）のうち、その commit を対象に起動して ok で返った読み取り専用の子の記録の out と、
-    読めないものの説明（無ければ空）。行と、out の record.json の両方で head・status・write が合うものだけを数える。
+    そのうち --interrogate を付けて立てた審査役の out と、読めないものの説明（無ければ空）。
+    行と、out の record.json の両方で head・status・write が合うものだけを数え、interrogate も両方で真のものだけを審査役に数える。
     head は launcher が、対象の作業ツリーが子の起動の前と終わりの両方で commit と同じとき（未 commit の変更が無いとき）だけ書く。
-    審査の中身（子が十分に攻めたか、何人か、審査の依頼だったか）は見ない。手で書き足した記録も見分けない（忘れて飛ばすのを止める）。"""
+    審査の中身（子が十分に攻めたか、何人か、依頼文が interrogate の観点を持っていたか）は見ない。手で書き足した記録も見分けない（忘れて飛ばすのを止める）。"""
     match = lambda e: (isinstance(e, dict) and e.get("head") == commit and e.get("status") == "ok" and e.get("write") is False
                        and isinstance(e.get("out"), str) and os.path.isabs(e["out"]))  # launcher は絶対パスを書く
     f = state_dir() / "delegations.jsonl"
-    found, broken = [], 0
+    found, judges, broken = [], [], 0
     try:
         rows = read_regular(f).split(b"\n")
     except FileNotFoundError:
         if not f.is_symlink():  # まだ委任していない（壊れた symlink は読めない形）
             rows = []
         else:
-            return [], f"委任の記録 {f} を読めない: 行き先が無い"
+            return [], [], f"委任の記録 {f} を読めない: 行き先が無い"
     except OSError as x:  # 権限・形。拒否の理由に出す
-        return [], f"委任の記録 {f} を読めない: {x}"
+        return [], [], f"委任の記録 {f} を読めない: {x}"
     for line in rows:
         if not line.strip():
             continue
@@ -200,7 +203,9 @@ def reviews_of(commit: str) -> tuple:
             continue
         if match(rec) and rec["out"] == e["out"]:
             found.append(e["out"])
-    return found, (f"委任の記録 {f} に、読めない行か、out の record.json を読めない行が {broken} 行ある" if broken else "")
+            if e.get("interrogate") is True and rec.get("interrogate") is True:
+                judges.append(e["out"])
+    return found, judges, (f"委任の記録 {f} に、読めない行か、out の record.json を読めない行が {broken} 行ある" if broken else "")
 
 
 def review_rounds(d: Path) -> int:
@@ -789,7 +794,7 @@ def op_step(a, r: Path, live, now: float, action: str):
         if verified != head:
             return ({"ok": False, "reason": f"検証した commit {verified or a.verified} と作業場所の HEAD {head} が違う。"
                         "検証の後に成果物が変わった。今の HEAD で証拠を取り直してから出す"}, 6)
-    reviewed, reviews = None, None
+    reviewed, reviews, judges = None, None, []
     if action == "begin" and a.key.split(":")[0] in REVIEWED:
         if not a.reviewed:
             return ({"ok": False, "reason": "push・pr には --reviewed <届ける前の審査を通した commit> か --reviewed none:<要らない理由> が要る。"
@@ -814,7 +819,7 @@ def op_step(a, r: Path, live, now: float, action: str):
                 after = (", ".join(files.splitlines()) or "なし") if rc == 0 else f"（差分を出せない: {err}）"
                 return ({"ok": False, "reason": f"審査を通した commit {reviewed} と作業場所の HEAD {head} が違う。"
                             f"審査の後に変えた。直した commit で審査を通し直してから出す。審査の後に変えたファイル: {after}"}, 6)
-            found, unread = reviews_of(reviewed)
+            found, judges, unread = reviews_of(reviewed)
             if not found:
                 return ({"ok": False, "reason": f"commit {reviewed} を対象にした審査役の記録が無い。launcher（launch.py、読み取り専用）で、"
                             "この commit を checkout した未 commit の変更が無い場所を --cwd にして審査役を立て、status が ok で返った記録が要る"
@@ -827,6 +832,10 @@ def op_step(a, r: Path, live, now: float, action: str):
                         "文書だけ・小さな追加は低、普通のコードは中、認証・課金・外部操作・データの削除・皆が使う土台は高"}, 2)
         if risk.group(1) != "低" and reviewed.startswith("none:"):
             return ({"ok": False, "reason": f"危険度が{risk.group(1)}の変更は interrogate を通す（入口の条件 (6)）。--reviewed に、審査を通した commit を書く"}, 2)
+        if risk.group(1) != "低" and not judges:
+            return ({"ok": False, "reason": f"危険度が{risk.group(1)}の変更は interrogate を通す（入口の条件 (6)）。commit {reviewed} の記録に、"
+                        "launcher に --interrogate を付けて立てた審査役のものが無い（条件 (5) の子の記録は代わりにならない）。"
+                        "interrogate の 3 の依頼文で、この commit の審査役を --interrogate を付けて立てる"}, 6)
         risk = risk.group(1) + ": " + risk.group(2).strip()
         f = r / "note.md"
         gaps = note_gaps(note_body(f), bool(reviews), review_rounds(Path(a.dir)) if reviews else 0)

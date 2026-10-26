@@ -658,10 +658,35 @@ class TestReviewedCommit(unittest.TestCase):
                 self.assertIn(f"危険度が{level}の変更は interrogate を通す", r["reason"], (key, level))
         self.assertEqual(self.ops_file(), before)
         self.assertEqual(self.publish(tok, "push:feat@1", "--reviewed", "none:文書だけ", "--risk", "低:文書だけ")[0], 0)
+        self.review_record(self.head(), interrogate=True)
         self.assertEqual(self.publish(tok, "pr:feat", "--reviewed", self.head(), "--risk", "中: 普通のコード")[0], 0)
         self.assertEqual(self.publish(tok, "push:feat@2", "--reviewed", self.head(), "--risk", "高:外部操作")[0], 0)
         recs = {json.loads(x)["key"]: json.loads(x) for x in self.ops_file().decode().splitlines()}
         self.assertEqual((recs["push:feat@1"]["risk"], recs["pr:feat"]["risk"]), ("低: 文書だけ", "中: 普通のコード"))
+
+    def test_a_medium_or_high_risk_needs_an_interrogate_reviewer_not_only_the_regression_check(self):
+        # 危険度を中と書いても、後退の一覧を攻める子（入口の条件 (5)）の記録だけで push でき、interrogate の観点の審査が一度も無かった（#25）
+        self.auto_risk = False
+        tok = self.claim()  # setUp が置いた記録は --interrogate の無い子（条件 (5) の子と同じ形）
+        before = self.ops_file()
+        for key in ("push:feat@1", "pr:feat"):
+            for level in ("中", "高"):
+                rc, r = self.publish(tok, key, "--reviewed", self.head(), "--risk", f"{level}:普通のコード")
+                self.assertEqual(rc, 6, (key, level))
+                self.assertIn("--interrogate", r["reason"], (key, level))
+        self.review_record(self.head(), record={"interrogate": False}, interrogate=True)  # 行だけが審査役だと言う
+        self.review_record(self.head(), record={"interrogate": True}, interrogate=False)  # record.json だけが言う
+        self.review_record(self.head(), interrogate="true")
+        self.assertEqual(self.publish(tok, "push:feat@1", "--reviewed", self.head(), "--risk", "中:普通のコード")[0], 6)
+        self.assertEqual(self.ops_file(), before)
+        self.assertEqual(self.publish(tok, "push:feat@1", "--reviewed", self.head(), "--risk", "低:試験だけ")[0], 0)  # 低は (5) の子で足りる
+        self.review_record(self.head(), interrogate=True)
+        self.assertEqual(self.publish(tok, "pr:feat", "--reviewed", self.head(), "--risk", "中:普通のコード")[0], 0)
+        self.commit("src/fix.py")  # 前の commit の審査役は、新しい commit の審査に数えない
+        self.review_record(self.head())
+        rc, r = self.publish(tok, "push:feat@2", "--reviewed", self.head(), "--risk", "高:外部操作")
+        self.assertEqual(rc, 6)
+        self.assertIn("--interrogate", r["reason"])
 
     def test_first_push_and_pr_without_a_declaration_are_refused_and_not_recorded(self):
         tok = self.claim()

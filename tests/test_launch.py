@@ -2235,6 +2235,25 @@ class TestLaunch(unittest.TestCase):
             rc, again = self.run_launch(None, extra=["--resume", rec["out"]])
             self.assertEqual((again["status"], again["head"]), ("ok", None), again)
 
+    def test_an_interrogate_reviewer_is_recorded_and_its_resume_stays_one(self):
+        """work.py は、危険度が中・高の push・pr で interrogate の審査役の記録を求める（Issue #25）。続きも同じ種類のまま。"""
+        last = lambda: json.loads((self.state / "delegations.jsonl").read_text().splitlines()[-1])
+        rc, rec = self.run_launch("claude")
+        self.assertEqual((rc, rec["interrogate"], last()["interrogate"]), (0, False, False), rec)
+        rc, rec = self.run_launch("claude", extra=["--interrogate", "--timeout", "2"], env_extra={"FAKE_HANG": "1"})
+        self.assertEqual((rec["status"], rec["interrogate"], last()["interrogate"]), ("timeout", True, True), rec)
+        self.assertIs(json.loads((Path(rec["out"]) / "record.json").read_text())["interrogate"], True)
+        rc, again = self.run_launch(None, extra=["--resume", rec["out"]])
+        self.assertEqual((rc, again["status"], again["interrogate"], last()["interrogate"]), (0, "ok", True, True), again)
+        for extra, words in ((["--host", "claude", "--cwd", str(self.cwd), "--write", "--interrogate"], "--write と一緒に渡さない"),
+                             (["--resume", rec["out"], "--interrogate"], "一緒に渡さない")):
+            with self.subTest(extra=extra):
+                self.args_file.unlink(missing_ok=True)
+                p = self.run_launch(None, extra=extra, raw=True)
+                self.assertEqual(p.returncode, 2, p.stderr)
+                self.assertIn(words, p.stderr)
+                self.assertFalse(self.args_file.exists())  # 子を起こさない
+
     def test_resume_takes_the_launch_only_from_the_record(self):
         """続きを違う権限・違う対象で起動しない。続きから起動できない記録では、子を起こさずに止める。"""
         rc, rec = self.run_launch("claude", extra=["--timeout", "2"], env_extra={"FAKE_HANG": "1"})
