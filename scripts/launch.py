@@ -775,7 +775,10 @@ def load_now() -> float | None:
         return None
 
 
-def wait_for_exit(child: subprocess.Popen, timeout: float) -> None:
+STOP_GRACE = 30  # launcher がシグナルを受けて子に TERM を伝えた後、子が片付けて終わるのを待つ秒数（--timeout の残りが短ければそちら）
+
+
+def wait_for_exit(child: subprocess.Popen, timeout: float, stop: dict) -> None:
     """子の CLI が終わるのを、刈らずに待つ（Linux）。刈らないので、止め終わるまで子の CLI とそのプロセスグループの番号は別のプロセスに
     使い回されず、終了コードも後の child.wait に残る。待つ間に自分の下へ来て終わった孤児は刈る（subreaper なので、刈らないとゾンビが溜まる）。"""
     deadline = time.monotonic() + timeout
@@ -785,7 +788,7 @@ def wait_for_exit(child: subprocess.Popen, timeout: float) -> None:
             return
         if r is not None:
             os.waitpid(r.si_pid, 0)  # 終わったと報告されたものなので、すぐ返る
-        if time.monotonic() > deadline:  # 孤児が終わり続けても、期限は守る
+        if time.monotonic() > min(deadline, stop.get("at", deadline) + STOP_GRACE):  # 孤児が終わり続けても、期限は守る
             raise subprocess.TimeoutExpired(child.args, timeout)
         if r is None:
             time.sleep(0.1)
@@ -944,7 +947,7 @@ def main() -> int:
                 become_subreaper()
     except Exception as e:
         prep = [f"起動の前の準備ができない: {e!r}"[:300], f"詳細: {launcher_error(out_dir)}"]
-    t0 = time.time()
+    t0, stop = time.time(), {}
     if prep:
         rec.update(status="failed", problems=prep)
     elif why:
@@ -957,6 +960,21 @@ def main() -> int:
             child = subprocess.Popen(cmd, cwd=a.cwd, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                      start_new_session=True)  # バイトで受ける（子の出力は UTF-8 とは限らない）
             rec["session"] = a.session  # 後の照合で failed になっても、確かめた後に続きから起動できるように
+            # 子を待つ間に止められたら（中断・呼び出し側の時間の上限）、子のプロセスグループに TERM を伝え、子が片付けて終わるのを
+            # 待ってから、照合して記録を書く（続きから起動できる）。launcher だけが止まると子は動き続け、記録も残らず、launcher と子を
+            # まとめて KILL すると、子の CLI（Claude Code 2.1.310）が対象に .claude/.cc-writes を残した。子が終わった後に受けたシグナルは、
+            # 記録を書き終えるまで待たせる。子を起動する前と、Popen から下の登録までの間に受けたシグナルは、これまでどおり launcher を止める
+            def forward(n, _frame):
+                if "sig" in stop:
+                    return
+                stop.update(sig=n, at=time.monotonic())
+                if not stop.get("reaped"):
+                    try:
+                        os.killpg(child.pid, signal.SIGTERM)
+                    except ProcessLookupError:
+                        pass
+            for s in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT):
+                signal.signal(s, forward)
             output, readers = {}, []
             try:
                 for k, f in (("stdout", child.stdout), ("stderr", child.stderr)):
@@ -964,7 +982,7 @@ def main() -> int:
                     readers[-1].start()
                 # 出力が閉じるのでなく、子の CLI が終わるのを待つ（子孫が出力を開いたままでも）
                 try:
-                    wait_for_exit(child, a.timeout) if LINUX else child.wait(timeout=a.timeout)
+                    wait_for_exit(child, a.timeout, stop) if LINUX else child.wait(timeout=a.timeout)
                 except subprocess.TimeoutExpired:  # 止めた後も出力を読み、session を記録する（--resume で続きから起動できる）
                     timed_out = True
             finally:
@@ -973,6 +991,7 @@ def main() -> int:
                 except ProcessLookupError:
                     pass
                 finally:
+                    stop["reaped"] = True  # 番号が使い回されうる。この後のシグナルは子に伝えない
                     if LINUX:
                         try:
                             try:
@@ -1061,8 +1080,11 @@ def main() -> int:
                                + changed[:20] + rec.get("problems", []))
             try:
                 for d in reversed(made):
-                    if d.is_dir() and not d.is_symlink() and not any(d.iterdir()):
-                        d.rmdir()
+                    try:
+                        if d.is_dir() and not d.is_symlink() and not any(d.iterdir()):
+                            d.rmdir()
+                    except FileNotFoundError:  # 同じ対象で並行する別の launcher が先に消した（空の置き場が無いという目的は満たす）
+                        pass
             except Exception as e:  # 子が権限を変えたなど。残ったものは task cleanup が未保存の変更とみなす
                 blocked.append("cleanup")
                 rec.update(status="failed", problems=[f"子の起動で作られた空の .claude を片付けられない: {e!r}"[:300],
@@ -1113,6 +1135,10 @@ def main() -> int:
     rec["duration_s"] = round(time.time() - t0, 1)
     rec["load"]["end"] = load_now()
     # 続きから起動してよいのは、session があり、権限・プロセス・Git・照合のどれにも当たらなかった起動だけ（空の残りは、片付けてから続けられる）
+    if "sig" in stop:  # 止められた。ok で返った報告はそのまま使う（子が TERM の前に書き終えていた）
+        rec["stopped_by_signal"] = stop["sig"]
+        if rec["status"] != "ok":
+            rec["problems"] = [f"launcher がシグナル {stop['sig']} を受けて、子に TERM を伝えて止めた"] + rec.get("problems", [])
     rec["resumable"] = bool(rec.get("session")) and not blocked
     try:
         json.dumps(rec, ensure_ascii=False, indent=1)

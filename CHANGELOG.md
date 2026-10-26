@@ -4,6 +4,16 @@ bb-writ を使う人に向けて、版ごとに変わったことを書く。新
 
 commit ごとの細かい変更は、各版の末尾の「commit の一覧」（前の版のタグとの比較）で見られる。
 
+## 0.18.1 - 2026-10-26
+
+### 直したこと
+
+- launcher で起動した子を途中で止められるようにした。launcher が子を待つ間に TERM・HUP・INT を受けると、子のプロセスグループに TERM を伝え、子が片付けて終わるのを待ってから（30 秒か `--timeout` の残りの短い方。過ぎたら KILL）、いつもどおり照合して記録を書く。記録には `stopped_by_signal` が付き、`ok` でなければ止めた理由が `problems` に並ぶ。`session` があれば `--resume` で続きから起動できる。これまでは launcher だけが止まり、子の CLI は動き続け、記録も残らなかった。そのため launcher と子を木ごと KILL すると、Claude Code の子が対象に空の `.claude/.cc-writes` を残し、`task cleanup` が止まった。止めるときは `kill <launcher の pid>` を使い、木ごと KILL しない（`delegate`・`playbook-pause-safely`）。
+  - 子を起動する前に受けたシグナルと、launcher を KILL したときは、これまでどおり記録は残らない。Linux の外では、TERM を無視する子は `--timeout` まで待つ（確かめていない）。
+- 同じ対象に読み取り専用の Claude Code の子を同時に立てたとき、後から終わった launcher が、子の起動で作られた空の `.claude` を片付けられないとして `failed` にし、続きから起動できなくなることがあったのを直した。先に別の launcher が消していれば、片付いたとみなす。
+
+commit の一覧：https://github.com/B16B1RD/bb-writ/compare/bb-writ--v0.18.0...bb-writ--v0.18.1
+
 ## 0.18.0 - 2026-10-25
 
 ### 変えたこと
