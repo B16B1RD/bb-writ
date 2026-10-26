@@ -2249,10 +2249,12 @@ class TestLaunch(unittest.TestCase):
         old = Path(self.tmp.name) / "old-record"  # 前の版の launcher の記録には欄が無い
         old.mkdir()
         (old / "record.json").write_text(json.dumps({k: v for k, v in plain.items() if k != "interrogate"}))
-        for prev in (plain["out"], str(old)):
-            with self.subTest(prev=prev):
-                rc, again = self.run_launch(None, extra=["--resume", prev])
-                self.assertEqual((rc, again["status"], again["interrogate"], last()["interrogate"]), (0, "ok", False, False), again)
+        for case, prev in (("launcher が書いた記録", plain["out"]), ("interrogate の欄の無い前の版の記録", str(old))):
+            with self.subTest(case):
+                p = self.run_launch(None, extra=["--resume", prev], raw=True)
+                self.assertEqual(p.returncode, 0, p.stderr)
+                again = json.loads(p.stdout)
+                self.assertEqual((again["status"], again["interrogate"], last()["interrogate"]), ("ok", False, False), again)
         for extra, words in ((["--host", "claude", "--cwd", str(self.cwd), "--write", "--interrogate"], "--write と一緒に渡さない"),
                              (["--resume", rec["out"], "--interrogate"], "一緒に渡さない")):
             with self.subTest(extra=extra):
