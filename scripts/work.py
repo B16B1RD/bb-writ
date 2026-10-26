@@ -1275,7 +1275,7 @@ def main() -> int:
     o.add_argument("--result", default="")
     o.add_argument("--from", dest="frm", type=Path, help="外部操作を実行する場所（push・pr・comment・merge・release・issue で必須）")
     o.add_argument("--verified", help="検証した commit（push・pr・merge・release で必須。作業場所の HEAD と一致させる）")
-    o.add_argument("--reviewed", help="届ける前の審査を通した commit か none:<理由>（push・pr で必須。commit は作業場所の HEAD と一致させ、launcher の審査役の記録が要る）")
+    o.add_argument("--reviewed", help="届ける前の審査を通した commit か none:<理由>（push・pr で必須。commit は作業場所の HEAD と一致させ、launcher の審査役の記録が要る。--risk が中・高なら --interrogate を付けた審査役の記録）")
     o.add_argument("--risk", help="変更の危険度と理由 低|中|高:<理由>（push・pr で必須。中・高は --reviewed none: と一緒に使えない）")
     c = sub.add_parser("check")
     c.add_argument("--dir", type=Path, required=True)

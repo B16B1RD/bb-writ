@@ -666,6 +666,7 @@ class TestReviewedCommit(unittest.TestCase):
 
     def test_a_medium_or_high_risk_needs_an_interrogate_reviewer_not_only_the_regression_check(self):
         # 危険度を中と書いても、後退の一覧を攻める子（入口の条件 (5)）の記録だけで push でき、interrogate の観点の審査が一度も無かった（#25）
+        # 照らすのは関門だけで、スキルの文（playbook-deliver・interrogate の 3）が関門と食い違わないかは見ない（文は読者役で確かめる）
         self.auto_risk = False
         tok = self.claim()  # setUp が置いた記録は --interrogate の無い子（条件 (5) の子と同じ形）
         before = self.ops_file()
@@ -676,7 +677,8 @@ class TestReviewedCommit(unittest.TestCase):
                 self.assertIn("--interrogate", r["reason"], (key, level))
         self.review_record(self.head(), record={"interrogate": False}, interrogate=True)  # 行だけが審査役だと言う
         self.review_record(self.head(), record={"interrogate": True}, interrogate=False)  # record.json だけが言う
-        self.review_record(self.head(), interrogate="true")
+        self.review_record(self.head(), record={"interrogate": True}, interrogate="true")  # 片側が真偽値でない
+        self.review_record(self.head(), record={"interrogate": "true"}, interrogate=True)
         self.assertEqual(self.publish(tok, "push:feat@1", "--reviewed", self.head(), "--risk", "中:普通のコード")[0], 6)
         self.assertEqual(self.ops_file(), before)
         self.assertEqual(self.publish(tok, "push:feat@1", "--reviewed", self.head(), "--risk", "低:試験だけ")[0], 0)  # 低は (5) の子で足りる

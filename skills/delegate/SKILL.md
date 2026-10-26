@@ -41,7 +41,7 @@ python3 <launch.py> --resume <前の記録の out> --prompt-file <続きの依�
 
 `scripts/work.py`（launcher と同じ置き場）。子に書く仕事を任せるときは、親が担当を持ったままにせず、子に `claim` させる（同じ作業場所に親と子が同時に書かない）。別タスクを子に任せるときは、親が `playbook-parallel` の `task start` で専用 worktree を作って `release` し、子はその worktree を `--cwd` にして起動し、そこで `claim` する（元の checkout で起動すると、その記録の置き場にタスクの一覧が含まれる）。`task start`・`task resume`・`integrate`・`task cleanup` は親が行う（子はタスクの一覧と統合の記録に書けない）。子が終わったら、親が同じ worktree で `claim` し直して確かめ、統合する。作業場所の記録（`lease.json`・`ops.jsonl`）は子が書き換えうるので、子に任せている間はその作業場所で外部操作を始めたままにしない。担当の期限は 24 時間までで、それを超える記録は切れたものとみなす（子が期限を遠い将来にして、親の取り直しを止められないように）。CLI 名や担当の表示名が同じでも、タスクと token で区別する。使い方は`playbook-deliver`。
 
-外部操作（push・PR・コメントなど）は元の checkout から `op run --from <元の checkout> -- <コマンド>` で実行する（照合を通ったときだけ実行し、終了コードを記録する）。成果物を出す操作は `--verified <検証した commit>` も付け、push・PR は `--reviewed <届ける前の審査を通した commit の ID か none:<理由>>` と `--risk 低|中|高:<理由>` も付ける（`HEAD` などの参照は受けない。commit は、それを対象に launcher で起動して `ok` で返った読み取り専用の子の記録が要る）。外部操作は親が行い、子には頼まない（子の付与は作業場所の中だけ）。`work.py check --dir <作業場所> --from <実行する場所>` で、そこで使われる GitHub のアカウントと書き込み権限を事前に見られる。子の起動に `GH_CONFIG_DIR` や `GH_TOKEN` を足してアカウントを決めない（利用者の環境の切り替えを上書きし、別の名前で外に出る）。
+外部操作（push・PR・コメントなど）は元の checkout から `op run --from <元の checkout> -- <コマンド>` で実行する（照合を通ったときだけ実行し、終了コードを記録する）。成果物を出す操作は `--verified <検証した commit>` も付け、push・PR は `--reviewed <届ける前の審査を通した commit の ID か none:<理由>>` と `--risk 低|中|高:<理由>` も付ける（`HEAD` などの参照は受けない。commit は、それを対象に launcher で起動して `ok` で返った読み取り専用の子の記録が要り、危険度が中・高ならそのうち `--interrogate` を付けた審査役の記録が要る）。外部操作は親が行い、子には頼まない（子の付与は作業場所の中だけ）。`work.py check --dir <作業場所> --from <実行する場所>` で、そこで使われる GitHub のアカウントと書き込み権限を事前に見られる。子の起動に `GH_CONFIG_DIR` や `GH_TOKEN` を足してアカウントを決めない（利用者の環境の切り替えを上書きし、別の名前で外に出る）。
 
 ## Claude Code
 

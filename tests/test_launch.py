@@ -2245,6 +2245,14 @@ class TestLaunch(unittest.TestCase):
         self.assertIs(json.loads((Path(rec["out"]) / "record.json").read_text())["interrogate"], True)
         rc, again = self.run_launch(None, extra=["--resume", rec["out"]])
         self.assertEqual((rc, again["status"], again["interrogate"], last()["interrogate"]), (0, "ok", True, True), again)
+        rc, plain = self.run_launch("claude", extra=["--timeout", "2"], env_extra={"FAKE_HANG": "1"})  # 条件 (5) の子の続きは審査役に化けない
+        old = Path(self.tmp.name) / "old-record"  # 前の版の launcher の記録には欄が無い
+        old.mkdir()
+        (old / "record.json").write_text(json.dumps({k: v for k, v in plain.items() if k != "interrogate"}))
+        for prev in (plain["out"], str(old)):
+            with self.subTest(prev=prev):
+                rc, again = self.run_launch(None, extra=["--resume", prev])
+                self.assertEqual((rc, again["status"], again["interrogate"], last()["interrogate"]), (0, "ok", False, False), again)
         for extra, words in ((["--host", "claude", "--cwd", str(self.cwd), "--write", "--interrogate"], "--write と一緒に渡さない"),
                              (["--resume", rec["out"], "--interrogate"], "一緒に渡さない")):
             with self.subTest(extra=extra):
