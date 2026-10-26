@@ -1894,9 +1894,10 @@ class TestLaunch(unittest.TestCase):
         return argv[argv.index({"claude": "--session-id", "grok": "-s"}[host]) + 1]
 
     def test_a_signal_to_the_launcher_stops_the_child_cleanly_and_keeps_the_record(self):
-        """launcher が子を待つ間に TERM・HUP・INT を受けたら、子のプロセスグループに TERM を伝え、子が片付けて終わるのを待ち、
+        """launcher が子を待つ間に TERM・HUP・INT を受けたら、直下の子に TERM を伝え、子が片付けて終わるのを待ち、
         照合して記録を書く（続きから起動できる）。中断で launcher と子をまとめて止めると、子の CLI（Claude Code 2.1.310）が
-        対象に .claude/.cc-writes を残し、記録も残らなかった。TERM を無視する子は、--timeout の残りまでで止める。"""
+        対象に .claude/.cc-writes を残し、記録も残らなかった。TERM を無視する子は、--timeout の残りまでで止める。
+        子が終わった後（照合の間）に受けたシグナルは、子を止めたと記録しない。猶予の秒数（30 秒）と、2 回目のシグナルの扱いは試験しない。"""
         def launch(mode, sig, timeout="60", ignore_hup=False, then=None):
             for f in (".started", ".term", ".stage"):
                 Path(str(self.args_file) + f).unlink(missing_ok=True)
@@ -1932,6 +1933,35 @@ class TestLaunch(unittest.TestCase):
                 self.assertTrue(rec["resumable"], rec)
                 self.assertEqual(rec["session"], Path(str(self.args_file) + ".started").read_text())
                 self.assertTrue((Path(rec["out"]) / "record.json").is_file())
+        real_git = shutil.which("git")  # 偽の git の中から呼ぶ本物（PATH を変える前に引いた絶対パス）
+        (self.bin / "git").write_text(f"#!/bin/sh\n[ -e \"{self.args_file}.done\" ] && sleep 3\nexec {real_git} \"$@\"\n")
+        (self.bin / "git").chmod(0o755)
+        try:  # 子が終わった後、照合の git が遅い間に受けたシグナルは、子を止めたと記録しない
+            Path(str(self.args_file) + ".done").unlink(missing_ok=True)
+            self.args_file.unlink(missing_ok=True)  # 前の起動の引数（残っていると、子の起動の前に送ってしまう）
+            env = {**os.environ, "HOME": str(self.home), "PATH": f"{self.bin}:/usr/bin:/bin", "BB_WRIT_CONFIG_DIR": str(self.cfg),
+                   "BB_WRIT_STATE_DIR": str(self.state), "FAKE_MODE": "good", "FAKE_ARGS": str(self.args_file),
+                   "FAKE_TEXT": GOOD.encode().decode("unicode_escape")}
+            (self.bin / "fake_env.json").write_text(json.dumps({k: v for k, v in env.items() if k.startswith("FAKE_")}))
+            for g in (["init", "-q"], ["add", "-A"], ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "x"]):  # 照合が git を呼ぶよう head を持たせる
+                subprocess.run([real_git, "-C", str(self.cwd), *g], check=True, capture_output=True)
+            p = subprocess.Popen([sys.executable, str(LAUNCH), "--host", "claude", "--cwd", str(self.cwd), "--prompt-file", str(self.prompt)],
+                                 env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            deadline = time.time() + 30
+            while not Path(str(self.args_file)).exists() and time.time() < deadline:  # 偽の子が起動した（引数を書いた）
+                time.sleep(0.05)
+            Path(str(self.args_file) + ".done").touch()  # ここから git は遅くなる
+            time.sleep(2)  # 偽の子は終わり、launcher は照合の git（3 秒）を待っている
+            self.assertIsNone(p.poll())  # launcher はまだ記録を書いていない
+            p.send_signal(signal.SIGTERM)
+            out, _ = p.communicate(timeout=90)
+            rec = json.loads(out)
+            self.assertNotIn("stopped_by_signal", rec)
+            self.assertFalse(any("シグナル" in x for x in rec.get("problems", [])), rec)
+        finally:
+            (self.bin / "git").unlink()
+            Path(str(self.args_file) + ".done").unlink(missing_ok=True)
+            subprocess.run(["rm", "-rf", str(self.cwd / ".git")], check=True)
         rc, rec = launch("stop", signal.SIGHUP, ignore_hup=True, then=signal.SIGTERM)  # nohup で無視させた HUP は無視のまま
         self.assertEqual((rec["status"], rec["stopped_by_signal"]), ("failed", int(signal.SIGTERM)), rec)
         rc, rec = launch("stop-deaf", signal.SIGTERM, timeout="4")  # TERM を無視する子は、--timeout の残りで止める

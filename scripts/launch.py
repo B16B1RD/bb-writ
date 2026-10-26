@@ -964,7 +964,8 @@ def main() -> int:
             # 照合して記録を書く（続きから起動できる）。launcher だけが止まると子は動き続け、記録も残らず、launcher と子をまとめて KILL
             # すると、子の CLI（Claude Code 2.1.310）が対象に .claude/.cc-writes を残した。グループには送らない（dotenvx が子へ伝え直し、
             # 子の CLI が TERM を 2 回受ける）。子を刈った後に受けたシグナルは子を止めていないので記録せず、記録を書き終えるまで待たせる
-            # （照合の間にもう一度 Ctrl-C を押すと、後処理の git も止まり、照合できない failed になる）。起動時に無視されていたシグナル
+            # （照合の間に端末の Ctrl-C が launcher のグループに届くと、後処理の git が止まり、記録の照合（head など）が欠けることがある。
+            # 子が自分で終わった直後、刈る前の数ミリ秒に受けたシグナルは、子を止めたと記録されることがある）。起動時に無視されていたシグナル
             # （nohup の HUP）は無視のまま。子を起動する前と、Popen から下の登録までの間に受けたシグナルは、これまでどおり launcher を止める
             def forward(n, _frame):
                 if "sig" in stop or stop.get("reaped"):
@@ -1023,7 +1024,7 @@ def main() -> int:
             if a.host == "codex" and not a.write and not breach:
                 rec["codex_turns"] = len(got["permissions"])
             stopped = ([] if not timed_out else [f"{a.timeout} 秒で終わらなかった"] if "sig" not in stop
-                       else [f"シグナルを受けて TERM を伝えた後、終わらなかったので止めた（猶予は {STOP_GRACE} 秒か --timeout の残りの短い方）"])
+                       else ["シグナルを受けて TERM を伝えた後、終わらなかったので止めた"])
             tail = [l for l in p.stderr.strip().splitlines() if "injected env" not in l and "Reading additional input" not in l][-5:]
             ended = [f"終了コード {p.returncode}"] + got["errors"] + tail if not timed_out and (p.returncode != 0 or got.get("is_error")) else []
             # 続きの session は、子の結果で確かめられたときだけ前と同じとみなす（時間切れの Claude Code・Grok は結果を出さない）
