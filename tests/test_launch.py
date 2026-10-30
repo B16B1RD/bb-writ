@@ -568,6 +568,14 @@ class TestLaunch(unittest.TestCase):
                 rc, again = self.run_launch(None, extra=["--resume", first["out"]])
                 self.assertEqual(rc, 0, again)
 
+    def test_a_breach_naming_a_path_with_the_unchecked_words_stays_a_breach(self):
+        """権限が違った理由の文に「確かめられない」というパスが入っても、照らせなかった扱いにしない。"""
+        patch = """\
+            launch.codex_breach = lambda *a: "Codex の実効の権限に deny が無い: /some/確かめられない/x"
+            """
+        rc, rec = self.launch_patched(patch, ["--host", "codex", "--cwd", str(self.cwd)])
+        self.assertEqual(rec["blocked"], ["breach"], rec)
+
     def test_a_signal_during_the_timeout_grace_does_not_send_a_second_term(self):
         p = self.launch_in_background(["--host", "claude", "--cwd", str(self.cwd), "--timeout", "1"])
         term = Path(str(self.args_file) + ".term")

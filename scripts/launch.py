@@ -778,6 +778,7 @@ def load_now() -> float | None:
         return None
 
 
+UNCHECKED = ("Codex の実効の権限を記録（", "続きの Codex の記録ファイルが")  # 権限を照らせなかった理由の文の先頭（理由の文の中にはパスが入るので、部分一致で見ない）
 UNSAFE = {"unsafe", "breach", "other-session", "left", "git"}  # 子が権限の外で動いた、別の session だった、かもしれない理由。この session はどの記録からも続けない（照らせなかっただけの理由は、前の記録から続けられる）
 STOP_GRACE = 30  # 子に TERM を送った後、子が片付けて終わるのを待つ秒数（シグナルで止めるときは --timeout の残りが短ければそちら）
 
@@ -1112,7 +1113,7 @@ def main() -> int:
                       + ([f"続きの子の session を確かめられないか、前と違う（{got['session']}）"] if other else []) + ([breach] if breach else []))
             # 続けさせない理由は、選ばれた status の枝でなく、事実から決める（利用枠の枝が先に決まっても残す）
             blocked += [k for k, fact in (("unsafe", unsafe), ("other-session" if got["session"] else "session", other),  # 照らせなかっただけなら、権限の外で動いた事実は無い
-                                          ("unchecked" if breach and "確かめられない" in breach else "breach", breach)) if fact]
+                                          ("unchecked" if breach and breach.startswith(UNCHECKED) else "breach", breach)) if fact]
             # 利用枠・権限の照合は、時間切れより先に見る（権限の約束どおりに動いたか分からない子を、続きから起動させない）。
             # 利用枠の文言を照らすのは、子が成功しなかったときだけ（成功した子の報告を、stderr の「429」「rate limit」などの一語で捨てていた）
             cli_failed = p.returncode != 0 or got.get("is_error") or not got["text"]  # 下の終了コードの枝と同じ条件
