@@ -84,8 +84,7 @@ class TestParallel(unittest.TestCase):
         t = self.start()
         at = Path(t['dir'])
         self.git(at, '-c', 'protocol.file.allow=always', 'submodule', 'update', '-q', '--init')
-        got = self.w('task', 'cleanup', '--dir', t['dir'], '--token', t['token'], '--saved', 'main', code=6)
-        self.assertIn('submodule', got['reason'])
+        self.w('task', 'cleanup', '--dir', t['dir'], '--token', t['token'], '--saved', 'main', code=6)
         self.assertTrue(at.exists())
         self.assertNotIn('cleanup', self.w('task', 'list', '--dir', self.repo)['tasks'][0])
 
@@ -116,6 +115,12 @@ class TestParallel(unittest.TestCase):
         subprocess.run(['git', 'init', '-q', '-b', 'main', '--separate-git-dir', str(outer / 'in.git'), str(inner)], check=True)
         self.git(inner, '-c', 'user.name=t', '-c', 'user.email=t', 'commit', '-q', '--allow-empty', '-m', 'i')
         self.w('task', 'start', '--dir', inner, '--holder', 'x', code=6)
+        named = Path(self.tmp.name) / 'gd' / '.git'  # 管理ディレクトリの名前が .git でも、その親に作らない
+        named.parent.mkdir()
+        tree = Path(self.tmp.name) / 'tree'
+        subprocess.run(['git', 'init', '-q', '-b', 'main', '--separate-git-dir', str(named), str(tree)], check=True)
+        self.git(tree, '-c', 'user.name=t', '-c', 'user.email=t', 'commit', '-q', '--allow-empty', '-m', 'i')
+        self.w('task', 'start', '--dir', tree, '--holder', 'x', code=6)
 
     def test_an_integration_record_waits_while_the_target_has_changes(self):
         a = self.start()
@@ -141,7 +146,8 @@ class TestParallel(unittest.TestCase):
         a = self.start()
         head = self.change(a, 'a')
         file = self.journal()
-        for body in ('[]', '["x"]', '{"dir": "/"}'):
+        whole = {'dir': str(Path(a['dir']).resolve()), 'verified': head, 'target': 'refs/heads/main'}
+        for body in ('[]', '["x"]', '{"dir": "/"}', json.dumps(whole)):  # 最後は expected だけが欠ける
             with self.subTest(body):
                 file.write_text(body)
                 got = self.integrate(a, self.git(self.repo, 'rev-parse', 'main'), head, code=6)

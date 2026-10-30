@@ -594,7 +594,7 @@ def registered_task(d):
 
 def read_journal(rr):
     journal = read(rr / 'integration.json')
-    if journal is not None and not (isinstance(journal, dict) and all(isinstance(journal.get(k), str) for k in ('dir', 'verified', 'target'))):
+    if journal is not None and not (isinstance(journal, dict) and all(isinstance(journal.get(k), str) for k in ('dir', 'expected', 'verified', 'target'))):
         raise ValueError(f"統合の記録の形が違う: {rr / 'integration.json'}")
     return journal
 
@@ -652,11 +652,13 @@ def task_command(a):
                 tasks.append({**task, 'lease': {k: v for k, v in lease.items() if k != 'token'} if lease else None})
             return out({'ok': True, 'tasks': tasks, 'integration': read(rr / 'integration.json')})
         if a.action == 'start':
-            common = Path(git(a.dir, 'rev-parse', '--path-format=absolute', '--git-common-dir'))
-            if common.name != '.git' and sh(['git', 'config', '--file', str(common / 'config'), 'core.worktree'], a.dir)[0]:  # 設定に無いと 1
+            top = Path(git(a.dir, 'rev-parse', '--show-toplevel')).resolve()  # 作業場所の下の階層からでも、そのタスクの統合先を継ぐ
+            common = Path(git(a.dir, 'rev-parse', '--path-format=absolute', '--git-common-dir')).resolve()
+            main_checkout = Path(git(a.dir, 'rev-parse', '--absolute-git-dir')).resolve() == common
+            if sh(['git', 'config', '--file', str(common / 'config'), 'core.worktree'], a.dir)[0] and (
+                    common != (repo / '.git').resolve() or (main_checkout and top != repo)):
                 # 管理ディレクトリから checkout へ戻る道が無く、作業場所から一覧を引けない
                 raise ValueError('--separate-git-dir の checkout にはタスクの作業場所を作れない')
-            top = Path(git(a.dir, 'rev-parse', '--show-toplevel'))  # 作業場所の下の階層からでも、そのタスクの統合先を継ぐ
             target = a.target or (registered_task(top) or {}).get('target')
             if not target:
                 rc, full, _ = sh(['git', 'symbolic-ref', '--quiet', 'HEAD'], a.dir)  # --short はタグと同じ名前で heads/ を付ける
