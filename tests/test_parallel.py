@@ -54,6 +54,221 @@ class TestParallel(unittest.TestCase):
         return self.w('integrate', '--dir', task['dir'], '--token', task['token'],
                       '--expected', expected, '--verified', verified, code=code)
 
+    def journal(self, **over):
+        rr = next((Path(self.tmp.name) / 'state' / 'work').glob('repo-*'))
+        (rr / 'integration.json').write_text(json.dumps({'dir': '/nonexistent/gone', 'expected': self.git(self.repo, 'rev-parse', 'main'),
+                                                         'verified': '0' * 40, 'target': 'refs/heads/main', **over}))
+        return rr / 'integration.json'
+
+    def test_a_task_in_a_submodule_works_in_the_submodule(self):
+        sub = Path(self.tmp.name) / 'sub-origin'
+        sub.mkdir()
+        self.git(sub, 'init', '-q', '-b', 'main')
+        self.git(sub, '-c', 'user.name=t', '-c', 'user.email=t', 'commit', '-q', '--allow-empty', '-m', 's')
+        self.git(self.repo, '-c', 'protocol.file.allow=always', 'submodule', 'add', '-q', str(sub), 'lib')
+        self.git(self.repo, 'commit', '-qm', 'add')
+        before = self.git(self.repo, 'branch', '--list')
+        t = self.w('task', 'start', '--dir', self.repo / 'lib', '--holder', 'x')
+        self.assertEqual(Path(t['checkout']).resolve(), (self.repo / 'lib').resolve())
+        self.assertEqual(self.git(self.repo, 'branch', '--list'), before)  # 親に作らない
+        self.assertIn(t['branch'], self.git(self.repo / 'lib', 'branch', '--list'))
+
+    def test_a_task_with_an_initialised_submodule_can_be_cleaned_up(self):
+        sub = Path(self.tmp.name) / 'sub-origin'
+        sub.mkdir()
+        self.git(sub, 'init', '-q', '-b', 'main')
+        self.git(sub, '-c', 'user.name=t', '-c', 'user.email=t', 'commit', '-q', '--allow-empty', '-m', 's')
+        self.git(self.repo, '-c', 'protocol.file.allow=always', 'submodule', 'add', '-q', str(sub), 'lib')
+        self.git(self.repo, 'commit', '-qm', 'add')
+        t = self.start()
+        self.git(t['dir'], '-c', 'protocol.file.allow=always', 'submodule', 'update', '-q', '--init')
+        self.w('task', 'cleanup', '--dir', t['dir'], '--token', t['token'], '--saved', 'main')
+        self.assertFalse(Path(t['dir']).exists())
+
+    def test_a_submodule_commit_that_only_the_task_has_stops_the_cleanup(self):
+        sub = Path(self.tmp.name) / 'sub-origin'
+        sub.mkdir()
+        self.git(sub, 'init', '-q', '-b', 'main')
+        self.git(sub, '-c', 'user.name=t', '-c', 'user.email=t', 'commit', '-q', '--allow-empty', '-m', 's')
+        self.git(self.repo, '-c', 'protocol.file.allow=always', 'submodule', 'add', '-q', str(sub), 'lib')
+        self.git(self.repo, 'commit', '-qm', 'add')
+        t = self.start()
+        at = Path(t['dir'])
+        self.git(at, '-c', 'protocol.file.allow=always', 'submodule', 'update', '-q', '--init')
+        self.git(at / 'lib', '-c', 'user.name=t', '-c', 'user.email=t', 'commit', '-q', '--allow-empty', '-m', 'only here')
+        self.git(at, 'add', 'lib')
+        self.git(at, 'commit', '-qm', 'bump')
+        self.git(self.repo, 'branch', 'kept', self.git(at, 'rev-parse', 'HEAD'))
+        got = self.w('task', 'cleanup', '--dir', t['dir'], '--token', t['token'], '--saved', 'kept', code=6)
+        self.assertIn('サブモジュール', got['reason'])
+        self.assertTrue(at.exists())
+
+    def test_a_stale_integration_record_of_a_gone_task_does_not_stop_others(self):
+        a = self.start()
+        head = self.change(a, 'a')
+        self.journal()
+        self.assertTrue(self.integrate(a, self.git(self.repo, 'rev-parse', 'main'), head)['ok'])
+
+    def test_a_landed_record_of_a_gone_task_is_cleared_for_another_task(self):
+        a = self.start()
+        head = self.change(a, 'a')
+        landed = self.git(self.repo, 'rev-parse', 'main')
+        self.journal(verified=landed)
+        self.assertTrue(self.integrate(a, landed, head)['ok'])
+
+    def test_a_task_in_a_separate_git_dir_works_in_its_checkout(self):
+        at = Path(self.tmp.name) / 'sep'
+        subprocess.run(['git', 'init', '-q', '-b', 'main', '--separate-git-dir', str(Path(self.tmp.name) / 'sep.git'), str(at)], check=True)
+        self.git(at, '-c', 'user.name=t', '-c', 'user.email=t', 'commit', '-q', '--allow-empty', '-m', 'i')
+        t = self.w('task', 'start', '--dir', at, '--holder', 'x')
+        self.assertEqual(Path(t['checkout']).resolve(), at.resolve())
+
+    def test_an_integration_record_waits_while_the_target_has_changes(self):
+        a = self.start()
+        head = self.change(a, 'a')
+        self.journal()
+        (self.repo / 'base').write_text('書きかけ\n')
+        got = self.integrate(a, self.git(self.repo, 'rev-parse', 'main'), head, code=6)
+        self.assertIn('統合先', got['reason'])
+
+    def test_a_rebased_task_recovers_from_its_own_stale_record(self):
+        a = self.start()
+        head = self.change(a, 'a')
+        self.journal(dir=str(Path(a['dir']).resolve()), verified=head)
+        at = Path(a['dir'])
+        self.git(at, '-c', 'user.name=t', '-c', 'user.email=t', 'commit', '-q', '--amend', '-m', '直した')
+        new = self.git(at, 'rev-parse', 'HEAD')
+        self.assertTrue(self.integrate(a, self.git(self.repo, 'rev-parse', 'main'), new)['ok'])
+
+    def test_a_record_of_this_task_does_not_stop_its_cleanup_when_nothing_landed(self):
+        a = self.start()
+        head = self.change(a, 'a')
+        self.git(self.repo, 'branch', 'kept', head)
+        self.journal(dir=str(Path(a['dir']).resolve()), verified=head)
+        self.w('task', 'cleanup', '--dir', a['dir'], '--token', a['token'], '--saved', 'kept')
+
+    def test_a_failed_fast_forward_after_the_target_moved_leaves_no_record(self):
+        a = self.start()
+        head = self.change(a, 'a')
+        expected = self.git(self.repo, 'rev-parse', 'main')
+        hooks = self.repo / '.git' / 'hooks' / 'reference-transaction'
+        hooks.write_text('#!/bin/sh\nexit 1\n')
+        hooks.chmod(0o755)
+        self.integrate(a, expected, head, code=6)
+        hooks.unlink()
+        self.assertEqual(self.w('task', 'list', '--dir', self.repo)['integration'], None)
+
+    def test_integrate_waits_for_an_op_run_in_the_checkout(self):
+        a = self.start()
+        head = self.change(a, 'a')
+        c = self.w('claim', '--dir', self.repo, '--holder', 'x')
+        p = subprocess.Popen([sys.executable, '-B', str(WORK), 'op', 'run', '--dir', self.repo, '--token', c['token'], '--key', 'local:slow',
+                              '--', 'sleep', '20'], env=self.env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        self.addCleanup(p.kill)
+        rr = next((Path(self.tmp.name) / 'state' / 'work').glob('repo-*'))
+        deadline = time.time() + 15
+        while time.time() < deadline and not any(rr.glob('*.lock')) and not (rr / 'ops.jsonl').exists():
+            time.sleep(0.05)
+        time.sleep(0.5)
+        lease = json.loads((rr / 'lease.json').read_text())
+        lease['expires_at'] = 1
+        (rr / 'lease.json').write_text(json.dumps(lease))
+        got = self.integrate(a, self.git(self.repo, 'rev-parse', 'main'), head, code=6)
+        self.assertIn('op run', got['reason'])
+
+    def test_a_task_started_below_a_worktree_keeps_the_target(self):
+        a = self.start()
+        sub = Path(a['dir']) / 'deep'
+        sub.mkdir()
+        b = self.w('task', 'start', '--dir', sub, '--holder', 'x')
+        self.assertEqual(b['target'], 'main')
+
+    def test_a_rewritten_target_in_the_work_record_is_not_used_by_task_start(self):
+        a = self.start()
+        self.git(self.repo, 'branch', 'other')
+        wr = Path(a['note']['path']).parent
+        record = json.loads((wr / 'task.json').read_text())
+        (wr / 'task.json').write_text(json.dumps({**record, 'target': 'other'}))
+        b = self.w('task', 'start', '--dir', a['dir'], '--holder', 'x')
+        self.assertEqual(b['target'], 'main')
+        (wr / 'task.json').write_text('[1]')
+        self.w('task', 'start', '--dir', a['dir'], '--holder', 'x', '--target', 'main')
+
+    def test_resume_finishes_a_cleanup_that_stopped_before_the_branch_was_deleted(self):
+        a = self.start()
+        head = self.change(a, 'a')
+        self.integrate(a, self.git(self.repo, 'rev-parse', 'main'), head)
+        reg = next(Path(self.tmp.name, 'state').rglob(a['task'] + '.json'))
+        reg.write_text(json.dumps({**json.loads(reg.read_text()), 'cleanup': {'saved': 'refs/heads/main', 'commit': head}}))
+        self.git(self.repo, 'worktree', 'remove', a['dir'])
+        got = self.w('task', 'resume', '--dir', self.repo, '--task', a['task'], '--holder', 'x')
+        self.assertTrue(got['completed'], got)
+        self.assertFalse(Path(a['dir']).exists())
+        self.assertNotIn(a['branch'], self.git(self.repo, 'branch', '--list'))
+
+    def test_a_refused_worktree_remove_leaves_the_task_as_it_was(self):
+        a = self.start()
+        head = self.change(a, 'a')
+        self.integrate(a, self.git(self.repo, 'rev-parse', 'main'), head)
+        self.git(self.repo, 'worktree', 'lock', a['dir'])
+        self.w('task', 'cleanup', '--dir', a['dir'], '--token', a['token'], '--saved', 'main', code=6)
+        self.assertNotIn('cleanup', self.w('task', 'list', '--dir', self.repo)['tasks'][0])
+
+    def test_a_background_process_of_a_hook_does_not_keep_the_lock(self):
+        a = self.start()
+        head = self.change(a, 'a')
+        hook = self.repo / '.git' / 'hooks' / 'post-merge'
+        hook.write_text('#!/bin/sh\nsleep 8 >/dev/null 2>&1 &\n')
+        hook.chmod(0o755)
+        self.integrate(a, self.git(self.repo, 'rev-parse', 'main'), head)
+        t0 = time.time()
+        self.w('task', 'list', '--dir', self.repo)
+        self.assertLess(time.time() - t0, 5)
+
+    def test_task_start_with_a_tag_of_the_same_name_as_the_branch(self):
+        self.git(self.repo, 'tag', 'main')
+        self.assertEqual(self.start()['target'], 'main')
+
+    def test_task_start_on_a_detached_head_says_so(self):
+        self.git(self.repo, 'checkout', '-q', '--detach')
+        got = self.w('task', 'start', '--dir', self.repo, '--holder', 'x', code=6)
+        self.assertIn('--target', got['reason'])
+
+    def test_a_mutex_link_does_not_truncate_another_file(self):
+        a = self.start()
+        wr = Path(a['note']['path']).parent
+        victim = Path(self.tmp.name) / 'victim'
+        victim.write_text('中身')
+        (wr / '.mutex').unlink()
+        (wr / '.mutex').symlink_to(victim)
+        p = subprocess.run([sys.executable, '-B', str(WORK), 'claim', '--dir', a['dir'], '--holder', 'x'], env=self.env, capture_output=True, text=True)
+        self.assertEqual(victim.read_text(), '中身')
+        self.assertNotIn('Traceback', p.stderr)
+
+    def test_a_lease_expiry_written_as_text_is_refused_without_a_traceback(self):
+        a = self.start()
+        wr = Path(a['note']['path']).parent
+        lease = json.loads((wr / 'lease.json').read_text())
+        (wr / 'lease.json').write_text(json.dumps({**lease, 'expires_at': str(time.time() + 300)}))
+        got = self.w('claim', '--dir', a['dir'], '--holder', 'x', code=3)
+        self.assertGreater(got['expires_in_s'], 0)
+
+    def test_a_relative_state_dir_stays_outside_the_checkout(self):
+        self.env['BB_WRIT_STATE_DIR'] = 'rel-state'
+        p = subprocess.run([sys.executable, '-B', str(WORK), 'task', 'start', '--dir', str(self.repo), '--holder', 'x'],
+                           env=self.env, cwd=self.tmp.name, capture_output=True, text=True)
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertEqual(self.git(self.repo, 'status', '--short'), '')
+
+    def test_a_target_not_merged_into_the_task_says_what_to_do(self):
+        a = self.start()
+        head = self.change(a, 'a')
+        (self.repo / 'x').write_text('x')
+        self.git(self.repo, 'add', 'x')
+        self.git(self.repo, 'commit', '-qm', 'x')
+        got = self.integrate(a, self.git(self.repo, 'rev-parse', 'main'), head, code=6)
+        self.assertIn('取り込', got['reason'])
+
     def test_simultaneous_same_host_and_mixed_hosts_have_separate_worktrees(self):
         (self.repo / 'local').write_text('手元の変更')
         for hosts in [('Claude Code', 'Claude Code'), ('Claude Code', 'Codex')]:

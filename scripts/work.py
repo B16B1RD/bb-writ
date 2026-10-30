@@ -91,7 +91,7 @@ from pathlib import Path
 
 
 def state_dir() -> Path:
-    return Path(os.environ.get("BB_WRIT_STATE_DIR", Path.home() / ".local" / "state" / "bb-writ"))
+    return Path(os.path.abspath(os.environ.get("BB_WRIT_STATE_DIR", Path.home() / ".local" / "state" / "bb-writ")))  # git -C の先でも同じ場所
 
 
 def root(d: Path) -> Path:
@@ -104,9 +104,15 @@ def root(d: Path) -> Path:
 
 @contextmanager
 def locked(r: Path):
-    with open(r / ".mutex", "w") as m:
-        fcntl.flock(m, fcntl.LOCK_EX)
-        yield m.fileno()
+    # 書く子は作業場所の記録に書けるので、リンクをたどらない。切り詰めない
+    fd = os.open(r / ".mutex", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o644)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield fd
+        # 子の git に渡した fd は同じ排他を指す。hook の背景のプロセスが継いでも残らないよう、明示して放す（親が止まったときは git の終わりまで保つ）
+        fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        os.close(fd)
 
 
 def read(p: Path):
@@ -115,6 +121,7 @@ def read(p: Path):
 
 def write(p: Path, obj):
     tmp = p.with_suffix(".tmp")
+    tmp.unlink(missing_ok=True)  # 書く子が置いたリンクをたどらない
     tmp.write_text(json.dumps(obj, ensure_ascii=False, indent=1), encoding="utf-8")
     os.replace(tmp, p)
 
@@ -359,7 +366,15 @@ def checkout_or_none(d: Path):
     if rc:
         return None
     c = Path(common)
-    return (c if c.is_absolute() else d / c).resolve().parent
+    c = (c if c.is_absolute() else d / c).resolve()
+    if c.name == ".git":
+        return c.parent
+    # サブモジュール（.git/modules/x）と --separate-git-dir の管理ディレクトリの親は checkout でない。core.worktree が元の checkout を指す
+    rc, at, _ = sh(["git", "config", "--file", str(c / "config"), "core.worktree"], d)
+    if rc == 0 and at:
+        return (c / at).resolve()
+    rc, top, _ = sh(["git", "rev-parse", "--show-toplevel"], d)  # --separate-git-dir の checkout（その linked worktree からは元の checkout を引けない）
+    return Path(top).resolve() if rc == 0 else c.parent
 
 
 def ssh_command(at: Path) -> list:
@@ -516,7 +531,7 @@ def claim_at(r, d, holder, minutes):
     old = read(r / 'lease.json')
     if alive(old, now):
         return {'ok': False, 'reason': '生きた担当がいる。二重に書かない',
-                'holder': old['holder'], 'expires_in_s': round(old['expires_at'] - now)}, 3
+                'holder': old['holder'], 'expires_in_s': round(float(old['expires_at']) - now)}, 3
     held = run_holder(r)
     if held:  # 担当の期限が切れても（手放されても）、op run のコマンドが動いている間は取らせない。取ると、終わっていない操作をやり直せる
         return {'ok': False, 'reason': f'op run の外部操作がまだ動いている: {held}。終わるのを待つ（終われば監督役が done を書く）',
@@ -572,10 +587,29 @@ def tasks_at(repo):
     return r
 
 
-def task_at(d):
+def registered_task(d):
     # 作業場所の記録の task.json は書く子が書き換えうるので、識別子だけを使い、中身は親だけが書くタスクの一覧から読む。
-    ident = str((read(root(d) / 'task.json') or {}).get('task'))
-    task = read(tasks_at(checkout_of(d)) / (ident + '.json')) if re.fullmatch('[a-f0-9]{16}', ident) else None
+    record = read(root(d) / 'task.json')
+    ident = str(record.get('task')) if isinstance(record, dict) else ''
+    return read(tasks_at(checkout_of(d)) / (ident + '.json')) if re.fullmatch('[a-f0-9]{16}', ident) else None
+
+
+def settle_integration(rr, repo, own=None):
+    """統合の記録を実物で閉じ、閉じられなければその記録を返す。統合先に書きかけが無ければ、ff は反映し終えたか、始まらなかったかのどちらか。
+    始まらなかった記録と、作業場所が消えた記録は要らない（リポジトリ全体が止まらない）。反映し終えた記録は、担当が完了を受け取るので、own の作業場所か
+    担当の作業場所が消えたときだけ閉じる。"""
+    journal = read(rr / 'integration.json')
+    if not journal or not clean(repo):
+        return journal
+    landed = sh(['git', 'merge-base', '--is-ancestor', journal['verified'], journal['target']], repo)[0] == 0
+    if landed and journal['dir'] != own and Path(journal['dir']).exists():
+        return journal
+    (rr / 'integration.json').unlink()
+    return None
+
+
+def task_at(d):
+    task = registered_task(d)
     if not task or Path(task['dir']).resolve() != d.resolve():
         raise ValueError('この場所は task start で作った作業場所ではない')
     return task
@@ -613,8 +647,13 @@ def task_command(a):
                 tasks.append({**task, 'lease': {k: v for k, v in lease.items() if k != 'token'} if lease else None})
             return out({'ok': True, 'tasks': tasks, 'integration': read(rr / 'integration.json')})
         if a.action == 'start':
-            source_task = read(root(a.dir) / 'task.json')
-            target = a.target or (source_task or {}).get('target') or git(a.dir, 'symbolic-ref', '--quiet', '--short', 'HEAD')
+            top = Path(git(a.dir, 'rev-parse', '--show-toplevel'))  # 作業場所の下の階層からでも、そのタスクの統合先を継ぐ
+            target = a.target or (registered_task(top) or {}).get('target')
+            if not target:
+                rc, full, _ = sh(['git', 'symbolic-ref', '--quiet', 'HEAD'], a.dir)  # --short はタグと同じ名前で heads/ を付ける
+                if rc:
+                    raise ValueError('HEAD がブランチにない。--target で統合先を指定する')
+                target = full.removeprefix('refs/heads/')
             git(repo, 'show-ref', '--verify', 'refs/heads/' + target)
             base = git(repo, 'rev-parse', '--verify', (a.base or 'refs/heads/' + target) + '^{commit}')
             ident = secrets.token_hex(8)
@@ -650,9 +689,15 @@ def task_command(a):
                     not re.fullmatch('[0-9a-f]{40}|[0-9a-f]{64}', str(task.get('base'))):
                 raise ValueError('タスクの記録が task start の作った値と合わない。記録を照合する')
             cleanup = task.get('cleanup')
-            if cleanup and not dest.exists() and not commit_of(repo, 'refs/heads/' + task['branch']):
+            if cleanup and not dest.exists():
                 if not contained(repo, cleanup['commit'], cleanup['saved']):
                     raise ValueError(f"片付けの途中の保存先 {cleanup['saved']} に、このタスクの変更が入っていない。記録と差分を照合する")
+                branch = commit_of(repo, 'refs/heads/' + task['branch'])
+                if branch and branch != cleanup['commit']:
+                    raise ValueError('片付けの途中の後にタスクのブランチが進んだ。記録と差分を照合する')
+                if branch:  # 作業場所を消した後、ブランチを消す前に止まった
+                    git(repo, 'worktree', 'prune', fds=(rf,))
+                    git(repo, 'branch', '-D', task['branch'], fds=(rf,))
                 wr = root(dest)
                 with locked(wr):
                     (wr / 'lease.json').unlink(missing_ok=True)
@@ -684,7 +729,7 @@ def task_command(a):
             current_lease(wr, a.token)
             if git(a.dir, 'symbolic-ref', '--quiet', 'HEAD') != 'refs/heads/' + task['branch']:
                 raise ValueError('タスクのブランチが変更されている。元のブランチに戻して保存先を照合する')
-            journal = read(rr / 'integration.json')
+            journal = settle_integration(rr, repo, own=str(a.dir.resolve()))
             if not clean(a.dir, ignored=True) or pending(wr) or (journal and journal['dir'] == str(a.dir.resolve())):
                 raise ValueError('未保存の変更・未完了の操作がある。作業場所を保持する')
             # 同じブランチ自身の名前を保存先として使うと、削除後に変更を失う。
@@ -697,8 +742,20 @@ def task_command(a):
             head = git(a.dir, 'rev-parse', 'HEAD')
             if not contained(repo, head, ref):
                 raise ValueError(f'保存先 {ref} に、このタスクの変更が入っていない。統合してから片付ける')
+            force = []
+            modules = Path(git(a.dir, 'rev-parse', '--path-format=absolute', '--git-path', 'modules'))
+            if modules.is_dir() and any(modules.iterdir()):  # 初期化したサブモジュールがあると、git は --force なしでは消さない
+                rc, _, _ = sh(['git', 'submodule', 'foreach', '--quiet', '--recursive', 'git branch -r --contains HEAD | grep -q .'], a.dir)
+                if rc:
+                    raise ValueError('サブモジュールに、この作業場所にしか無い commit がある。push してから片付ける')
+                force = ['--force']
             write(registry / (task['task'] + '.json'), {**task, 'cleanup': {'saved': ref, 'commit': head}})
-            git(repo, 'worktree', 'remove', str(a.dir.resolve()), fds=(rf, wf))
+            try:
+                git(repo, 'worktree', 'remove', *force, str(a.dir.resolve()), fds=(rf, wf))
+            except ValueError:
+                if a.dir.exists():  # 拒否された（lock など）。片付けは始まっていない
+                    write(registry / (task['task'] + '.json'), task)
+                raise
             git(repo, 'branch', '-D', task['branch'], fds=(rf, wf))
             (wr / 'lease.json').unlink()
             (registry / (task['task'] + '.json')).unlink()
@@ -725,34 +782,32 @@ def integrate(a):
         target_lease = read(rr / 'lease.json')
         if alive(target_lease, time.time()):
             raise ValueError('統合先の checkout に生きた担当がいる。書き換えず待つ')
+        held = run_holder(rr)
+        if held:  # 担当の期限が切れても、動いているコマンドの足元で統合先を動かさない（claim と同じ）
+            raise ValueError(f'統合先の checkout で op run の外部操作がまだ動いている: {held}。終わるのを待つ')
         if git(a.dir, 'symbolic-ref', '--quiet', 'HEAD') != 'refs/heads/' + task['branch']:
             raise ValueError('タスクのブランチが変更されている')
         journal_file = rr / 'integration.json'
         journal = read(journal_file)
         head, target = git(a.dir, 'rev-parse', 'HEAD'), git(repo, 'rev-parse', ref)
-        if journal:
-            if journal['dir'] != str(a.dir.resolve()):
-                raise ValueError('別タスクの統合が未完了。task list から担当と作業場所を調べ、先に照合する')
-            # 反映直後の中断だけは Git の実物から完了を復元できる。
-            if a.verified == journal['verified'] and a.expected == journal['expected'] and clean(dest) and subprocess.run(['git', '-C', str(repo), 'merge-base', '--is-ancestor', journal['verified'], target],
-                                              capture_output=True).returncode == 0:
-                journal_file.unlink()
-                return out({'ok': True, 'recovered': True, 'commit': journal['verified'], 'target_commit': target})
-            if not clean(dest):
-                raise ValueError('前回の統合が未完了。統合先の HEAD・差分を照合し、変更を保存してから再開する')
-            # 統合先が別の版に変わった場合、前回の候補も保存した新版の検証が必要。
-            git(repo, 'merge-base', '--is-ancestor', journal['verified'], head)
+        # 反映直後の中断だけは Git の実物から完了を復元できる。
+        if journal and journal['dir'] == str(a.dir.resolve()) and a.verified == journal['verified'] and a.expected == journal['expected'] and clean(dest) \
+                and subprocess.run(['git', '-C', str(repo), 'merge-base', '--is-ancestor', journal['verified'], target], capture_output=True).returncode == 0:
+            journal_file.unlink()
+            return out({'ok': True, 'recovered': True, 'commit': journal['verified'], 'target_commit': target})
+        if settle_integration(rr, repo):
+            raise ValueError('別の統合が未完了か、統合先に未 commit の変更がある。task list の integration から担当と作業場所を調べ、先に照合する')
         if head != a.verified or target != a.expected:
             raise ValueError('検証した commit または統合先が変わった。最新の統合先を取り込み、再検証する')
         if not clean(a.dir) or not clean(dest):
             raise ValueError('作業場所か統合先に未 commit の変更がある。変更は保持する')
-        git(repo, 'merge-base', '--is-ancestor', target, head)
+        if sh(['git', 'merge-base', '--is-ancestor', target, head], repo)[0]:
+            raise ValueError('統合先が作業場所に入っていない。最新の統合先を取り込み、再検証する')
         write(journal_file, {'dir': str(a.dir.resolve()), 'expected': target, 'verified': head, 'target': ref})
         try:
             git(dest, 'merge', '--ff-only', '--no-overwrite-ignore', head, fds=(rf, wf))
         except (ValueError, OSError):
-            if git(repo, 'rev-parse', ref) == target and clean(dest):
-                journal_file.unlink()
+            settle_integration(rr, repo, own=str(a.dir.resolve()))  # 統合先が別の commit へ進んで ff が拒まれても、書きかけが無ければ何も反映していない
             raise
         if git(repo, 'rev-parse', ref) != head or not clean(dest):
             raise ValueError('統合後の実物が検証した commit と一致しない。記録と差分を照合する')
@@ -1348,4 +1403,7 @@ def dispatch(a, r: Path, run_argv):
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except OSError as e:  # 記録の置き場を開けない（ロックがリンクになっているなど）
+        sys.exit(out({"ok": False, "reason": f"記録の置き場を読み書きできない: {e}"}, 6))
