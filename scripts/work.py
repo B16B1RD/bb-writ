@@ -109,9 +109,9 @@ def locked(r: Path):
     try:
         fcntl.flock(fd, fcntl.LOCK_EX)
         yield fd
-        # 子の git に渡した fd は同じ排他を指す。hook の背景のプロセスが継いでも残らないよう、明示して放す（親が止まったときは git の終わりまで保つ）
-        fcntl.flock(fd, fcntl.LOCK_UN)
     finally:
+        # 子の git に渡した fd は同じ排他を指す。hook の背景のプロセスが継いでも残らないよう、明示して放す（親が kill されたときは git の終わりまで保つ）
+        fcntl.flock(fd, fcntl.LOCK_UN)
         os.close(fd)
 
 
@@ -369,12 +369,9 @@ def checkout_or_none(d: Path):
     c = (c if c.is_absolute() else d / c).resolve()
     if c.name == ".git":
         return c.parent
-    # サブモジュール（.git/modules/x）と --separate-git-dir の管理ディレクトリの親は checkout でない。core.worktree が元の checkout を指す
+    # サブモジュール（.git/modules/x）の管理ディレクトリの親は checkout でない。core.worktree が元の checkout を指す
     rc, at, _ = sh(["git", "config", "--file", str(c / "config"), "core.worktree"], d)
-    if rc == 0 and at:
-        return (c / at).resolve()
-    rc, top, _ = sh(["git", "rev-parse", "--show-toplevel"], d)  # --separate-git-dir の checkout（その linked worktree からは元の checkout を引けない）
-    return Path(top).resolve() if rc == 0 else c.parent
+    return (c / at).resolve() if rc == 0 and at else c.parent
 
 
 def ssh_command(at: Path) -> list:
@@ -587,11 +584,16 @@ def tasks_at(repo):
     return r
 
 
+SUBMODULE_SAVED = ('test -z "$(git status --porcelain --untracked-files=all --ignored=matching --ignore-submodules=none)" && test -z "$(git stash list)" '
+                   '&& test -z "$(git rev-list -1 HEAD --branches --not --remotes)"')
+
+
 def registered_task(d):
     # 作業場所の記録の task.json は書く子が書き換えうるので、識別子だけを使い、中身は親だけが書くタスクの一覧から読む。
     record = read(root(d) / 'task.json')
     ident = str(record.get('task')) if isinstance(record, dict) else ''
-    return read(tasks_at(checkout_of(d)) / (ident + '.json')) if re.fullmatch('[a-f0-9]{16}', ident) else None
+    task = read(tasks_at(checkout_of(d)) / (ident + '.json')) if re.fullmatch('[a-f0-9]{16}', ident) else None
+    return task if task and Path(task['dir']).resolve() == d.resolve() else None
 
 
 def settle_integration(rr, repo, own=None):
@@ -601,6 +603,8 @@ def settle_integration(rr, repo, own=None):
     journal = read(rr / 'integration.json')
     if not journal or not clean(repo):
         return journal
+    if not all(isinstance(journal.get(k), str) for k in ('dir', 'verified', 'target')):
+        raise ValueError(f"統合の記録の形が違う: {rr / 'integration.json'}")
     landed = sh(['git', 'merge-base', '--is-ancestor', journal['verified'], journal['target']], repo)[0] == 0
     if landed and journal['dir'] != own and Path(journal['dir']).exists():
         return journal
@@ -610,7 +614,7 @@ def settle_integration(rr, repo, own=None):
 
 def task_at(d):
     task = registered_task(d)
-    if not task or Path(task['dir']).resolve() != d.resolve():
+    if not task:
         raise ValueError('この場所は task start で作った作業場所ではない')
     return task
 
@@ -647,6 +651,8 @@ def task_command(a):
                 tasks.append({**task, 'lease': {k: v for k, v in lease.items() if k != 'token'} if lease else None})
             return out({'ok': True, 'tasks': tasks, 'integration': read(rr / 'integration.json')})
         if a.action == 'start':
+            if not (repo / '.git').exists():  # 管理ディレクトリから checkout へ戻る道が無く、作業場所から一覧を引けない
+                raise ValueError('--separate-git-dir の checkout にはタスクの作業場所を作れない')
             top = Path(git(a.dir, 'rev-parse', '--show-toplevel'))  # 作業場所の下の階層からでも、そのタスクの統合先を継ぐ
             target = a.target or (registered_task(top) or {}).get('target')
             if not target:
@@ -696,7 +702,6 @@ def task_command(a):
                 if branch and branch != cleanup['commit']:
                     raise ValueError('片付けの途中の後にタスクのブランチが進んだ。記録と差分を照合する')
                 if branch:  # 作業場所を消した後、ブランチを消す前に止まった
-                    git(repo, 'worktree', 'prune', fds=(rf,))
                     git(repo, 'branch', '-D', task['branch'], fds=(rf,))
                 wr = root(dest)
                 with locked(wr):
@@ -745,9 +750,10 @@ def task_command(a):
             force = []
             modules = Path(git(a.dir, 'rev-parse', '--path-format=absolute', '--git-path', 'modules'))
             if modules.is_dir() and any(modules.iterdir()):  # 初期化したサブモジュールがあると、git は --force なしでは消さない
-                rc, _, _ = sh(['git', 'submodule', 'foreach', '--quiet', '--recursive', 'git branch -r --contains HEAD | grep -q .'], a.dir)
+                # --force はサブモジュールの中のものも消す。親の status は設定（diff.ignoreSubmodules・ignore=all）で見えないことがあるので、中を直接見る
+                rc, _, _ = sh(['git', 'submodule', 'foreach', '--quiet', '--recursive', SUBMODULE_SAVED], a.dir)
                 if rc:
-                    raise ValueError('サブモジュールに、この作業場所にしか無い commit がある。push してから片付ける')
+                    raise ValueError('サブモジュールに、この作業場所にしか無いもの（未保存の変更・stash・リモートに無い commit）がある。保存してから片付ける')
                 force = ['--force']
             write(registry / (task['task'] + '.json'), {**task, 'cleanup': {'saved': ref, 'commit': head}})
             try:
@@ -807,7 +813,7 @@ def integrate(a):
         try:
             git(dest, 'merge', '--ff-only', '--no-overwrite-ignore', head, fds=(rf, wf))
         except (ValueError, OSError):
-            settle_integration(rr, repo, own=str(a.dir.resolve()))  # 統合先が別の commit へ進んで ff が拒まれても、書きかけが無ければ何も反映していない
+            settle_integration(rr, repo)  # 統合先が別の commit へ進んで ff が拒まれても、書きかけが無ければ何も反映していない
             raise
         if git(repo, 'rev-parse', ref) != head or not clean(dest):
             raise ValueError('統合後の実物が検証した commit と一致しない。記録と差分を照合する')
@@ -1406,4 +1412,4 @@ if __name__ == "__main__":
     try:
         sys.exit(main())
     except OSError as e:  # 記録の置き場を開けない（ロックがリンクになっているなど）
-        sys.exit(out({"ok": False, "reason": f"記録の置き場を読み書きできない: {e}"}, 6))
+        sys.exit(out({"ok": False, "reason": f"記録の置き場を読み書きできない: {e}"}, 2))

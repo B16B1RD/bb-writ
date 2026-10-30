@@ -85,23 +85,36 @@ class TestParallel(unittest.TestCase):
         self.w('task', 'cleanup', '--dir', t['dir'], '--token', t['token'], '--saved', 'main')
         self.assertFalse(Path(t['dir']).exists())
 
-    def test_a_submodule_commit_that_only_the_task_has_stops_the_cleanup(self):
+    def test_what_only_a_submodule_of_the_task_has_stops_the_cleanup(self):
+        """親の status が見ないもの（他の枝・stash・ignore=all の下の未追跡）も、--force で失わない。"""
         sub = Path(self.tmp.name) / 'sub-origin'
         sub.mkdir()
         self.git(sub, 'init', '-q', '-b', 'main')
         self.git(sub, '-c', 'user.name=t', '-c', 'user.email=t', 'commit', '-q', '--allow-empty', '-m', 's')
         self.git(self.repo, '-c', 'protocol.file.allow=always', 'submodule', 'add', '-q', str(sub), 'lib')
+        self.git(self.repo, 'config', '-f', '.gitmodules', 'submodule.lib.ignore', 'all')
+        self.git(self.repo, 'add', '.')
         self.git(self.repo, 'commit', '-qm', 'add')
-        t = self.start()
-        at = Path(t['dir'])
-        self.git(at, '-c', 'protocol.file.allow=always', 'submodule', 'update', '-q', '--init')
-        self.git(at / 'lib', '-c', 'user.name=t', '-c', 'user.email=t', 'commit', '-q', '--allow-empty', '-m', 'only here')
-        self.git(at, 'add', 'lib')
-        self.git(at, 'commit', '-qm', 'bump')
-        self.git(self.repo, 'branch', 'kept', self.git(at, 'rev-parse', 'HEAD'))
-        got = self.w('task', 'cleanup', '--dir', t['dir'], '--token', t['token'], '--saved', 'kept', code=6)
-        self.assertIn('サブモジュール', got['reason'])
-        self.assertTrue(at.exists())
+        id_ = ['-c', 'user.name=t', '-c', 'user.email=t']
+        def branch(lib):
+            self.git(lib, 'switch', '-qc', 'wip')
+            self.git(lib, *id_, 'commit', '-q', '--allow-empty', '-m', 'only here')
+            self.git(lib, 'switch', '-q', '--detach', 'origin/main')
+        def stash(lib):
+            (lib / 'f').write_text('f')
+            self.git(lib, 'add', 'f')
+            self.git(lib, *id_, 'stash', '-q')
+        def untracked(lib):
+            (lib / 'wip.txt').write_text('x')
+        for name, plant in (('branch', branch), ('stash', stash), ('untracked', untracked)):
+            with self.subTest(name):
+                t = self.start()
+                at = Path(t['dir'])
+                self.git(at, '-c', 'protocol.file.allow=always', 'submodule', 'update', '-q', '--init')
+                plant(at / 'lib')
+                got = self.w('task', 'cleanup', '--dir', t['dir'], '--token', t['token'], '--saved', 'main', code=6)
+                self.assertIn('サブモジュール', got['reason'])
+                self.assertTrue(at.exists())
 
     def test_a_stale_integration_record_of_a_gone_task_does_not_stop_others(self):
         a = self.start()
@@ -116,12 +129,12 @@ class TestParallel(unittest.TestCase):
         self.journal(verified=landed)
         self.assertTrue(self.integrate(a, landed, head)['ok'])
 
-    def test_a_task_in_a_separate_git_dir_works_in_its_checkout(self):
+    def test_a_separate_git_dir_is_refused_with_the_reason(self):
         at = Path(self.tmp.name) / 'sep'
         subprocess.run(['git', 'init', '-q', '-b', 'main', '--separate-git-dir', str(Path(self.tmp.name) / 'sep.git'), str(at)], check=True)
         self.git(at, '-c', 'user.name=t', '-c', 'user.email=t', 'commit', '-q', '--allow-empty', '-m', 'i')
-        t = self.w('task', 'start', '--dir', at, '--holder', 'x')
-        self.assertEqual(Path(t['checkout']).resolve(), at.resolve())
+        got = self.w('task', 'start', '--dir', at, '--holder', 'x', code=6)
+        self.assertIn('separate-git-dir', got['reason'])
 
     def test_an_integration_record_waits_while_the_target_has_changes(self):
         a = self.start()
@@ -130,6 +143,57 @@ class TestParallel(unittest.TestCase):
         (self.repo / 'base').write_text('書きかけ\n')
         got = self.integrate(a, self.git(self.repo, 'rev-parse', 'main'), head, code=6)
         self.assertIn('統合先', got['reason'])
+        self.assertIsNotNone(self.w('task', 'list', '--dir', self.repo)['integration'])
+
+    def test_a_landed_record_of_a_living_task_stops_others_until_it_recovers(self):
+        a, b = self.start(), self.start()
+        ah, bh = self.change(a, 'a'), self.change(b, 'b')
+        landed = self.git(self.repo, 'rev-parse', 'main')
+        self.journal(dir=str(Path(a['dir']).resolve()), verified=landed)
+        self.integrate(b, landed, bh, code=6)
+        self.assertIsNotNone(self.w('task', 'list', '--dir', self.repo)['integration'])
+        self.git(self.repo, 'branch', 'kept', ah)
+        self.w('task', 'cleanup', '--dir', a['dir'], '--token', a['token'], '--saved', 'kept')  # 担当の片付けは閉じる
+        self.assertIsNone(self.w('task', 'list', '--dir', self.repo)['integration'])
+
+    def test_a_malformed_integration_record_is_refused_without_a_traceback(self):
+        a = self.start()
+        head = self.change(a, 'a')
+        self.journal(verified=None)
+        got = self.integrate(a, self.git(self.repo, 'rev-parse', 'main'), head, code=6)
+        self.assertIn('形が違う', got['reason'])
+
+    def test_a_branch_that_moved_after_a_stopped_cleanup_is_kept(self):
+        a = self.start()
+        head = self.change(a, 'a')
+        self.integrate(a, self.git(self.repo, 'rev-parse', 'main'), head)
+        reg = next(Path(self.tmp.name, 'state').rglob(a['task'] + '.json'))
+        reg.write_text(json.dumps({**json.loads(reg.read_text()), 'cleanup': {'saved': 'refs/heads/main', 'commit': head}}))
+        moved = self.change(a, 'later')
+        self.git(self.repo, 'worktree', 'remove', a['dir'])
+        self.w('task', 'resume', '--dir', self.repo, '--task', a['task'], '--holder', 'x', code=6)
+        self.assertEqual(self.git(self.repo, 'rev-parse', a['branch']), moved)
+
+    def test_a_task_json_naming_another_task_is_not_used(self):
+        a = self.start()
+        self.git(self.repo, 'branch', 'other')
+        other = self.w('task', 'start', '--dir', self.repo, '--holder', 'x', '--target', 'other')
+        wr = Path(a['note']['path']).parent
+        record = json.loads((wr / 'task.json').read_text())
+        (wr / 'task.json').write_text(json.dumps({**record, 'task': other['task']}))
+        self.assertEqual(self.w('task', 'start', '--dir', a['dir'], '--holder', 'x')['target'], a['branch'])  # other を継がない
+
+    def test_a_failing_hook_with_a_background_process_does_not_keep_the_lock(self):
+        a = self.start()
+        head = self.change(a, 'a')
+        hook = self.repo / '.git' / 'hooks' / 'reference-transaction'
+        hook.write_text('#!/bin/sh\nsleep 8 >/dev/null 2>&1 &\nexit 1\n')
+        hook.chmod(0o755)
+        self.integrate(a, self.git(self.repo, 'rev-parse', 'main'), head, code=6)
+        hook.unlink()
+        t0 = time.time()
+        self.w('task', 'list', '--dir', self.repo)
+        self.assertLess(time.time() - t0, 5)
 
     def test_a_rebased_task_recovers_from_its_own_stale_record(self):
         a = self.start()
@@ -244,6 +308,7 @@ class TestParallel(unittest.TestCase):
         p = subprocess.run([sys.executable, '-B', str(WORK), 'claim', '--dir', a['dir'], '--holder', 'x'], env=self.env, capture_output=True, text=True)
         self.assertEqual(victim.read_text(), '中身')
         self.assertNotIn('Traceback', p.stderr)
+        self.assertEqual(p.returncode, 2, p.stdout + p.stderr)  # リンクを開かない
 
     def test_a_lease_expiry_written_as_text_is_refused_without_a_traceback(self):
         a = self.start()

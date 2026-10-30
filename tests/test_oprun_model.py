@@ -50,7 +50,7 @@ MODELED_MODEL = "bf1892257d184533"
 MODELED = {
     "read": "8372930316b7ee94",
     "write": "00c93a6aa7ceb1e8",
-    "locked": "efb62868e283bd5c",
+    "locked": "0a22de1033650c4d",
     "ops": "19f01a5bc3cb84ad",
     "op_step": "f06c60f9eafc1f16",
     "run_lock": "fdd3edfffe9c0b10",
