@@ -584,10 +584,6 @@ def tasks_at(repo):
     return r
 
 
-SUBMODULE_SAVED = ('test -z "$(git status --porcelain --untracked-files=all --ignored=matching --ignore-submodules=none)" && test -z "$(git stash list)" '
-                   '&& test -z "$(git rev-list -1 HEAD --branches --not --remotes)"')
-
-
 def registered_task(d):
     # 作業場所の記録の task.json は書く子が書き換えうるので、識別子だけを使い、中身は親だけが書くタスクの一覧から読む。
     record = read(root(d) / 'task.json')
@@ -596,15 +592,20 @@ def registered_task(d):
     return task if task and Path(task['dir']).resolve() == d.resolve() else None
 
 
+def read_journal(rr):
+    journal = read(rr / 'integration.json')
+    if journal is not None and not (isinstance(journal, dict) and all(isinstance(journal.get(k), str) for k in ('dir', 'verified', 'target'))):
+        raise ValueError(f"統合の記録の形が違う: {rr / 'integration.json'}")
+    return journal
+
+
 def settle_integration(rr, repo, own=None):
     """統合の記録を実物で閉じ、閉じられなければその記録を返す。統合先に書きかけが無ければ、ff は反映し終えたか、始まらなかったかのどちらか。
     始まらなかった記録と、作業場所が消えた記録は要らない（リポジトリ全体が止まらない）。反映し終えた記録は、担当が完了を受け取るので、own の作業場所か
     担当の作業場所が消えたときだけ閉じる。"""
-    journal = read(rr / 'integration.json')
+    journal = read_journal(rr)
     if not journal or not clean(repo):
         return journal
-    if not all(isinstance(journal.get(k), str) for k in ('dir', 'verified', 'target')):
-        raise ValueError(f"統合の記録の形が違う: {rr / 'integration.json'}")
     landed = sh(['git', 'merge-base', '--is-ancestor', journal['verified'], journal['target']], repo)[0] == 0
     if landed and journal['dir'] != own and Path(journal['dir']).exists():
         return journal
@@ -651,7 +652,9 @@ def task_command(a):
                 tasks.append({**task, 'lease': {k: v for k, v in lease.items() if k != 'token'} if lease else None})
             return out({'ok': True, 'tasks': tasks, 'integration': read(rr / 'integration.json')})
         if a.action == 'start':
-            if not (repo / '.git').exists():  # 管理ディレクトリから checkout へ戻る道が無く、作業場所から一覧を引けない
+            common = Path(git(a.dir, 'rev-parse', '--path-format=absolute', '--git-common-dir'))
+            if common.name != '.git' and sh(['git', 'config', '--file', str(common / 'config'), 'core.worktree'], a.dir)[0]:  # 設定に無いと 1
+                # 管理ディレクトリから checkout へ戻る道が無く、作業場所から一覧を引けない
                 raise ValueError('--separate-git-dir の checkout にはタスクの作業場所を作れない')
             top = Path(git(a.dir, 'rev-parse', '--show-toplevel'))  # 作業場所の下の階層からでも、そのタスクの統合先を継ぐ
             target = a.target or (registered_task(top) or {}).get('target')
@@ -747,19 +750,11 @@ def task_command(a):
             head = git(a.dir, 'rev-parse', 'HEAD')
             if not contained(repo, head, ref):
                 raise ValueError(f'保存先 {ref} に、このタスクの変更が入っていない。統合してから片付ける')
-            force = []
-            modules = Path(git(a.dir, 'rev-parse', '--path-format=absolute', '--git-path', 'modules'))
-            if modules.is_dir() and any(modules.iterdir()):  # 初期化したサブモジュールがあると、git は --force なしでは消さない
-                # --force はサブモジュールの中のものも消す。親の status は設定（diff.ignoreSubmodules・ignore=all）で見えないことがあるので、中を直接見る
-                rc, _, _ = sh(['git', 'submodule', 'foreach', '--quiet', '--recursive', SUBMODULE_SAVED], a.dir)
-                if rc:
-                    raise ValueError('サブモジュールに、この作業場所にしか無いもの（未保存の変更・stash・リモートに無い commit）がある。保存してから片付ける')
-                force = ['--force']
             write(registry / (task['task'] + '.json'), {**task, 'cleanup': {'saved': ref, 'commit': head}})
             try:
-                git(repo, 'worktree', 'remove', *force, str(a.dir.resolve()), fds=(rf, wf))
+                git(repo, 'worktree', 'remove', str(a.dir.resolve()), fds=(rf, wf))
             except ValueError:
-                if a.dir.exists():  # 拒否された（lock など）。片付けは始まっていない
+                if a.dir.exists():  # 拒否された（lock、初期化したサブモジュール）。片付けは始まっていない。--force で通さない（中身を失う）
                     write(registry / (task['task'] + '.json'), task)
                 raise
             git(repo, 'branch', '-D', task['branch'], fds=(rf, wf))
@@ -794,7 +789,7 @@ def integrate(a):
         if git(a.dir, 'symbolic-ref', '--quiet', 'HEAD') != 'refs/heads/' + task['branch']:
             raise ValueError('タスクのブランチが変更されている')
         journal_file = rr / 'integration.json'
-        journal = read(journal_file)
+        journal = read_journal(rr)
         head, target = git(a.dir, 'rev-parse', 'HEAD'), git(repo, 'rev-parse', ref)
         # 反映直後の中断だけは Git の実物から完了を復元できる。
         if journal and journal['dir'] == str(a.dir.resolve()) and a.verified == journal['verified'] and a.expected == journal['expected'] and clean(dest) \
