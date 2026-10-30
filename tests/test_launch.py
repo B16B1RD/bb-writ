@@ -747,6 +747,7 @@ class TestLaunch(unittest.TestCase):
                 self.assertEqual(rec["stopped_by_signal"], int(sig), rec)
                 self.assertTrue(rec["resumable"], rec)
 
+    @unittest.skipUnless(sys.platform.startswith("linux"), "子を刈らずに待つのは Linux だけ")
     def test_a_child_reaped_late_does_not_read_as_exit_zero(self):
         """KILL の後も child.wait が切れ、子を別の場所で刈ると、poll が 0 を返した。終了コードは分からないと書く。"""
         patch = """\
@@ -1973,13 +1974,14 @@ class TestLaunch(unittest.TestCase):
                 self.stop_fakes()  # 前の subTest が、止まらない子の CLI として残したもの
                 self.addCleanup(self.stop_fakes)
                 t0 = time.time()
-                rc, rec = self.run_launch(host, mode, extra=("--timeout", "2"),
-                                          env_extra={"FAKE_SLEEP": sleep, "PYTHONPATH": str(site), "FAKE_SITE": what, **({"FAKE_CLOSE_OUT": "1"} if closed else {})})
+                # 猶予を実際に 30 秒待つと、試験全体が CI の上限を超える
+                rc, rec = self.launch_patched("launch.STOP_GRACE = 1", ["--host", host, "--cwd", str(self.cwd), "--timeout", "2"], mode=mode,
+                                              env_extra={"FAKE_SLEEP": sleep, "PYTHONPATH": str(site), "FAKE_SITE": what, **({"FAKE_CLOSE_OUT": "1"} if closed else {})})
                 self.orphans()
                 self.assertEqual((rc, rec["status"]), (2, "timeout" if what == "waitid-storm" else "failed"), rec)  # 止めきれれば、続きから起動できる時間切れ
                 self.assertTrue(any(words in p for p in rec["problems"]), rec)
-                # 時間切れの TERM の後に 30 秒の猶予（waitid-storm は子の終わりが見えないので猶予を使い切る）。止まらない CLI はさらに 10 秒待ち、残りを 5 秒止め続ける
-                self.assertLess(time.time() - t0, {"unkillable-cli": 55, "waitid-storm": 40}.get(what, 10), rec)
+                # 時間切れの TERM の後に猶予（waitid-storm は子の終わりが見えないので使い切る）。止まらない CLI はさらに 10 秒待ち、残りを 5 秒止め続ける
+                self.assertLess(time.time() - t0, 25 if what == "unkillable-cli" else 10, rec)
                 if what == "unkillable-cli":  # 止まらない子の CLI（Popen の子。claude なら偽の dotenvx）を並べる
                     cli = Path(str(self.args_file) + ".cli").read_text().split()[host == "claude"]
                     self.assertTrue(any(p.startswith(f"{cli} ") for p in rec["problems"]), rec)
