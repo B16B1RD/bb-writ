@@ -192,7 +192,7 @@ GIT_TIMEOUT = float(os.environ.get("BB_WRIT_GIT_TIMEOUT") or 60)  # 子が管理
 
 def grok_git_dir(cwd: Path) -> tuple[Path | None, str | None]:
     """worktree の commit が書く Git の共通ディレクトリ。Git の外なら None。"""
-    g = subprocess.run(["git", "-C", str(cwd), "rev-parse", "--git-common-dir"], capture_output=True, text=True, errors="replace", timeout=GIT_TIMEOUT)
+    g = subprocess.run(["git", "-C", str(cwd), "rev-parse", "--git-common-dir"], capture_output=True, text=True, errors="surrogateescape", timeout=GIT_TIMEOUT)
     if g.returncode == 0:
         return (cwd / g.stdout.strip()).resolve(), None
     if "not a git repository" in g.stderr:
@@ -203,7 +203,7 @@ def grok_git_dir(cwd: Path) -> tuple[Path | None, str | None]:
 def worktree_dirs(cwd: Path) -> tuple[Path | None, Path | None, str | None]:
     """(その作業場所の管理ディレクトリ, 共通ディレクトリ, 理由)。Git の外なら (None, None, None)。"""
     g = subprocess.run(["git", "-C", str(cwd), "rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir"],
-                       capture_output=True, text=True, errors="replace", timeout=GIT_TIMEOUT)
+                       capture_output=True, text=True, errors="surrogateescape", timeout=GIT_TIMEOUT)
     if g.returncode == 0:
         own, common = g.stdout.split()
         return Path(own).resolve(), Path(common).resolve(), None
@@ -749,9 +749,9 @@ def clean_head(cwd: Path) -> str | None:
     追跡外のファイルとサブモジュールの中の変更は、設定（status.showUntrackedFiles=no、diff.ignoreSubmodules・submodule.<名>.ignore）に関わらず数える。
     assume-unchanged・skip-worktree・fsmonitor で隠した変更は見分けない。"""
     try:
-        local = subprocess.run(["git", "rev-parse", "--local-env-vars"], capture_output=True, text=True, errors="replace", timeout=GIT_TIMEOUT)
+        local = subprocess.run(["git", "rev-parse", "--local-env-vars"], capture_output=True, text=True, errors="surrogateescape", timeout=GIT_TIMEOUT)
         env = {k: v for k, v in os.environ.items() if k not in local.stdout.split()}
-        head = subprocess.run(["git", "rev-parse", "--verify", "HEAD^{commit}"], cwd=cwd, env=env, capture_output=True, text=True, errors="replace", timeout=GIT_TIMEOUT)
+        head = subprocess.run(["git", "rev-parse", "--verify", "HEAD^{commit}"], cwd=cwd, env=env, capture_output=True, text=True, errors="surrogateescape", timeout=GIT_TIMEOUT)
         # バイトで受ける（ファイル名は UTF-8 とは限らない）。index を書き直すロックを取らない（利用者の git と競わない）
         status = subprocess.run(["git", "--no-optional-locks", "status", "--porcelain", "--untracked-files=normal", "--ignore-submodules=none"], cwd=cwd, env=env,
                                 capture_output=True, timeout=GIT_TIMEOUT)
@@ -1111,9 +1111,8 @@ def main() -> int:
             doubts = ((["Grok の sandbox が約束どおりに効いたか分からない（警告）"] + unsafe if unsafe else [])
                       + ([f"続きの子の session を確かめられないか、前と違う（{got['session']}）"] if other else []) + ([breach] if breach else []))
             # 続けさせない理由は、選ばれた status の枝でなく、事実から決める（利用枠の枝が先に決まっても残す）
-            turns = got.get("permissions", [])[a.codex_turns:]  # 照らす turn が無かっただけなら、権限の外で動いた事実は無い
-            blocked += [k for k, fact in (("unsafe", unsafe), ("other-session" if got["session"] else "session", other),
-                                          ("breach" if turns else "unchecked", breach)) if fact]
+            blocked += [k for k, fact in (("unsafe", unsafe), ("other-session" if got["session"] else "session", other),  # 照らせなかっただけなら、権限の外で動いた事実は無い
+                                          ("unchecked" if breach and "確かめられない" in breach else "breach", breach)) if fact]
             # 利用枠・権限の照合は、時間切れより先に見る（権限の約束どおりに動いたか分からない子を、続きから起動させない）。
             # 利用枠の文言を照らすのは、子が成功しなかったときだけ（成功した子の報告を、stderr の「429」「rate limit」などの一語で捨てていた）
             cli_failed = p.returncode != 0 or got.get("is_error") or not got["text"]  # 下の終了コードの枝と同じ条件

@@ -620,6 +620,10 @@ class TestLaunch(unittest.TestCase):
         h1 = git("rev-parse", "HEAD")
         rc, first = self.run_launch("claude", extra=["--timeout", "2"], env_extra={"FAKE_HANG": "1"})
         self.assertEqual(first["head"], h1)
+        with open(self.state / "delegations.jsonl", "a") as f:  # 前の版の記録には saw が無い
+            f.write(json.dumps({"session": first["session"], "out": "x"}) + "\n")
+        rc, plain = self.run_launch(None, extra=["--resume", first["out"]])
+        self.assertEqual(plain["head"], h1, plain)
         git("commit", "-q", "--allow-empty", "-m", "2")
         rc, mid = self.run_launch(None, extra=["--resume", first["out"]])
         self.assertIsNone(mid["head"], mid)
@@ -687,6 +691,28 @@ class TestLaunch(unittest.TestCase):
         rc, rec = self.launch_patched(patch, ["--host", "claude", "--cwd", str(d), "--write"])
         self.assertEqual((rc, rec["status"], rec["head"]), (2, "failed", None), rec)
         self.assertTrue((Path(rec["out"]) / "record.json").is_file())
+
+    def test_git_output_in_another_encoding_reaches_the_record(self):
+        """子を起こす前から .git の文言が UTF-8 でなくても記録を書く。非 UTF-8 のパスは壊さずに持ち回る。"""
+        d = self.worktree("garbled2")[1]
+        (d / ".git").write_bytes(b"gitdir: /nonexistent/\xff\n")
+        rc, rec = self.run_launch("claude", cwd=d)
+        self.assertIsNone(rec["head"], rec)
+        self.assertTrue((Path(rec["out"]) / "record.json").is_file())
+        try:
+            odd = os.fsencode(self.tmp.name) + b"/r\xff"
+            os.mkdir(odd)
+        except OSError:
+            self.skipTest("この OS は UTF-8 でない名前を作れない")
+        subprocess.run([b"git", b"init", b"-q", odd], check=True)
+        patch = f"""\
+            own, common, why = launch.worktree_dirs(os.fsdecode({odd!r}))
+            import json
+            print(json.dumps({{"exists": os.path.isdir(own)}}))
+            sys.exit(0)
+            """
+        rc, got = self.launch_patched(patch, [])
+        self.assertTrue(got["exists"], got)
 
     def test_a_signal_right_after_the_child_starts_is_not_lost(self):
         """子の起動の直後に受けたシグナルでも、子に TERM を伝えて記録を書く（記録が無いまま子が動き続け、INT では動いている子の置き場を消した）。"""
