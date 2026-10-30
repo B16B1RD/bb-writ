@@ -64,7 +64,7 @@ description: コード・文書・スキル・解析に関する技術的な依�
 | 新しい振る舞い・変更（足して・変えて・できるようにして） | `playbook-feature` |
 | README・手引き・SKILL.md・知識ベースの追加や訂正 | `playbook-docs-skill` |
 
-続きの引き受けは `playbook-session-pickup`、止めるのは `playbook-pause-safely`、変種の比較は `playbook-eval`、委任は `delegate`、振り返りは `reflect`、繰り返す誤りは `correct`。合う手引きが無ければ、目的と確かめ方から手順を組んで返答に書く。
+順序・途中の死・再開・記録をまたぐ状態の約束は `create-formal-verification-skill`、続きの引き受けは `playbook-session-pickup`、止めるのは `playbook-pause-safely`、変種の比較は `playbook-eval`、委任は `delegate`、振り返りは `reflect`、繰り返す誤りは `correct`。合う手引きが無ければ、目的と確かめ方から手順を組んで返答に書く。
 
 ## 原則の索引
 
