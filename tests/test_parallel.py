@@ -107,6 +107,9 @@ class TestParallel(unittest.TestCase):
         self.git(at, '-c', 'user.name=t', '-c', 'user.email=t', 'commit', '-q', '--allow-empty', '-m', 'i')
         got = self.w('task', 'start', '--dir', at, '--holder', 'x', code=6)
         self.assertIn('separate-git-dir', got['reason'])
+        self.git(at, 'worktree', 'add', '-q', '-b', 'linked', str(Path(self.tmp.name) / 'linked'))
+        got = self.w('task', 'start', '--dir', Path(self.tmp.name) / 'linked', '--holder', 'x', code=6)
+        self.assertIn('separate-git-dir', got['reason'])
         outer = Path(self.tmp.name) / 'outer'  # 管理ディレクトリが別のリポジトリの下にあっても、その親に作らない
         outer.mkdir()
         self.git(outer, 'init', '-q', '-b', 'main')

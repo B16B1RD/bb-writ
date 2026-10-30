@@ -657,7 +657,7 @@ def task_command(a):
             main_checkout = Path(git(a.dir, 'rev-parse', '--absolute-git-dir')).resolve() == common
             if sh(['git', 'config', '--file', str(common / 'config'), 'core.worktree'], a.dir)[0] and (
                     common != (repo / '.git').resolve() or (main_checkout and top != repo)):
-                # 管理ディレクトリから checkout へ戻る道が無く、作業場所から一覧を引けない
+                # 管理ディレクトリから checkout へ戻る道が無く、作業場所から一覧を引けない（名前が .git の管理ディレクトリに手で足した linked worktree は見分けない）
                 raise ValueError('--separate-git-dir の checkout にはタスクの作業場所を作れない')
             target = a.target or (registered_task(top) or {}).get('target')
             if not target:
