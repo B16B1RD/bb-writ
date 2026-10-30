@@ -568,13 +568,21 @@ class TestLaunch(unittest.TestCase):
                 rc, again = self.run_launch(None, extra=["--resume", first["out"]])
                 self.assertEqual(rc, 0, again)
 
-    def test_a_breach_naming_a_path_with_the_unchecked_words_stays_a_breach(self):
-        """権限が違った理由の文に「確かめられない」というパスが入っても、照らせなかった扱いにしない。"""
-        patch = """\
-            launch.codex_breach = lambda *a: "Codex の実効の権限に deny が無い: /some/確かめられない/x"
-            """
-        rc, rec = self.launch_patched(patch, ["--host", "codex", "--cwd", str(self.cwd)])
-        self.assertEqual(rec["blocked"], ["breach"], rec)
+    def test_a_breach_is_told_from_having_nothing_to_check_by_the_start_of_the_reason(self):
+        """照らせなかった理由だけを unchecked に分ける。理由の文にはパスが入るので、文の途中の一致で分けない。"""
+        unread = 'real([], [])'  # 実物の文（記録が無い）
+        rollouts = '"続きの Codex の記録ファイルが 1 つでない（2 個）。"'
+        for reason, kind in ((unread, "unchecked"), (rollouts, "unchecked"),
+                             ('"Codex の実効の権限に deny が無い: /some/確かめられない/x"', "breach"),
+                             (f'"Codex の実効の権限に deny が無い: /" + {unread}', "breach"), (f'"Codex の実効の権限に deny が無い: /" + {rollouts}', "breach")):
+            with self.subTest(reason=reason):
+                patch = f"""\
+                    real = launch.codex_breach
+                    reason = {reason}
+                    launch.codex_breach = lambda *a: reason
+                    """
+                rc, rec = self.launch_patched(patch, ["--host", "codex", "--cwd", str(self.cwd)])
+                self.assertEqual(rec["blocked"], [kind], rec)
 
     def test_a_signal_during_the_timeout_grace_does_not_send_a_second_term(self):
         p = self.launch_in_background(["--host", "claude", "--cwd", str(self.cwd), "--timeout", "1"])
