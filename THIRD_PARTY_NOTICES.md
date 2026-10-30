@@ -10,7 +10,7 @@ bb-writ の一部は、次のソフトウェアをもとに書き直している
 - もとにしたもの:
   - 原則 12 本（`skills/principle-` の attack-the-premise・encode-lessons-in-structure・experience-first・fix-root-causes・foundational-thinking・laziness-protocol・model-the-domain・never-block-on-the-human・prove-it-works・sequence-verifiable-units・subtract-before-you-add・test-behavior-not-implementation）。CLI ハーネス向けに日本語で書き直した
   - 入口が依頼を読んで手引きを選ぶ形（pstack の `poteto-mode`）
-  - `correct`・`create-verification-skill`・`interrogate`・`reflect` の考え方と名前
+  - `correct`・`create-verification-skill`・`create-formal-verification-skill`・`interrogate`・`reflect` の考え方と名前（`create-formal-verification-skill` は 2026-10-30 に 0.15.36 を参照）
 
 ```
 MIT License

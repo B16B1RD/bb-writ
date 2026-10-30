@@ -529,6 +529,58 @@ class TestLaunch(unittest.TestCase):
         self.assertIn("この session は続けない", p.stderr)
         self.assertFalse(self.args_file.exists())  # 子を起こさない
 
+    def test_every_reason_that_bans_a_session_applies_from_an_earlier_record(self):
+        """子が権限の外で動いたかもしれない理由は、後の起動の記録にあっても、前の記録からの続きを止める。別の session を返した記録も、頼んだ session で見つかる。"""
+        for kind in ("unsafe", "breach", "other-session", "left", "git"):
+            with self.subTest(kind):
+                rc, first = self.run_launch("claude", extra=["--timeout", "2"], env_extra={"FAKE_HANG": "1"})
+                line = {"session": "another" if kind == "other-session" else first["session"], "session_asked": first["session"], "blocked": [kind], "out": "x"}
+                with open(self.state / "delegations.jsonl", "a") as f:
+                    f.write(json.dumps(line) + "\n")
+                self.args_file.unlink()
+                p = self.run_launch(None, extra=["--resume", first["out"]], raw=True)
+                self.assertEqual(p.returncode, 2, p.stdout)
+                self.assertIn(kind, p.stderr)
+                self.assertFalse(self.args_file.exists())
+
+    def test_a_reason_of_having_nothing_to_check_keeps_the_earlier_record(self):
+        for kind in ("session", "unchecked", "error"):
+            with self.subTest(kind):
+                rc, first = self.run_launch("claude", extra=["--timeout", "2"], env_extra={"FAKE_HANG": "1"})
+                with open(self.state / "delegations.jsonl", "a") as f:
+                    f.write(json.dumps({"session": first["session"], "blocked": [kind], "out": "x"}) + "\n")
+                rc, again = self.run_launch(None, extra=["--resume", first["out"]])
+                self.assertEqual(rc, 0, again)
+
+    def test_a_resume_from_an_older_record_still_sees_later_empty_places(self):
+        """後の起動が残した空の場所は、前の記録に戻って続けるときも止める（対象とホームの両方）。"""
+        for key in ("cwd_residue", "home_residue"):
+            with self.subTest(key):
+                rc, first = self.run_launch("claude", extra=["--timeout", "2"], env_extra={"FAKE_HANG": "1"})
+                left = self.home / ("left-" + key)
+                left.write_text("")
+                with open(self.state / "delegations.jsonl", "a") as f:
+                    f.write(json.dumps({"session": first["session"], "blocked": [], key: [str(left)], "out": "x"}) + "\n")
+                p = self.run_launch(None, extra=["--resume", first["out"]], raw=True)
+                self.assertEqual(p.returncode, 2, p.stdout)
+                self.assertIn(str(left), p.stderr)
+                left.unlink()
+                rc, again = self.run_launch(None, extra=["--resume", first["out"]])
+                self.assertEqual(rc, 0, again)
+
+    def test_a_signal_during_the_timeout_grace_does_not_send_a_second_term(self):
+        p = self.launch_in_background(["--host", "claude", "--cwd", str(self.cwd), "--timeout", "1"])
+        term = Path(str(self.args_file) + ".term")
+        deadline = time.time() + 20
+        while not term.exists() and time.time() < deadline:
+            time.sleep(0.02)
+        p.send_signal(signal.SIGTERM)  # 子は 1 秒かけて片付ける
+        out, _ = p.communicate(timeout=60)
+        rec = json.loads(out)
+        self.assertEqual(term.read_text(), f"{int(signal.SIGTERM)}\n")
+        self.assertEqual(rec["status"], "timeout", rec)
+        self.assertEqual(rec["problems"][1 if rec["problems"][0].startswith("launcher") else 0], "1 秒で終わらなかった", rec)
+
     def test_a_resume_refuses_while_the_last_launch_left_empty_places(self):
         """前の起動の空の残りを片付けずに続けると、続きの比較の「前からあるもの」に入って、ok で見えなくなる。"""
         d = self.worktree("residue")[1]

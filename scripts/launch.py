@@ -192,7 +192,7 @@ GIT_TIMEOUT = float(os.environ.get("BB_WRIT_GIT_TIMEOUT") or 60)  # 子が管理
 
 def grok_git_dir(cwd: Path) -> tuple[Path | None, str | None]:
     """worktree の commit が書く Git の共通ディレクトリ。Git の外なら None。"""
-    g = subprocess.run(["git", "-C", str(cwd), "rev-parse", "--git-common-dir"], capture_output=True, text=True, timeout=GIT_TIMEOUT)
+    g = subprocess.run(["git", "-C", str(cwd), "rev-parse", "--git-common-dir"], capture_output=True, text=True, errors="replace", timeout=GIT_TIMEOUT)
     if g.returncode == 0:
         return (cwd / g.stdout.strip()).resolve(), None
     if "not a git repository" in g.stderr:
@@ -203,7 +203,7 @@ def grok_git_dir(cwd: Path) -> tuple[Path | None, str | None]:
 def worktree_dirs(cwd: Path) -> tuple[Path | None, Path | None, str | None]:
     """(その作業場所の管理ディレクトリ, 共通ディレクトリ, 理由)。Git の外なら (None, None, None)。"""
     g = subprocess.run(["git", "-C", str(cwd), "rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir"],
-                       capture_output=True, text=True, timeout=GIT_TIMEOUT)
+                       capture_output=True, text=True, errors="replace", timeout=GIT_TIMEOUT)
     if g.returncode == 0:
         own, common = g.stdout.split()
         return Path(own).resolve(), Path(common).resolve(), None
@@ -749,13 +749,13 @@ def clean_head(cwd: Path) -> str | None:
     追跡外のファイルとサブモジュールの中の変更は、設定（status.showUntrackedFiles=no、diff.ignoreSubmodules・submodule.<名>.ignore）に関わらず数える。
     assume-unchanged・skip-worktree・fsmonitor で隠した変更は見分けない。"""
     try:
-        local = subprocess.run(["git", "rev-parse", "--local-env-vars"], capture_output=True, text=True, timeout=GIT_TIMEOUT)
+        local = subprocess.run(["git", "rev-parse", "--local-env-vars"], capture_output=True, text=True, errors="replace", timeout=GIT_TIMEOUT)
         env = {k: v for k, v in os.environ.items() if k not in local.stdout.split()}
-        head = subprocess.run(["git", "rev-parse", "--verify", "HEAD^{commit}"], cwd=cwd, env=env, capture_output=True, text=True, timeout=GIT_TIMEOUT)
+        head = subprocess.run(["git", "rev-parse", "--verify", "HEAD^{commit}"], cwd=cwd, env=env, capture_output=True, text=True, errors="replace", timeout=GIT_TIMEOUT)
         # バイトで受ける（ファイル名は UTF-8 とは限らない）。index を書き直すロックを取らない（利用者の git と競わない）
         status = subprocess.run(["git", "--no-optional-locks", "status", "--porcelain", "--untracked-files=normal", "--ignore-submodules=none"], cwd=cwd, env=env,
                                 capture_output=True, timeout=GIT_TIMEOUT)
-    except (OSError, subprocess.TimeoutExpired, UnicodeDecodeError):  # git が無い・対象が無い・管理ファイルが FIFO で止まる・子が壊した .git で文言が UTF-8 でない
+    except (OSError, subprocess.TimeoutExpired):  # git が無い・対象が無い・管理ファイルが FIFO で止まる
         return None
     if local.returncode or head.returncode or status.returncode or status.stdout.strip():
         return None
@@ -778,7 +778,7 @@ def load_now() -> float | None:
         return None
 
 
-UNSAFE = {"unsafe", "left", "git"}  # 子が権限の外で動いたかもしれない理由。この session はどの記録からも続けない（照らせなかっただけの理由は、前の記録から続けられる）
+UNSAFE = {"unsafe", "breach", "other-session", "left", "git"}  # 子が権限の外で動いた、別の session だった、かもしれない理由。この session はどの記録からも続けない（照らせなかっただけの理由は、前の記録から続けられる）
 STOP_GRACE = 30  # 子に TERM を送った後、子が片付けて終わるのを待つ秒数（シグナルで止めるときは --timeout の残りが短ければそちら）
 
 
@@ -880,7 +880,7 @@ def session_history(session: str) -> list[dict]:
             r = json.loads(line)
         except ValueError:
             continue
-        if isinstance(r, dict) and r.get("session") == session:
+        if isinstance(r, dict) and session in (r.get("session"), r.get("session_asked")):  # 別の session を返した続きも数える
             found.append(r)
     return found
 
@@ -939,16 +939,16 @@ def main() -> int:
             ap.error(f"前の起動の記録は続きから起動できない（{(prev.get('problems') or ['理由が記録に無い'])[0]}"[:300]
                      + "）。権限の照合に当たった・止めきれないプロセスがあった・Git の管理情報が変わったなどの記録は、確かめてから最初から起動し直す: "
                      + str(a.resume))
-        left = [f for f in [*(prev.get("cwd_residue") or []), *(prev.get("home_residue") or [])] if os.path.lexists(f)]
-        if left:  # 片付けずに続けると、続きの比較で「前からあるもの」になり、ok で見えなくなる
-            ap.error(f"前の起動の空の残りを確かめて片付けてから続ける: {left[:20]}"[:600])
         a.lock = hold_session(prev["session"])
         if a.lock is None:
             ap.error(f"同じ session の続きが動いている。終わるのを待つ: {a.resume}")
         a.history = session_history(prev["session"])
-        unsafe = sorted({k for r in a.history for k in r.get("blocked") or [] if k in UNSAFE})
-        if unsafe:  # 権限の外で動いたかもしれない session は、どの記録からも続けない
-            ap.error(f"この session は続けない（{'・'.join(unsafe)}。{a.history[-1].get('out')} ほかの記録を確かめて、最初から起動し直す）: {a.resume}"[:600])
+        banned = [r for r in a.history if UNSAFE.intersection(r.get("blocked") or [])]
+        if banned:  # 権限の外で動いたかもしれない session は、どの記録からも続けない
+            ap.error(f"この session は続けない（{banned[-1].get('out')} の {'・'.join(sorted(UNSAFE.intersection(banned[-1]['blocked'])))}）。確かめて、最初から起動し直す: {a.resume}"[:600])
+        left = sorted({f for r in [prev, *a.history] for k in ("cwd_residue", "home_residue") for f in r.get(k) or [] if os.path.lexists(f)})
+        if left:  # 片付けずに続けると、続きの比較で「前からあるもの」になり、ok で見えなくなる
+            ap.error(f"これまでの起動の空の残りを確かめて片付けてから続ける: {left[:20]}"[:600])
         if prev["host"] == "grok" and not (isinstance(prev.get("grok_home"), str) and Path(prev["grok_home"]).is_dir()):
             ap.error(f"--resume の記録の grok_home が無い（Grok は前の home の session の記録から続ける）: {a.resume}")
         if prev["host"] == "codex" and not prev["write"] and not isinstance(prev.get("scratch"), str):
@@ -986,7 +986,7 @@ def main() -> int:
     except FileExistsError:
         ap.error(f"--out がもうある（前の起動の記録を上書きしない）: {out_dir}")
     rec = {"host": a.host, "cwd": str(a.cwd), "model_requested": a.model, "effort_requested": a.effort,
-           "write": a.write, "interrogate": a.interrogate, "out": str(out_dir), **({"resumed_from": str(a.resume.resolve())} if a.resume else {}),
+           "write": a.write, "interrogate": a.interrogate, "out": str(out_dir), "session_asked": a.session, **({"resumed_from": str(a.resume.resolve())} if a.resume else {}),
            "load": {"cpus": os.cpu_count(), "start": load_now()}}  # 時間切れが混雑によるかを後で見分ける材料
     blocked = []  # 続きから起動させない理由（権限が分からない、プロセスを止めきれない、Git の管理情報が変わった、照合できない）
     rec["head"] = rec["saw"] = clean_head(a.cwd)  # 子を起こす前に（子が見る作業ツリー）。saw は、後で head を外しても残す
@@ -1111,7 +1111,9 @@ def main() -> int:
             doubts = ((["Grok の sandbox が約束どおりに効いたか分からない（警告）"] + unsafe if unsafe else [])
                       + ([f"続きの子の session を確かめられないか、前と違う（{got['session']}）"] if other else []) + ([breach] if breach else []))
             # 続けさせない理由は、選ばれた status の枝でなく、事実から決める（利用枠の枝が先に決まっても残す）
-            blocked += [k for k, fact in (("unsafe", unsafe), ("session", other), ("breach", breach)) if fact]
+            turns = got.get("permissions", [])[a.codex_turns:]  # 照らす turn が無かっただけなら、権限の外で動いた事実は無い
+            blocked += [k for k, fact in (("unsafe", unsafe), ("other-session" if got["session"] else "session", other),
+                                          ("breach" if turns else "unchecked", breach)) if fact]
             # 利用枠・権限の照合は、時間切れより先に見る（権限の約束どおりに動いたか分からない子を、続きから起動させない）。
             # 利用枠の文言を照らすのは、子が成功しなかったときだけ（成功した子の報告を、stderr の「429」「rate limit」などの一語で捨てていた）
             cli_failed = p.returncode != 0 or got.get("is_error") or not got["text"]  # 下の終了コードの枝と同じ条件
@@ -1211,7 +1213,7 @@ def main() -> int:
                            + rec["home_residue"][:20] + rec.get("problems", []))
     if rec["head"] and clean_head(a.cwd) != rec["head"]:  # 確かめた後、子の終わりまでに作業ツリーが変わった（子が見たものが commit と違いうる）
         rec.update(head=None, head_lost="子の起動の前に確かめた後、終わりまでに対象の HEAD か作業ツリーが変わったか、終わりに確かめられなかった")
-    elif rec["head"] and a.resume and (seen := next((h for h in [a.prev_head, *(r.get("saw") for r in a.history)] if h != rec["head"]), rec["head"])) != rec["head"]:
+    elif rec["head"] and a.resume and (seen := next((h for h in [a.prev_head, *(r["saw"] for r in a.history if "saw" in r)] if h != rec["head"]), rec["head"])) != rec["head"]:
         # 続きの子は、前の起動で別の commit（か未 commit の変更）を見た。前の記録へ戻って続けたときも、その session が見たものを数える
         rec.update(head=None, head_lost=f"前の起動の head（{seen}）と違う。続きの子は前の起動で別のものを見た")
     if rec["status"] == "ok" and not a.write and rec["head"]:  # work.py が審査に数える子。指摘が届いたその場で、次にすることを出す
