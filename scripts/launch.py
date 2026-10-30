@@ -21,6 +21,7 @@ push・pr でこれを求める）。依頼文の中身が審査だったかは�
 """
 from __future__ import annotations  # macOS の Command Line Tools の python3（3.9）でも型注釈で落ちないように
 import argparse
+import fcntl
 import hashlib
 import json
 import os
@@ -42,7 +43,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from work import root as work_record  # noqa: E402  作業場所ごとの記録の置き場（担当・記録・証拠）
 
 DEFAULTS = {"claude": ("sonnet", "medium"), "codex": ("gpt-6-sol", "medium"), "grok": ("grok-4.7", "medium")}
-QUOTA = re.compile(r"usage limit|rate limit|quota|exceeded your|too many requests|429|limit reached|out of credits", re.I)
+QUOTA = re.compile(r"usage limit|rate limit|quota|exceeded your|too many requests|(?:status|code|http|error)\W{0,12}429\b|\b429 too many|limit reached|out of credits", re.I)
 CONTRACT = """
 
 ---
@@ -754,7 +755,7 @@ def clean_head(cwd: Path) -> str | None:
         # バイトで受ける（ファイル名は UTF-8 とは限らない）。index を書き直すロックを取らない（利用者の git と競わない）
         status = subprocess.run(["git", "--no-optional-locks", "status", "--porcelain", "--untracked-files=normal", "--ignore-submodules=none"], cwd=cwd, env=env,
                                 capture_output=True, timeout=GIT_TIMEOUT)
-    except (OSError, subprocess.TimeoutExpired):  # git が無い・対象が無い・管理ファイルが FIFO で止まる
+    except (OSError, subprocess.TimeoutExpired, UnicodeDecodeError):  # git が無い・対象が無い・管理ファイルが FIFO で止まる・子が壊した .git で文言が UTF-8 でない
         return None
     if local.returncode or head.returncode or status.returncode or status.stdout.strip():
         return None
@@ -777,21 +778,46 @@ def load_now() -> float | None:
         return None
 
 
-STOP_GRACE = 30  # launcher がシグナルを受けて子に TERM を伝えた後、子が片付けて終わるのを待つ秒数（--timeout の残りが短ければそちら）
+UNSAFE = {"unsafe", "left", "git"}  # 子が権限の外で動いたかもしれない理由。この session はどの記録からも続けない（照らせなかっただけの理由は、前の記録から続けられる）
+STOP_GRACE = 30  # 子に TERM を送った後、子が片付けて終わるのを待つ秒数（シグナルで止めるときは --timeout の残りが短ければそちら）
+
+
+def ask_to_stop(child: subprocess.Popen, stop: dict) -> None:
+    """直下の子に TERM を 1 回だけ送る。グループには送らない（dotenvx が子へ伝え直し、子の CLI が TERM を 2 回受ける）。"""
+    if "at" in stop or stop.get("reaped"):
+        return
+    stop["at"] = time.monotonic()
+    try:
+        os.kill(child.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
 
 
 def wait_for_exit(child: subprocess.Popen, timeout: float, stop: dict) -> None:
-    """子の CLI が終わるのを、刈らずに待つ（Linux）。刈らないので、止め終わるまで子の CLI とそのプロセスグループの番号は別のプロセスに
-    使い回されず、終了コードも後の child.wait に残る。待つ間に自分の下へ来て終わった孤児は刈る（subreaper なので、刈らないとゾンビが溜まる）。"""
+    """子の CLI が終わるのを待つ。期限が来たら TERM を送って片付けを待ち、それでも終わらなければ TimeoutExpired（いきなり KILL すると、子の CLI が
+    対象に置き場を残した）。Linux では刈らずに待つ。刈らないので、止め終わるまで子の CLI とそのプロセスグループの番号は別のプロセスに
+    使い回されず、終了コードも後の child.wait に残る。待つ間に自分の下へ来て終わった孤児は刈る（subreaper なので、刈らないとゾンビが溜まる）。
+    Linux の外は刈るしかないので、刈ったらシグナルを伝えない印を立てる。"""
     deadline = time.monotonic() + timeout
     while True:
-        r = os.waitid(os.P_ALL, 0, os.WEXITED | os.WNOHANG | os.WNOWAIT)
-        if r is not None and r.si_pid == child.pid:
+        r = None
+        if LINUX:
+            r = os.waitid(os.P_ALL, 0, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+            if r is not None and r.si_pid == child.pid:
+                return
+            if r is not None:
+                os.waitpid(r.si_pid, 0)  # 終わったと報告されたものなので、すぐ返る
+        elif child.poll() is not None:
+            stop["reaped"] = True
             return
-        if r is not None:
-            os.waitpid(r.si_pid, 0)  # 終わったと報告されたものなので、すぐ返る
-        if time.monotonic() > min(deadline, stop.get("at", deadline) + STOP_GRACE):  # 孤児が終わり続けても、期限は守る
-            raise subprocess.TimeoutExpired(child.args, timeout)
+        now = time.monotonic()  # 孤児が終わり続けても、期限は守る
+        if "at" in stop:
+            limit = stop["at"] + STOP_GRACE
+            if now > (limit if stop.get("timed_out") else min(limit, deadline)):
+                raise subprocess.TimeoutExpired(child.args, timeout)
+        elif now > deadline:
+            stop["timed_out"] = True
+            ask_to_stop(child, stop)
         if r is None:
             time.sleep(0.1)
 
@@ -841,6 +867,37 @@ def stop_descendants(group: int) -> tuple[list[str], list[str]]:
     return sorted(v for k, v in stopped.items() if k not in left), sorted(denied.get(k, v[0]) for k, v in left.items())
 
 
+def session_history(session: str) -> list[dict]:
+    """同じ session のこれまでの起動の記録（delegations.jsonl）。前の記録へ戻って続けても、その session に起きたことを忘れないため。"""
+    try:
+        with open(state_dir() / "delegations.jsonl", encoding="utf-8", errors="replace") as f:
+            lines = f.read().split("\n")
+    except FileNotFoundError:
+        return []
+    found = []
+    for line in lines:
+        try:
+            r = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(r, dict) and r.get("session") == session:
+            found.append(r)
+    return found
+
+
+def hold_session(session: str):
+    """この session の続きの排他。launcher が終わると（KILL でも）OS が放す。取れなければ None。"""
+    d = state_dir() / "resuming"
+    d.mkdir(parents=True, exist_ok=True)
+    f = open(d / hashlib.sha256(session.encode()).hexdigest()[:32], "w")
+    try:
+        fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        f.close()
+        return None
+    return f
+
+
 def launcher_error(out_dir: Path) -> str:
     """想定外の例外のトレースバックを out に残し、その場所を返す。"""
     import traceback
@@ -866,7 +923,7 @@ def main() -> int:
     ap.add_argument("--timeout", type=int, default=1800)
     ap.add_argument("--resume", type=Path, help="前の起動の out。同じ session・同じ権限で続きから起動する（host・cwd・model・effort・write・interrogate は記録から取る）")
     a = ap.parse_args()
-    a.session, a.grok_home, a.codex_turns, a.prev_head, a.scratch = None, None, 0, None, None
+    a.session, a.grok_home, a.codex_turns, a.prev_head, a.scratch, a.history = None, None, 0, None, None, []
     if a.resume:
         # 時間切れで止めた子を最初から起動し直すと、それまでの作業（会話記録には残っている）を捨てる。続きから起動する
         try:
@@ -882,6 +939,16 @@ def main() -> int:
             ap.error(f"前の起動の記録は続きから起動できない（{(prev.get('problems') or ['理由が記録に無い'])[0]}"[:300]
                      + "）。権限の照合に当たった・止めきれないプロセスがあった・Git の管理情報が変わったなどの記録は、確かめてから最初から起動し直す: "
                      + str(a.resume))
+        left = [f for f in [*(prev.get("cwd_residue") or []), *(prev.get("home_residue") or [])] if os.path.lexists(f)]
+        if left:  # 片付けずに続けると、続きの比較で「前からあるもの」になり、ok で見えなくなる
+            ap.error(f"前の起動の空の残りを確かめて片付けてから続ける: {left[:20]}"[:600])
+        a.lock = hold_session(prev["session"])
+        if a.lock is None:
+            ap.error(f"同じ session の続きが動いている。終わるのを待つ: {a.resume}")
+        a.history = session_history(prev["session"])
+        unsafe = sorted({k for r in a.history for k in r.get("blocked") or [] if k in UNSAFE})
+        if unsafe:  # 権限の外で動いたかもしれない session は、どの記録からも続けない
+            ap.error(f"この session は続けない（{'・'.join(unsafe)}。{a.history[-1].get('out')} ほかの記録を確かめて、最初から起動し直す）: {a.resume}"[:600])
         if prev["host"] == "grok" and not (isinstance(prev.get("grok_home"), str) and Path(prev["grok_home"]).is_dir()):
             ap.error(f"--resume の記録の grok_home が無い（Grok は前の home の session の記録から続ける）: {a.resume}")
         if prev["host"] == "codex" and not prev["write"] and not isinstance(prev.get("scratch"), str):
@@ -914,12 +981,15 @@ def main() -> int:
         if any(d.name == ".git" or all((d / n).exists() for n in ("HEAD", "objects", "refs")) for d in [*scratch.parents, *unresolved.parents]):
             ap.error(f"bb-writ の状態の置き場 {state_dir()} が Git の管理ディレクトリの中にある。読み取り専用の Codex は一時ディレクトリに書けるので、外に置く")
     out_dir = (a.out or state_dir() / "delegations" / stamp).resolve()
-    out_dir.mkdir(parents=True, exist_ok=False)
+    try:
+        out_dir.mkdir(parents=True, exist_ok=False)
+    except FileExistsError:
+        ap.error(f"--out がもうある（前の起動の記録を上書きしない）: {out_dir}")
     rec = {"host": a.host, "cwd": str(a.cwd), "model_requested": a.model, "effort_requested": a.effort,
            "write": a.write, "interrogate": a.interrogate, "out": str(out_dir), **({"resumed_from": str(a.resume.resolve())} if a.resume else {}),
            "load": {"cpus": os.cpu_count(), "start": load_now()}}  # 時間切れが混雑によるかを後で見分ける材料
     blocked = []  # 続きから起動させない理由（権限が分からない、プロセスを止めきれない、Git の管理情報が変わった、照合できない）
-    rec["head"] = clean_head(a.cwd)  # 子を起こす前に（子が見る作業ツリー）
+    rec["head"] = rec["saw"] = clean_head(a.cwd)  # 子を起こす前に（子が見る作業ツリー）。saw は、後で head を外しても残す
 
     snapshot, why, prep = None, None, None
     try:  # 起動の前の準備も、前の子が残したもの（FIFO・権限・壊れた HEAD）に当たりうる。止まらず落ちずに記録して返す
@@ -959,41 +1029,44 @@ def main() -> int:
     elif why:
         rec.update(status="unavailable", problems=[why])
     else:
-        child, left, timed_out = None, [], False
+        child, left, timed_out, exit_lost = None, [], False, False
         try:
+            # 子を待つ間に止められたら（中断・呼び出し側の時間の上限）、直下の子に TERM を伝え、子が片付けて終わるのを待ってから、
+            # 照合して記録を書く（続きから起動できる）。launcher だけが止まると子は動き続け、記録も残らず、launcher と子をまとめて KILL
+            # すると、子の CLI（Claude Code 2.1.310）が対象に .claude/.cc-writes を残した。子を刈った後に受けたシグナルは子を止めていないので
+            # 記録せず、記録を書き終えるまで待たせる（照合の間に端末の Ctrl-C が launcher のグループに届くと、後処理の git が止まり、記録の照合
+            # （head など）が欠けることがある。子が自分で終わった直後、刈る前の 0.1 秒までに受けたシグナルは、子を止めたと記録されることがある）。
+            # 起動時に無視されていたシグナル（nohup の HUP）は無視のまま。受け手は Popen の前に置く（Popen の直後に受けたものも子に伝える）
+            def forward(n, _frame):
+                if "sig" in stop or stop.get("reaped"):
+                    return
+                stop["sig"] = n
+                if child is not None:
+                    ask_to_stop(child, stop)
+            for s in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT):
+                if signal.getsignal(s) is not signal.SIG_IGN:
+                    signal.signal(s, forward)
             # 子が残した背景のプロセスが、終了後の照合の後に書き換えないよう、プロセスグループごと止める。子の CLI が新しいセッションに
             # 切り離した子孫（Claude Code の Bash）はグループの外なので、Linux では自分の下に来たものを残らなくなるまで止める
             child = subprocess.Popen(cmd, cwd=a.cwd, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                      start_new_session=True)  # バイトで受ける（子の出力は UTF-8 とは限らない）
+            if "sig" in stop:
+                ask_to_stop(child, stop)
             rec["session"] = a.session  # 後の照合で failed になっても、確かめた後に続きから起動できるように
-            # 子を待つ間に止められたら（中断・呼び出し側の時間の上限）、直下の子に TERM を伝え、子が片付けて終わるのを待ってから、
-            # 照合して記録を書く（続きから起動できる）。launcher だけが止まると子は動き続け、記録も残らず、launcher と子をまとめて KILL
-            # すると、子の CLI（Claude Code 2.1.310）が対象に .claude/.cc-writes を残した。グループには送らない（dotenvx が子へ伝え直し、
-            # 子の CLI が TERM を 2 回受ける）。子を刈った後に受けたシグナルは子を止めていないので記録せず、記録を書き終えるまで待たせる
-            # （照合の間に端末の Ctrl-C が launcher のグループに届くと、後処理の git が止まり、記録の照合（head など）が欠けることがある。
-            # 子が自分で終わった直後、刈る前の数ミリ秒に受けたシグナルは、子を止めたと記録されることがある）。起動時に無視されていたシグナル
-            # （nohup の HUP）は無視のまま。子を起動する前と、Popen から下の登録までの間に受けたシグナルは、これまでどおり launcher を止める
-            def forward(n, _frame):
-                if "sig" in stop or stop.get("reaped"):
-                    return
-                stop.update(sig=n, at=time.monotonic())
-                try:
-                    os.kill(child.pid, signal.SIGTERM)
-                except ProcessLookupError:
-                    pass
-            for s in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT):
-                if signal.getsignal(s) is not signal.SIG_IGN:
-                    signal.signal(s, forward)
-            output, readers = {}, []
+            output, readers = {"stdout": bytearray(), "stderr": bytearray()}, []
+            def read_all(k, f):  # 読めた分を残す（子孫が開いたままで終わらなくても、調べる材料になる）
+                while chunk := f.read1(65536):
+                    output[k] += chunk
             try:
                 for k, f in (("stdout", child.stdout), ("stderr", child.stderr)):
-                    readers.append(threading.Thread(target=lambda k=k, f=f: output.__setitem__(k, f.read()), daemon=True))
+                    readers.append(threading.Thread(target=read_all, args=(k, f), daemon=True))
                     readers[-1].start()
                 # 出力が閉じるのでなく、子の CLI が終わるのを待つ（子孫が出力を開いたままでも）
                 try:
-                    wait_for_exit(child, a.timeout, stop) if LINUX else child.wait(timeout=a.timeout)
+                    wait_for_exit(child, a.timeout, stop)
                 except subprocess.TimeoutExpired:  # 止めた後も出力を読み、session を記録する（--resume で続きから起動できる）
                     timed_out = True
+                timed_out = timed_out or bool(stop.get("timed_out"))  # 時間切れの TERM で、子が片付けて終わった
             finally:
                 try:
                     os.killpg(child.pid, signal.SIGKILL)  # Linux では、まだ刈っていない（番号は使い回されていない）
@@ -1005,20 +1078,20 @@ def main() -> int:
                         try:
                             try:
                                 child.wait(timeout=10)
-                            except subprocess.TimeoutExpired:  # 止まらない子の CLI は、下で残りとして並ぶ
-                                pass
+                            except subprocess.TimeoutExpired:  # 止まらない子の CLI は、下で残りとして並ぶ（後で刈るので、終了コードは分からない）
+                                exit_lost = True
                             rec["stopped_after_exit"], left = stop_descendants(child.pid)
                         except Exception as e:
                             rec.setdefault("stopped_after_exit", [])
                             left = [f"子の残りを確かめられない: {e!r}"[:300], f"詳細: {launcher_error(out_dir)}"]
             for t in readers:
                 t.join(timeout=0 if left else 10)  # 開いていた子孫が止まれば閉じる（止めきれなかったものは、待っても閉じない）
-            if any(t.is_alive() for t in readers):
-                raise RuntimeError("子の CLI が終わった後も、ほかのプロセスが子の出力を開いたまま")
-            stdout, stderr = output["stdout"], output["stderr"]
+            stdout, stderr = bytes(output["stdout"]), bytes(output["stderr"])
             (out_dir / "stdout.jsonl").write_bytes(stdout)  # 照合の材料は生のまま残す
             (out_dir / "stderr.log").write_bytes(stderr)
-            p = subprocess.CompletedProcess(cmd, child.poll(), stdout.decode("utf-8", "replace"), stderr.decode("utf-8", "replace"))
+            if any(t.is_alive() for t in readers):
+                raise RuntimeError("子の CLI が終わった後も、ほかのプロセスが子の出力を開いたまま")
+            p = subprocess.CompletedProcess(cmd, None if exit_lost else child.poll(), stdout.decode("utf-8", "replace"), stderr.decode("utf-8", "replace"))
             got = {"claude": parse_claude, "codex": parse_codex, "grok": parse_grok}[a.host](p.stdout)
             # 警告の行（sandbox の適用失敗、効かなかった引数）があれば、権限の約束どおりに動いたか分からないので結果を使わない
             unsafe = [l for l in p.stderr.splitlines() if a.host == "grok" and GROK_WARNING.search(l)][-5:]
@@ -1029,12 +1102,12 @@ def main() -> int:
                 breach = f"続きの Codex の記録ファイルが 1 つでない（{got['rollouts']} 個）。前の起動で照らした turn を除けず、実効の権限を確かめられない"
             if a.host == "codex" and not a.write and not breach:
                 rec["codex_turns"] = len(got["permissions"])
-            stopped = ([] if not timed_out else [f"{a.timeout} 秒で終わらなかった"] if "sig" not in stop
+            stopped = ([] if not timed_out else [f"{a.timeout} 秒で終わらなかった"] if stop.get("timed_out")
                        else ["シグナルを受けて TERM を伝えた後、終わらなかったので止めた"])
             tail = [l for l in p.stderr.strip().splitlines() if "injected env" not in l and "Reading additional input" not in l][-5:]
             ended = [f"終了コード {p.returncode}"] + got["errors"] + tail if not timed_out and (p.returncode != 0 or got.get("is_error")) else []
-            # 続きの session は、子の結果で確かめられたときだけ前と同じとみなす（時間切れの Claude Code・Grok は結果を出さない）
-            other = a.resume and (got["session"] or not timed_out) and got["session"] != a.session
+            # 続きの session は、子の結果で確かめられたときだけ前と同じとみなす（時間切れとシグナルで止めた Claude Code・Grok は結果を出さない）
+            other = a.resume and (got["session"] or not (timed_out or "sig" in stop)) and got["session"] != a.session
             doubts = ((["Grok の sandbox が約束どおりに効いたか分からない（警告）"] + unsafe if unsafe else [])
                       + ([f"続きの子の session を確かめられないか、前と違う（{got['session']}）"] if other else []) + ([breach] if breach else []))
             # 続けさせない理由は、選ばれた status の枝でなく、事実から決める（利用枠の枝が先に決まっても残す）
@@ -1138,8 +1211,9 @@ def main() -> int:
                            + rec["home_residue"][:20] + rec.get("problems", []))
     if rec["head"] and clean_head(a.cwd) != rec["head"]:  # 確かめた後、子の終わりまでに作業ツリーが変わった（子が見たものが commit と違いうる）
         rec.update(head=None, head_lost="子の起動の前に確かめた後、終わりまでに対象の HEAD か作業ツリーが変わったか、終わりに確かめられなかった")
-    elif rec["head"] and a.resume and rec["head"] != a.prev_head:  # 続きの子は、前の起動で別の commit（か未 commit の変更）を見た
-        rec.update(head=None, head_lost=f"前の起動の head（{a.prev_head}）と違う。続きの子は前の起動で別のものを見た")
+    elif rec["head"] and a.resume and (seen := next((h for h in [a.prev_head, *(r.get("saw") for r in a.history)] if h != rec["head"]), rec["head"])) != rec["head"]:
+        # 続きの子は、前の起動で別の commit（か未 commit の変更）を見た。前の記録へ戻って続けたときも、その session が見たものを数える
+        rec.update(head=None, head_lost=f"前の起動の head（{seen}）と違う。続きの子は前の起動で別のものを見た")
     if rec["status"] == "ok" and not a.write and rec["head"]:  # work.py が審査に数える子。指摘が届いたその場で、次にすることを出す
         rec["next"] = ("審査の指摘なら、直す前に、作業の記録（claim の note.path）の「指摘の扱い」の欄に、指摘ごとに"
                        "対応する・記録のみ・退ける と理由を書く（入口の条件 (6)。push・pr はこの欄が空なら拒否される）")
@@ -1150,6 +1224,7 @@ def main() -> int:
         rec["stopped_by_signal"] = stop["sig"]
         if rec["status"] != "ok":
             rec["problems"] = [f"launcher がシグナル {stop['sig']} を受けて、子に TERM を伝えて止めた"] + rec.get("problems", [])
+    rec["blocked"] = sorted(set(blocked))
     rec["resumable"] = bool(rec.get("session")) and not blocked
     try:
         json.dumps(rec, ensure_ascii=False, indent=1)
@@ -1162,6 +1237,7 @@ def main() -> int:
     body = json.dumps(rec, ensure_ascii=False, indent=1)
     # 子の文字列には単独のサロゲートがありうる（JS の JSON.stringify が出す）。書き出しで落ちず、\udXXX の形で残す
     (out_dir / "record.json").write_text(body, encoding="utf-8", errors="backslashreplace")
+    state_dir().mkdir(parents=True, exist_ok=True)  # --out を渡すと、ここまでに作られていないことがある
     with open(state_dir() / "delegations.jsonl", "a", encoding="utf-8") as f:  # 1 行 1 件。U+2028 なども生で入れない
         f.write(json.dumps({k: v for k, v in rec.items() if k != "report"}) + "\n")
     sys.stdout.reconfigure(errors="backslashreplace")

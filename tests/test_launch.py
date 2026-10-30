@@ -476,6 +476,197 @@ class TestLaunch(unittest.TestCase):
                            env=env, capture_output=True, text=True, timeout=120, cwd=proc_cwd)  # launcher が止まったら、試験ごと止まらずに落とす
         return p if raw else (p.returncode, json.loads(p.stdout))
 
+    def launch_in_background(self, extra, mode="stop", env_extra=None):
+        """launcher を起動し、偽の子が動き始めるのを待って返す（シグナル・同時の起動の試験）。"""
+        for f in (".started", ".term", ".stage"):
+            Path(str(self.args_file) + f).unlink(missing_ok=True)
+        env = {**os.environ, "HOME": str(self.home), "PATH": f"{self.bin}:/usr/bin:/bin", "BB_WRIT_CONFIG_DIR": str(self.cfg),
+               "BB_WRIT_STATE_DIR": str(self.state), "FAKE_MODE": mode, "FAKE_ARGS": str(self.args_file),
+               "FAKE_TEXT": GOOD.encode().decode("unicode_escape"), **(env_extra or {})}
+        (self.bin / "fake_env.json").write_text(json.dumps({k: v for k, v in env.items() if k.startswith("FAKE_")}))
+        p = subprocess.Popen([sys.executable, str(LAUNCH), "--prompt-file", str(self.prompt), *extra], env=env,
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        self.addCleanup(p.kill)
+        deadline = time.time() + 30
+        while not Path(str(self.args_file) + ".started").exists() and time.time() < deadline:
+            time.sleep(0.05)
+        self.assertTrue(Path(str(self.args_file) + ".started").exists())
+        return p
+
+    def launch_patched(self, patch, extra, mode="good", env_extra=None):
+        """launch.py を import し、patch（Python の文）を当ててから main を動かす。起きる時機を決められない場面だけに使う。"""
+        env = {**os.environ, "HOME": str(self.home), "PATH": f"{self.bin}:/usr/bin:/bin", "BB_WRIT_CONFIG_DIR": str(self.cfg),
+               "BB_WRIT_STATE_DIR": str(self.state), "FAKE_MODE": mode, "FAKE_ARGS": str(self.args_file),
+               "FAKE_TEXT": GOOD.encode().decode("unicode_escape"), **(env_extra or {})}
+        (self.bin / "fake_env.json").write_text(json.dumps({k: v for k, v in env.items() if k.startswith("FAKE_")}))
+        code = (f"import os, signal, subprocess, sys\nsys.path.insert(0, {str(LAUNCH.parent)!r})\nimport launch\n{textwrap.dedent(patch)}\n"
+                f"sys.argv = ['launch.py', '--prompt-file', {str(self.prompt)!r}, *{list(extra)!r}]\nsys.exit(launch.main())\n")
+        p = subprocess.run([sys.executable, "-B", "-c", code], env=env, capture_output=True, text=True, timeout=120)
+        self.assertTrue(p.stdout.strip(), p.stderr)
+        return p.returncode, json.loads(p.stdout)
+
+    def test_a_stopped_resume_can_still_be_continued(self):
+        """続きの子を止めても、続きから起動できる（止めた子は結果を出さないので、session を確かめられないのは権限の不明ではない）。
+        実物の Claude Code 2.1 系で、続きを TERM で止めると resumable が偽になり、次の --resume が拒否された。"""
+        rc, first = self.run_launch("claude", extra=["--timeout", "2"], env_extra={"FAKE_HANG": "1"})
+        p = self.launch_in_background(["--resume", first["out"], "--timeout", "60"])
+        p.send_signal(signal.SIGTERM)
+        out, err = p.communicate(timeout=60)
+        rec = json.loads(out)
+        self.assertEqual((rec["status"], rec["resumable"], rec["stopped_by_signal"]), ("failed", True, int(signal.SIGTERM)), rec)
+        rc, again = self.run_launch(None, extra=["--resume", rec["out"]])
+        self.assertEqual((rc, again["status"]), (0, "ok"), again)
+
+    def test_a_session_found_unsafe_cannot_be_continued_from_an_earlier_record(self):
+        """続きの起動で sandbox が効かなかった session は、その前の記録からも続けさせない。照らすものが無かっただけの起動は、前の記録から
+        続けられる（test_a_resume_checks_what_it_takes_over_from_the_last_launch の no-new-turn）。"""
+        rc, first = self.run_launch("grok", extra=["--timeout", "2"], cwd=self.grok_target(), env_extra={"FAKE_HANG": "1"})
+        rc, mid = self.run_launch(None, "nosandbox", extra=["--resume", first["out"]])
+        self.assertEqual((mid["status"], mid["resumable"]), ("failed", False), mid)
+        self.args_file.unlink()
+        p = self.run_launch(None, extra=["--resume", first["out"]], raw=True)
+        self.assertEqual(p.returncode, 2, p.stdout)
+        self.assertIn("この session は続けない", p.stderr)
+        self.assertFalse(self.args_file.exists())  # 子を起こさない
+
+    def test_a_resume_refuses_while_the_last_launch_left_empty_places(self):
+        """前の起動の空の残りを片付けずに続けると、続きの比較の「前からあるもの」に入って、ok で見えなくなる。"""
+        d = self.worktree("residue")[1]
+        rc, rec = self.run_launch("claude", "cwd-residue-hang", extra=["--write", "--timeout", "2"], cwd=d)
+        self.assertEqual((rec["status"], rec["resumable"]), ("failed", True), rec)
+        self.args_file.unlink()
+        p = self.run_launch(None, extra=["--resume", rec["out"]], raw=True)
+        self.assertEqual(p.returncode, 2, p.stdout)
+        self.assertIn(str(d / ".bashrc"), p.stderr)
+        self.assertFalse(self.args_file.exists())
+        for f in rec["cwd_residue"]:
+            shutil.rmtree(f) if Path(f).is_dir() else Path(f).unlink()
+        rc, again = self.run_launch(None, extra=["--resume", rec["out"]])
+        self.assertNotIn(again["status"], ("unavailable",), again)
+        self.assertEqual(again["cwd_residue"], [], again)
+
+    def test_a_session_runs_in_one_resume_at_a_time(self):
+        """同じ session の続きを同時に 2 つ起動しない。launcher が KILL されても排他は残らない。"""
+        rc, first = self.run_launch("claude", extra=["--timeout", "2"], env_extra={"FAKE_HANG": "1"})
+        p = self.launch_in_background(["--resume", first["out"], "--timeout", "60"], mode="stop-deaf")
+        second = self.run_launch(None, extra=["--resume", first["out"]], raw=True)
+        self.assertEqual(second.returncode, 2, second.stdout)
+        self.assertIn("同じ session の続きが動いている", second.stderr)
+        p.kill()  # 子は残る（launcher の外の話）が、排他は手放す
+        p.communicate(timeout=30)
+        self.orphans()
+        rc, again = self.run_launch(None, extra=["--resume", first["out"]])
+        self.assertEqual(rc, 0, again)
+
+    def test_a_resume_from_an_older_record_keeps_the_commits_the_session_saw(self):
+        """前の記録に戻って続けても、session がその間に見た別の commit を忘れない（審査の head を書かない）。"""
+        git = lambda *a: subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", *a], cwd=self.cwd, check=True,
+                                        capture_output=True, text=True).stdout.strip()
+        git("init", "-q")
+        git("add", "-A")
+        git("commit", "-q", "-m", "1")
+        h1 = git("rev-parse", "HEAD")
+        rc, first = self.run_launch("claude", extra=["--timeout", "2"], env_extra={"FAKE_HANG": "1"})
+        self.assertEqual(first["head"], h1)
+        git("commit", "-q", "--allow-empty", "-m", "2")
+        rc, mid = self.run_launch(None, extra=["--resume", first["out"]])
+        self.assertIsNone(mid["head"], mid)
+        git("reset", "-q", "--hard", h1)
+        rc, again = self.run_launch(None, extra=["--resume", first["out"]])
+        self.assertEqual(again["status"], "ok", again)
+        self.assertIsNone(again["head"], again)
+        self.assertNotIn("next", again)
+
+    def test_a_timed_out_child_gets_a_term_and_time_to_clean_up(self):
+        """時間切れも、まず TERM を送って子の片付けを待つ（いきなり KILL すると、子の CLI の置き場が残る）。"""
+        rc, rec = self.run_launch("claude", "stop", extra=["--timeout", "2"])
+        self.assertEqual(Path(str(self.args_file) + ".term").read_text(), f"{int(signal.SIGTERM)}\n")
+        self.assertFalse(Path(str(self.args_file) + ".stage").exists())
+        self.assertEqual((rec["status"], rec["resumable"]), ("timeout", True), rec)
+        self.assertEqual(rec["problems"][0], "2 秒で終わらなかった")
+        self.assertNotIn("stopped_by_signal", rec)
+
+    def test_the_wait_honours_the_grace_outside_linux_too(self):
+        """Linux の外でも、シグナルの後の猶予で待つのをやめる（--timeout の残りまで止まらなかった）。猶予は --timeout より長くならない。"""
+        patch = """\
+            launch.LINUX = False
+            launch.STOP_GRACE = 1
+            real = subprocess.Popen
+            def started(*a, **k):
+                p = real(*a, **k)
+                if k.get("start_new_session"):
+                    os.kill(os.getpid(), signal.SIGTERM)
+                return p
+            subprocess.Popen = started
+            """
+        t0 = time.monotonic()
+        rc, rec = self.launch_patched(patch, ["--host", "claude", "--cwd", str(self.cwd), "--timeout", "20"], mode="stop-deaf")
+        self.orphans()
+        self.assertLess(time.monotonic() - t0, 15, rec)
+        self.assertEqual(rec["stopped_by_signal"], int(signal.SIGTERM), rec)
+
+    def test_a_missing_state_dir_does_not_lose_the_result(self):
+        """--out を渡し、状態の置き場がまだ無くても、記録と標準出力の JSON を返す（審査の記録に数えられなかった）。"""
+        shutil.rmtree(self.state)
+        rc, rec = self.run_launch("claude", extra=["--out", str(Path(self.tmp.name) / "out-here")])
+        self.assertEqual((rc, rec["status"]), (0, "ok"), rec)
+        self.assertTrue((self.state / "delegations.jsonl").is_file())
+
+    def test_an_out_that_exists_is_refused_before_the_child(self):
+        out = Path(self.tmp.name) / "taken"
+        out.mkdir()
+        p = self.run_launch("claude", extra=["--out", str(out)], raw=True)
+        self.assertEqual(p.returncode, 2)
+        self.assertNotIn("Traceback", p.stderr)
+        self.assertIn(str(out), p.stderr)
+        self.assertFalse(self.args_file.exists())
+
+    def test_a_git_error_in_another_encoding_does_not_lose_the_record(self):
+        """子が .git を壊して git の文言が UTF-8 でなくても、落ちずに記録を書く（Git の管理情報の変更の警告が消えた）。"""
+        d = self.worktree("garbled")[1]
+        patch = f"""\
+            real = launch.git_snapshot
+            def snap(*a):
+                if os.path.exists(os.environ["FAKE_ARGS"]):
+                    open({str(d / ".git")!r}, "wb").write(b"gitdir: /nonexistent/\\xff\\n")
+                return real(*a)
+            launch.git_snapshot = snap
+            """
+        rc, rec = self.launch_patched(patch, ["--host", "claude", "--cwd", str(d), "--write"])
+        self.assertEqual((rc, rec["status"], rec["head"]), (2, "failed", None), rec)
+        self.assertTrue((Path(rec["out"]) / "record.json").is_file())
+
+    def test_a_signal_right_after_the_child_starts_is_not_lost(self):
+        """子の起動の直後に受けたシグナルでも、子に TERM を伝えて記録を書く（記録が無いまま子が動き続け、INT では動いている子の置き場を消した）。"""
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            with self.subTest(sig=sig):
+                patch = f"""\
+                    real = subprocess.Popen
+                    def started(*a, **k):
+                        p = real(*a, **k)
+                        if k.get("start_new_session"):
+                            os.kill(os.getpid(), {int(sig)})
+                        return p
+                    subprocess.Popen = started
+                    """
+                rc, rec = self.launch_patched(patch, ["--host", "claude", "--cwd", str(self.cwd)], mode="stop")
+                self.assertEqual(rec["stopped_by_signal"], int(sig), rec)
+                self.assertTrue(rec["resumable"], rec)
+
+    def test_a_child_reaped_late_does_not_read_as_exit_zero(self):
+        """KILL の後も child.wait が切れ、子を別の場所で刈ると、poll が 0 を返した。終了コードは分からないと書く。"""
+        patch = """\
+            real = subprocess.Popen.wait
+            def wait(self, timeout=None):
+                if timeout == 10:
+                    raise subprocess.TimeoutExpired(self.args, timeout)
+                return real(self, timeout)
+            subprocess.Popen.wait = wait
+            """
+        rc, rec = self.launch_patched(patch, ["--host", "claude", "--cwd", str(self.cwd), "--timeout", "1"], env_extra={"FAKE_HANG": "1"})
+        self.assertEqual(rec["status"], "timeout", rec)
+        self.assertIsNone(rec["exit_code"], rec)
+
     def test_launch_leaves_no_bytecode_in_the_plugin(self):
         subprocess.run(["rm", "-rf", str(ROOT / "scripts" / "__pycache__")], check=True)
         self.run_launch("codex")  # 試験の外と同じく -B なしで起動する
@@ -1629,11 +1820,11 @@ class TestLaunch(unittest.TestCase):
                         raise PermissionError(1, "denied")
                     _kill2(pid, sig)
                 os.kill = kill
-            if what == "unkillable-cli":  # 子の CLI（偽の dotenvx と claude）に、SIGKILL が効かない
+            if what == "unkillable-cli":  # 子の CLI（偽の dotenvx と claude）に、TERM も SIGKILL も効かない
                 _kill3, _killpg = os.kill, os.killpg
                 fake = os.path.join(os.path.dirname(os.environ["FAKE_ARGS"]), "bin", "").encode()
                 def kill(pid, sig):
-                    if sig == 9 and fake in open(f"/proc/{pid}/cmdline", "rb").read():
+                    if sig in (9, 15) and fake in open(f"/proc/{pid}/cmdline", "rb").read():
                         return
                     _kill3(pid, sig)
                 os.kill, os.killpg = kill, lambda *a: None
@@ -1693,7 +1884,8 @@ class TestLaunch(unittest.TestCase):
                 self.orphans()
                 self.assertEqual((rc, rec["status"]), (2, "timeout" if what == "waitid-storm" else "failed"), rec)  # 止めきれれば、続きから起動できる時間切れ
                 self.assertTrue(any(words in p for p in rec["problems"]), rec)
-                self.assertLess(time.time() - t0, 25 if what == "unkillable-cli" else 10, rec)  # 止まらない CLI は 10 秒待ち、残りを 5 秒止め続ける
+                # 時間切れの TERM の後に 30 秒の猶予（waitid-storm は子の終わりが見えないので猶予を使い切る）。止まらない CLI はさらに 10 秒待ち、残りを 5 秒止め続ける
+                self.assertLess(time.time() - t0, {"unkillable-cli": 55, "waitid-storm": 40}.get(what, 10), rec)
                 if what == "unkillable-cli":  # 止まらない子の CLI（Popen の子。claude なら偽の dotenvx）を並べる
                     cli = Path(str(self.args_file) + ".cli").read_text().split()[host == "claude"]
                     self.assertTrue(any(p.startswith(f"{cli} ") for p in rec["problems"]), rec)
@@ -2501,6 +2693,7 @@ class TestLaunch(unittest.TestCase):
         for i, (line, extra, status) in enumerate((("WARN failed to refresh rate limits", {}, "ok"), ("request finished in 1429ms", {}, "ok"),
                                                    ("Reconnecting... 1/5 (unexpected status 429 Too Many Requests)", {}, "ok"),
                                                    ("stream error: last status: 429 Too Many Requests", {"FAKE_EXIT": "1"}, "quota"),
+                                                   ("compile took 1429ms", {"FAKE_HANG": "1"}, "timeout"),  # 時間切れでも、時間の数字は利用枠でない
                                                    ("API Error: 429 rate_limit_error", {"FAKE_HANG": "1"}, "quota"),  # 時間切れ（成功していない）
                                                    ("", {"FAKE_TEXT": "", "FAKE_STDERR": "rate limit"}, "quota"),  # 終了コード 0 でも本文が無い
                                                    ("", {"FAKE_MODE": "apierror", "FAKE_ERROR": "exceeded retry limit, last status: 429 Too Many Requests"}, "quota"))):  # CLI のエラーにだけある
