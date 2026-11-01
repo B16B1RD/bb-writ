@@ -126,6 +126,12 @@ Grok Build:
 /bb-writ README を読み、このプロジェクトの使い方を説明して。ファイルは変更しないで。
 ```
 
+CLI を非対話で動かすときは（`claude -p` など）、Claude Code では `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1` を付ける。付けないと、背景の処理の途中の文（「終わると通知が届きます」など）が結果として出て、`--output-format json` や stream-json の利用者が完成の報告と取り違える。
+
+```sh
+CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1 claude -p "/bb-writ:bb-writ <依頼>" --output-format json < /dev/null
+```
+
 Claude Code は、普通の依頼文だけでは入口を使わない。入口の名前を付けずに使わせるには、作業するリポジトリの `CLAUDE.md` に「技術的な仕事は、まず bb-writ:bb-writ スキルを使って始める」と書く。Codex と Grok Build は、入口の名前を付けない普通の依頼でも入口を最初に読んだ（試験での観測）。どの CLI でも hook の設定は要らない。
 
 ## 仕組みと含まれるスキル
