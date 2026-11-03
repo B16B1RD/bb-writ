@@ -23,7 +23,7 @@ bb-writ は、CLI ハーネス（Claude Code・Codex。Grok Build も同じ SKIL
 
 - 設定 `~/.config/bb-writ/`（dotenvx の `.env`・`.env.keys`、専用ログインの `claude-home`・`codex-home`・`grok-auth`、比較用の `cmp/`）。状態 `~/.local/state/bb-writ/`（`work/` 作業場所ごとの担当・記録・証拠、`delegations/` 委任の記録、`notes/`、`worktrees/`）。
 - 専用ログイン: Claude Code は `~/.config/bb-writ/.env` の `CLAUDE_CODE_OAUTH_TOKEN`（dotenvx）と `CLAUDE_CONFIG_DIR=~/.config/bb-writ/claude-home`、Codex は `CODEX_HOME=~/.config/bb-writ/codex-home`、Grok Build は `GROK_HOME=~/.config/bb-writ/grok-auth`。呼び出し方は `skills/delegate/SKILL.md`。
-- プラグインとして配る（大前提）。出すときは `.claude-plugin/plugin.json`・`plugin.json`・`.claude-plugin/marketplace.json` の版を一緒に上げる。Codex も同じ 2 つ（marketplace と root の `plugin.json`）を読む（0.163.0 で確認）。ホスト専用のマニフェストは、必要が実物で出るまで足さない。Codex の専用ログインは版ごとの写しなので、版を上げたら `codex plugin remove bb-writ@bb-writ` → `add`。
+- プラグインとして配る（大前提）。出すときは `.claude-plugin/plugin.json`・`plugin.json`・`.claude-plugin/marketplace.json` の版を一緒に上げる。Codex も同じ 2 つ（marketplace と root の `plugin.json`）を読む（0.163.0 で確認）。ホスト専用のマニフェストは、必要が実物で出るまで足さない。Codex の専用ログインは版ごとの写しなので、版を上げたとき、または版を上げる前の変更を Codex の子で使うときは `codex plugin remove bb-writ@bb-writ` → `add`（中身が違うと launcher が Codex の子を起動しない）。
 - 変更履歴は利用者向けの `CHANGELOG.md` 1 つ。版を上げる commit で、先頭に `## <版> - <日付>` の節を足し、前のタグからの変更（版を上げなかった commit の分も）を利用者に何が変わるかで書く。開発者向けの履歴は別に書かず、タグの間の git log を使う。push の後、その commit に `claude plugin tag --push` でタグ（`bb-writ--v<版>`）を付け、Release は `gh release create <タグ> --title "bb-writ <版>" --notes-file <その節を抜き出したファイル>` で作る。Release の本文は手で書かない（同じ文面を 2 か所で持たないため。commit を経ない文は、公開前の検査も通らない）。
 
 ## 試験
@@ -48,6 +48,7 @@ bb-writ は、CLI ハーネス（Claude Code・Codex。Grok Build も同じ SKIL
 | 統合の記録を、作業場所やブランチが消えたまま残して、リポジトリ全体の統合を止めない（統合していないのに記録が残り、別タスクが止まった。形式検証で見つかった） | `scripts/work.py` の `settle_integration`。`tests/test_parallel.py` の `test_a_stale_integration_record_of_a_gone_task_does_not_stop_others`・`test_a_failed_fast_forward_after_the_target_moved_leaves_no_record` |
 | launcher の終わりを、コマンド行の文字列で探す待ち（`pgrep -f` など）で待たない（審査役の launcher が 3〜4 分で終わった後も、待つループが自分のコマンド行に一致し続け、子が 6 時間止まった） | 無い（`delegate` の文だけ。待つループは親のホストの shell で動き、補助コードからは見えない） |
 | launcher はプラグインの置き場に `__pycache__` を作らない | `tests/test_launch.py` の `test_launch_leaves_no_bytecode_in_the_plugin` |
+| Codex の子を、launcher と中身の違う bb-writ の写しで動かさない（Codex の子は専用ログインの写しのスキルを読み、入れ直すまでの間に古い写しで 88 回中 8 回動いた。版を上げる前の変更は届かなかった） | `scripts/launch.py` の `codex_stale_copy`（`skills/`・`scripts/` を中身で比べ、違えば `unavailable`）。`tests/test_launch.py` の `test_a_codex_child_does_not_start_on_a_stale_copy_of_bb_writ` |
 | Claude Code の子に `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB` を使わない（許可の方針を既定に戻し、空のファイルを残した） | 読み取り専用の子は `tests/test_launch.py` の `test_claude_read_only_in_worktree_denies_the_common_git_dir`。書く子は試験が無く、残った空のファイルを上の `home_entries` が捕まえる |
 | Claude Code の子には背景の処理を使わせない（`CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1`。審査役が試験を背景で回し、終わりの知らせが次のターンを起こして、`--output-format json` が最後のターンの結果だけを返し、報告が 2 回消えた） | `tests/test_launch.py` の `test_claude_child_gets_no_parent_claude_env`（書く子と読み取り専用の子の両方） |
 | Claude Code の子に、親の `CLAUDE*`・`ANTHROPIC_*` の環境変数を渡さない | `tests/test_launch.py` の `test_claude_child_gets_no_parent_claude_env` |

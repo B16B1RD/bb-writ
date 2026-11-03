@@ -152,7 +152,7 @@ Claude Code は、普通の依頼文だけでは入口を使わない。入口�
 - 起動する CLI と、起動される CLI（Claude Code・Codex・Grok Build のうち 2 つ以上）。
 - 起動される CLI の bb-writ 専用ログイン。Codex で `interrogate` を使うときは、同じ Codex の審査役も別プロセスの Codex として起動するので、Codex のログインも要る。
   - Claude Code：`claude setup-token` で得たトークンを、`~/.config/bb-writ/.env` の `CLAUDE_CODE_OAUTH_TOKEN` に [dotenvx](https://dotenvx.com/) で暗号化して置く（鍵の `.env.keys` も同じ場所）。起動するときも dotenvx がトークンを子の環境にだけ渡すので、dotenvx を入れておく。
-  - Codex：`CODEX_HOME=~/.config/bb-writ/codex-home codex login`。
+  - Codex：`CODEX_HOME=~/.config/bb-writ/codex-home codex login`。この専用ログインにも bb-writ を入れた場合、Codex の子はその写しのスキルを読む。写しが起動する側の bb-writ と中身で違うと、Codex の子は起動せず、入れ直すコマンド（`CODEX_HOME` を付けた [Codex の更新](#codex-1)と同じ 3 つ）を示す。
   - Grok Build：`GROK_HOME=~/.config/bb-writ/grok-auth grok login`。
 - Linux・WSL2 で Claude Code を子として起動するなら、`bwrap`（bubblewrap）と `socat`。子は OS の sandbox の中で動き、sandbox を起動できなければ起動しない。
 

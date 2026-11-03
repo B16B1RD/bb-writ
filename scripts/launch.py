@@ -441,6 +441,30 @@ def codex_breach(turns: list, denies: list[str]) -> str | None:
     return None
 
 
+def codex_stale_copy(home: Path) -> str | None:
+    """専用ログインの Codex に入った bb-writ の写しが、この launcher の skills/・scripts/ と中身で違えば理由。写しが無ければ None。
+    Claude Code の子には --plugin-dir でこの bb-writ を渡すが、Codex には起動ごとに置き場を渡す引数が無く、子は写しのスキルと
+    補助スクリプトを読む（版を上げる前の変更は届かず、入れ直すまでの間に古い写しで 88 回中 8 回動いた。-c で plugins の enabled を
+    切ってもスキルは見えたままだった。0.166.0）。版の番号でなく中身で比べる（版を上げていない変更を見逃すため）。"""
+    def tree(base: Path) -> dict:
+        return {p.relative_to(base).as_posix(): p.read_bytes() for d in ("skills", "scripts") if (base / d).is_dir()
+                for p in (base / d).rglob("*") if p.is_file() and "__pycache__" not in p.parts}
+    root = Path(__file__).resolve().parents[1]
+    mine = tree(root)
+    for copy in sorted((home / "plugins" / "cache").glob("*/bb-writ/*")):
+        if not (copy / "skills").is_dir():
+            continue
+        theirs = tree(copy)
+        diff = sorted(k for k in mine.keys() | theirs.keys() if mine.get(k) != theirs.get(k))
+        if diff:
+            mp = copy.parent.parent.name
+            return (f"専用ログインの Codex の bb-writ の写し {copy} が、この bb-writ（{root}）と違う（{', '.join(diff[:3])}"
+                    f"{' など' if len(diff) > 3 else ''}）。子は古い写しのスキルで動くので起動しない。入れ直す: "
+                    f"CODEX_HOME={home} codex plugin marketplace upgrade {mp}、CODEX_HOME={home} codex plugin remove bb-writ@{mp}、"
+                    f"CODEX_HOME={home} codex plugin add bb-writ@{mp}")
+    return None
+
+
 def command(a, prompt: str, scratch: Path) -> tuple[list[str], dict, str | None]:
     """起動するコマンドと環境。使えなければ (…, …, 理由)。scratch は読み取り専用の Codex に渡す一時ディレクトリ。"""
     cfg = config_dir()
@@ -532,6 +556,9 @@ def command(a, prompt: str, scratch: Path) -> tuple[list[str], dict, str | None]
     home = cfg / "codex-home"
     if not (home / "auth.json").is_file():
         return [], env, f"専用ログインが無い: {home}/auth.json（CODEX_HOME={home} codex login）"
+    why = codex_stale_copy(home)
+    if why:
+        return [], env, why
     env["CODEX_HOME"] = str(home)
     if a.write:
         # 作業記録と、worktree で commit するのに要る共通ディレクトリの中の場所だけを渡す（管理ディレクトリが無いと index.lock を作れなかった。0.163.0）

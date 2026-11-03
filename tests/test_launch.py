@@ -2836,6 +2836,28 @@ class TestLaunch(unittest.TestCase):
         self.assertEqual(rec["status"], "unavailable")
         self.assertIn("GROK_HOME=", rec["problems"][0])
 
+    def test_a_codex_child_does_not_start_on_a_stale_copy_of_bb_writ(self):
+        # Codex の子は専用ログインに入れた写しのスキルと補助スクリプトを読む。この launcher と中身が違えば起動しない
+        copy = self.cfg / "codex-home" / "plugins" / "cache" / "bb-writ" / "bb-writ" / "9.9.9"
+        for d in ("skills", "scripts"):
+            shutil.copytree(ROOT / d, copy / d, ignore=shutil.ignore_patterns("__pycache__"))
+        rc, rec = self.run_launch("codex")
+        self.assertEqual(rec["status"], "ok", rec)  # 同じ中身なら起動する
+        changed = copy / "skills" / "interrogate" / "SKILL.md"
+        changed.write_text(changed.read_text(encoding="utf-8") + "\n古い文\n", encoding="utf-8")
+        self.args_file.unlink(missing_ok=True)
+        rc, rec = self.run_launch("codex")
+        self.assertEqual((rc, rec["status"]), (2, "unavailable"), rec)
+        self.assertFalse(self.args_file.exists(), "古い写しのまま偽の codex が呼ばれた")
+        self.assertIn("skills/interrogate/SKILL.md", rec["problems"][0])
+        self.assertIn("codex plugin remove bb-writ@bb-writ", rec["problems"][0])
+        changed.unlink()  # 写しに無いファイルも違いに数える
+        rc, rec = self.run_launch("codex")
+        self.assertEqual(rec["status"], "unavailable", rec)
+        shutil.rmtree(copy.parents[2])  # 写しが無ければ、bb-writ 無しの子として起動する
+        rc, rec = self.run_launch("codex")
+        self.assertEqual(rec["status"], "ok", rec)
+
     def test_multiple_launches_keep_separate_evidence(self):
         _, a = self.run_launch('codex')
         _, b = self.run_launch('codex')
