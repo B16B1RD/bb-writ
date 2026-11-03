@@ -2885,7 +2885,8 @@ class TestLaunch(unittest.TestCase):
                 self.assertEqual(rc, 2, rec)
                 self.assertFalse(self.args_file.exists(), "古い写しのまま偽の codex が呼ばれた")
                 self.assertIn(path, rec["problems"][0])
-                for sub in (f"codex plugin marketplace upgrade {mp}", f"codex plugin remove bb-writ@{mp}", f"codex plugin add bb-writ@{mp}"):
+                for sub in (f"codex plugin marketplace upgrade {mp}", f"codex plugin remove bb-writ@{mp}", f"codex plugin add bb-writ@{mp}",
+                            "統合してから入れ直す"):  # 作業場所の launcher では入れ直しても一致しないことも示す
                     self.assertIn(sub, rec["problems"][0])
 
     def test_multiple_launches_keep_separate_evidence(self):
