@@ -2838,25 +2838,55 @@ class TestLaunch(unittest.TestCase):
 
     def test_a_codex_child_does_not_start_on_a_stale_copy_of_bb_writ(self):
         # Codex の子は専用ログインに入れた写しのスキルと補助スクリプトを読む。この launcher と中身が違えば起動しない
-        copy = self.cfg / "codex-home" / "plugins" / "cache" / "bb-writ" / "bb-writ" / "9.9.9"
-        for d in ("skills", "scripts"):
-            shutil.copytree(ROOT / d, copy / d, ignore=shutil.ignore_patterns("__pycache__"))
-        rc, rec = self.run_launch("codex")
-        self.assertEqual(rec["status"], "ok", rec)  # 同じ中身なら起動する
-        changed = copy / "skills" / "interrogate" / "SKILL.md"
-        changed.write_text(changed.read_text(encoding="utf-8") + "\n古い文\n", encoding="utf-8")
-        self.args_file.unlink(missing_ok=True)
-        rc, rec = self.run_launch("codex")
-        self.assertEqual((rc, rec["status"]), (2, "unavailable"), rec)
-        self.assertFalse(self.args_file.exists(), "古い写しのまま偽の codex が呼ばれた")
-        self.assertIn("skills/interrogate/SKILL.md", rec["problems"][0])
-        self.assertIn("codex plugin remove bb-writ@bb-writ", rec["problems"][0])
-        changed.unlink()  # 写しに無いファイルも違いに数える
-        rc, rec = self.run_launch("codex")
-        self.assertEqual(rec["status"], "unavailable", rec)
-        shutil.rmtree(copy.parents[2])  # 写しが無ければ、bb-writ 無しの子として起動する
-        rc, rec = self.run_launch("codex")
-        self.assertEqual(rec["status"], "ok", rec)
+        cache = self.cfg / "codex-home" / "plugins" / "cache"
+
+        def copy(ver="9.9.9", mp="bb-writ", dirs=("skills", "scripts")):
+            c = cache / mp / "bb-writ" / ver
+            for d in dirs:
+                shutil.copytree(ROOT / d, c / d, ignore=shutil.ignore_patterns("__pycache__"))
+            return c
+
+        def append(p):
+            p.write_text(p.read_text(encoding="utf-8") + "\n古い文\n", encoding="utf-8")
+
+        def two(stale_first):  # 写しが 2 つあれば、どちらが古くても止める
+            append((copy("9.9.8") if stale_first else copy("9.9.9")) / "skills" / "interrogate" / "SKILL.md")
+            copy("9.9.9" if stale_first else "9.9.8")
+
+        def pyc():
+            (copy() / "scripts" / "__pycache__").mkdir()
+            (cache / "bb-writ" / "bb-writ" / "9.9.9" / "scripts" / "__pycache__" / "launch.cpython-312.pyc").write_bytes(b"x")
+
+        cases = [  # (場面, 用意, 期待, 理由に出る名前の marketplace と違うファイル)
+            ("同じ中身", lambda: copy(), "ok", None),
+            ("スキルが違う", lambda: append(copy() / "skills" / "interrogate" / "SKILL.md"), "unavailable", ("bb-writ", "skills/interrogate/SKILL.md")),
+            ("補助スクリプトが違う", lambda: append(copy() / "scripts" / "work.py"), "unavailable", ("bb-writ", "scripts/work.py")),
+            ("写しに無いファイル", lambda: (copy() / "skills" / "interrogate" / "SKILL.md").unlink(), "unavailable", ("bb-writ", "skills/interrogate/SKILL.md")),
+            ("写しにだけあるファイル", lambda: (copy() / "skills" / "old-skill.md").write_text("x"), "unavailable", ("bb-writ", "skills/old-skill.md")),
+            ("scripts の無い写し", lambda: copy(dirs=("skills",)), "unavailable", ("bb-writ", "scripts/launch.py")),
+            ("別の名前の marketplace", lambda: append(copy(mp="mine") / "skills" / "interrogate" / "SKILL.md"), "unavailable", ("mine", "skills/interrogate/SKILL.md")),
+            ("古い写しが先", lambda: two(True), "unavailable", ("bb-writ", "skills/interrogate/SKILL.md")),
+            ("古い写しが後", lambda: two(False), "unavailable", ("bb-writ", "skills/interrogate/SKILL.md")),
+            ("写しの __pycache__ は比べない", pyc, "ok", None),
+            ("skills の無い置き場は写しでない", lambda: (cache / "bb-writ" / "bb-writ" / "9.9.9").mkdir(parents=True), "ok", None),
+            ("写しが無い（bb-writ 無しの子として起動する）", lambda: None, "ok", None),
+        ]
+        for name, prepare, status, why in cases:
+            with self.subTest(name):
+                shutil.rmtree(cache, ignore_errors=True)
+                prepare()
+                self.args_file.unlink(missing_ok=True)
+                rc, rec = self.run_launch("codex")
+                self.assertEqual(rec["status"], status, rec)
+                if why is None:
+                    self.assertTrue(self.args_file.exists(), "codex が呼ばれていない")
+                    continue
+                mp, path = why
+                self.assertEqual(rc, 2, rec)
+                self.assertFalse(self.args_file.exists(), "古い写しのまま偽の codex が呼ばれた")
+                self.assertIn(path, rec["problems"][0])
+                for sub in (f"codex plugin marketplace upgrade {mp}", f"codex plugin remove bb-writ@{mp}", f"codex plugin add bb-writ@{mp}"):
+                    self.assertIn(sub, rec["problems"][0])
 
     def test_multiple_launches_keep_separate_evidence(self):
         _, a = self.run_launch('codex')

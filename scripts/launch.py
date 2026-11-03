@@ -445,7 +445,9 @@ def codex_stale_copy(home: Path) -> str | None:
     """専用ログインの Codex に入った bb-writ の写しが、この launcher の skills/・scripts/ と中身で違えば理由。写しが無ければ None。
     Claude Code の子には --plugin-dir でこの bb-writ を渡すが、Codex には起動ごとに置き場を渡す引数が無く、子は写しのスキルと
     補助スクリプトを読む（版を上げる前の変更は届かず、入れ直すまでの間に古い写しで 88 回中 8 回動いた。-c で plugins の enabled を
-    切ってもスキルは見えたままだった。0.166.0）。版の番号でなく中身で比べる（版を上げていない変更を見逃すため）。"""
+    切ってもスキルは見えたままだった。0.166.0）。版の番号でなく中身で比べる（版を上げていない変更を見逃すため）。
+    写しにだけあるファイル（古い版の残りも）・写しの置き場がどれか 1 つでも違えば止める。守らない範囲: 読めないファイルは例外のまま
+    failed になり、symlink の置き場の中は数えない（rglob がたどらない）。"""
     def tree(base: Path) -> dict:
         return {p.relative_to(base).as_posix(): p.read_bytes() for d in ("skills", "scripts") if (base / d).is_dir()
                 for p in (base / d).rglob("*") if p.is_file() and "__pycache__" not in p.parts}
@@ -461,7 +463,8 @@ def codex_stale_copy(home: Path) -> str | None:
             return (f"専用ログインの Codex の bb-writ の写し {copy} が、この bb-writ（{root}）と違う（{', '.join(diff[:3])}"
                     f"{' など' if len(diff) > 3 else ''}）。子は古い写しのスキルで動くので起動しない。入れ直す: "
                     f"CODEX_HOME={home} codex plugin marketplace upgrade {mp}、CODEX_HOME={home} codex plugin remove bb-writ@{mp}、"
-                    f"CODEX_HOME={home} codex plugin add bb-writ@{mp}")
+                    f"CODEX_HOME={home} codex plugin add bb-writ@{mp}。写しは marketplace に登録した置き場から作られるので、"
+                    f"この bb-writ がその置き場と別の場所（作業場所など）にあれば、入れ直しても一致しない（統合してから入れ直す）")
     return None
 
 
