@@ -462,8 +462,9 @@ def codex_stale_copy(home: Path) -> str | None:
             mp = copy.parent.parent.name
             return (f"専用ログインの Codex の bb-writ の写し {copy} が、この bb-writ（{root}）と違う（{', '.join(diff[:3])}"
                     f"{' など' if len(diff) > 3 else ''}）。子は古い写しのスキルで動くので起動しない。入れ直す: "
-                    f"CODEX_HOME={home} codex plugin marketplace upgrade {mp}、CODEX_HOME={home} codex plugin remove bb-writ@{mp}、"
-                    f"CODEX_HOME={home} codex plugin add bb-writ@{mp}。写しは marketplace に登録した置き場から作られるので、"
+                    f"CODEX_HOME={home} codex plugin remove bb-writ@{mp}、CODEX_HOME={home} codex plugin add bb-writ@{mp}"
+                    f"（GitHub から入れた marketplace なら、先に CODEX_HOME={home} codex plugin marketplace upgrade {mp}。"
+                    f"手元のディレクトリで登録した marketplace では upgrade は要らず、エラーになる）。写しは marketplace に登録した置き場から作られるので、"
                     f"この bb-writ がその置き場と別の場所（作業場所など）にあれば、入れ直しても一致しない（統合してから入れ直す）")
     return None
 
