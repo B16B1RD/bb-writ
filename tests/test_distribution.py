@@ -48,6 +48,13 @@ class TestSkills(unittest.TestCase):
             self.assertRegex(head, r"\ndescription: .*(使う|適用する)")  # 使う場面（原則は「〜に適用する」）
             self.assertNotIn("disable-model-invocation", head)  # Claude Code の Skill ツールから呼べなくなる（2026-10-17 の実測）
 
+    def test_ci_jobs_have_room_for_the_slow_macos_runners(self):
+        """macOS の job は 9〜10 分かかり、日によって 1〜2 割揺れる。上限 10 分では全部通る試験が 3 回続けて打ち切られた（2026-11）。"""
+        for p in (ROOT / ".github" / "workflows").glob("*.yml"):
+            for m in re.finditer(r"timeout-minutes:\s*(\d+)", p.read_text(encoding="utf-8")):
+                self.assertGreaterEqual(int(m.group(1)), 30, f"{p.name} の timeout-minutes: {m.group(1)}。最も遅い OS（macOS）の成功した実行の最長を "
+                                        "gh run list・gh run view で見て、その 3 倍以上にする。試験を削って合わせない")
+
     def test_skills_do_not_point_at_other_plugin_files(self):
         """Claude Code はプラグイン内の別ファイルの Read に承認を求める。スキルは本文だけで届く（scripts の実行は除く）。"""
         for p in (ROOT / "skills").glob("*/SKILL.md"):

@@ -478,7 +478,37 @@ def check(d: Path, frm: Path, kind: str = "push") -> tuple[dict, int]:
         if base.get("login") != here["login"]:
             return {**res, "ok": False, "reason": f"{frm} のアカウント {here['login']} と元の checkout {c} のアカウント {base.get('login')} が食い違う。"
                     f"外部操作は元の checkout から実行する"}, 5
+    if kind == "release":
+        why = ci_not_passed(d, frm, here["repo"])
+        if why:
+            return {**res, "ok": False, "reason": why}, 6
     return {**res, "ok": True}, 0
+
+
+CI_OK = {"success", "skipped", "neutral"}
+
+
+def ci_not_passed(d: Path, frm: Path, repo: str):
+    """出す commit の GitHub Actions の実行が、全部終わって通ったか。通っていなければ理由を返す。
+    push の直後に Release を出し、macOS の job が時間切れで打ち切られた（cancelled）のを 3 回見ないまま「済んだ」と報告したため。
+    守らない範囲: 実行が 1 つも無ければ通す（CI の無いリポジトリ。push の直後で、実行がまだ作られていない数秒も通る）。
+    Actions 以外の CI（外部のサービスの check）は見ない。"""
+    head = commit_of(d, "HEAD")
+    rc, o, e = sh(["gh", "run", "list", "-R", repo, "--commit", head, "--limit", "100", "--json", "name,status,conclusion,url"], frm)
+    try:
+        runs = json.loads(o) if rc == 0 else None
+    except ValueError:
+        runs = None
+    if not isinstance(runs, list):
+        return f"commit {head[:12]} の CI の実行を読めない（gh run list: {(e or o)[:200]}）。読めるようにしてから出す"
+    if [r for r in runs if r.get("status") != "completed"]:
+        return (f"commit {head[:12]} の CI が終わっていない（" + "、".join(f"{r.get('name')}: {r.get('status')}" for r in runs if r.get("status") != "completed")
+                + f"）。gh run watch --exit-status <id> -R {repo} で終わるまで待ち、結果を確かめてから出す")
+    bad = [r for r in runs if r.get("conclusion") not in CI_OK]
+    if bad:
+        return (f"commit {head[:12]} の CI が通っていない（" + "、".join(f"{r.get('name')}: {r.get('conclusion')} {r.get('url')}" for r in bad)
+                + "）。cancelled は時間切れなどで打ち切られたもので、失敗と同じに扱う。ログで原因を直し、CI が通った commit で出す")
+    return None
 
 
 def commit_of(d: Path, rev: str):

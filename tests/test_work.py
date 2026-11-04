@@ -164,6 +164,10 @@ elif sys.argv[1:3] == ["repo", "view"]:
     if perm == "NONE":
         print("GraphQL: Could not resolve to a Repository", file=sys.stderr); sys.exit(1)
     print("B16B1RD/demo " + perm)
+elif sys.argv[1:3] == ["run", "list"]:  # 出す commit の Actions の実行。FAKE_GH_RUNS は JSON の配列（無ければ実行なし）、FAIL なら gh が失敗する
+    if os.environ.get("FAKE_GH_RUNS") == "FAIL":
+        print("HTTP 502: Bad Gateway", file=sys.stderr); sys.exit(1)
+    print(os.environ.get("FAKE_GH_RUNS", "[]"))
 """
 
 FAKE_SSH = """#!/usr/bin/env python3
@@ -315,6 +319,34 @@ class TestAccountCheck(unittest.TestCase):
         tok = self.claim()
         head = subprocess.run(["git", "rev-parse", "HEAD"], env=self.env, cwd=self.wt, check=True, capture_output=True, text=True).stdout.strip()
         self.assertEqual(self.begin(tok, "pr:feat", "--from", str(self.repo), "--verified", head, "--reviewed", "none:試験の外")[0], 5)
+
+    def test_a_release_waits_for_the_ci_of_the_commit_to_pass(self):
+        """push の直後に Release を出し、macOS の job が時間切れで打ち切られた（cancelled）のを 3 回見なかった。"""
+        tok = self.claim()
+        head = subprocess.run(["git", "rev-parse", "HEAD"], env=self.env, cwd=self.wt, check=True, capture_output=True, text=True).stdout.strip()
+        run = lambda name, status, conclusion: {"name": name, "status": status, "conclusion": conclusion, "url": f"https://github.com/B16B1RD/demo/actions/runs/{name}"}
+        cases = [  # (実行の一覧, 終了コード, 理由に含む語)
+            ([], 0, None),  # CI の無いリポジトリ
+            ([run("test", "completed", "success"), run("lint", "completed", "skipped")], 0, None),
+            ([run("test", "in_progress", "")], 6, "終わっていない"),
+            ([run("test", "queued", ""), run("lint", "completed", "success")], 6, "test: queued"),
+            ([run("test", "completed", "cancelled")], 6, "cancelled"),
+            ([run("test", "completed", "success"), run("test", "completed", "failure")], 6, "failure"),
+            ([run("test", "completed", "timed_out")], 6, "timed_out"),
+            ("FAIL", 6, "読めない"),
+            ("not json", 6, "読めない"),
+        ]
+        for i, (runs, code, word) in enumerate(cases):
+            with self.subTest(runs=runs):
+                self.env["FAKE_GH_RUNS"] = runs if isinstance(runs, str) else json.dumps(runs)
+                rc, r = self.begin(tok, f"release:v{i}", "--from", str(self.repo), "--verified", head)
+                self.assertEqual(rc, code, r)
+                if word:
+                    self.assertIn(word, r["reason"])
+                    self.assertNotIn("op", r)  # 記録を残さない（通ったら同じ鍵で出し直せる）
+        self.env["FAKE_GH_RUNS"] = json.dumps([run("test", "completed", "failure")])
+        rc, r = self.begin(tok, "push:feat", "--from", str(self.repo), "--verified", head, "--reviewed", "none:試験の外")
+        self.assertEqual(rc, 0, r)  # push は CI を起こす側なので止めない
 
     def test_push_checks_the_push_url_not_the_fetch_url(self):
         """fetch は upstream、push は自分の fork（pushurl）という構成。push の権限は pushurl で見る。"""
