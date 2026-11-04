@@ -762,6 +762,8 @@ class TestReviewedCommit(unittest.TestCase):
         tok = self.claim()
         self.commit("src/fix.py")
         self.review_record(self.head(), audit=True)
+        self.review_record(self.head(), record={"audit": False}, audit=True)  # 片側だけが監査役と言う記録も、審査役に数えない
+        self.review_record(self.head(), record={"audit": True}, audit=False)
         rc, r = self.publish(tok, "push:feat@1", "--reviewed", self.head())
         self.assertEqual(rc, 6, r)
         self.assertIn("審査役の記録が無い", r["reason"])

@@ -2527,6 +2527,7 @@ class TestLaunch(unittest.TestCase):
         last = lambda: json.loads((self.state / "delegations.jsonl").read_text().splitlines()[-1])
         rc, rec = self.run_launch("claude")
         self.assertEqual((rc, rec["audit"], last()["audit"]), (0, False, False), rec)
+        self.assertEqual((Path(rec["out"]) / "prompt.md").read_text(), self.prompt.read_text())  # どの子も依頼文を残す
         rc, rec = self.run_launch("claude", extra=["--audit", "--timeout", "2"], env_extra={"FAKE_HANG": "1"})
         self.assertEqual((rec["status"], rec["audit"], last()["audit"]), ("timeout", True, True), rec)
         self.assertIs(json.loads((Path(rec["out"]) / "record.json").read_text())["audit"], True)
