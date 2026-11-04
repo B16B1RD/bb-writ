@@ -492,7 +492,8 @@ def ci_not_passed(d: Path, frm: Path, repo: str):
     """出す commit の GitHub Actions の実行が、全部終わって通ったか。通っていなければ理由を返す。
     push の直後に Release を出し、macOS の job が時間切れで打ち切られた（cancelled）のを 3 回見ないまま「済んだ」と報告したため。
     守らない範囲: 実行が 1 つも無ければ通す（CI の無いリポジトリ。push の直後で、実行がまだ作られていない数秒も通る）。
-    Actions 以外の CI（外部のサービスの check）は見ない。"""
+    Actions 以外の CI（外部のサービスの check）は見ない。その commit の実行を全部見るので、同じ commit で手動に起こして
+    失敗した実行・別の workflow の失敗も止める（理由と URL を出すので、その実行を再実行して通すか、要らない実行なら利用者に聞く）。"""
     head = commit_of(d, "HEAD")
     rc, o, e = sh(["gh", "run", "list", "-R", repo, "--commit", head, "--limit", "100", "--json", "name,status,conclusion,url"], frm)
     try:

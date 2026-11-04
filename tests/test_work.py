@@ -164,10 +164,13 @@ elif sys.argv[1:3] == ["repo", "view"]:
     if perm == "NONE":
         print("GraphQL: Could not resolve to a Repository", file=sys.stderr); sys.exit(1)
     print("B16B1RD/demo " + perm)
-elif sys.argv[1:3] == ["run", "list"]:  # 出す commit の Actions の実行。FAKE_GH_RUNS は JSON の配列（無ければ実行なし）、FAIL なら gh が失敗する
+elif sys.argv[1:3] == ["run", "list"]:  # Actions の実行。FAKE_GH_RUNS は FAKE_GH_RUNS_COMMIT の commit の実行（JSON の配列）、FAIL なら gh が失敗する
     if os.environ.get("FAKE_GH_RUNS") == "FAIL":
         print("HTTP 502: Bad Gateway", file=sys.stderr); sys.exit(1)
-    print(os.environ.get("FAKE_GH_RUNS", "[]"))
+    a = sys.argv[3:]
+    mine = "--commit" in a and a[a.index("--commit") + 1] == os.environ.get("FAKE_GH_RUNS_COMMIT") and "-R" in a and a[a.index("-R") + 1] == "B16B1RD/demo"
+    other = '[{"name": "old", "status": "completed", "conclusion": "failure", "url": "u"}]'  # 別の commit の失敗した実行
+    print(os.environ.get("FAKE_GH_RUNS", "[]") if mine else other if os.environ.get("FAKE_GH_RUNS_COMMIT") else "[]")  # 指定の無い試験は実行なし
 """
 
 FAKE_SSH = """#!/usr/bin/env python3
@@ -324,6 +327,7 @@ class TestAccountCheck(unittest.TestCase):
         """push の直後に Release を出し、macOS の job が時間切れで打ち切られた（cancelled）のを 3 回見なかった。"""
         tok = self.claim()
         head = subprocess.run(["git", "rev-parse", "HEAD"], env=self.env, cwd=self.wt, check=True, capture_output=True, text=True).stdout.strip()
+        self.env["FAKE_GH_RUNS_COMMIT"] = head
         run = lambda name, status, conclusion: {"name": name, "status": status, "conclusion": conclusion, "url": f"https://github.com/B16B1RD/demo/actions/runs/{name}"}
         cases = [  # (実行の一覧, 終了コード, 理由に含む語)
             ([], 0, None),  # CI の無いリポジトリ
