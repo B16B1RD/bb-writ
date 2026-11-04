@@ -52,7 +52,7 @@ MODELED = {
     "write": "00c93a6aa7ceb1e8",
     "locked": "0a22de1033650c4d",
     "ops": "19f01a5bc3cb84ad",
-    "op_step": "a846ffb2a5174e63",
+    "op_step": "abeb77dceb916408",
     "run_lock": "fdd3edfffe9c0b10",
     "alive": "f1f9574a8ad75670",
     "check_token": "6297f65bcd57f11c",

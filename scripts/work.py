@@ -937,7 +937,7 @@ def op_step(a, r: Path, live, now: float, action: str):
         _, _, audits, unread = reviews_of(head)
         if not audits:
             return ({"ok": False, "reason": f"作業場所の HEAD {head} を対象にした監査役（返す前の判定）の記録が無い。--reviewed none: でも要る"
-                        "（none: は interrogate を省く宣言で、子を省く宣言でない）。launcher（launch.py）に --audit を付け、この commit を"
+                        "（none: は interrogate を省く宣言で、子を省く宣言でない）。launcher（launch.py）に --audit を付け、この commit を "
                         "checkout した未 commit の変更が無い場所を --cwd にして、`playbook-verify` の「返す前の判定」の依頼文で立て、"
                         "status が ok で返った記録が要る。指摘は、作業の記録の指摘の扱いの欄に書いてから出す"
                         + (f"。{unread}" if unread else "")}, 6)

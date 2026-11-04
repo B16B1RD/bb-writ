@@ -91,6 +91,22 @@ READ_ONLY_ENV = {"PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "LANGUAGE",
                  "SSL_CERT_FILE", "SSL_CERT_DIR", "NODE_EXTRA_CA_CERTS", "REQUESTS_CA_BUNDLE"}
 
 
+def outs_of_place(cwd: Path) -> list[Path]:
+    """委任の記録のうち、この場所を --cwd にして立てた子の out（監査役が依頼文と報告を読む）。読めない行は飛ばす（監査役が読めないだけ）。"""
+    rows = []
+    try:
+        with open(state_dir() / "delegations.jsonl", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                try:
+                    rows.append(json.loads(line))
+                except (ValueError, RecursionError):
+                    continue
+    except OSError:
+        return []
+    return [Path(r["out"]) for r in rows if isinstance(r, dict) and r.get("cwd") == str(cwd)
+            and isinstance(r.get("out"), str) and os.path.isabs(r["out"]) and Path(r["out"]).is_dir()]
+
+
 def outside_reads(keep: list[Path]) -> list[str]:
     """ホームの下で、keep のどれにも至らない場所。keep に至る経路の上の兄弟だけを並べ、経路そのものは拒否しない。"""
     keep_set = {p.resolve() for p in keep}
@@ -512,6 +528,8 @@ def command(a, prompt: str, scratch: Path) -> tuple[list[str], dict, str | None]
             home = Path.home()
             keep = [a.cwd, *([git_dir] if git_dir else []), home / ".gitconfig", home / ".config" / "git",
                     *(Path(d) for d in env.get("PATH", "").split(os.pathsep) if d.startswith(str(home)))]
+            if a.audit:  # 監査役は、その場所の作業の記録・その場所で立てた子の out（依頼文と報告）・bb-writ のスキルを読む（ほかの場所の記録は読ませない）
+                keep += [work_record(a.cwd), Path(__file__).resolve().parents[1] / "skills", *outs_of_place(a.cwd)]
             # 子の Bash に渡す環境も最小限にする（読み取り専用の子は git と読むコマンドしか使わない）
             env = {k: v for k, v in env.items() if k in READ_ONLY_ENV or k.upper().endswith("_PROXY") or k.startswith("LC_")}
             env["CLAUDE_CONFIG_DIR"] = str(cfg / "claude-home")

@@ -2703,6 +2703,29 @@ class TestLaunch(unittest.TestCase):
         self.assertIn(str(self.home), sandbox["filesystem"]["denyWrite"])
         self.assertEqual(Path(str(self.args_file) + ".scrub").read_text(), "")  # SCRUB は許可の方針を default に戻すので使わない
 
+    def test_claude_auditor_reads_the_record_and_the_children_of_its_place_only(self):
+        """監査役（返す前の判定）は、作業の記録・その場所で立てた子の依頼文と報告を読む。読み取り専用の子はホームの下の対象の外を
+        読めず、監査役が記録を読めないまま差分だけで判定した。ほかの場所の記録と子の out は読ませない。"""
+        repo, wt = self.worktree()
+        self.state = self.home / "state"  # 記録の置き場がホームの下にあるとき（実物の既定 ~/.local/state/bb-writ）
+        mine, other = self.home / "outs" / "mine", self.home / "outs" / "other"
+        for d in (mine, other):
+            d.mkdir(parents=True)
+        self.state.mkdir()
+        with open(self.state / "delegations.jsonl", "w", encoding="utf-8") as f:
+            f.write(json.dumps({"cwd": str(wt.resolve()), "out": str(mine)}) + "\n" + "{壊れた行\n"
+                    + json.dumps({"cwd": str(self.cwd.resolve()), "out": str(other)}) + "\n")
+        record = Path(self.record_of(wt))
+        record.mkdir(parents=True, exist_ok=True)
+        readable = lambda p, reads: not any(str(p) == r or str(p).startswith(r + "/") for r in reads)
+        for audit in (False, True):
+            with self.subTest(audit=audit):
+                self.run_launch("claude", cwd=wt, extra=["--audit"] if audit else [], env_extra={"BB_WRIT_STATE_DIR": str(self.state)})
+                argv = json.loads(self.args_file.read_text())
+                reads = json.loads(argv[argv.index("--settings") + 1])["sandbox"]["filesystem"]["denyRead"]
+                self.assertEqual((readable(record, reads), readable(mine, reads)), (audit, audit))
+                self.assertFalse(readable(other, reads))
+
     def writable_dir(self, parent: Path):
         """parent の下の使い捨てのディレクトリ。書けない環境（読み取り専用の審査役の sandbox の中など）では、理由を出して試験を飛ばす。"""
         try:
