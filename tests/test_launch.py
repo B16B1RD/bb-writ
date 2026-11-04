@@ -2708,6 +2708,9 @@ class TestLaunch(unittest.TestCase):
         """監査役（返す前の判定）は、作業の記録・その場所で立てた子の依頼文と報告を読む。読み取り専用の子はホームの下の対象の外を
         読めず、監査役が記録を読めないまま差分だけで判定した。ほかの場所の記録と子の out は読ませない。"""
         repo, wt = self.worktree()
+        # macOS の一時ディレクトリは /var → /private/var の symlink の下にある。launcher は読める場所を解いた道筋で決めるので、
+        # 試験のホームも解いた道筋にする（実物のホーム /Users/<名前> は symlink でない）
+        self.home = self.home.resolve()
         self.state = self.home / "state"  # 記録の置き場がホームの下にあるとき（実物の既定 ~/.local/state/bb-writ）
         mine, other = self.home / "outs" / "mine", self.home / "outs" / "other"
         for d in (mine, other):
