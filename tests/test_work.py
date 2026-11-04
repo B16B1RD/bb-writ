@@ -216,6 +216,7 @@ class TestAccountCheck(unittest.TestCase):
         g("worktree", "add", "-q", "-b", "feat", str(self.wt), cwd=self.repo)
         # op run を w() を通さずに起こす試験のため、最初の HEAD を対象にした審査役の記録を置く（w() は渡した commit の分を置く）
         TestAccountCheck.review_record(self, g("rev-parse", "HEAD", cwd=self.wt).stdout.decode().strip())
+        TestAccountCheck.review_record(self, g("rev-parse", "HEAD", cwd=self.wt).stdout.decode().strip(), audit=True)  # 監査役も
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -224,6 +225,8 @@ class TestAccountCheck(unittest.TestCase):
         args = with_risk(self, args)
         if "--reviewed" in args and getattr(self, "launcher_reviews", True):  # 審査役の記録との照合を試験しない試験では、記録を先に置く
             TestAccountCheck.review_record(self, args[args.index("--reviewed") + 1])
+        if "--reviewed" in args and getattr(self, "launcher_audits", True):  # 監査役の記録との照合を試験しない試験では、HEAD の監査役の記録を先に置く
+            TestAccountCheck.review_record(self, "HEAD", audit=True)
         p = subprocess.run([sys.executable, str(WORK), *args], env=self.env, capture_output=True, text=True, errors="replace",
                            cwd=self.tmp.name, timeout=300)  # 相対の out を解く場所を決める。止まる退行は止まらずに落とす
         return p.returncode, json.loads(p.stdout)
@@ -233,7 +236,7 @@ class TestAccountCheck(unittest.TestCase):
         record を渡すと、record.json だけをその上書きで書く。"""
         p = subprocess.run(["git", "rev-parse", "--verify", "--quiet", commit + "^{commit}"], env=self.env, cwd=self.wt,
                            capture_output=True, text=True)
-        if p.returncode or not re.fullmatch(r"[0-9a-f]{7,64}", commit):
+        if p.returncode or not re.fullmatch(r"[0-9a-f]{7,64}|HEAD", commit):
             return
         state = Path(self.env["BB_WRIT_STATE_DIR"])
         out = state / "delegations" / f"r{len(list((state / 'delegations').glob('*'))) if (state / 'delegations').is_dir() else 0}"
@@ -726,6 +729,45 @@ class TestReviewedCommit(unittest.TestCase):
         self.assertEqual(rc, 6)
         self.assertIn("--interrogate", r["reason"])
 
+    def test_every_push_and_pr_needs_an_audit_of_the_head_even_when_no_review_is_declared(self):
+        # 規則の文書の変更を、読者役を別の目的の読み手で、意味の判断を役割の違う agent で代えたまま --reviewed none: で出した。
+        # none: は interrogate を省く宣言で、子を省く宣言でない。監査の中身（何を挙げたか）は見ない
+        self.launcher_audits = False
+        tok = self.claim()
+        self.commit("docs/policy.md")  # setUp が置いた監査役の記録は前の commit のもの
+        before = self.ops_file()
+        for key in ("push:feat@1", "pr:feat"):
+            for reviewed in ("none:文書だけ", self.head()):
+                rc, r = self.publish(tok, key, "--reviewed", reviewed)
+                self.assertEqual(rc, 6, (key, reviewed, r))
+                self.assertIn("監査役", r["reason"], (key, reviewed))
+                self.assertIn("--audit", r["reason"], (key, reviewed))
+        # 読み取り専用で ok の、片側だけが監査役と言う・書く子・ok でない記録は数えない
+        self.review_record(self.head(), record={"audit": False}, audit=True)
+        self.review_record(self.head(), record={"audit": True}, audit=False)
+        self.review_record(self.head(), audit="true", record={"audit": "true"})
+        self.review_record(self.head(), audit=True, write=True)
+        self.review_record(self.head(), audit=True, status="not-run")
+        self.assertEqual(self.publish(tok, "push:feat@1", "--reviewed", "none:文書だけ")[0], 6)
+        self.assertEqual(self.ops_file(), before)
+        self.review_record(self.head(), audit=True)
+        self.assertEqual(self.publish(tok, "push:feat@1", "--reviewed", "none:文書だけ")[0], 0)
+        self.assertEqual(self.publish(tok, "pr:feat", "--reviewed", self.head())[0], 0)
+        recs = {json.loads(x)["key"]: json.loads(x) for x in self.ops_file().decode().splitlines()}
+        self.assertEqual(len(recs["push:feat@1"]["audits"]), 1)  # どの監査役の記録で通したかを残す
+
+    def test_an_audit_does_not_count_as_a_review(self):
+        # 監査役は push ごとに立てる。審査役の代わりにすると、審査を通した commit の宣言が監査だけで通る
+        self.launcher_reviews = self.launcher_audits = False
+        tok = self.claim()
+        self.commit("src/fix.py")
+        self.review_record(self.head(), audit=True)
+        rc, r = self.publish(tok, "push:feat@1", "--reviewed", self.head())
+        self.assertEqual(rc, 6, r)
+        self.assertIn("審査役の記録が無い", r["reason"])
+        self.review_record(self.head())
+        self.assertEqual(self.publish(tok, "push:feat@1", "--reviewed", self.head())[0], 0)
+
     def test_first_push_and_pr_without_a_declaration_are_refused_and_not_recorded(self):
         tok = self.claim()
         before = self.ops_file()
@@ -855,7 +897,7 @@ class TestReviewedCommit(unittest.TestCase):
         self.assertEqual((rc, r["op"]["reviews"]), (0, outs), r)
 
     def test_records_of_another_commit_a_failed_or_unrun_review_or_a_writing_child_do_not_count(self):
-        self.launcher_reviews = False
+        self.launcher_reviews = self.launcher_audits = False
         tok = self.claim()
         before_fix = self.head()
         self.commit("tests/test_new.py")
@@ -895,10 +937,11 @@ class TestReviewedCommit(unittest.TestCase):
         finally:
             delegations.chmod(0o644)
         self.review_record(h)
+        self.review_record(h, audit=True)
         self.assertEqual(self.publish(tok, "push:feat@1", "--reviewed", h)[0], 0)
 
     def test_no_delegation_record_at_all_is_a_refusal_not_a_crash(self):
-        self.launcher_reviews = False
+        self.launcher_reviews = self.launcher_audits = False
         tok = self.claim()
         (Path(self.env["BB_WRIT_STATE_DIR"]) / "delegations.jsonl").unlink()  # setUp が置いた記録も無い（初めての利用）
         rc, r = self.publish(tok, "push:feat@1", "--reviewed", self.head())
@@ -997,6 +1040,16 @@ class TestPremiseAfterRounds(unittest.TestCase):
     def refused(self, key, head, premise=None):
         rc, res = self.publish(key, head, premise)
         return rc == 2 and res.get("note", {}).get("empty") == [PREMISE_LINE[2:-1]]
+
+    def test_audits_do_not_count_as_rounds(self):
+        # 監査役は push ごとに立てるので、周に数えると、文書だけの PR でも 3 回目の push で仕組みの要否を求めてしまう
+        self.start()
+        heads = [self.commit(f"a{i}") for i in range(3)]
+        for h in heads:
+            self.review_record(h, audit=True)
+        self.review_record(heads[1])
+        self.review_record(heads[2])  # 審査は 2 周
+        self.assertEqual(self.publish("push:feat@a", heads[2])[0], 0)
 
     def test_the_third_reviewed_commit_needs_the_premise_and_earlier_ones_do_not(self):
         r = self.start()
@@ -1104,7 +1157,8 @@ class TestPremiseAfterRounds(unittest.TestCase):
 
 
 class TestNoteBeforePublish(unittest.TestCase):
-    """push・pr は、作業の記録の目的・制約・確かめ方と、審査を通した commit なら指摘の扱いが空なら出せない。
+    """push・pr は、作業の記録の目的・制約・確かめ方・指摘の扱いが空なら出せない（指摘の扱いは、監査役をどの push・pr でも立てるので、
+    --reviewed none: でも要る）。
     言い直し・記録・指摘の扱いの一覧を飛ばしたまま、長いセッションで作業が進んだ。照らすのは欄が空かどうかだけで、
     中身の真偽・書いた順・どの周の審査の指摘かは見ない（前の周の扱いが残っていれば通る）。拒否の文言は確かめず、
     拒否の JSON の note.empty（雛形の順の欄の名前）を見る。"""
@@ -1122,7 +1176,7 @@ class TestNoteBeforePublish(unittest.TestCase):
     def publish(self, tok, key, reviewed):
         return self.begin(tok, key, "--from", str(self.repo), "--verified", self.head(), "--reviewed", reviewed)
 
-    def head_note(self, purpose="x", limits="x", check="x", triage=None):
+    def head_note(self, purpose="x", limits="x", check="x", triage="x"):
         return (f"# 作業の記録\n\n- 目的:{purpose}\n- 制約:{limits}\n- できたと分かる確かめ方（述語）:{check}\n"
                 + ("" if triage is None else f"{TRIAGE_LINE}{triage}\n") + "- 決めたことと根拠: y\n")
 
@@ -1147,8 +1201,12 @@ class TestNoteBeforePublish(unittest.TestCase):
                 self.assertEqual(res["note"]["empty"], [name])
                 self.w("release", "--dir", str(self.wt), "--token", tok)
 
-    def test_filled_fields_pass_and_the_triage_is_not_needed_without_a_reviewed_commit(self):
-        tok, r = self.claim(self.head_note())
+    def test_the_triage_is_needed_even_when_no_review_is_declared(self):
+        # 監査役（返す前の判定）はどの push・pr でも立てるので、その指摘の扱いを none: でも書かせる
+        tok, r = self.claim(self.head_note(triage=None))
+        rc, res = self.publish(tok, "push:feat@1", "none:文書だけ")
+        self.assertEqual((rc, res["note"]["empty"]), (2, ["指摘の扱い（審査の指摘ごとに、対応する・記録のみ・退ける と理由を、直す前に）"]))
+        self.note.write_text(self.head_note(), encoding="utf-8")
         self.assertNotIn("empty", self.w("status", "--dir", str(self.wt))[1]["note"])
         self.assertEqual(self.publish(tok, "push:feat@1", "none:文書だけ")[0], 0)
 
@@ -1232,7 +1290,8 @@ class TestNoteBeforePublish(unittest.TestCase):
         tok, _ = self.claim(self.head_note())
         self.note.unlink()  # 記録のファイルが無いのは、欄が無いのと同じ
         rc, res = self.publish(tok, "push:feat@gone", "none:文書だけ")
-        self.assertEqual((rc, res["note"]["empty"]), (2, ["目的", "制約", "できたと分かる確かめ方（述語）"]))
+        self.assertEqual((rc, res["note"]["empty"]), (2, ["目的", "制約", "できたと分かる確かめ方（述語）",
+                                                          "指摘の扱い（審査の指摘ごとに、対応する・記録のみ・退ける と理由を、直す前に）"]))
         # UTF-8 でない字があっても、欄が書いてあれば通す（置き換えて読む）
         self.note.write_bytes(self.head_note().encode("utf-8") + b"\xff\xfe\n")
         self.assertEqual(self.publish(tok, "push:feat@bytes", "none:文書だけ")[0], 0)

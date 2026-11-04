@@ -2,7 +2,7 @@
 """別系統の CLI（Claude Code・Codex・Grok Build）を bb-writ 専用のログインで起動し、報告を回収して検査する（plan-v3 4.2 の launcher）。
 
 使い方:
-  python3 launch.py --host codex|claude|grok --cwd <対象> --prompt-file <依頼> [--model M] [--effort E] [--write | --interrogate] [--out <dir>] [--timeout 秒]
+  python3 launch.py --host codex|claude|grok --cwd <対象> --prompt-file <依頼> [--model M] [--effort E] [--write | --interrogate | --audit] [--out <dir>] [--timeout 秒]
   python3 launch.py --resume <前の起動の out> --prompt-file <続きの依頼> [--out <dir>] [--timeout 秒]
 
 標準出力に 1 行の JSON を出す。status は ok / not-run / invalid-report / timeout / failed / quota / unavailable。ok のときだけ終了コード 0。
@@ -17,6 +17,8 @@ JSON が返ったことを成功にしない: 結論が空、証拠が無い、�
 Linux の外では、プロセスグループを止めるだけ（stopped_after_exit は出ない）。
 --interrogate は、読み取り専用の子が interrogate の審査役だという宣言で、記録の interrogate に残す（work.py が、危険度が中・高の
 push・pr でこれを求める）。依頼文の中身が審査だったかは見ない。
+--audit は、読み取り専用の子が返す前の判定（スキルの要求を守ったかの監査）の子だという宣言で、記録の audit に残す
+（work.py が、すべての push・pr で HEAD を対象にしたこの記録を求める）。依頼文の中身が監査だったかは見ない。
 トークンは画面にもログにも出さない（Claude Code は dotenvx run で子の環境にだけ渡す）。
 """
 from __future__ import annotations  # macOS の Command Line Tools の python3（3.9）でも型注釈で落ちないように
@@ -951,9 +953,10 @@ def main() -> int:
     ap.add_argument("--effort")
     ap.add_argument("--write", action="store_true", help="変更を許す（既定は読み取り専用）")
     ap.add_argument("--interrogate", action="store_true", help="読み取り専用の子が interrogate の審査役だと記録に残す")
+    ap.add_argument("--audit", action="store_true", help="読み取り専用の子が返す前の判定（遵守の監査）の子だと記録に残す")
     ap.add_argument("--out", type=Path)
     ap.add_argument("--timeout", type=int, default=1800)
-    ap.add_argument("--resume", type=Path, help="前の起動の out。同じ session・同じ権限で続きから起動する（host・cwd・model・effort・write・interrogate は記録から取る）")
+    ap.add_argument("--resume", type=Path, help="前の起動の out。同じ session・同じ権限で続きから起動する（host・cwd・model・effort・write・interrogate・audit は記録から取る）")
     a = ap.parse_args()
     a.session, a.grok_home, a.codex_turns, a.prev_head, a.scratch, a.history = None, None, 0, None, None, []
     if a.resume:
@@ -962,8 +965,8 @@ def main() -> int:
             prev = obj(json.loads((a.resume / "record.json").read_text(encoding="utf-8")))
         except (OSError, ValueError) as e:
             ap.error(f"--resume の記録を読めない: {e!r}"[:300])
-        if a.host or a.cwd or a.model or a.effort or a.write or a.interrogate:
-            ap.error("--resume は host・cwd・model・effort・write・interrogate を前の記録から取る（違う権限で続けない）。一緒に渡さない")
+        if a.host or a.cwd or a.model or a.effort or a.write or a.interrogate or a.audit:
+            ap.error("--resume は host・cwd・model・effort・write・interrogate・audit を前の記録から取る（違う権限で続けない）。一緒に渡さない")
         if not (prev.get("host") in ("claude", "codex", "grok") and all(isinstance(prev.get(k), str) and prev[k] for k in ("cwd", "model_requested", "effort_requested", "session"))
                 and isinstance(prev.get("write"), bool)):
             ap.error(f"--resume の記録に、続きから起動するのに要るもの（host・cwd・model・effort・write・session）が無い: {a.resume}")
@@ -988,10 +991,13 @@ def main() -> int:
         a.host, a.cwd, a.model, a.effort, a.write = prev["host"], Path(prev["cwd"]), prev["model_requested"], prev["effort_requested"], prev["write"]
         a.session, a.grok_home = prev["session"], prev.get("grok_home") and Path(prev["grok_home"])
         a.interrogate = prev.get("interrogate") is True
+        a.audit = prev.get("audit") is True
         # 前の起動で照らし終えた turn の数（その turn は、その起動の deny で照らした）と、前の起動が見た commit
         a.codex_turns, a.prev_head, a.scratch = prev.get("codex_turns") or 0, prev.get("head"), prev.get("scratch")
     elif a.write and a.interrogate:
         ap.error("--interrogate は読み取り専用の審査役に付ける。--write と一緒に渡さない")
+    elif a.audit and (a.write or a.interrogate):
+        ap.error("--audit は読み取り専用の監査役に付ける。--write・--interrogate と一緒に渡さない（審査役と監査役は別の子）")
     elif not (a.host and a.cwd):
         ap.error("--host と --cwd が要る（--resume のときは記録から取る）")
     elif a.host in ("claude", "grok"):
@@ -1017,8 +1023,13 @@ def main() -> int:
         out_dir.mkdir(parents=True, exist_ok=False)
     except FileExistsError:
         ap.error(f"--out がもうある（前の起動の記録を上書きしない）: {out_dir}")
+    # 監査役（返す前の判定）が、記録の要約でなく、子に何を頼んだかを読めるように（依頼文の真偽は見ない）
+    try:
+        shutil.copyfile(a.prompt_file, out_dir / "prompt.md")
+    except OSError:  # 読めない依頼文は、子を起こす段で失敗として記録する
+        pass
     rec = {"host": a.host, "cwd": str(a.cwd), "model_requested": a.model, "effort_requested": a.effort,
-           "write": a.write, "interrogate": a.interrogate, "out": str(out_dir), "session_asked": a.session, **({"resumed_from": str(a.resume.resolve())} if a.resume else {}),
+           "write": a.write, "interrogate": a.interrogate, "audit": a.audit, "out": str(out_dir), "session_asked": a.session, **({"resumed_from": str(a.resume.resolve())} if a.resume else {}),
            "load": {"cpus": os.cpu_count(), "start": load_now()}}  # 時間切れが混雑によるかを後で見分ける材料
     blocked = []  # 続きから起動させない理由（権限が分からない、プロセスを止めきれない、Git の管理情報が変わった、照合できない）
     rec["head"] = rec["saw"] = clean_head(a.cwd)  # 子を起こす前に（子が見る作業ツリー）。saw は、後で head を外しても残す

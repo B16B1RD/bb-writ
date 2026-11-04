@@ -2521,6 +2521,39 @@ class TestLaunch(unittest.TestCase):
             rc, again = self.run_launch(None, extra=["--resume", rec["out"]])
             self.assertEqual((again["status"], again["head"]), ("ok", None), again)
 
+    def test_an_auditor_is_recorded_and_its_resume_stays_one(self):
+        """work.py は、すべての push・pr で HEAD を対象にした監査役（返す前の判定）の記録を求める。続きも監査役のまま、
+        ほかの子の続きは監査役に化けない。審査役・書く子とは兼ねない。"""
+        last = lambda: json.loads((self.state / "delegations.jsonl").read_text().splitlines()[-1])
+        rc, rec = self.run_launch("claude")
+        self.assertEqual((rc, rec["audit"], last()["audit"]), (0, False, False), rec)
+        rc, rec = self.run_launch("claude", extra=["--audit", "--timeout", "2"], env_extra={"FAKE_HANG": "1"})
+        self.assertEqual((rec["status"], rec["audit"], last()["audit"]), ("timeout", True, True), rec)
+        self.assertIs(json.loads((Path(rec["out"]) / "record.json").read_text())["audit"], True)
+        # 監査役が、記録の要約でなく、子に何を頼んだかを読めるように、依頼文を out に残す
+        self.assertEqual((Path(rec["out"]) / "prompt.md").read_text(), self.prompt.read_text())
+        rc, again = self.run_launch(None, extra=["--resume", rec["out"]])
+        self.assertEqual((rc, again["status"], again["audit"], last()["audit"]), (0, "ok", True, True), again)
+        rc, plain = self.run_launch("claude", extra=["--timeout", "2"], env_extra={"FAKE_HANG": "1"})
+        old = Path(self.tmp.name) / "old-audit-record"  # 前の版の launcher の記録には欄が無い
+        old.mkdir()
+        (old / "record.json").write_text(json.dumps({k: v for k, v in plain.items() if k != "audit"}))
+        for case, prev in (("launcher が書いた記録", plain["out"]), ("audit の欄の無い前の版の記録", str(old))):
+            with self.subTest(case):
+                p = self.run_launch(None, extra=["--resume", prev], raw=True)
+                self.assertEqual(p.returncode, 0, p.stderr)
+                again = json.loads(p.stdout)
+                self.assertEqual((again["status"], again["audit"], last()["audit"]), ("ok", False, False), again)
+        for extra in (["--host", "claude", "--cwd", str(self.cwd), "--write", "--audit"],
+                      ["--host", "claude", "--cwd", str(self.cwd), "--interrogate", "--audit"],
+                      ["--resume", rec["out"], "--audit"]):
+            with self.subTest(extra=extra):
+                self.args_file.unlink(missing_ok=True)
+                p = self.run_launch(None, extra=extra, raw=True)
+                self.assertEqual(p.returncode, 2, p.stderr)
+                self.assertIn("一緒に渡さない", p.stderr)
+                self.assertFalse(self.args_file.exists())  # 子を起動しない
+
     def test_an_interrogate_reviewer_is_recorded_and_its_resume_stays_one(self):
         """work.py は、危険度が中・高の push・pr で interrogate の審査役の記録を求める（Issue #25）。続きも同じ種類のまま。"""
         last = lambda: json.loads((self.state / "delegations.jsonl").read_text().splitlines()[-1])
