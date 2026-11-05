@@ -88,6 +88,7 @@ import re
 import secrets
 import signal
 import stat
+import unicodedata
 import subprocess
 import sys
 import time
@@ -291,27 +292,40 @@ PREMISE = FIELDS[4]
 PREMISE_ROUNDS = 3  # この数の審査役を立てた後は、直しが仕組みに重なっていないかを確かめさせる（interrogate の 5 が前提を疑う 3 周目と同じ数。Important の有無は見ない）
 
 
-SHORT = {f.split("（")[0]: f for f in FIELDS}  # 括弧を省いた欄の名前 → 雛形の欄の名前
-FIELD_LINE = re.compile(r"[-*+] ([^:：（(]+?)\s*(?:[（(]([^）)]*)[）)])?\s*[:：]")  # 手入力の揺れ（箇条書きの記号・全角と半角の括弧と ":"）も受ける
-HEADING = re.compile(r"#+(\s|$)")  # Markdown の見出し（「#」だけの空の見出しも）。「#123 …」は見出しでない
+def name_key(name: str) -> str:
+    """欄の名前を照らす形。空白・強調の記号・大文字と小文字の違いを無視する。"""
+    return re.sub(r"[\s*_]", "", name).casefold()
+
+
+SHORT = {name_key(f.split("（")[0]): f for f in FIELDS}  # 括弧を省いた欄の名前 → 雛形の欄の名前
+# 欄の行: 行頭の記号（箇条書きの -・*・+・「・」・全角のハイフンなど、番号「1.」、チェックボックス「[ ]」、強調の **、先頭の BOM）と
+# 空白の後に、欄の名前（空白・強調の記号・大文字と小文字は name_key で無視）、括弧（全角でも半角でも）、「:」か「：」。記号を広く
+# 受けるのは、受けない書き方の行が前の空の欄を埋めて見せるため（迷う行は欄の行にして、前の欄の中身を終わらせる側に倒す）。
+# 字下げした行と「#」「|」「>」で始まる行は欄の行でない。
+FIELD_LINE = re.compile(r"(?:(?:[^\w\s#|>]|\d+[.)])\s*)+([^:：（(]+?)\s*(?:[（(]([^）)]*)[）)])?[\s*_]*[:：]")
+HEADING = re.compile(r" {0,3}[#＃]+(\s|$)")  # Markdown の見出し（「#」だけの空の見出し、3 文字までの字下げ、全角の「＃」も）。「#123 …」は見出しでない
+SETEXT = re.compile(r" {0,3}(=+|-+)[ \t]*$")  # 前の行を見出しにする下線（「メモ」の次の行の「===」）
 
 
 def field_of(line: str):
     """行頭の欄の行なら (雛形の欄の名前, 中身の始まり)。雛形の括弧の中（説明）は省いてよい（「- 指摘の扱い: …」も欄）。
-    欄の名前で始まり、括弧の中が雛形と違う行（「- 確かめ方（未定）:」）は、どの欄でもないが欄の行なので (None, …)
-    （前の欄の中身に数えると、空の欄が埋まって見える）。欄の名前で始まらない行（字下げ・「- 目的外のこと:」）は None。"""
+    欄の名前で始まり、括弧の中が雛形と違う行（「- できたと分かる確かめ方（未定）:」）は、どの欄でもないが欄の行なので (None, …)
+    （前の欄の中身に数えると、空の欄が埋まって見える）。欄の名前で始まらない行（字下げ・「- 目的外のこと:」・雛形に無い名前の「- メモ:」）は None で、前の欄の中身に数える
+    （中身を箇条書きで書いた「- F1: 対応する」を欄の終わりにしないため。雛形に無い名前の行で空の欄が埋まって見えることは守らない）。"""
     m = FIELD_LINE.match(line)
-    name = m and SHORT.get(m[1].strip())
+    name = m and SHORT.get(name_key(m[1]))
     if not name:
         return None
-    return (name if m[2] is None or f"（{m[2]}）" == name[len(m[1].strip()):] else None), m.end()
+    paren = name[len(name.split("（")[0]):]  # 雛形の括弧（無ければ空）
+    return (name if m[2] is None or name_key(f"（{m[2]}）") == name_key(paren) else None), m.end()
 
 
 def note_gaps(body: str, publish: bool, rounds: int = 0) -> list:
-    """記録の必須の欄のうち、空か無いものの名前。欄の中身は、名前の行の ":" の後から、次の欄の行か見出しの行の前まで
+    """記録の必須の欄のうち、空か無いものの名前。欄の中身は、名前の行の ":" の後から、次の欄の行か見出し（setext の下線なら、その前の行）の前まで
     （表や字下げした行も中身に数える）。中身の真偽・書いた順・どの審査の指摘かは見ない（忘れて飛ばすのを止める）。
-    同じ欄が 2 回あれば最初だけを見る。push・pr の前（publish）は指摘の扱いの欄も、審査の周が PREMISE_ROUNDS に達した commit では仕組みの要否の欄も。"""
-    lines, gaps = body.splitlines(), []
+    同じ欄が 2 回あれば最初だけを見る。本文は NFC にそろえて見る（NFD で書いた欄の行も欄）。UTF-8 のほかの文字コード（UTF-16 など）で
+    書いた記録は読めず、欄が無いとして拒否する。push・pr の前（publish）は指摘の扱いの欄も、審査の周が PREMISE_ROUNDS に達した commit では仕組みの要否の欄も。"""
+    lines, gaps = unicodedata.normalize("NFC", body).splitlines(), []
     for name in REQUIRED + ([TRIAGE] if publish else []) + ([PREMISE] if publish and rounds >= PREMISE_ROUNDS else []):
         at, end = next(((i, f[1]) for i, l in enumerate(lines) if (f := field_of(l)) and f[0] == name), (None, None))
         if at is None:
@@ -321,6 +335,9 @@ def note_gaps(body: str, publish: bool, rounds: int = 0) -> list:
         for l in lines[at + 1:]:
             if HEADING.match(l) or field_of(l):
                 break
+            if SETEXT.match(l) and len(text) > 1 and text[-1].strip():  # 前の行は見出しの文で、中身でない
+                text.pop()
+                break
             text.append(l)
         if not "".join(text).strip():
             gaps.append(name)
@@ -329,12 +346,11 @@ def note_gaps(body: str, publish: bool, rounds: int = 0) -> list:
 
 def note_body(f: Path) -> str:
     """記録の中身。無ければ空。UTF-8 でない字は置き換えて読む（欄が空かを見るだけなので、止めない。置き換えか無視かは結果を変えない）。
-    先頭の BOM は外す（残すと最初の欄の行が欄に見えない）。
     通常のファイルでない（ディレクトリ・壊れた symlink など）か、読めなければ RecordError。"""
     if not f.is_file() and (f.exists() or f.is_symlink()):
         raise RecordError(f"作業の記録 {f} が通常のファイルでない")
     try:
-        return f.read_text(encoding="utf-8-sig", errors="replace") if f.is_file() else ""
+        return f.read_text(encoding="utf-8", errors="replace") if f.is_file() else ""
     except OSError as e:
         raise RecordError(f"作業の記録 {f} を読めない: {e}") from None
 
@@ -1054,7 +1070,7 @@ MAX_TAIL = 8 * 1024  # 記録に残す出力の上限（バイト）。改行の
 
 
 def tail(f: Path, lines: int = 20, budget: int = MAX_TAIL) -> str:
-    """出力の末尾の lines 行を、記録（ops.jsonl に書く JSON の値）にして budget バイトまで返す。
+    """出力の末尾の lines 行を、記録（ops.jsonl に書く JSON の値）にして budget バイトまで返す（budget は先頭を省いた印の 24 バイトより大きいこと）。
     出力の末尾の ASCII の空白（改行を含む。全角の空白などは残す）は記録しない。最後の意味のある文字の前の 64 KiB だけを読む
     （そこを探して後ろから 64 KiB ずつ遡る。16 MiB 遡っても無ければ空を返す）。行の中の空白は変えない。"""
     if not f.is_file():
