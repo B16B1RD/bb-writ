@@ -21,7 +21,7 @@ work.py の field_line に書いた（生成した揺れで見つかった穴を
 TestFixedExamples は、過去の修正の反例と境界の例と、守らないと決めた今の振る舞いの例を Hypothesis なしで回す（手元に Hypothesis が無くても、退行を落とす）。
 TestInputShapes は Hypothesis（tests/requirements.txt）が無ければ飛ばす。CI は入れて、毎回同じ入力（derandomize）で回す。
 広く回すときは BB_WRIT_PBT_EXAMPLES に例の数を渡す（乱数も毎回変わる）。
-Hypothesis の置き場（定数のキャッシュの .hypothesis/）は、リポジトリに残さないよう、実行の終わりに消える一時ディレクトリに向ける。
+Hypothesis の置き場（.hypothesis/。定数のキャッシュ・文字の表など）は、リポジトリに残さないよう、実行の終わりに消える一時ディレクトリに向ける。
 """
 
 import importlib.util
@@ -216,7 +216,9 @@ class TestInputShapes(unittest.TestCase):
             # の定数のキャッシュなどを、置き場に書く。task cleanup は無視されたファイルも残っていれば片付けを拒むので、
             # リポジトリの写しで work.py を sys.modules に入れてから性質の試験を回し、次の 3 つを見る。
             # 置き場に work.py の定数のキャッシュが書かれた（この場面を作れている。キャッシュの 1 行目は「# file: <読み込んだファイルのパス>」）、
-            # 写しに何も増えない、子が終わると置き場が消える（置き場の片付けはプロセスの終わりなので、子は unittest.main の後に数える）
+            # 写しに何も増えない、子が終わると置き場が消える（置き場の片付けはプロセスの終わりなので、子は unittest.main の後に数える）。
+            # 守らないもの（どれも落ちる側に倒れ、誤って通らない）: 子の時間切れと、子が終わり際に stdout へ書いたときは、
+            # 診断の分かりにくい ERROR になる。キャッシュの 1 行目を「/」区切りで見るので、区切りが「\」の OS では落ちる（CI は Linux と macOS）
             root = Path(__file__).resolve().parents[1]
             with tempfile.TemporaryDirectory() as d:
                 copy = Path(d) / "repo"
