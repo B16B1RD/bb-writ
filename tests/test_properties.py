@@ -56,16 +56,16 @@ if given is not None:
     HEADING = st.sampled_from(["## メモ", "# 別の節", "#", "###"])
 
     def written_name(draw, name):
-        """欄の名前の書き方。雛形どおり・括弧を省く・半角の括弧・名前の後の空白。"""
+        """欄の名前の書き方。雛形どおり・括弧を省く・半角の括弧・名前の後や括弧の前の空白。"""
         short, paren = name.split("（")[0], name[len(name.split("（")[0]):]
-        forms = [name, short, short + " "] + ([short + paren.replace("（", "(").replace("）", ")")] if paren else [])
+        forms = [name, short, short + " "] + ([short + paren.replace("（", "(").replace("）", ")"), short + " " + paren] if paren else [])
         return draw(st.sampled_from(forms))
 
     @st.composite
     def notes(draw):
         """(記録の本文, 空と判定されるべき欄の集合)。"""
         lines, empty, written = (["# 作業の記録", ""] if draw(st.booleans()) else []), set(), set()  # 見出しの無い記録は、BOM が最初の欄の行に付く
-        for name in w.FIELDS:
+        for name in draw(st.permutations(w.FIELDS)):  # 欄を書く順は見ない（名前に空白のある欄が必須の欄の後に来ることもある）
             state = draw(st.sampled_from(["filled", "empty", "absent"])) if name in REQ else "filled"
             if state == "absent":
                 empty.add(name)
