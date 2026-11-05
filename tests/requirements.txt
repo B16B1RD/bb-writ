@@ -1,0 +1,5 @@
+# 試験だけの依存（scripts/ は標準ライブラリだけ）。tests/test_properties.py が使い、無ければそのファイルだけ飛ばす。
+# 版は Python ごとに、その版が入れられる最後のもの（3.9 は 6.141.1 まで、3.10 は 6.168.5 まで）。
+hypothesis==6.141.1; python_version < "3.10"
+hypothesis==6.168.5; python_version >= "3.10" and python_version < "3.11"
+hypothesis==6.170.14; python_version >= "3.11"

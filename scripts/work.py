@@ -291,30 +291,35 @@ PREMISE = FIELDS[4]
 PREMISE_ROUNDS = 3  # この数の審査役を立てた後は、直しが仕組みに重なっていないかを確かめさせる（interrogate の 5 が前提を疑う 3 周目と同じ数。Important の有無は見ない）
 
 
-def field_line(name: str):
-    """欄の名前の行。雛形の括弧の中（説明）は省いてよい（「- 指摘の扱い: …」も欄）。別の文言の括弧は受けない。"""
-    short, paren = name.split("（")[0], name[len(name.split("（")[0]):]
-    return re.compile(rf"- {re.escape(short)}(?:{re.escape(paren)})?:" if paren else rf"- {re.escape(short)}:")
-
-
-FIELD_LINES = [field_line(f) for f in FIELDS]
+SHORT = {f.split("（")[0]: f for f in FIELDS}  # 括弧を省いた欄の名前 → 雛形の欄の名前
+FIELD_LINE = re.compile(r"[-*+] ([^:：（(]+?)\s*(?:[（(]([^）)]*)[）)])?\s*[:：]")  # 手入力の揺れ（箇条書きの記号・全角と半角の括弧と ":"）も受ける
 HEADING = re.compile(r"#+(\s|$)")  # Markdown の見出し（「#」だけの空の見出しも）。「#123 …」は見出しでない
 
 
+def field_of(line: str):
+    """行頭の欄の行なら (雛形の欄の名前, 中身の始まり)。雛形の括弧の中（説明）は省いてよい（「- 指摘の扱い: …」も欄）。
+    欄の名前で始まり、括弧の中が雛形と違う行（「- 確かめ方（未定）:」）は、どの欄でもないが欄の行なので (None, …)
+    （前の欄の中身に数えると、空の欄が埋まって見える）。欄の名前で始まらない行（字下げ・「- 目的外のこと:」）は None。"""
+    m = FIELD_LINE.match(line)
+    name = m and SHORT.get(m[1].strip())
+    if not name:
+        return None
+    return (name if m[2] is None or f"（{m[2]}）" == name[len(m[1].strip()):] else None), m.end()
+
+
 def note_gaps(body: str, publish: bool, rounds: int = 0) -> list:
-    """記録の必須の欄のうち、空か無いものの名前。欄の中身は、名前の行の ":" の後から、次の雛形の欄か見出しの行の前まで
+    """記録の必須の欄のうち、空か無いものの名前。欄の中身は、名前の行の ":" の後から、次の欄の行か見出しの行の前まで
     （表や字下げした行も中身に数える）。中身の真偽・書いた順・どの審査の指摘かは見ない（忘れて飛ばすのを止める）。
     同じ欄が 2 回あれば最初だけを見る。push・pr の前（publish）は指摘の扱いの欄も、審査の周が PREMISE_ROUNDS に達した commit では仕組みの要否の欄も。"""
     lines, gaps = body.splitlines(), []
     for name in REQUIRED + ([TRIAGE] if publish else []) + ([PREMISE] if publish and rounds >= PREMISE_ROUNDS else []):
-        pat = field_line(name)
-        at, m = next(((i, m) for i, l in enumerate(lines) if (m := pat.match(l))), (None, None))
+        at, end = next(((i, f[1]) for i, l in enumerate(lines) if (f := field_of(l)) and f[0] == name), (None, None))
         if at is None:
             gaps.append(name)
             continue
-        text = [lines[at][m.end():]]
+        text = [lines[at][end:]]
         for l in lines[at + 1:]:
-            if HEADING.match(l) or any(p.match(l) for p in FIELD_LINES):
+            if HEADING.match(l) or field_of(l):
                 break
             text.append(l)
         if not "".join(text).strip():
@@ -324,11 +329,12 @@ def note_gaps(body: str, publish: bool, rounds: int = 0) -> list:
 
 def note_body(f: Path) -> str:
     """記録の中身。無ければ空。UTF-8 でない字は置き換えて読む（欄が空かを見るだけなので、止めない。置き換えか無視かは結果を変えない）。
+    先頭の BOM は外す（残すと最初の欄の行が欄に見えない）。
     通常のファイルでない（ディレクトリ・壊れた symlink など）か、読めなければ RecordError。"""
     if not f.is_file() and (f.exists() or f.is_symlink()):
         raise RecordError(f"作業の記録 {f} が通常のファイルでない")
     try:
-        return f.read_text(encoding="utf-8", errors="replace") if f.is_file() else ""
+        return f.read_text(encoding="utf-8-sig", errors="replace") if f.is_file() else ""
     except OSError as e:
         raise RecordError(f"作業の記録 {f} を読めない: {e}") from None
 
