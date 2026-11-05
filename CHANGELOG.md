@@ -4,6 +4,15 @@ bb-writ を使う人に向けて、版ごとに変わったことを書く。新
 
 commit ごとの細かい変更は、各版の末尾の「commit の一覧」（前の版のタグとの比較）で見られる。
 
+## 0.22.1 - 2026-11-06
+
+### 変えたこと
+
+- bb-writ を直す人向け: `tests/test_properties.py` を Hypothesis ありで回しても、リポジトリに `.hypothesis/` を残さない。全試験では、ほかの試験の読み込みで `scripts/work.py` が `sys.modules` に入り、Hypothesis がその定数のキャッシュを作業ディレクトリの `.hypothesis/` に書いていた（`database=None` でも書く）。そのため `work.py task cleanup` が、作業場所の片付けを拒んでいた。Hypothesis の置き場は、実行の終わりに消える一時ディレクトリに向ける。試験を強制終了したときは、一時ディレクトリが残る（リポジトリには残らない）。
+- bb-writ を直す人向け: CI の job の上限を 35 分に上げた。macOS の job が 11.4 分かかり、上限 30 分が最も遅い OS の実測の 3 倍を割った。
+
+commit の一覧：https://github.com/B16B1RD/bb-writ/compare/bb-writ--v0.22.0...bb-writ--v0.22.1
+
 ## 0.22.0 - 2026-11-05
 
 ### 足したこと
