@@ -242,6 +242,7 @@
 ### そのほか
 
 - `delegate`: 子への委任と、別の CLI を専用ログインで起動する呼び出し方。`interrogate`・`playbook-eval`・`reflect` が別の CLI を使うときの土台です。準備は README の [任意機能の準備](../README.md#任意機能の準備) にあります。
+- `create-formal-verification-skill`・`create-property-test-skill`: 入口が、テストと審査が届きにくい約束を確かめる検査を対象のリポジトリに作るときに使います。前者は順序・途中の kill・再開の約束を、決めた範囲の全部の順序でたどります。後者は入力の形・文字コード・大きさの約束を、揺れの一覧を組み合わせた多数の入力で確かめます（Property-Based Testing）。「形式検証して」「性質の試験を足して」と入口に頼みます。
 - `verify-parallel`: bb-writ 自体を開発する人が、作業場所の分離と統合を実際の CLI で確かめるためのスキルです。利用者は使いません。
 
 ## 10. 通し例：1 つの仕事を最後まで

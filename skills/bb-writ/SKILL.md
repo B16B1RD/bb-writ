@@ -65,7 +65,7 @@ description: コード・文書・スキル・解析に関する技術的な依�
 | README・手引き・SKILL.md・知識ベースの追加や訂正 | `playbook-docs-skill` |
 | PR のレビュー指摘に対応する | 直す指摘の中身で `playbook-bug`・`playbook-feature`・`playbook-docs-skill`。どれを直すかは、先に「その場で」の審査やレビューの指摘で決める |
 
-順序・途中の死・再開・記録をまたぐ状態の約束は `create-formal-verification-skill`、続きの引き受けは `playbook-session-pickup`、止めるのは `playbook-pause-safely`、変種の比較は `playbook-eval`、委任は `delegate`、振り返りは `reflect`、繰り返す誤りは `correct`。合う手引きが無ければ、目的と確かめ方から手順を組んで返答に書く。
+順序・途中の死・再開・記録をまたぐ状態の約束は `create-formal-verification-skill`、入力の形・文字コード・大きさの約束は `create-property-test-skill`、続きの引き受けは `playbook-session-pickup`、止めるのは `playbook-pause-safely`、変種の比較は `playbook-eval`、委任は `delegate`、振り返りは `reflect`、繰り返す誤りは `correct`。合う手引きが無ければ、目的と確かめ方から手順を組んで返答に書く。
 
 ## 原則の索引
 
