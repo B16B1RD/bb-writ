@@ -40,9 +40,10 @@ try:
 except ImportError:  # 試験だけの依存。無ければ TestInputShapes だけ飛ばす（理由は unittest の出力に出る）
     given = None
 else:
-    # Hypothesis は、database=None でも局所のモジュールの定数のキャッシュを作業ディレクトリの .hypothesis/ に書く。
-    # リポジトリに残すと task cleanup が片付けを拒むので、実行の終わりに消える一時ディレクトリに向ける
-    # （HYPOTHESIS_STORAGE_DIRECTORY は子のプロセスにも渡るので使わない）
+    # Hypothesis は、database=None でも置き場（局所のモジュールの定数のキャッシュ、文字の表など）を、import した時点の
+    # 作業ディレクトリの .hypothesis/ に作る。リポジトリに残すと task cleanup が片付けを拒むので、置き場の全部を、
+    # 実行の終わりに消える一時ディレクトリに向ける（HYPOTHESIS_STORAGE_DIRECTORY は子のプロセスにも渡るので使わない。
+    # 強制終了したときは一時ディレクトリが残る）
     HYPOTHESIS_HOME = tempfile.TemporaryDirectory(prefix="bb-writ-hypothesis-")
     set_hypothesis_home_dir(HYPOTHESIS_HOME.name)
 
@@ -211,9 +212,10 @@ class TestInputShapes(unittest.TestCase):
             pass
     else:
         def test_running_the_properties_leaves_nothing_in_the_repository(self):
-            # Hypothesis は、sys.modules にある局所のモジュール（全試験では他の試験が読み込んだ scripts/work.py）の定数を、
-            # 作業ディレクトリの .hypothesis/ に書く。task cleanup は無視されたファイルも残っていれば片付けを拒むので、
-            # リポジトリの写しで work.py を sys.modules に入れてから性質の試験を回し、写しに何も増えないことを見る
+            # Hypothesis は、sys.modules にある局所のモジュール（全試験では test_launch が読み込む launch.py から入る scripts/work.py）
+            # の定数のキャッシュなどを、置き場に書く。task cleanup は無視されたファイルも残っていれば片付けを拒むので、
+            # リポジトリの写しで work.py を sys.modules に入れてから性質の試験を回し、次の 3 つを見る。
+            # 置き場にキャッシュが書かれた（この場面を作れている）、写しに何も増えない、子が終わると置き場が消える
             root = Path(__file__).resolve().parents[1]
             with tempfile.TemporaryDirectory() as d:
                 copy = Path(d) / "repo"
@@ -221,13 +223,18 @@ class TestInputShapes(unittest.TestCase):
                     (copy / rel).parent.mkdir(parents=True, exist_ok=True)
                     (copy / rel).write_bytes((root / rel).read_bytes())
                 before = {p.relative_to(copy) for p in copy.rglob("*")}
-                code = ("import sys, unittest; sys.dont_write_bytecode = True; sys.path.insert(0, 'scripts'); import work; "
+                code = ("import sys, unittest; sys.dont_write_bytecode = True; sys.path[:0] = ['.', 'scripts']; import work; "
                         "r = unittest.main(module='tests.test_properties', argv=['x', 'TestInputShapes.test_the_gate_names_exactly_the_fields_left_empty'], exit=False).result; "
+                        "from hypothesis.configuration import storage_directory; c = storage_directory('constants', intent_to_write=False); "
+                        "c = getattr(c, 'path', c); print(c.parent); print(len(list(c.glob('*'))) if c.is_dir() else 0); "
                         "sys.exit(0 if r.wasSuccessful() and r.testsRun == 1 else 1)")
-                env = {k: v for k, v in os.environ.items() if k != "HYPOTHESIS_STORAGE_DIRECTORY"}
+                env = {k: v for k, v in os.environ.items() if k not in ("HYPOTHESIS_STORAGE_DIRECTORY", "BB_WRIT_PBT_EXAMPLES")}
                 run = subprocess.run([sys.executable, "-B", "-c", code], cwd=copy, env=env, capture_output=True, text=True, timeout=300)
                 self.assertEqual(run.returncode, 0, run.stderr[-2000:])
+                home, cached = run.stdout.split("\n")[-3:-1]
+                self.assertGreater(int(cached), 0, f"置き場 {home} に定数のキャッシュが書かれず、確かめる場面を作れていない")
                 self.assertEqual(sorted(str(p) for p in {p.relative_to(copy) for p in copy.rglob("*")} - before), [])
+                self.assertFalse(Path(home).exists(), f"子が終わっても置き場 {home} が残った")
 
         @SETTINGS
         @given(notes())
