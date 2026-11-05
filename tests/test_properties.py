@@ -26,6 +26,7 @@ TestInputShapes は Hypothesis（tests/requirements.txt）が無ければ飛ば�
 import importlib.util
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -201,6 +202,25 @@ class TestInputShapes(unittest.TestCase):
         def test_input_shapes(self):  # 飛ばしたことを出力に残す（クラスが空だと何も出ない）
             pass
     else:
+        def test_running_the_properties_leaves_nothing_in_the_repository(self):
+            # Hypothesis は、sys.modules にある局所のモジュール（全試験では他の試験が読み込んだ scripts/work.py）の定数を、
+            # 作業ディレクトリの .hypothesis/ に書く。task cleanup は無視されたファイルも残っていれば片付けを拒むので、
+            # リポジトリの写しで work.py を sys.modules に入れてから性質の試験を回し、写しに何も増えないことを見る
+            root = Path(__file__).resolve().parents[1]
+            with tempfile.TemporaryDirectory() as d:
+                copy = Path(d) / "repo"
+                for rel in ("scripts/work.py", "tests/__init__.py", "tests/process_limit.py", "tests/test_properties.py"):
+                    (copy / rel).parent.mkdir(parents=True, exist_ok=True)
+                    (copy / rel).write_bytes((root / rel).read_bytes())
+                before = {p.relative_to(copy) for p in copy.rglob("*")}
+                code = ("import sys, unittest; sys.dont_write_bytecode = True; sys.path.insert(0, 'scripts'); import work; "
+                        "r = unittest.main(module='tests.test_properties', argv=['x', 'TestInputShapes.test_the_gate_names_exactly_the_fields_left_empty'], exit=False).result; "
+                        "sys.exit(0 if r.wasSuccessful() and r.testsRun == 1 else 1)")
+                env = {k: v for k, v in os.environ.items() if k != "HYPOTHESIS_STORAGE_DIRECTORY"}
+                run = subprocess.run([sys.executable, "-B", "-c", code], cwd=copy, env=env, capture_output=True, text=True, timeout=300)
+                self.assertEqual(run.returncode, 0, run.stderr[-2000:])
+                self.assertEqual(sorted(str(p) for p in {p.relative_to(copy) for p in copy.rglob("*")} - before), [])
+
         @SETTINGS
         @given(notes())
         def test_the_gate_names_exactly_the_fields_left_empty(self, case):
