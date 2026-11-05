@@ -328,11 +328,12 @@ def note_gaps(body: str, publish: bool, rounds: int = 0) -> list:
 
 def note_body(f: Path) -> str:
     """記録の中身。無ければ空。UTF-8 でない字は置き換えて読む（欄が空かを見るだけなので、止めない。置き換えか無視かは結果を変えない）。
+    先頭の BOM は外す（残すと、見出しの無い記録の最初の欄の行が欄に見えず、書いた欄が無いと言われる）。
     通常のファイルでない（ディレクトリ・壊れた symlink など）か、読めなければ RecordError。"""
     if not f.is_file() and (f.exists() or f.is_symlink()):
         raise RecordError(f"作業の記録 {f} が通常のファイルでない")
     try:
-        return f.read_text(encoding="utf-8", errors="replace") if f.is_file() else ""
+        return f.read_text(encoding="utf-8-sig", errors="replace") if f.is_file() else ""
     except OSError as e:
         raise RecordError(f"作業の記録 {f} を読めない: {e}") from None
 
