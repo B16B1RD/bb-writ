@@ -215,7 +215,7 @@ class TestInputShapes(unittest.TestCase):
             # Hypothesis は、sys.modules にある局所のモジュール（全試験では test_launch が読み込む launch.py から入る scripts/work.py）
             # の定数のキャッシュなどを、置き場に書く。task cleanup は無視されたファイルも残っていれば片付けを拒むので、
             # リポジトリの写しで work.py を sys.modules に入れてから性質の試験を回し、次の 3 つを見る。
-            # 置き場に work.py の定数のキャッシュが書かれた（この場面を作れている。キャッシュの 1 行目は「# file: <元のパス>」）、
+            # 置き場に work.py の定数のキャッシュが書かれた（この場面を作れている。キャッシュの 1 行目は「# file: <読み込んだファイルのパス>」）、
             # 写しに何も増えない、子が終わると置き場が消える（置き場の片付けはプロセスの終わりなので、子は unittest.main の後に数える）
             root = Path(__file__).resolve().parents[1]
             with tempfile.TemporaryDirectory() as d:
@@ -232,9 +232,10 @@ class TestInputShapes(unittest.TestCase):
                         "sys.exit(0 if r.wasSuccessful() and r.testsRun == 1 else 1)")
                 env = {k: v for k, v in os.environ.items() if k not in ("HYPOTHESIS_STORAGE_DIRECTORY", "BB_WRIT_PBT_EXAMPLES")}
                 run = subprocess.run([sys.executable, "-B", "-c", code], cwd=copy, env=env, capture_output=True, text=True, timeout=300)
-                self.assertEqual(run.returncode, 0, "子の性質の試験が落ちたか、1 件だけ回らなかった:\n" + run.stdout[-500:] + run.stderr[-2000:])
+                self.assertEqual(run.returncode, 0, "子の性質の試験が落ちたか、回ったのが 1 件でなかった:\n" + run.stdout[-500:] + run.stderr[-2000:])
                 home, cached = run.stdout.split("\n")[-3:-1]
-                self.assertGreater(int(cached), 0, f"置き場 {home} に scripts/work.py の定数のキャッシュが書かれず、確かめる場面を作れていない")
+                self.assertGreater(int(cached), 0, f"置き場 {home} に scripts/work.py の定数のキャッシュが書かれず、確かめる場面を作れていない"
+                                   "（一時ディレクトリのパスに test・tests の段があると、Hypothesis はそこのモジュールを局所と見なさない）")
                 self.assertEqual(sorted(str(p) for p in {p.relative_to(copy) for p in copy.rglob("*")} - before), [], "リポジトリの写しに増えたもの")
                 self.assertFalse(Path(home).exists(), f"子が終わっても置き場 {home} が残った")
 
