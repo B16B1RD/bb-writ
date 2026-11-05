@@ -215,7 +215,8 @@ class TestInputShapes(unittest.TestCase):
             # Hypothesis は、sys.modules にある局所のモジュール（全試験では test_launch が読み込む launch.py から入る scripts/work.py）
             # の定数のキャッシュなどを、置き場に書く。task cleanup は無視されたファイルも残っていれば片付けを拒むので、
             # リポジトリの写しで work.py を sys.modules に入れてから性質の試験を回し、次の 3 つを見る。
-            # 置き場にキャッシュが書かれた（この場面を作れている）、写しに何も増えない、子が終わると置き場が消える
+            # 置き場に work.py の定数のキャッシュが書かれた（この場面を作れている。キャッシュの 1 行目は「# file: <元のパス>」）、
+            # 写しに何も増えない、子が終わると置き場が消える（置き場の片付けはプロセスの終わりなので、子は unittest.main の後に数える）
             root = Path(__file__).resolve().parents[1]
             with tempfile.TemporaryDirectory() as d:
                 copy = Path(d) / "repo"
@@ -226,14 +227,15 @@ class TestInputShapes(unittest.TestCase):
                 code = ("import sys, unittest; sys.dont_write_bytecode = True; sys.path[:0] = ['.', 'scripts']; import work; "
                         "r = unittest.main(module='tests.test_properties', argv=['x', 'TestInputShapes.test_the_gate_names_exactly_the_fields_left_empty'], exit=False).result; "
                         "from hypothesis.configuration import storage_directory; c = storage_directory('constants', intent_to_write=False); "
-                        "c = getattr(c, 'path', c); print(c.parent); print(len(list(c.glob('*'))) if c.is_dir() else 0); "
+                        "c = getattr(c, 'path', c); print(c.parent); "
+                        "print(sum(f.read_text(encoding='utf-8').startswith('# file: ') and f.read_text(encoding='utf-8').split(chr(10))[0].endswith('scripts/work.py') for f in c.glob('*')) if c.is_dir() else 0); "
                         "sys.exit(0 if r.wasSuccessful() and r.testsRun == 1 else 1)")
                 env = {k: v for k, v in os.environ.items() if k not in ("HYPOTHESIS_STORAGE_DIRECTORY", "BB_WRIT_PBT_EXAMPLES")}
                 run = subprocess.run([sys.executable, "-B", "-c", code], cwd=copy, env=env, capture_output=True, text=True, timeout=300)
-                self.assertEqual(run.returncode, 0, run.stderr[-2000:])
+                self.assertEqual(run.returncode, 0, "子の性質の試験が落ちたか、1 件だけ回らなかった:\n" + run.stdout[-500:] + run.stderr[-2000:])
                 home, cached = run.stdout.split("\n")[-3:-1]
-                self.assertGreater(int(cached), 0, f"置き場 {home} に定数のキャッシュが書かれず、確かめる場面を作れていない")
-                self.assertEqual(sorted(str(p) for p in {p.relative_to(copy) for p in copy.rglob("*")} - before), [])
+                self.assertGreater(int(cached), 0, f"置き場 {home} に scripts/work.py の定数のキャッシュが書かれず、確かめる場面を作れていない")
+                self.assertEqual(sorted(str(p) for p in {p.relative_to(copy) for p in copy.rglob("*")} - before), [], "リポジトリの写しに増えたもの")
                 self.assertFalse(Path(home).exists(), f"子が終わっても置き場 {home} が残った")
 
         @SETTINGS
