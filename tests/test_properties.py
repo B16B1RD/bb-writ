@@ -1,4 +1,5 @@
-"""入力の形の約束を、揺れを組み合わせた多数の入力で確かめる（Property-Based Testing。scripts/work.py の note_gaps・tail）。
+"""入力の形の約束を、揺れを組み合わせた多数の入力で確かめる（Property-Based Testing。scripts/work.py の note_body・note_gaps・tail）。
+確認した work.py: 5b091ff の欄の判定と tail に、note_body の utf-8-sig（f41aa6f）を足したもの。
 
 順序・途中の kill・再開の約束は test_oprun_model.py が全部の順序でたどる。ここは、そのモデルの外に残る入力の形・文字コード・大きさを見る。
 揺れは次の出所から並べる。
@@ -15,9 +16,9 @@
 行 14 行は多くが欄の中の項目（「- 指摘の扱い（審査 1 回目）: …」。中身に数えるのが正しい）だったので、守らない範囲として
 work.py の field_line に書いた（生成した揺れで見つかった穴を、揺れを読み分ける解析器で塞ぐと、審査の周ごとに新しい穴が出た）。
 記号だけの行（区切り線「---」、空の「-」、HTML のコメント）は中身に数える（その欄は空と見なさない）。手元の記録の欄の中身に 0 行で、
-この今の振る舞いを固定の例で固定する。UTF-8 でない記録、budget が印の 24 バイト以下の tail も見ない。
+この今の振る舞いを「---」と HTML のコメントの固定の例で固定する（空の「-」だけの行の例は無い）。UTF-8 でない記録、budget が印の 24 バイト以下の tail も見ない。
 
-TestFixedExamples は、過去の修正の反例と境界の例を Hypothesis なしで回す（手元に Hypothesis が無くても、退行を落とす）。
+TestFixedExamples は、過去の修正の反例と境界の例と、守らないと決めた今の振る舞いの例を Hypothesis なしで回す（手元に Hypothesis が無くても、退行を落とす）。
 TestInputShapes は Hypothesis（tests/requirements.txt）が無ければ飛ばす。CI は入れて、毎回同じ入力（derandomize）で回す。
 広く回すときは BB_WRIT_PBT_EXAMPLES に例の数を渡す（乱数も毎回変わる）。
 """
