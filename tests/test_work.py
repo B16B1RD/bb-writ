@@ -1261,7 +1261,7 @@ class TestNoteBeforePublish(unittest.TestCase):
         tok, _ = self.claim(self.head_note().replace("- 決めたことと根拠", short + "- 決めたことと根拠"))
         self.assertEqual(self.publish(tok, "push:feat@short-ok", self.head())[0], 0)
         self.w("release", "--dir", str(self.wt), "--token", tok)
-        # 別の文言の括弧の欄・「#」だけの空の見出しの下・2 回目の同じ欄は、空の欄を埋めない（同じ欄は最初だけを見る）
+        # 別の文言の括弧の欄（その欄の前に書いたもの）・「#」だけの空の見出しの下・2 回目の同じ欄は、空の欄を埋めない（同じ欄は最初だけを見る）
         tok, _ = self.claim(self.head_note(check="", triage="x").replace("# 作業の記録\n", "# 作業の記録\n- できたと分かる確かめ方（未定）: x\n"))
         rc, res = self.publish(tok, "push:feat@paren", self.head())
         self.assertEqual((rc, res["note"]["empty"]), (2, ["できたと分かる確かめ方（述語）"]))
