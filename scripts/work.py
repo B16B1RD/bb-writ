@@ -88,7 +88,6 @@ import re
 import secrets
 import signal
 import stat
-import unicodedata
 import subprocess
 import sys
 import time
@@ -292,51 +291,33 @@ PREMISE = FIELDS[4]
 PREMISE_ROUNDS = 3  # この数の審査役を立てた後は、直しが仕組みに重なっていないかを確かめさせる（interrogate の 5 が前提を疑う 3 周目と同じ数。Important の有無は見ない）
 
 
-def name_key(name: str) -> str:
-    """欄の名前を照らす形。空白・強調の記号・大文字と小文字の違いを無視する。"""
-    return re.sub(r"[\s*_]", "", name).casefold()
+def field_line(name: str):
+    """欄の名前の行。雛形の括弧の中（説明）は省いてよい（「- 指摘の扱い: …」も欄）。別の文言の括弧は受けない。
+    雛形の行を書き換えた欄の行（「* 目的:」「- 目的：」など）は欄と見なさず、前の欄の中身に数える。そのため、書き換えた行の前の
+    空の欄が埋まって見えることは守らない（雛形は note が書き、書き手は「:」の後に書き足す。2026-11 に手元の作業の記録 227 件の
+    欄らしい行 2,079 行を数えて、書き換えた欄の行は 0 行だった。揺れを読み分ける解析器を足すと、審査の周ごとに新しい穴が出た）。"""
+    short, paren = name.split("（")[0], name[len(name.split("（")[0]):]
+    return re.compile(rf"- {re.escape(short)}(?:{re.escape(paren)})?:" if paren else rf"- {re.escape(short)}:")
 
 
-SHORT = {name_key(f.split("（")[0]): f for f in FIELDS}  # 括弧を省いた欄の名前 → 雛形の欄の名前
-# 欄の行: 行頭の記号（箇条書きの -・*・+・「・」・全角のハイフンなど、番号「1.」、チェックボックス「[ ]」、強調の **、先頭の BOM）と
-# 空白の後に、欄の名前（空白・強調の記号・大文字と小文字は name_key で無視）、括弧（全角でも半角でも）、「:」か「：」。記号を広く
-# 受けるのは、受けない書き方の行が前の空の欄を埋めて見せるため（迷う行は欄の行にして、前の欄の中身を終わらせる側に倒す）。
-# 字下げした行と「#」「|」「>」で始まる行は欄の行でない。
-FIELD_LINE = re.compile(r"(?:(?:[^\w\s#|>]|\d+[.)])\s*)+([^:：（(]+?)\s*(?:[（(]([^）)]*)[）)])?[\s*_]*[:：]")
-HEADING = re.compile(r" {0,3}[#＃]+(\s|$)")  # Markdown の見出し（「#」だけの空の見出し、3 文字までの字下げ、全角の「＃」も）。「#123 …」は見出しでない
-SETEXT = re.compile(r" {0,3}(=+|-+)[ \t]*$")  # 前の行を見出しにする下線（「メモ」の次の行の「===」）
-
-
-def field_of(line: str):
-    """行頭の欄の行なら (雛形の欄の名前, 中身の始まり)。雛形の括弧の中（説明）は省いてよい（「- 指摘の扱い: …」も欄）。
-    欄の名前で始まり、括弧の中が雛形と違う行（「- できたと分かる確かめ方（未定）:」）は、どの欄でもないが欄の行なので (None, …)
-    （前の欄の中身に数えると、空の欄が埋まって見える）。欄の名前で始まらない行（字下げ・「- 目的外のこと:」・雛形に無い名前の「- メモ:」）は None で、前の欄の中身に数える
-    （中身を箇条書きで書いた「- F1: 対応する」を欄の終わりにしないため。雛形に無い名前の行で空の欄が埋まって見えることは守らない）。"""
-    m = FIELD_LINE.match(line)
-    name = m and SHORT.get(name_key(m[1]))
-    if not name:
-        return None
-    paren = name[len(name.split("（")[0]):]  # 雛形の括弧（無ければ空）
-    return (name if m[2] is None or name_key(f"（{m[2]}）") == name_key(paren) else None), m.end()
+FIELD_LINES = [field_line(f) for f in FIELDS]
+HEADING = re.compile(r"#+(\s|$)")  # Markdown の見出し（「#」だけの空の見出しも）。「#123 …」は見出しでない
 
 
 def note_gaps(body: str, publish: bool, rounds: int = 0) -> list:
-    """記録の必須の欄のうち、空か無いものの名前。欄の中身は、名前の行の ":" の後から、次の欄の行か見出し（setext の下線なら、その前の行）の前まで
+    """記録の必須の欄のうち、空か無いものの名前。欄の中身は、名前の行の ":" の後から、次の雛形の欄か見出しの行の前まで
     （表や字下げした行も中身に数える）。中身の真偽・書いた順・どの審査の指摘かは見ない（忘れて飛ばすのを止める）。
-    同じ欄が 2 回あれば最初だけを見る。本文は NFC にそろえて見る（NFD で書いた欄の行も欄）。UTF-8 のほかの文字コード（UTF-16 など）で
-    書いた記録は読めず、欄が無いとして拒否する。push・pr の前（publish）は指摘の扱いの欄も、審査の周が PREMISE_ROUNDS に達した commit では仕組みの要否の欄も。"""
-    lines, gaps = unicodedata.normalize("NFC", body).splitlines(), []
+    同じ欄が 2 回あれば最初だけを見る。push・pr の前（publish）は指摘の扱いの欄も、審査の周が PREMISE_ROUNDS に達した commit では仕組みの要否の欄も。"""
+    lines, gaps = body.splitlines(), []
     for name in REQUIRED + ([TRIAGE] if publish else []) + ([PREMISE] if publish and rounds >= PREMISE_ROUNDS else []):
-        at, end = next(((i, f[1]) for i, l in enumerate(lines) if (f := field_of(l)) and f[0] == name), (None, None))
+        pat = field_line(name)
+        at, m = next(((i, m) for i, l in enumerate(lines) if (m := pat.match(l))), (None, None))
         if at is None:
             gaps.append(name)
             continue
-        text = [lines[at][end:]]
+        text = [lines[at][m.end():]]
         for l in lines[at + 1:]:
-            if HEADING.match(l) or field_of(l):
-                break
-            if SETEXT.match(l) and len(text) > 1 and text[-1].strip():  # 前の行は見出しの文で、中身でない
-                text.pop()
+            if HEADING.match(l) or any(p.match(l) for p in FIELD_LINES):
                 break
             text.append(l)
         if not "".join(text).strip():
