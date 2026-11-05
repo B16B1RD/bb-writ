@@ -21,6 +21,7 @@ work.py の field_line に書いた（生成した揺れで見つかった穴を
 TestFixedExamples は、過去の修正の反例と境界の例と、守らないと決めた今の振る舞いの例を Hypothesis なしで回す（手元に Hypothesis が無くても、退行を落とす）。
 TestInputShapes は Hypothesis（tests/requirements.txt）が無ければ飛ばす。CI は入れて、毎回同じ入力（derandomize）で回す。
 広く回すときは BB_WRIT_PBT_EXAMPLES に例の数を渡す（乱数も毎回変わる）。
+Hypothesis の置き場（定数のキャッシュの .hypothesis/）は、リポジトリに残さないよう、実行の終わりに消える一時ディレクトリに向ける。
 """
 
 import importlib.util
@@ -35,8 +36,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parent)); import process_limit  
 
 try:
     from hypothesis import given, settings, strategies as st, HealthCheck
+    from hypothesis.configuration import set_hypothesis_home_dir
 except ImportError:  # 試験だけの依存。無ければ TestInputShapes だけ飛ばす（理由は unittest の出力に出る）
     given = None
+else:
+    # Hypothesis は、database=None でも局所のモジュールの定数のキャッシュを作業ディレクトリの .hypothesis/ に書く。
+    # リポジトリに残すと task cleanup が片付けを拒むので、実行の終わりに消える一時ディレクトリに向ける
+    # （HYPOTHESIS_STORAGE_DIRECTORY は子のプロセスにも渡るので使わない）
+    HYPOTHESIS_HOME = tempfile.TemporaryDirectory(prefix="bb-writ-hypothesis-")
+    set_hypothesis_home_dir(HYPOTHESIS_HOME.name)
 
 WORK = Path(__file__).resolve().parents[1] / "scripts" / "work.py"
 
