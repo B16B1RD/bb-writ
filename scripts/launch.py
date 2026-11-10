@@ -21,8 +21,10 @@ push・pr でこれを求める）。依頼文の中身が審査だったかは�
 （work.py が、すべての push・pr で HEAD を対象にしたこの記録を求める）。依頼文の中身が監査だったかは見ない。
 起動のたびに、自分が状態の置き場に作った一時の置き場（読み取り専用の Codex の子の一時ディレクトリ delegations/<名前>/tmp と、
 Grok の子の起動ごとの home grok-homes/<名前>）のうち、もう続きから起動されないものを消す（sweep_leftovers）。消すのは、最後に使われてから
-LEFTOVER_DAYS 日を過ぎたものと、task cleanup で消えたタスクの作業場所を見ていた子のもの。消した場所は記録の swept に並べる。
-消した置き場を指す記録からは --resume できない（理由を出して拒む）。報告と記録（out の中、delegations.jsonl）は消さない。
+LEFTOVER_DAYS 日を過ぎたものと、それを指す記録の対象が、どれも、もう無いタスクの作業場所（task cleanup などで消えたもの）であるもの。
+消した場所は記録の swept に並べる。launcher は、使っている置き場の排他（置き場の隣の <名前>.lock）を終わりまで持ち、片付けは、
+その排他を取れた置き場だけを消す。片付けの対象の置き場を指す記録からは、まだ消えていなくても --resume できない（理由を出して拒む）。
+報告と記録（out の中、delegations.jsonl）は消さない。
 トークンは画面にもログにも出さない（Claude Code は dotenvx run で子の環境にだけ渡す）。
 """
 from __future__ import annotations  # macOS の Command Line Tools の python3（3.9）でも型注釈で落ちないように
@@ -30,6 +32,7 @@ import argparse
 import fcntl
 import hashlib
 import json
+import math
 import os
 import re
 import shutil
@@ -367,6 +370,10 @@ def grok_home(login: Path, extends: str, read_write: list[Path]) -> tuple[Path, 
     base = state_dir() / "grok-homes"
     base.mkdir(parents=True, exist_ok=True)
     home = Path(tempfile.mkdtemp(prefix=time.strftime("%Y%m%d-%H%M%S-"), dir=base))
+    held, _ = hold_place(home)  # 作った直後から、片付けに消させない（launcher が終わるまで持つ）
+    if held is None:
+        raise OSError(f"起動ごとの home {home} の排他を取れない")
+    PLACES_HELD.append(held)
     (home / "auth.json").symlink_to(login / "auth.json")
     rw = [str(p.resolve()) for p in read_write]
     (home / "sandbox.toml").write_text(f'[profiles.bbwrit]\nextends = "{extends}"\nread_write = {json.dumps(rw)}\n', encoding="utf-8")
@@ -955,37 +962,45 @@ def hold_session(session: str):
 
 
 LEFTOVER_DAYS = 7  # 子の一時の置き場を、最後に使われてから残す日数（過ぎたら launcher が消し、その記録からは続きから起動できない）
+PLACES_HELD = []  # この launcher が使っている一時の置き場の排他。終わりまで持つ（launcher が終わると、KILL でも OS が放す）
 
 
-def sweep_lock(block: bool):
-    """片付けと、続きの起動の照合（session の排他を取り、一時の置き場があるかを見る）を直列にする排他。取れなければ None。
-    直列にしないと、照合を通った続きの足元で置き場が消える。launcher が終わると OS が放す。"""
-    d = state_dir() / "resuming"
-    d.mkdir(parents=True, exist_ok=True)
-    f = open(d / ".sweep", "w")
+def hold_place(p: Path):
+    """一時の置き場 p を使う間（片付けは、消す間）の排他。置き場の隣の <名前>.lock の flock。(排他, None) か (None, 理由) を返す。
+    理由は "gone"（置き場が無い・symlink・ディレクトリでない）か "busy"（ほかの launcher が使っているか、片付けている）。
+    使っている置き場を、記録（delegations.jsonl）の値に頼らずに片付けから守る（記録は手で書き換えられ、session の排他は記録の
+    session の値からしか引けない）。排他のファイルは、子の書ける場所の外（置き場の親）に置き、置き場と一緒に片付けが消す。"""
+    def real() -> bool:
+        return not p.is_symlink() and p.is_dir()
+    lock = str(p) + ".lock"
+    if not real():
+        return None, "gone"
     try:
-        fcntl.flock(f, fcntl.LOCK_EX | (0 if block else fcntl.LOCK_NB))
+        f = open(lock, "a")
     except OSError:
-        f.close()
-        return None
-    return f
-
-
-def session_idle(session: str) -> bool:
-    """この session の続きが動いていないか。排他のファイルは作らない（無ければ、続きが起動されたことが無い）。sweep_lock の下で呼ぶ。"""
-    try:
-        f = open(state_dir() / "resuming" / hashlib.sha256(session.encode()).hexdigest()[:32], "r+")
-    except FileNotFoundError:
-        return True
-    except OSError:
-        return False  # 読めない排他は、動いているものとして扱う（消さない側に倒す）
+        return None, "gone"
     try:
         fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        return True
     except OSError:
-        return False
-    finally:
         f.close()
+        return None, "busy"
+    if not real():  # 排他を取るまでの間に片付けられた。いま作った排他のファイルなら残さない
+        try:
+            if os.path.samestat(os.stat(lock), os.fstat(f.fileno())):
+                os.unlink(lock)
+        except OSError:
+            pass
+        f.close()
+        return None, "gone"
+    return f, None
+
+
+def usable_time(t, now: float) -> bool:
+    """片付けの期限に使える時刻か。数でない値・無限大・未来（1 日より先）の時刻は使わない（偽の行 1 つで置き場を残し続けられないように）。"""
+    try:
+        return isinstance(t, (int, float)) and not isinstance(t, bool) and math.isfinite(t) and t <= now + 86400
+    except OverflowError:  # float にできない大きさの整数
+        return False
 
 
 def stamp_time(name: str):
@@ -1011,22 +1026,35 @@ def task_worktree_gone(cwd, base: Path) -> bool:
 
 
 def remove_tree(p: Path):
-    """置き場を中身ごと消す。symlink はたどらない（rmtree は symlink の行き先に入らず、p が symlink なら拒む）。
-    子が書けないディレクトリ（中身が 0444・0555 の写し）を残していても消せるよう、失敗した実のディレクトリだけ書けるようにしてやり直す。"""
-    def retry(func, path, _):
-        for d in (os.path.dirname(path), path):
-            if os.path.isdir(d) and not os.path.islink(d):
-                os.chmod(d, stat.S_IMODE(os.lstat(d).st_mode) | 0o700)
-        func(path)
-    shutil.rmtree(p, **({"onexc": retry} if sys.version_info >= (3, 12) else {"onerror": retry}))
+    """置き場（実のディレクトリ）を中身ごと消す。symlink はたどらず、名前だけ消す。子は、書けない・読めないディレクトリ（0555・0000）や
+    深い木を残せるので、rmtree を使わず（版によって再帰し、失敗時の呼び直しの形も違う）、実のディレクトリを自分で読み書きできるように
+    しながら、深いほうから消す。道筋が長すぎる木（PATH_MAX を超える）は消せず、OSError になる。"""
+    todo = [(str(p), False)]
+    while todo:
+        d, emptied = todo.pop()
+        if emptied:
+            os.rmdir(d)
+            continue
+        os.chmod(d, stat.S_IMODE(os.lstat(d).st_mode) | 0o700)
+        todo.append((d, True))
+        with os.scandir(d) as entries:
+            for e in entries:
+                if e.is_dir(follow_symlinks=False):
+                    todo.append((e.path, False))
+                else:
+                    os.unlink(e.path)
 
 
-def leftover_places(base: Path) -> list:
-    """launcher が状態の置き場に作る一時の置き場のうち、いまあるもの: 読み取り専用の Codex の子の一時ディレクトリ
-    （delegations/<名前>/tmp）と、Grok の子の起動ごとの home（grok-homes/<名前>）。実のディレクトリだけ（symlink は数えない）。
+def leftover_places(base: Path) -> tuple:
+    """launcher が状態の置き場に作る一時の置き場のうち、いまあるものと、並べられなかった理由。置き場は、読み取り専用の Codex の子の
+    一時ディレクトリ（delegations/<名前>/tmp）と、Grok の子の起動ごとの home（grok-homes/<名前>）。実のディレクトリだけを数え、
+    delegations・grok-homes そのもの、<名前>、tmp のどれかが symlink なら、その先は数えない（行き先は状態の置き場の外かもしれない）。
     記録に書かれた場所でなく、ここで並べたものだけを片付けの対象にする（記録が状態の置き場の外を指していても、そこは消さない）。"""
-    found = []
+    found, problems = [], []
     for parent, inside in ((base / "delegations", "tmp"), (base / "grok-homes", None)):
+        if parent.is_symlink():
+            problems.append(f"{parent} が symlink なので、その下の一時の置き場は片付けない")
+            continue
         try:
             entries = sorted(os.scandir(parent), key=lambda e: e.name)
         except OSError:
@@ -1037,19 +1065,11 @@ def leftover_places(base: Path) -> list:
             p = Path(e.path) / inside if inside else Path(e.path)
             if not p.is_symlink() and p.is_dir():
                 found.append((p, e.name))
-    return found
+    return found, problems
 
 
-def sweep_leftovers(now: float) -> dict:
-    """もう続きから起動されない一時の置き場（leftover_places）を消し、{"removed": [消した場所], "problems": [消せなかった理由]} を返す。
-    消すのは次のどちらか: それを指す記録の対象が、どれも、もう無いタスクの作業場所（task_worktree_gone）。
-    または、最後に使われてから LEFTOVER_DAYS 日を過ぎた（記録の状態で分けない。時間切れの子も、ok の子も同じ）。
-    最後に使われた時刻は、それを指す記録の at（起動の終わり）と、置き場の名前の日時のうち新しいほう。どちらも無ければ、期限では消さない。
-    記録の無い置き場は、動いている最初の起動（記録は終わりに書く）か、記録を書く前に止まった起動のもので、名前の日時だけで決める
-    （LEFTOVER_DAYS 日を超えて動き続ける起動の置き場は守らない）。続きが動いている session の置き場は消さない。
-    報告と記録（out の record.json・report.md、delegations.jsonl）は消さない。作っていない置き場（resuming/ の排他の空のファイルなど）にも触れない。"""
-    out = {"removed": [], "problems": []}
-    base = state_dir()
+def leftover_uses(base: Path) -> dict:
+    """一時の置き場（解いた道筋）ごとの、それを指す委任の記録（delegations.jsonl）の行。"""
     uses = {}
     try:
         with open(base / "delegations.jsonl", encoding="utf-8", errors="replace") as f:
@@ -1058,46 +1078,72 @@ def sweep_leftovers(now: float) -> dict:
                     r = json.loads(line)
                 except (ValueError, RecursionError):
                     continue
-                if isinstance(r, dict):
-                    for k in ("scratch", "grok_home"):
-                        if isinstance(r.get(k), str) and r[k]:
+                if not isinstance(r, dict):
+                    continue
+                for k in ("scratch", "grok_home"):
+                    if isinstance(r.get(k), str) and r[k]:
+                        try:
                             uses.setdefault(os.path.realpath(r[k]), []).append(r)
+                        except ValueError:  # 道筋にできない文字列
+                            pass
     except OSError:
-        pass  # まだ委任していない・読めない: 記録の無い置き場として、名前の日時だけで決める
+        pass  # まだ委任していない・読めない: どの置き場も、記録の無いものとして名前の日時だけで決める
+    return uses
 
-    def due(p: Path, name: str) -> tuple:
-        rs = uses.get(os.path.realpath(p), [])
-        times = [r["at"] for r in rs if isinstance(r.get("at"), (int, float)) and not isinstance(r.get("at"), bool)]
-        named = stamp_time(name)
-        last = max(times + ([named] if named is not None else []), default=None)
-        gone = bool(rs) and all(task_worktree_gone(r.get("cwd"), base) for r in rs)
-        return gone or (last is not None and now - last > LEFTOVER_DAYS * 86400), rs
 
-    todo = [(p, name) for p, name in leftover_places(base) if due(p, name)[0]]
-    if not todo:
-        return out  # 何も作らずに返る（排他のファイルも）
-    gate = sweep_lock(block=False)
-    if gate is None:  # ほかの launcher が片付けている
-        return out
-    try:
-        for p, name in todo:
-            yes, rs = due(p, name)
-            sessions = {s for r in rs for s in (r.get("session"), r.get("session_asked")) if isinstance(s, str) and s}
-            if not yes or p.is_symlink() or not p.is_dir() or not all(session_idle(s) for s in sessions):
+def leftover_due(p: Path, name: str, uses: dict, base: Path, now: float) -> bool:
+    """置き場 p が、もう続きから起動されないと言えるか（sweep_leftovers の説明の 2 つの条件）。"""
+    rs = uses.get(os.path.realpath(p), [])
+    times = [t for t in [*(r.get("at") for r in rs), stamp_time(name)] if usable_time(t, now)]
+    gone = bool(rs) and all(task_worktree_gone(r.get("cwd"), base) for r in rs)
+    return gone or (bool(times) and now - max(times) > LEFTOVER_DAYS * 86400)
+
+
+def place_due(p: Path) -> bool:
+    """一時の置き場 p（delegations/<名前>/tmp か grok-homes/<名前>）が、いま片付けの対象か。続きの起動は、対象の置き場からは続けない
+    （まだ消えていなくても。片付けが途中で止まって中身が半分になった置き場は、必ず対象なので、そこからも続かない）。"""
+    base = state_dir()
+    return leftover_due(p, p.parent.name if p.name == "tmp" else p.name, leftover_uses(base), base, time.time())
+
+
+def sweep_leftovers(now: float, out: dict) -> None:
+    """もう続きから起動されない一時の置き場（leftover_places）を消し、消した場所を out["removed"] に、消せなかった理由を out["problems"] に足す
+    （途中で想定外の例外が出ても、そこまでに消した場所が out に残る）。
+    消すのは次のどちらか: それを指す記録の対象が、どれも、もう無いタスクの作業場所（task_worktree_gone）。
+    または、最後に使われてから LEFTOVER_DAYS 日を過ぎた（記録の状態で分けない。時間切れの子も、ok の子も同じ）。
+    最後に使われた時刻は、それを指す記録の at（起動の終わり）と、置き場の名前の日時のうち、使える時刻（usable_time）の最も新しいもの。
+    使える時刻が 1 つも無い置き場（名前にも記録にも日時が無い・未来の日時だけ）は、期限では消さない。
+    記録の無い置き場は、動いている最初の起動（記録は終わりに書く）か、記録を書く前に止まった起動のもので、名前の日時だけで決める。
+    launcher が使っている置き場（最初の起動も、続きも）は消さない: 使う launcher が置き場の排他（hold_place）を終わりまで持ち、
+    片付けは、その排他を取れた置き場だけを消す。排他を取った後に、記録を読み直して決め直す（取るまでの間に、続きの起動が終わって
+    記録を足したかもしれない）。記録の行を書き換えると、使っていない置き場を期限より早く消させることはできる（その記録からの続きが
+    拒否されるだけで、報告と記録は残る）。使っている置き場を消させることはできない。
+    報告と記録（out の record.json・report.md、delegations.jsonl）は消さない。作っていない置き場（resuming/ の排他の空のファイルなど）にも触れない。"""
+    base = state_dir()
+    places, problems = leftover_places(base)
+    out["problems"] += problems
+    uses = leftover_uses(base)
+    for p, name in places:
+        if not leftover_due(p, name, uses, base, now):
+            continue
+        lock, _ = hold_place(p)
+        if lock is None:  # ほかの launcher が使っている・片付けた
+            continue
+        try:
+            if not leftover_due(p, name, leftover_uses(base), base, now):
                 continue
-            try:
-                remove_tree(p)
-                out["removed"].append(str(p))
-                if p.name == "tmp" and p.parent.parent.name == "delegations":
-                    try:
-                        p.parent.rmdir()  # tmp だけだった置き場（--out をほかに渡した起動）は、空になったら外す。報告のある置き場は空でないので残る
-                    except OSError:
-                        pass
-            except OSError as e:
-                out["problems"].append(f"一時の置き場を片付けられない: {p}: {e!r}"[:300])
-    finally:
-        gate.close()
-    return out
+            remove_tree(p)
+            os.unlink(str(p) + ".lock")
+            out["removed"].append(str(p))
+            if p.name == "tmp":
+                try:
+                    p.parent.rmdir()  # tmp だけだった置き場（--out をほかに渡した起動）は、空になったら外す。報告のある置き場は空でないので残る
+                except OSError:
+                    pass
+        except (OSError, RecursionError) as e:  # 1 つの置き場の失敗で、ほかの置き場の片付けを止めない
+            out["problems"].append(f"一時の置き場を片付けられない: {p}: {e!r}"[:300])
+        finally:
+            lock.close()
 
 
 def launcher_error(out_dir: Path) -> str:
@@ -1142,8 +1188,6 @@ def main() -> int:
             ap.error(f"前の起動の記録は続きから起動できない（{(prev.get('problems') or ['理由が記録に無い'])[0]}"[:300]
                      + "）。権限の照合に当たった・止めきれないプロセスがあった・Git の管理情報が変わったなどの記録は、確かめてから最初から起動し直す: "
                      + str(a.resume))
-        # 片付け（sweep_leftovers）と直列にする。排他を取って一時の置き場があるのを見るまでの間に、置き場を消させない
-        gate = sweep_lock(block=True)
         a.lock = hold_session(prev["session"])
         if a.lock is None:
             ap.error(f"同じ session の続きが動いている。終わるのを待つ: {a.resume}")
@@ -1154,16 +1198,27 @@ def main() -> int:
         left = sorted({f for r in [prev, *a.history] for k in ("cwd_residue", "home_residue") for f in r.get(k) or [] if os.path.lexists(f)})
         if left:  # 片付けずに続けると、続きの比較で「前からあるもの」になり、ok で見えなくなる
             ap.error(f"これまでの起動の空の残りを確かめて片付けてから続ける: {left[:20]}"[:600])
-        swept_note = (f"launcher は、最後に使われてから {LEFTOVER_DAYS} 日を過ぎた子の一時の置き場と、片付けたタスクの作業場所を見ていた子の一時の置き場を消す。"
+        swept_note = (f"launcher は、最後に使われてから {LEFTOVER_DAYS} 日を過ぎた子の一時の置き場と、もう無いタスクの作業場所だけを見ていた子の一時の置き場を消す。"
                       "続きからでなく、新しく起動する")
-        if prev["host"] == "grok" and not (isinstance(prev.get("grok_home"), str) and Path(prev["grok_home"]).is_dir()):
-            ap.error(f"--resume の記録の grok_home が無い（Grok は前の home の session の記録から続ける）。{swept_note}: {a.resume}")
+        busy_note = "を、ほかの launcher が使っているか片付けている。少し待って、もう一度起動する"
+        # 続きが使う一時の置き場の排他を、ここで取って終わりまで持つ（片付けは、排他を取れた置き場だけを消す）。無ければ続けない:
+        # 無いまま続けると、空の一時ディレクトリを作り直して起動し、子は前の起動で写した対象を失ったまま続きを始める
+        if prev["host"] == "grok":
+            held, why = hold_place(Path(prev["grok_home"])) if isinstance(prev.get("grok_home"), str) else (None, "gone")
+            if held is None:
+                ap.error(f"--resume の記録の grok_home {busy_note if why == 'busy' else 'が無い（Grok は前の home の session の記録から続ける）。' + swept_note}: {a.resume}")
+            PLACES_HELD.append(held)
+            if place_due(Path(prev["grok_home"])):
+                ap.error(f"--resume の記録の grok_home は、もう続きから起動できない。{swept_note}: {a.resume}")
         if prev["host"] == "codex" and not prev["write"] and not isinstance(prev.get("scratch"), str):
             ap.error(f"--resume の記録に、読み取り専用の Codex の一時ディレクトリ（scratch）が無い: {a.resume}")
-        if prev["host"] == "codex" and not prev["write"] and (Path(prev["scratch"]).is_symlink() or not Path(prev["scratch"]).is_dir()):
-            # 無いまま続けると、空の一時ディレクトリを作り直して起動し、子は前の起動で写した対象を失ったまま続きを始める
-            ap.error(f"--resume の記録の一時ディレクトリ（scratch）が無い。{swept_note}: {a.resume}")
-        gate.close()
+        if prev["host"] == "codex" and not prev["write"]:
+            held, why = hold_place(Path(prev["scratch"]))
+            if held is None:
+                ap.error(f"--resume の記録の一時ディレクトリ（scratch）{busy_note if why == 'busy' else 'が無い。' + swept_note}: {a.resume}")
+            PLACES_HELD.append(held)
+            if place_due(Path(prev["scratch"])):
+                ap.error(f"--resume の記録の一時ディレクトリ（scratch）は、もう続きから起動できない。{swept_note}: {a.resume}")
         a.host, a.cwd, a.model, a.effort, a.write = prev["host"], Path(prev["cwd"]), prev["model_requested"], prev["effort_requested"], prev["write"]
         a.session, a.grok_home = prev["session"], prev.get("grok_home") and Path(prev["grok_home"])
         a.interrogate = prev.get("interrogate") is True
@@ -1194,10 +1249,11 @@ def main() -> int:
         unresolved = Path(os.path.abspath(scratch_at))
         if any(d.name == ".git" or all((d / n).exists() for n in ("HEAD", "objects", "refs")) for d in [*scratch.parents, *unresolved.parents]):
             ap.error(f"bb-writ の状態の置き場 {state_dir()} が Git の管理ディレクトリの中にある。読み取り専用の Codex は一時ディレクトリに書けるので、外に置く")
+    swept = {"removed": [], "problems": []}
     try:  # 自分の作った一時の置き場のうち、もう続きから起動されないものを消す。消せなくても子の起動は止めない（記録の swept に出す）
-        swept = sweep_leftovers(time.time())
-    except Exception as e:  # 片付けの想定外の失敗も同じ
-        swept = {"removed": [], "problems": [f"一時の置き場の片付けが失敗した: {e!r}"[:300]]}
+        sweep_leftovers(time.time(), swept)
+    except Exception as e:  # 片付けの想定外の失敗も同じ（そこまでに消した場所は swept に残る）
+        swept["problems"].append(f"一時の置き場の片付けが失敗した: {e!r}"[:300])
     out_dir = (a.out or state_dir() / "delegations" / stamp).resolve()
     try:
         out_dir.mkdir(parents=True, exist_ok=False)
@@ -1229,6 +1285,12 @@ def main() -> int:
                                     scratch)
         if a.host == "codex" and not a.write and not why:
             rec["scratch"] = str(scratch)
+            if not a.resume:  # 続きは、照合のときに取ってある。最初の起動は、作った直後のここで取る（記録を書く前から、片付けに消させない）
+                held, _ = hold_place(scratch)
+                if held is None:
+                    why = f"一時ディレクトリ {scratch} の排他を取れない"
+                else:
+                    PLACES_HELD.append(held)
         if a.host == "grok" and not why:
             rec["grok_home"] = env["GROK_HOME"]  # 再開（grok -r）はこの home で
         if not why:
