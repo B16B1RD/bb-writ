@@ -2,7 +2,6 @@
 
 import errno
 import json
-import shlex
 import shutil
 import signal
 import os
@@ -1182,7 +1181,6 @@ class TestLaunch(unittest.TestCase):
         self.assertEqual((rc, rec["status"]), (0, "ok"), rec)
         argv = json.loads(self.args_file.read_text())
         rules = fs_rules(argv)
-        import re
         h = str(home.resolve())
         self.assertEqual(rules.get(":tmpdir"), "write")
         for denied in (f"{h}/.ssh", f"{h}/.config/gh", f"{h}/elsewhere/aws", f"{h}/.codex/auth.json", f"{h}/.codex/sessions"):
@@ -1194,7 +1192,6 @@ class TestLaunch(unittest.TestCase):
                 self.assertNotIn(absent, rules)
         self.assertEqual(rules.get(str(self.cfg.resolve())), "deny")  # 専用ログイン（試験ではホームの外）
         # 普段の専用ログインは ~/.config の下。拒む場所の下の場所は書かない
-        import shutil
         nested = home / ".config" / "bb-writ"
         shutil.copytree(self.cfg, nested)
         rc, rec = self.run_launch("codex", path=f"{real.parent}:/usr/bin:/bin", env_extra={"BB_WRIT_CONFIG_DIR": str(nested)})
@@ -1237,7 +1234,6 @@ class TestLaunch(unittest.TestCase):
             with self.subTest(place=place):
                 self.assertEqual(rules.get(str((home / place).resolve())), "deny", (place, rules))
         # 名前に BMP の外の文字がある置き場も、TOML として壊さない
-        odd = home / ".config" / "gh" / ".."  / "x😀"
         (home / ".config" / "x😀").mkdir()
         rc, rec = self.run_launch("codex")
         argv = json.loads(self.args_file.read_text())
@@ -1249,7 +1245,6 @@ class TestLaunch(unittest.TestCase):
         self.assertEqual(rules.get(f"{h}/.config/git/credentials"), "deny")
         self.assertNotIn(f"{h}/.config/git", rules)
         # ~/.config/git が外（dotfiles）を指す symlink でも、その節点を拒まない（git は ~/.config/git/config の道筋で読む）
-        import shutil
         shutil.rmtree(home / ".config" / "git")
         (home / "dotfiles" / "git").mkdir(parents=True)
         (home / ".config" / "git").symlink_to(home / "dotfiles" / "git")
@@ -2021,7 +2016,6 @@ class TestLaunch(unittest.TestCase):
     def test_only_the_empty_ssh_dir_claude_code_makes_in_home_is_not_residue(self):
         # 2.1.309 の sandbox は、子を起こすたびにホームへ空の .claude/ssh を作り、残りとして委任が毎回 failed になった。
         # 数えないのは空のディレクトリの ~/.claude/ssh だけで、どのホストでも、~/.claude が前からあってもなくても同じ。消さない
-        import shutil
         home = Path(self.tmp.name) / "home"
         h = lambda *p: str(home.joinpath(*p))
         cases = (  # (ホスト, 偽の CLI のモード, 引数, 前から .claude があるか, status, 残り, 後の ~/.claude/ssh)

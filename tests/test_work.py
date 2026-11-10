@@ -119,7 +119,7 @@ class TestWork(unittest.TestCase):
 
 
 FAKE_GH = """#!/usr/bin/env python3
-# 置き場所でアカウントを切り替える gh のラッパーと同じく、カレントディレクトリでアカウントを選ぶ偽物。FAKE_GH_MAP は「接頭辞=login:権限」を ; で並べ、最後の項目は既定。
+# 置き場所でアカウントを切り替える gh のラッパーと同じく、カレントディレクトリでアカウントを選ぶ偽物。FAKE_GH_MAP は「接頭辞=login:権限」を ; で並べ、当たった項目のうち最後のものを使う。どれにも当たらなければ FAKE_GH_DEFAULT。
 import os, re, subprocess, sys
 cwd = os.getcwd()
 login, perm = os.environ["FAKE_GH_DEFAULT"].split(":")
