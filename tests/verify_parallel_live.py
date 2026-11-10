@@ -82,7 +82,7 @@ work.py は {ROOT}/scripts/work.py。元の checkout は {repo}。
         # launcher の main が起動の前に決める値も渡す（command が読む。Claude Code の session は起動の前に決める）
         a = SimpleNamespace(host=host, write=True, cwd=repo,
                             model='sonnet' if host == 'claude' else 'gpt-6-sol', effort='medium',
-                            audit=False, resume=None, session=str(uuid.uuid4()) if host == 'claude' else None)
+                            resume=None, session=str(uuid.uuid4()) if host == 'claude' else None)
         cmd, child_env, why = launcher.command(a, prompt, evidence / 'scratch')  # 読み取り専用の Codex にだけ使う一時ディレクトリ
         if why:
             raise RuntimeError(why)
