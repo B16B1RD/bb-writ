@@ -2693,6 +2693,7 @@ class TestLaunch(unittest.TestCase):
                 self.leftover("tmp", self.stamp(1, "-noat"), {}),       # 記録に時刻が無い（前の版の記録）: 名前の日時で決める
                 self.leftover("tmp", self.stamp(-30, "-future"), {}),   # 未来の日時の名前だけ: 使える時刻が無いので、期限では消さない
                 self.leftover("tmp", "名前に日時が無い", {}),             # 記録にも名前にも時刻が無ければ、期限では消さない
+                self.leftover("tmp", "名前に日時が無く、時刻が真偽値", {"at": True}),  # 真偽値は時刻でない（1 秒として数えない）
                 self.leftover("tmp", self.stamp(6.5, "-edge"), {"at": now - 6.5 * 86400}),
                 self.leftover("home", self.stamp(1, "-home"), {"at": now - 86400})]
         rec = self.sweep_by_a_launch()
