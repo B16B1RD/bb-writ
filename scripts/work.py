@@ -607,8 +607,8 @@ def contained(repo, commit, ref):
     p = subprocess.run(['git', '-C', str(repo), 'merge-tree', '--write-tree', ref, commit], stdin=subprocess.DEVNULL,
                        capture_output=True, text=True)
     if p.returncode not in (0, 1) or not p.stdout:
-        raise ValueError('変更が保存先に入っているかを確かめられない（git merge-tree --write-tree には Git 2.38 以上が要る）: '
-                         + (p.stderr.strip() or 'git が失敗した'))
+        raise ValueError('変更が保存先に入っているかを確かめられない: ' + (p.stderr.strip() or 'git が失敗した')
+                         + '（git merge-tree --write-tree を使う。Git が 2.38 より古いと、ここで止まる）')
     return p.returncode == 0 and p.stdout.split()[0] == git(repo, 'rev-parse', ref + '^{tree}')
 
 
