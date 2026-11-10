@@ -1582,7 +1582,7 @@ class TestLaunch(unittest.TestCase):
                 self.assertEqual(p.returncode, 2, p)
                 self.assertIn(sign, p.stderr)
                 self.assertEqual(sorted(str(x) for x in wt.rglob("*")), before)  # 対象の中に何も作らない
-                self.assertFalse(os.path.lexists(state / "delegations") and not state.is_symlink(), state)  # 置き場も作らない
+                self.assertFalse(os.path.lexists(state / "delegations"), state)  # 委任の記録の置き場を作らない（置き場が symlink でも、行き先に）。見るのは delegations だけ
         # HEAD・objects・refs のどれか 2 つだけがある普通のディレクトリの下では起動する（bare の形は 3 つがそろうとき）
         for missing in ("HEAD", "objects", "refs"):
             with self.subTest(missing=missing):
@@ -1801,7 +1801,9 @@ class TestLaunch(unittest.TestCase):
         # 親の CLAUDE_CODE_PLUGIN_DIRS（利用者の mod）や API の鍵を子に渡さない。渡すのは専用の設定ディレクトリだけ
         # 背景の処理を止める変数は、書く子にも読み取り専用の子にも渡す（json の出力が最後のターンの結果だけになり、報告が消えた）
         for extra in ([], ["--write"]):
-            self.run_launch("claude", extra=extra, env_extra={"CLAUDE_CODE_PLUGIN_DIRS": "~/.claude/mods/x", "CLAUDECODE": "1", "CLAUDE_EFFORT": "max", "ANTHROPIC_API_KEY": "k"})
+            Path(str(self.args_file) + ".env").unlink(missing_ok=True)  # 前の回の子が書いたものを読まない
+            rc, rec = self.run_launch("claude", extra=extra, env_extra={"CLAUDE_CODE_PLUGIN_DIRS": "~/.claude/mods/x", "CLAUDECODE": "1", "CLAUDE_EFFORT": "max", "ANTHROPIC_API_KEY": "k"})
+            self.assertTrue(Path(str(self.args_file) + ".env").exists(), (extra, rec))  # この回の子が起動した
             env = json.loads(Path(str(self.args_file) + ".env").read_text())
             self.assertEqual((sorted(env), env["CLAUDE_CODE_DISABLE_BACKGROUND_TASKS"]), (["CLAUDE_CODE_DISABLE_BACKGROUND_TASKS", "CLAUDE_CONFIG_DIR"], "1"), extra)
 
@@ -2180,6 +2182,7 @@ class TestLaunch(unittest.TestCase):
         f = d / "r.jsonl"
         f.write_bytes(b'{"type": "turn_context", "payload": {"model": "m"}}\n' * 10 + b"y" * (3 << 20) + b"\n")
         lines = list(launch.rollout_lines(f))
+        self.assertGreater(len(lines), 10)  # 10 行と、割れた巨大な行（1 行も返らなければ、下は何も確かめない）
         self.assertTrue(all(len(l) <= 1 << 20 for l in lines))  # 巨大な行は割れて、読めない行になる
         self.assertEqual(list(launch.rollout_lines(f, limit=200))[-1], b'{"type": "turn_context", "payload": {}}')  # 上限で実効値を不明にする
         os.mkfifo(d / "fifo")
@@ -2206,7 +2209,9 @@ class TestLaunch(unittest.TestCase):
         subprocess.run(["git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "-q", "--allow-empty", "-m", "i"], check=True)
         subprocess.run(["git", "-C", str(repo), "worktree", "add", "-q", str(wt)], check=True)
         (wt / "a.txt").write_text("x\n")
-        self.run_launch("claude", "checkout", extra=["--write"], cwd=wt)
+        self.args_file.unlink(missing_ok=True)
+        rc, rec = self.run_launch("claude", "checkout", extra=["--write"], cwd=wt)
+        self.assertTrue(self.args_file.exists(), rec)  # 子が起動したうえで（起動しなければ .claude も作られず、下は何も確かめない）
         self.assertEqual([p.name for p in (repo, wt) if (p / ".claude").exists()], [])
 
     def session_arg(self, host) -> str:

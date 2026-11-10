@@ -923,13 +923,15 @@ class TestReviewedCommit(unittest.TestCase):
         rc, r = self.publish(tok, "push:feat@1", "--reviewed", h)
         self.assertEqual(rc, 6, r)
         self.assertIn("record.json を読めない行が 6 行", r["reason"])  # 書きかけ・UTF-8 でない・深すぎる行と、record.json の無い・FIFO・開けない名前の行
+        self.review_record(h, audit=True)  # 監査役の記録は置く（無いと、相対の out を受けても監査役の関門で同じ 6 になり、区別できない）
         rel = Path(self.tmp.name) / "rel"  # 相対の out（work.py の場所で解かれる。launcher は絶対パスを書く）
         rel.mkdir()
         rel_out = "rel"  # w() の work.py は self.tmp.name で動く
         (rel / "record.json").write_text(json.dumps({"head": h, "status": "ok", "write": False, "out": rel_out}))
         with open(delegations, "a", encoding="utf-8") as f:
             f.write(json.dumps({"head": h, "status": "ok", "write": False, "out": rel_out}) + "\n")
-        self.assertEqual(self.publish(tok, "push:feat@1", "--reviewed", h)[0], 6)
+        rc, r = self.publish(tok, "push:feat@1", "--reviewed", h)
+        self.assertEqual(rc, 6, r)  # 相対の out は数えない（監査役の記録はあるので、数えると通ってしまう）
         delegations.chmod(0)  # 委任の記録そのものを読めない
         try:
             if not os.access(delegations, os.R_OK):  # root では権限で止められない
@@ -1904,6 +1906,9 @@ class TestOpRun(unittest.TestCase):
         rec = self.stop_at(Path(self.tmp.name) / "gate2", "before-start", ran)
         self.assertNotIn("exit 0", rec)  # 起こしたコマンドに伝わり、最後までは走らない
         self.assertIn("exit 143", rec)
+        # 起こさずに終えたのでなく、起こしたコマンドが止まった（どちらも 143 になる）。止めは exec の直後に届き、コマンドが動き始めた印は
+        # 置けないので、記録の文言で見分ける（コマンドの側を 143 で終わるものに差し替える後退は見ない）
+        self.assertNotIn("起動の前に止められた", rec)
 
     def test_killing_the_relay_before_it_tells_does_not_start_the_command(self):
         """中継が保留を渡す前に殺されたら、止めとみなす（空の報せを「止め無し」と読んで起こした）。"""
@@ -2103,7 +2108,9 @@ class TestOpRun(unittest.TestCase):
         os.chmod(gate, 0o555)
         os.environ["BB_WRIT_SUPERVISE_GATE"] = str(gate)
         try:
+            t0 = time.monotonic()
             work.gate("x")  # 書けなければ、止まらずに進む（例外を出さない）
+            self.assertLess(time.monotonic() - t0, 5)  # 待たない（待つと 60 秒かかる）
         finally:
             os.environ.pop("BB_WRIT_SUPERVISE_GATE", None)
             os.chmod(gate, 0o755)
@@ -2823,7 +2830,8 @@ class TestOpRun(unittest.TestCase):
 
     def test_the_output_file_is_removed_after_it_is_read(self):
         tok = self.claim()
-        self.run_op(tok, "push:feat@1", "--reviewed", self.head(), *self.script("print('first secret')"))
+        rc, r = self.run_op(tok, "push:feat@1", "--reviewed", self.head(), *self.script("print('first secret')"))
+        self.assertEqual(rc, 0, r)  # 1 回目が走ったうえで（走らなければ、下の 2 つは何も確かめない）
         self.assertEqual(self.outputs(), [])  # 名前を問わず、出力のファイルを残さない
         p = self.raw("op", "run", "--dir", str(self.wt), "--token", tok, "--key", "push:feat@2", "--what", "x", "--from", str(self.repo),
                      "--verified", self.head(), "--reviewed", self.head(), *self.script("print('second')"))
