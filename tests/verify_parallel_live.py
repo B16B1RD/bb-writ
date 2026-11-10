@@ -15,6 +15,7 @@ import shutil
 import subprocess
 import sys
 from types import SimpleNamespace
+import uuid
 
 ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location('bb_launch', ROOT / 'scripts/launch.py')
@@ -78,8 +79,10 @@ work.py は {ROOT}/scripts/work.py。元の checkout は {repo}。
             prompt = '/bb-writ:bb-writ ' + instructions
         else:
             prompt = instructions
+        # launcher の main が起動の前に決める値も渡す（command が読む。Claude Code の session は起動の前に決める）
         a = SimpleNamespace(host=host, write=True, cwd=repo,
-                            model='sonnet' if host == 'claude' else 'gpt-6-sol', effort='medium')
+                            model='sonnet' if host == 'claude' else 'gpt-6-sol', effort='medium',
+                            audit=False, resume=None, session=str(uuid.uuid4()) if host == 'claude' else None)
         cmd, child_env, why = launcher.command(a, prompt, evidence / 'scratch')  # 読み取り専用の Codex にだけ使う一時ディレクトリ
         if why:
             raise RuntimeError(why)
@@ -162,7 +165,8 @@ work.py は {ROOT}/scripts/work.py。元の checkout は {repo}。
             results.extend(pair)
             print(json.dumps({'hosts': hosts, 'result': 'passed', 'sessions': [r['session'] for r in pair]}), flush=True)
         # 読むだけの依頼では、専用 worktree を作らず investigation を使う。
-        a = SimpleNamespace(host='claude', write=False, cwd=repo, model='sonnet', effort='medium')
+        a = SimpleNamespace(host='claude', write=False, cwd=repo, model='sonnet', effort='medium',
+                            audit=False, resume=None, session=str(uuid.uuid4()))
         prompt = '/bb-writ:bb-writ README.md を読んで説明して。変更はしないで。委任も不要。'
         cmd, child_env, why = launcher.command(a, prompt + launcher.CONTRACT, evidence / 'scratch')
         if why:
