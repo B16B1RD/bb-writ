@@ -2845,10 +2845,10 @@ class TestLaunch(unittest.TestCase):
         self.assertFalse(os.path.lexists(place))
         self.assertEqual((rec["swept"]["removed"], rec["swept"]["problems"]), ([str(place)], []))
 
-    def test_a_directory_is_read_to_the_end_before_anything_in_it_is_removed(self):
-        """置き場の中のディレクトリは、読み終えてから中身を消す。読んでいる最中に消すと、位置で読み進める実装では、消した分だけ後ろが
-        詰まって残りを読み飛ばし、置き場が消えない。その実装を、launcher の中の os.scandir（fd を渡す呼び出しだけ）を差し替えて作る:
-        呼ばれるたびに今の中身を並べ直して、何番目かで次を返す。"""
+    def test_a_place_goes_even_where_reading_a_directory_skips_what_follows_a_removal(self):
+        """ディレクトリを位置で読み進める実装（消した分だけ後ろが詰まり、読みながら消すと残りを読み飛ばす）でも、置き場は 1 回の片付けで
+        全部消える。その実装を、launcher の中の os.scandir（fd を渡す呼び出しだけ）を差し替えて作る: 呼ばれるたびに今の中身を並べ直して、
+        何番目かで次を返す。見るのは結果（置き場が残らない）で、読む順そのものではない。"""
         place = self.leftover("tmp", self.stamp(9, "-skip"), {"at": time.time() - 8 * 86400})
         for i in range(40):
             (place / f"f{i:02d}").write_text("x")
@@ -2881,6 +2881,27 @@ class TestLaunch(unittest.TestCase):
         self.assertEqual((rc, rec["status"]), (0, "ok"), rec)
         self.assertFalse(os.path.lexists(place))
         self.assertEqual((rec["swept"]["removed"], rec["swept"]["problems"]), ([str(place)], []))
+
+    def test_a_place_too_big_to_list_in_memory_does_not_stop_the_others(self):
+        """中身を並べるメモリが足りない置き場（項目が入りきらないディレクトリ）があっても、ほかの置き場の片付けは止まらない。その置き場は
+        残り、理由が記録に出る。その場面を、launcher の中の os.scandir（fd を渡す呼び出し）を、最初の 1 回だけ MemoryError にして作る。"""
+        old = time.time() - 8 * 86400
+        first, second = self.leftover("tmp", self.stamp(9, "-a-big"), {"at": old}), self.leftover("tmp", self.stamp(9, "-b-next"), {"at": old})
+        patch = """
+            real_scandir, calls = os.scandir, []
+            def scandir(p="."):
+                if isinstance(p, int):
+                    calls.append(p)
+                    if len(calls) == 1:
+                        raise MemoryError()
+                return real_scandir(p)
+            os.scandir = scandir
+        """
+        rc, rec = self.launch_patched(patch, ["--host", "claude", "--cwd", str(self.cwd)])
+        self.assertEqual((rc, rec["status"]), (0, "ok"), rec)
+        self.assertEqual((first.is_dir(), os.path.lexists(second)), (True, False))
+        self.assertEqual((rec["swept"]["removed"], len(rec["swept"]["problems"])), ([str(second)], 1), rec["swept"])
+        self.assertIn("MemoryError", rec["swept"]["problems"][0])
 
     def test_times_that_cannot_be_right_do_not_keep_a_place(self):
         """数でない・無限大・未来の時刻の記録は、期限の時計に使わない（偽の行 1 つで、置き場を残し続けられない）。"""
