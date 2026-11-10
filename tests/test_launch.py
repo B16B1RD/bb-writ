@@ -2723,7 +2723,7 @@ class TestLaunch(unittest.TestCase):
         rec = self.sweep_by_a_launch()
         self.assertFalse(os.path.lexists(gone))
         self.assertEqual([p for p in kept if not p.is_dir()], [])
-        self.assertEqual(rec["swept"]["removed"], [str(gone)])
+        self.assertEqual((rec["swept"]["removed"], rec["swept"]["problems"]), ([str(gone)], []))  # 残る置き場が、判定の失敗で残ったのでないこと
 
     def test_a_real_read_only_codex_child_of_a_cleaned_up_task_is_swept_and_cannot_be_continued(self):
         """本物の起動が書いた記録の形で: タスクの作業場所を見た読み取り専用の Codex の子の一時ディレクトリは、作業場所が消えた後の起動で消え、
@@ -2972,6 +2972,20 @@ class TestLaunch(unittest.TestCase):
                     + json.dumps({"scratch": "a\u0000b", "at": 1}) + "\n" + "\n")
         rec = self.sweep_by_a_launch()
         self.assertEqual((rec["swept"]["removed"], rec["swept"]["problems"]), ([str(place)], []))
+
+    def test_nothing_is_removed_where_a_directory_cannot_be_locked(self):
+        """ディレクトリの排他（flock）を取れない環境では、使っている置き場を見分けられないので、片付けは何も消さず、理由を 1 度だけ記録に出す。
+        最初の起動は、排他なしで進む。その環境を作るために、launcher の中の flock を、ディレクトリには使えない応答に差し替える。"""
+        old = time.time() - 8 * 86400
+        places = [self.leftover("tmp", self.stamp(9, "-one"), {"at": old}), self.leftover("home", self.stamp(9, "-two"), {"at": old})]
+        patch = ("import errno, fcntl, os, stat\nreal = fcntl.flock\ndef unsupported(fd, op):\n    n = fd if isinstance(fd, int) else fd.fileno()\n"
+                 "    if stat.S_ISDIR(os.fstat(n).st_mode):\n        raise OSError(errno.EOPNOTSUPP, 'ディレクトリの排他は使えない')\n    return real(fd, op)\n"
+                 "fcntl.flock = unsupported")
+        rc, rec = self.launch_patched(patch, ["--host", "codex", "--cwd", str(self.cwd)])
+        self.assertEqual((rc, rec["status"]), (0, "ok"), rec)  # 読み取り専用の Codex の子（自分の一時ディレクトリを持つ）も起動する
+        self.assertEqual([p for p in places if not p.is_dir()], [])
+        self.assertEqual((rec["swept"]["removed"], len(rec["swept"]["problems"])), ([], 1), rec["swept"])
+        self.assertIn("排他", rec["swept"]["problems"][0])
 
     def test_a_resume_waits_while_another_launcher_holds_its_place(self):
         """続きが使う置き場を、ほかの launcher が使っているか片付けている間は、続きを起動しない（待つように言う）。"""
