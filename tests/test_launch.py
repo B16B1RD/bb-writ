@@ -443,7 +443,8 @@ def load_launch():
 class TestLaunch(unittest.TestCase):
     def setUp(self):
         # 試験の中から直に呼ぶ git（リポジトリを用意する commit など）と、起こす launcher が、利用者の全体の Git 設定（core.hooksPath など）を
-        # 読まないように（全体の設定を渡す試験は、env_extra で上書きする）
+        # 読まないように（全体の設定を渡す試験は、env_extra で上書きする）。切り離しを外しても、全体の設定に hook などが無い環境では
+        # 試験は落ちない（切り離しそのものは確かめない）
         from unittest import mock
         no_global = mock.patch.dict(os.environ, {"GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"})
         no_global.start()
@@ -473,6 +474,7 @@ class TestLaunch(unittest.TestCase):
     def launch_env(self, mode="good", path=None, env_extra=None):
         """偽の CLI・試験のホームと設定で launcher を起こす環境。偽の子に渡す FAKE_* は fake_env.json にも書く（子の環境を絞る launcher でも届く）。
         試験ごとに組んでいたころ、写し損ねて HOME と fake_env.json が抜け、launcher が実物のホームを走査し、偽の子が落ちたまま通った試験があった。"""
+        # この補助を使わずに環境を組んでも、落ちる試験は無い（実物のホームと設定を見ないことは、試験では確かめない）
         env = {**os.environ, "HOME": str(self.home), "PATH": path if path is not None else f"{self.bin}:/usr/bin:/bin", "BB_WRIT_CONFIG_DIR": str(self.cfg),
                "BB_WRIT_STATE_DIR": str(self.state), "FAKE_MODE": mode, "FAKE_ARGS": str(self.args_file),
                "FAKE_TEXT": GOOD.encode().decode("unicode_escape"), **(env_extra or {})}
@@ -623,7 +625,9 @@ class TestLaunch(unittest.TestCase):
         rc, first = self.run_launch("claude", extra=["--timeout", "2"], env_extra={"FAKE_HANG": "1"})
         p = self.launch_in_background(["--resume", first["out"], "--timeout", "60"], mode="stop-deaf")
 
-        def stop_fakes():  # この試験の置き場の偽の CLI だけを止める（pkill の無い環境では、偽の子は 60 秒で自分から終わる）
+        # この試験の置き場の偽の CLI だけを止める（pkill の無い環境では、偽の子は 60 秒で自分から終わる）。
+        # この片付けを外しても試験は落ちない（試験の後に偽の子を残さないことは確かめない）
+        def stop_fakes():
             try:
                 subprocess.run(["pkill", "-KILL", "-f", str(self.bin)], check=False)
             except FileNotFoundError:

@@ -22,7 +22,8 @@ class TestParallel(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.repo = Path(self.tmp.name) / 'repo'
         self.repo.mkdir()
-        # 利用者の全体の Git 設定を読まない（全体の core.hooksPath があると、利用者の hook が試験の commit のたびに動いた）
+        # 利用者の全体の Git 設定を読まない（全体の core.hooksPath があると、利用者の hook が試験の commit のたびに動いた）。
+        # 切り離しを外しても、全体の設定に hook などが無い環境では試験は落ちない（切り離しそのものは確かめない）
         self.env = {**os.environ, 'BB_WRIT_STATE_DIR': str(Path(self.tmp.name) / 'state'), 'GIT_CONFIG_GLOBAL': os.devnull, 'GIT_CONFIG_NOSYSTEM': '1'}
         self.git(self.repo, 'init', '-q', '-b', 'main')
         self.git(self.repo, 'config', 'user.name', 'Test')
@@ -227,7 +228,10 @@ class TestParallel(unittest.TestCase):
                               '--', 'sh', '-c', f'echo $$ > {shlex.quote(str(pidfile))}; exec sleep 20'],
                              env=self.env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-        def stop():  # op run を止めても、監督役（別のセッション）とコマンドは残る。コマンドを止め、監督役が終わるのを待ってから片付ける
+        # op run を止めても、監督役（別のセッション）とコマンドは残る。コマンドを止め、監督役が終わるのを待ってから片付ける。
+        # この片付けを外しても試験は落ちない（残さないことは確かめない）。pid のファイルが書かれる前に試験が落ちると、
+        # コマンドを止められず、監督役は sleep 20 の終わりまで残る
+        def stop():
             try:
                 os.kill(int(pidfile.read_text()), signal.SIGTERM)
                 p.wait(timeout=15)
@@ -241,7 +245,9 @@ class TestParallel(unittest.TestCase):
         time.sleep(0.5)
         lease = json.loads((rr / 'lease.json').read_text())
         lease['expires_at'] = 1
-        lease['token'] = 'x'  # 監督役は token が同じ担当の期限を 1 秒ごとに延ばす。延ばされて「生きた担当がいる」の拒否に変わらないように
+        # 監督役は token が同じ担当の期限を 1 秒ごとに延ばす。延ばされて「生きた担当がいる」の拒否に変わらないように。
+        # 時機の競争を避ける行で、外してもまず落ちない（外したことを捕まえる試験は無い）
+        lease['token'] = 'x'
         (rr / 'lease.json').write_text(json.dumps(lease))
         got = self.integrate(a, self.git(self.repo, 'rev-parse', 'main'), head, code=6)
         self.assertIn('op run', got['reason'])
@@ -661,6 +667,8 @@ class TestParallel(unittest.TestCase):
         self.await_file(entered)
         second = self.integrating(b, bh)
         first.kill()  # 親だけが停止。git と hook はまだ動く。
+        # 排他を子の git に渡さない退行は、この待ちの間に second が終わることでだけ見分ける（終わった後の rc と理由は同じになる）。
+        # second の起動から終わりまでがこの待ちより遅い機械では見分けられない（誤って落ちることは無い）
         time.sleep(0.15)
         self.assertIsNone(second.poll(), 'git が動く間に別タスクが統合を追い越した')
         finish.touch()
@@ -703,6 +711,8 @@ class TestParallel(unittest.TestCase):
                                      '--holder', 'Codex'], env=self.env,
                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         self.addCleanup(self.stop, takeover)
+        # 統合が作業場所の排他を持たない退行は、この待ちの間に takeover が終わることでだけ見分ける。
+        # takeover の起動から終わりまでがこの待ちより遅い機械では見分けられない（誤って落ちることは無い）
         time.sleep(0.15)
         self.assertIsNone(takeover.poll(), '期限切れだけで動作中の統合を引き継いだ')
         finish.touch()
