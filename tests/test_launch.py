@@ -2898,7 +2898,8 @@ class TestLaunch(unittest.TestCase):
 
     def test_a_place_due_for_removal_cannot_be_continued_even_before_it_is_removed(self):
         """片付けの対象になった置き場からは、まだ消えていなくても続きを起動しない。片付けが途中で止まって中身が半分になった置き場は、
-        必ず対象なので、そこから続くことが無い。続けられるかどうかが、片付けが先に走ったかに左右されない。"""
+        対象のままなので、そこから続くことが無い（偽の行・時計の巻き戻し・作業場所の作り直しが無い間。その順序は test_sweep_model が
+        たどる）。続けられるかどうかが、片付けが先に走ったかに左右されない。"""
         task = self.state / "worktrees" / "repo-0123456789" / "0123456789abcdef"
         task.mkdir(parents=True)
         (task / "a.txt").write_text("x\n")
