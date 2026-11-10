@@ -2805,9 +2805,10 @@ class TestLaunch(unittest.TestCase):
                                              str(common / "logs" / "refs" / "heads" / "bb-writ"), str(common / "worktrees" / "wt")]))
 
     def test_grok_parallel_launches_have_separate_homes(self):
-        env = {**os.environ, "PATH": f"{self.bin}:/usr/bin:/bin", "BB_WRIT_CONFIG_DIR": str(self.cfg), "BB_WRIT_STATE_DIR": str(self.state),
+        env = {**os.environ, "HOME": str(self.home), "PATH": f"{self.bin}:/usr/bin:/bin", "BB_WRIT_CONFIG_DIR": str(self.cfg), "BB_WRIT_STATE_DIR": str(self.state),
                "FAKE_ARGS": str(self.args_file), "FAKE_TEXT": GOOD.encode().decode("unicode_escape")}
-        procs = [subprocess.Popen([sys.executable, str(LAUNCH), "--host", "grok", "--cwd", str(self.cwd), "--prompt-file", str(self.prompt), "--write"],
+        (self.bin / "fake_env.json").write_text(json.dumps({k: v for k, v in env.items() if k.startswith("FAKE_")}))
+        procs =[subprocess.Popen([sys.executable, str(LAUNCH), "--host", "grok", "--cwd", str(self.cwd), "--prompt-file", str(self.prompt), "--write"],
                                   env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE) for _ in range(8)]
         homes = {json.loads(pr.communicate()[0])["grok_home"] for pr in procs}
         self.assertEqual(len(homes), 8)
@@ -2960,7 +2961,9 @@ class TestLaunch(unittest.TestCase):
         out = self.state / 'existing'
         self.run_launch('codex', extra=['--out', str(out)])
         record = (out / 'record.json').read_text()
-        env = {**os.environ, 'BB_WRIT_STATE_DIR': str(self.state)}
+        # 拒否が退行しても本物の codex と専用ログインに届かないよう、run_launch と同じく偽の CLI・試験のホームと設定で起動する
+        env = {**os.environ, 'HOME': str(self.home), 'PATH': f'{self.bin}:/usr/bin:/bin', 'BB_WRIT_CONFIG_DIR': str(self.cfg),
+               'BB_WRIT_STATE_DIR': str(self.state)}
         p = subprocess.run([sys.executable, str(LAUNCH), '--host', 'codex', '--cwd', str(self.cwd),
                             '--prompt-file', str(self.prompt), '--out', str(out)],
                            env=env, capture_output=True, text=True)
