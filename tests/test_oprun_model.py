@@ -3,7 +3,9 @@
 審査が 1 周に 1 つずつ交互実行を見つけ、そのたびに直していたため、このモデルが写す範囲は 1 回の全探索でたどる。
 範囲は担当 2・鍵 2・token 3。担当の期限切れはいつでも起こせる（実際の時間を写さない、保守的な写し方）。
 過去の修正を戻した版をフラグで作り、それぞれが反例を出すことも試す（一度も落ちたことのない検査は、何も確かめていない）。
-TLA+ の同じモデル（TLC）とは、MODELED_AT で、今の版の状態数（MODELED_STATES）と、戻した版の違反と反例の動作の列が一致した。
+TLA+ の同じモデル（TLC）とは、モデルを最後に変えた版（MODELED_MODEL と MODELED_STATES を書いた 2026-10-24 の版）で、状態数
+（MODELED_STATES）と、戻した版の違反と反例の動作の列が一致した。その後に MODELED_AT を進めたとき、モデルは変えていない
+（MODELED_MODEL が同じ）。
 モデル（MODEL_PARTS の関数と、それが読む定数）を変えると、その本文のハッシュ（MODELED_MODEL）が変わって落ちる。
 同じ変更を TLA+ のモデルに入れて TLC と照らしてから、MODELED_MODEL と MODELED_STATES を書き換える（TLC は CI に置かないので、
 照らし直したかは試験で確かめない）。
@@ -321,12 +323,16 @@ def story(bad, trace):
 
 
 class TestOpRunModel(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.now = check(NOW)  # 今の版の全探索は 1 回だけ（下の 2 つの試験が同じ結果を使う）
+
     def test_the_modeled_code_keeps_the_invariants_in_every_interleaving(self):
-        bad, n, trace = check(NOW)
+        bad, n, trace = self.now
         self.assertIsNone(bad, f"{n} 状態をたどって反例。scripts/work.py か、モデルの写し方を直す:\n" + (story(bad, trace) if bad else ""))
 
     def test_the_model_is_the_one_checked_against_tlc(self):
-        self.assertEqual(check(NOW)[1], MODELED_STATES, "モデルの状態数が、TLC と照らした数と違う。モデルを変えたなら、同じ変更を "
+        self.assertEqual(self.now[1], MODELED_STATES, "モデルの状態数が、TLC と照らした数と違う。モデルを変えたなら、同じ変更を "
                          "TLA+ のモデルに入れて TLC と照らしてから MODELED_STATES を書き換える（tests/test_oprun_model.py の冒頭）")
         self.assertEqual(model_fingerprint(), MODELED_MODEL,
                          f"モデル（{'・'.join(MODEL_PARTS)}）が、TLC と照らしたものと違う。同じ変更を TLA+ のモデルに入れて TLC と照らしてから "
