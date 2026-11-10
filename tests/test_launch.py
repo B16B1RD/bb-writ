@@ -1406,8 +1406,16 @@ class TestLaunch(unittest.TestCase):
         # AttributeError で動かなくなっていた（引数の数は合っていたので、上の試験は通った）。台本に書かれた SimpleNamespace(...) を
         # そのまま組み、偽の CLI の環境で command() に渡す。コマンドの要素が全部文字列であることも見る（session を None のまま渡すと、
         # Claude Code の --session-id の値が None になり、起動の段で落ちる）。
-        # 守らない範囲: SimpleNamespace(...) 以外で組んだ名前空間、command() の後の台本の処理（組んだコマンドの書き換え・実行）、
-        # Grok の経路（台本は grok を起動しない）。キーワードの値が host・repo・uuid 以外の名前を読むと NameError で落ちる（ここに足す）。
+        # 守らない範囲:
+        # - SimpleNamespace(...) という名前の呼び出しでない組み方（argparse.Namespace・別名・types.SimpleNamespace）は見ない。2 か所の
+        #   片方だけをそう組むと、その片方の欠けは見ずに通る（見つけた数が 0 のときだけ落ちる）。
+        # - 値の中身は見ない。空の文字列の session、resume を真にした名前空間、f-string を通って文字列になる値（Codex の effort）は通る。
+        # - host の変数には claude と codex だけを入れる（台本の hosts の一覧は読まない）。台本が host の変数で grok を起動するように
+        #   なっても、Grok の経路（grok_home を読む）は通さない。host='grok' を直に書いた名前空間は通す。
+        # - command() の後の台本の処理（組んだコマンドの書き換え・実行）は見ない。
+        # 台本の正当な書き換えでも落ちる形: 組んだ後に属性を足す（a.resume = None。値は SimpleNamespace(...) の中に書く）、command() に
+        # 渡さない SimpleNamespace(...) を tests/verify_*.py に置く（全部を command() に渡すものとして扱う）、キーワードの値が
+        # host・repo・uuid 以外の名前を読む（NameError。下の辞書に足す）。
         import ast
         import uuid
         from types import SimpleNamespace
