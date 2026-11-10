@@ -14,8 +14,8 @@ jobs:
         os: [ubuntu-24.04, macos-15]
         python: ["3.9", "3.11"]
     runs-on: ${{ matrix.os }}
-    # 上限は最も遅い macOS の成功した実行の最長の 3 倍以上。2026-11 の macOS は 8〜11.4 分（0.22.0 で 11.4 分）で、10 分の上限では全部通る試験が揺れだけで打ち切られた（cancelled）
-    timeout-minutes: 35
+    # 上限は最も遅い macOS の成功した実行の最長の 3 倍以上。2026-11 の macOS は 8〜12.9 分（0.22.0 で 11.4 分。0.24.0 で試験が増えて 12.6〜12.9 分。試験 2 本が落ちた回は 14.1 分）で、10 分の上限では全部通る試験が揺れだけで打ち切られた（cancelled）
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
