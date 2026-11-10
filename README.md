@@ -147,7 +147,7 @@ Claude Code は、普通の依頼文だけでは入口を使わない。入口�
 
 ## 任意機能の準備
 
-push・PR まで頼む場合と、`delegate`・`interrogate`・`reflect`・`playbook-eval` を使う場合は、[前提](#前提)に加えて次を用意する。push・PR だけなら、使っている CLI の専用ログインがあれば足りる（もう一方の CLI は要らない）。
+push・PR まで頼む場合と、`delegate`・`interrogate`・`reflect`・`playbook-eval` を使う場合は、[前提](#前提)に加えて次を用意する。push・PR だけなら、使っている CLI の専用ログインと、その CLI を子として起動する準備（下の、Claude Code の dotenvx と、Linux・WSL2 の `bwrap`・`socat`）があれば足りる（もう一方の CLI は要らない）。
 
 - 別系統の CLI を使う場合は、起動する CLI と、起動される CLI（Claude Code・Codex・Grok Build のうち 2 つ以上）。
 - 起動される CLI の bb-writ 専用ログイン。push・PR の前の判定の子と、`interrogate` の同じ系統の審査役は、使っている CLI と同じ CLI を別プロセスで起動するので、使っている CLI の専用ログインも要る（Claude Code でも Codex でも Grok Build でも）。
