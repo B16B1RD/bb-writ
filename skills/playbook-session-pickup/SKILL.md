@@ -16,6 +16,6 @@ description: 前のセッション（別の CLI でもよい）の続きを引�
 5. **続ける。** 残りの仕事に合う手引き（入口 `bb-writ` の表）へ渡す。引き継いだ主張は、最後に元の目的に照らして実物で確かめる（`principle-prove-it-works`）。
 6. **外部操作の約束を守る。** これから行う push・PR 作成・コメントなどは元の checkout から `op run --key <種類:対象> --from <元の checkout> -- <コマンド>` で実行する（push の鍵には出す commit を含める。`push:origin/main@<commit>`。`push`・`pr`・`merge`・`release` は `--verified <検証した commit>` も。`push`・`pr` は `--reviewed <届ける前の審査を通した commit の ID か none:<理由>>` と `--risk 低|中|高:<理由>` も（`HEAD` などの参照は受けない。commit は、それを対象に launcher で起動して `ok` で返った読み取り専用の審査役の記録が要り、危険度が中・高ならそのうち `--interrogate` を付けた審査役の記録が要る）。前の担当の検証は、その commit が今の HEAD と同じときだけ使える）。`op begin` とコマンドを別々に並べない。照合（手順 3）の `gh` も元の checkout で実行する（作業場所では別のアカウントになり、PR が見えないことがある）。
 
-`work.py` の場所は `playbook-pause-safely` と同じ。
+`work.py` はプラグインの置き場の `scripts/work.py`（Claude Code では `${CLAUDE_PLUGIN_ROOT}/scripts/work.py`、Codex・Grok Build ではこのスキルの SKILL.md から 2 つ上の `scripts/work.py`）。
 
 返答: 前の担当がどこで止まったか、引き継いだものとやり直したもの（できれば無し）、照合した外部操作とその結果、再開点、結果。

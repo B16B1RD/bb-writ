@@ -25,7 +25,7 @@ description: 変更・設計・計画を、独立した審査役（同じ系統�
 
 同じ依頼文を 2 人に渡す（入口の条件 (6) から通すときの人数は、5 の危険度で決める）。
 
-- **審査役 A（同じ系統・新しい文脈）:** Claude Code では launcher の `--host claude --interrogate` で読み取り専用に立てる。`Agent` ツールで立てない（書き込みが OS で止まらず、依頼で許された外の `~/.npm` に書いた。記録にも残らず、`work.py` の `--reviewed` は、その commit を対象に launcher で立てて `ok` で返った審査役の記録が無ければ通さない）。Codex では launcher の `--host codex`。Codex の workspace-write の sandbox の中では入れ子の `codex exec` が起動できず、非対話実行ではサブエージェントも起動されなかった（2026-10-17 の実測）。起動できなければ「同系統の審査は無い」と書き、B だけで判定する。
+- **審査役 A（同じ系統・新しい文脈）:** Claude Code では launcher の `--host claude --interrogate` で読み取り専用に立てる。`Agent` ツールで立てない（書き込みが OS で止まらず、依頼で許された外の `~/.npm` に書いた。記録にも残らず、`work.py` の `--reviewed` は、その commit を対象に launcher で立てて `ok` で返った審査役の記録が無ければ通さない）。Codex では launcher の `--host codex --interrogate`。Codex の workspace-write の sandbox の中では入れ子の `codex exec` が起動できず、非対話実行ではサブエージェントも起動されなかった（2026-10-17 の実測）。起動できなければ「同系統の審査は無い」と書き、B だけで判定する。
 - **審査役 B（別系統）:** launcher で、自分と別の系統の CLI（Claude Code・Codex・Grok Build のどれか。`--host claude|codex|grok`）を bb-writ 専用のログインで、読み取り専用で起動する。
 
   ```bash
