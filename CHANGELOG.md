@@ -4,6 +4,31 @@ bb-writ を使う人に向けて、版ごとに変わったことを書く。新
 
 commit ごとの細かい変更は、各版の末尾の「commit の一覧」（前の版のタグとの比較）で見られる。
 
+## 0.23.0 - 2026-11-10
+
+### 変えたこと
+
+- `verify-parallel` を配布から外した。スキルの一覧から `bb-writ:verify-parallel` が消える。bb-writ 自身の並行開発の仕組みを確かめる、bb-writ を直す人向けの検証スキルで、利用者は使わない。リポジトリの `.agents/skills/verify-parallel/` に移した（Claude Code は `.claude/skills/` の symlink から読む）。
+- README・「はじめての bb-writ」・「スキルの使い方」の前提を、今の振る舞いに合わせた。push・PR まで頼むには、bb-writ 専用のログインと、その CLI を別プロセスで起動する準備（Claude Code は dotenvx と、Linux・WSL2 では bwrap・socat）が要る。使っている CLI の分があれば足り、もう一方の CLI は要らない。0.21.0 から、push・pr は返す前の判定の子の記録が無いと拒否されるが、文書は専用ログインを任意機能だけで使うと書いていた。振る舞いは変えていない。
+- README と「スキルの使い方」の、`interrogate` の準備の文を直した。同じ系統の審査役も、bb-writ が専用ログインで別プロセスとして起動するので、どの CLI でも、使っている CLI の専用ログインが要る（前は、Codex でだけ要ると書いていた）。振る舞いは変えていない。
+- 「はじめての bb-writ」に、「直して」と頼んだ後の変更の場所を書いた。変更は、タスク専用のブランチ `bb-writ/<識別子>` の commit として残る（リポジトリの規則が worktree やタスクのブランチを許さないときは作らず、Git で管理していない場所では、その場のファイルを変える）。作業していた checkout への取り込みは、「取り込んで」と頼むか、最初から依頼に書く。前は「変更は手元の作業ツリーに残ります」と書いていた。
+- README に、git の下限（2.38 以上）を書いた。タスクの作業場所の一覧に 2.36、squash・rebase で統合した後の片付けの確認に 2.38 で入った機能を使う。スキルの一覧に `playbook-parallel` を足した。
+- `playbook-parallel` に、タスクの変更を捨てる手順と、作業場所もブランチも消えたタスクの記録を閉じる手順を書いた。どちらも、今ある `task resume`・`task cleanup` で行う（命令は足していない）。
+- `reflect` は、別系統の CLI を使えないとき、同じ系統の新しい文脈をもう 1 人立て、別系統の読みが無いことを返答に書く。前は、代わりの手段を書いていなかった。
+- `interrogate` の、Codex で同じ系統の審査役を立てる行に `--interrogate` を書いた。付けないと、危険度が中・高の push・pr が求める審査役の記録にならない。
+- `delegate` の、読み取り専用の Claude Code の子の道具の一覧に `Skill` を足した（launcher は前から渡していて、文だけが古かった）。監査役でない読み取り専用の子は、対象の外を Read できないが、Skill ツールで bb-writ のスキルを呼べる、と書いた。
+- `playbook-session-pickup` は、`work.py` の場所をその本文に書く（前は別の手引きを指していた）。`principle-route-lessons` と `principle-model-the-domain` の文の細部を直した。
+- `work.py` の `task cleanup --saved` と、片付けの途中で止まったタスクの `task resume` は、保存先に変更が入っているかを確かめられずに拒否するとき、理由に git 自身の理由を先に出す。前は「Git 2.38 以上が要る」が先に出て、保存先と履歴がつながらないときも Git の版のせいに見えた。拒否する条件と終了コードは同じ。
+- bb-writ を直す人向け: 実機の確かめの台本 `tests/verify_parallel_live.py` が、launcher の `command()` が読む値を渡しておらず、子を起動する前に落ちていたのを直した。台本が渡す値がずれたら落ちる試験を足した。
+- bb-writ を直す人向け: 試験が、利用者の全体の Git 設定（`core.hooksPath` など）と、実物のホーム・設定を読まないようにした。試験の後に、監督役や偽の子のプロセスを残さない。見逃していた assert を 8 本強め、名前と中身の食い違いを直した。
+
+### 守らないこと
+
+- bb-writ を直す人向け: `verify-parallel` の置き場と symlink を確かめる検査は無い（配布の検査は `skills/` だけを見る）。
+- bb-writ を直す人向け: 試験が確かめない範囲（片付け、環境の切り離し、待ちで見分ける試験の限界）は、その行のコメントに書いた。
+
+commit の一覧：https://github.com/B16B1RD/bb-writ/compare/bb-writ--v0.22.1...bb-writ--v0.23.0
+
 ## 0.22.1 - 2026-11-06
 
 ### 変えたこと
