@@ -2884,18 +2884,17 @@ class TestLaunch(unittest.TestCase):
 
     def test_a_place_too_big_to_list_in_memory_does_not_stop_the_others(self):
         """中身を並べるメモリが足りない置き場（項目が入りきらないディレクトリ）があっても、ほかの置き場の片付けは止まらない。その置き場は
-        残り、理由が記録に出る。その場面を、launcher の中の os.scandir（fd を渡す呼び出し）を、最初の 1 回だけ MemoryError にして作る。"""
+        残り、理由が記録に出る。その場面を、launcher の中の remove_tree を、最初の 1 つの置き場だけ MemoryError にして作る。"""
         old = time.time() - 8 * 86400
         first, second = self.leftover("tmp", self.stamp(9, "-a-big"), {"at": old}), self.leftover("tmp", self.stamp(9, "-b-next"), {"at": old})
         patch = """
-            real_scandir, calls = os.scandir, []
-            def scandir(p="."):
-                if isinstance(p, int):
-                    calls.append(p)
-                    if len(calls) == 1:
-                        raise MemoryError()
-                return real_scandir(p)
-            os.scandir = scandir
+            real_remove, seen = launch.remove_tree, []
+            def remove_tree(p):
+                seen.append(p)
+                if len(seen) == 1:
+                    raise MemoryError()
+                return real_remove(p)
+            launch.remove_tree = remove_tree
         """
         rc, rec = self.launch_patched(patch, ["--host", "claude", "--cwd", str(self.cwd)])
         self.assertEqual((rc, rec["status"]), (0, "ok"), rec)
