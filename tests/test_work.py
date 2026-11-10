@@ -40,7 +40,7 @@ class TestWork(unittest.TestCase):
         self.dir = Path(self.tmp.name) / "wt"
         self.dir.mkdir()
         # 利用者の全体の Git 設定（core.hooksPath・commit.gpgsign など）を読まない。
-        # 切り離しを外しても、全体の設定に hook などが無い環境では試験は落ちない（切り離しそのものは確かめない）
+        # 切り離しそのものを確かめる試験は無い（外しても、全体の設定が試験の git の動きを変えない環境では落ちない）
         self.env = {**os.environ, "BB_WRIT_STATE_DIR": str(Path(self.tmp.name) / "state"), "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}
 
     def tearDown(self):
