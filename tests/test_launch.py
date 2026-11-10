@@ -464,12 +464,18 @@ class TestLaunch(unittest.TestCase):
         self.orphans()  # 試験が run_launch の途中で落ちても、偽の子孫を残さない（記録の置き場を消す前に読む）
         self.tmp.cleanup()
 
-    def run_launch(self, host, mode="good", extra=(), path=None, cwd=None, env_extra=None, proc_cwd=None, raw=False):
-        self.orphans()  # 前の回が途中で落ちて読まれなかった偽の子孫を、上書きする前に片付けに回す
+    def launch_env(self, mode="good", path=None, env_extra=None):
+        """偽の CLI・試験のホームと設定で launcher を起こす環境。偽の子に渡す FAKE_* は fake_env.json にも書く（子の環境を絞る launcher でも届く）。
+        試験ごとに組んでいたころ、写し損ねて HOME と fake_env.json が抜け、launcher が実物のホームを走査し、偽の子が落ちたまま通った試験があった。"""
         env = {**os.environ, "HOME": str(self.home), "PATH": path if path is not None else f"{self.bin}:/usr/bin:/bin", "BB_WRIT_CONFIG_DIR": str(self.cfg),
                "BB_WRIT_STATE_DIR": str(self.state), "FAKE_MODE": mode, "FAKE_ARGS": str(self.args_file),
                "FAKE_TEXT": GOOD.encode().decode("unicode_escape"), **(env_extra or {})}
         (self.bin / "fake_env.json").write_text(json.dumps({k: v for k, v in env.items() if k.startswith("FAKE_")}))
+        return env
+
+    def run_launch(self, host, mode="good", extra=(), path=None, cwd=None, env_extra=None, proc_cwd=None, raw=False):
+        self.orphans()  # 前の回が途中で落ちて読まれなかった偽の子孫を、上書きする前に片付けに回す
+        env = self.launch_env(mode, path, env_extra)
         target = ["--host", host, "--cwd", str(cwd or self.cwd)] if host else []  # host が無いのは --resume（記録から取る）
         p = subprocess.run([sys.executable, str(LAUNCH), *target, "--prompt-file", str(self.prompt), *extra],
                            env=env, capture_output=True, text=True, timeout=120, cwd=proc_cwd)  # launcher が止まったら、試験ごと止まらずに落とす
@@ -479,10 +485,7 @@ class TestLaunch(unittest.TestCase):
         """launcher を起動し、偽の子が動き始めるのを待って返す（シグナル・同時の起動の試験）。"""
         for f in (".started", ".term", ".stage"):
             Path(str(self.args_file) + f).unlink(missing_ok=True)
-        env = {**os.environ, "HOME": str(self.home), "PATH": f"{self.bin}:/usr/bin:/bin", "BB_WRIT_CONFIG_DIR": str(self.cfg),
-               "BB_WRIT_STATE_DIR": str(self.state), "FAKE_MODE": mode, "FAKE_ARGS": str(self.args_file),
-               "FAKE_TEXT": GOOD.encode().decode("unicode_escape"), **(env_extra or {})}
-        (self.bin / "fake_env.json").write_text(json.dumps({k: v for k, v in env.items() if k.startswith("FAKE_")}))
+        env = self.launch_env(mode, env_extra=env_extra)
         p = subprocess.Popen([sys.executable, str(LAUNCH), "--prompt-file", str(self.prompt), *extra], env=env,
                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         self.addCleanup(p.kill)
@@ -494,10 +497,7 @@ class TestLaunch(unittest.TestCase):
 
     def launch_patched(self, patch, extra, mode="good", env_extra=None):
         """launch.py を import し、patch（Python の文）を当ててから main を動かす。起きる時機を決められない場面だけに使う。"""
-        env = {**os.environ, "HOME": str(self.home), "PATH": f"{self.bin}:/usr/bin:/bin", "BB_WRIT_CONFIG_DIR": str(self.cfg),
-               "BB_WRIT_STATE_DIR": str(self.state), "FAKE_MODE": mode, "FAKE_ARGS": str(self.args_file),
-               "FAKE_TEXT": GOOD.encode().decode("unicode_escape"), **(env_extra or {})}
-        (self.bin / "fake_env.json").write_text(json.dumps({k: v for k, v in env.items() if k.startswith("FAKE_")}))
+        env = self.launch_env(mode, env_extra=env_extra)
         code = (f"import os, signal, subprocess, sys\nsys.path.insert(0, {str(LAUNCH.parent)!r})\nimport launch\n{textwrap.dedent(patch)}\n"
                 f"sys.argv = ['launch.py', '--prompt-file', {str(self.prompt)!r}, *{list(extra)!r}]\nsys.exit(launch.main())\n")
         p = subprocess.run([sys.executable, "-B", "-c", code], env=env, capture_output=True, text=True, timeout=120)
@@ -616,11 +616,19 @@ class TestLaunch(unittest.TestCase):
         """同じ session の続きを同時に 2 つ起動しない。launcher が KILL されても排他は残らない。"""
         rc, first = self.run_launch("claude", extra=["--timeout", "2"], env_extra={"FAKE_HANG": "1"})
         p = self.launch_in_background(["--resume", first["out"], "--timeout", "60"], mode="stop-deaf")
+
+        def stop_fakes():  # この試験の置き場の偽の CLI だけを止める（pkill の無い環境では、偽の子は 60 秒で自分から終わる）
+            try:
+                subprocess.run(["pkill", "-KILL", "-f", str(self.bin)], check=False)
+            except FileNotFoundError:
+                pass
+        self.addCleanup(stop_fakes)  # 途中で落ちても残さない
         second = self.run_launch(None, extra=["--resume", first["out"]], raw=True)
         self.assertEqual(second.returncode, 2, second.stdout)
         self.assertIn("同じ session の続きが動いている", second.stderr)
         p.kill()  # 子は残る（launcher の外の話）が、排他は手放す
         p.communicate(timeout=30)
+        stop_fakes()  # launcher を KILL したので、偽の子（止めを聞かずに 60 秒眠る）が試験の後まで残る
         self.orphans()
         rc, again = self.run_launch(None, extra=["--resume", first["out"]])
         self.assertEqual(rc, 0, again)
@@ -1188,8 +1196,7 @@ class TestLaunch(unittest.TestCase):
         self.assertNotIn("read", rules.values())  # 拒んだ場所の下に read を書かない（本体を実行できなかった）
         for absent in (f"{h}/.config", f"{h}/.config/git",  # Git の設定を含む置き場は中身ごと、Git の設定は拒まない
                        f"{h}/.codex", f"{h}/.codex/packages", f"{h}/.gnupg", f"{h}/.aws", f"{h}/missing", f"{h}/.kube"):
-            if absent:
-                self.assertNotIn(absent, rules)
+            self.assertNotIn(absent, rules)
         self.assertEqual(rules.get(str(self.cfg.resolve())), "deny")  # 専用ログイン（試験ではホームの外）
         # 普段の専用ログインは ~/.config の下。拒む場所の下の場所は書かない
         nested = home / ".config" / "bb-writ"
@@ -2227,10 +2234,7 @@ class TestLaunch(unittest.TestCase):
         def launch(mode, sig, timeout="60", ignore_hup=False, then=None):
             for f in (".started", ".term", ".stage"):
                 Path(str(self.args_file) + f).unlink(missing_ok=True)
-            env = {**os.environ, "HOME": str(self.home), "PATH": f"{self.bin}:/usr/bin:/bin", "BB_WRIT_CONFIG_DIR": str(self.cfg),
-                   "BB_WRIT_STATE_DIR": str(self.state), "FAKE_MODE": mode, "FAKE_ARGS": str(self.args_file),
-                   "FAKE_TEXT": GOOD.encode().decode("unicode_escape")}
-            (self.bin / "fake_env.json").write_text(json.dumps({k: v for k, v in env.items() if k.startswith("FAKE_")}))
+            env = self.launch_env(mode)
             p = subprocess.Popen([sys.executable, str(LAUNCH), "--host", "claude", "--cwd", str(self.cwd), "--prompt-file", str(self.prompt),
                                   "--timeout", timeout], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
                                  preexec_fn=(lambda: signal.signal(signal.SIGHUP, signal.SIG_IGN)) if ignore_hup else None)
@@ -2265,10 +2269,7 @@ class TestLaunch(unittest.TestCase):
         (self.bin / "git").chmod(0o755)
         try:  # 子が終わった後、照合の git が遅い間に受けたシグナルは、子を止めたと記録しない
             self.args_file.unlink(missing_ok=True)  # 前の起動の引数（残っていると、子の起動の前の git も遅くなり、子の起動の前に送ってしまう）
-            env = {**os.environ, "HOME": str(self.home), "PATH": f"{self.bin}:/usr/bin:/bin", "BB_WRIT_CONFIG_DIR": str(self.cfg),
-                   "BB_WRIT_STATE_DIR": str(self.state), "FAKE_MODE": "good", "FAKE_ARGS": str(self.args_file),
-                   "FAKE_TEXT": GOOD.encode().decode("unicode_escape")}
-            (self.bin / "fake_env.json").write_text(json.dumps({k: v for k, v in env.items() if k.startswith("FAKE_")}))
+            env = self.launch_env()
             for g in (["init", "-q"], ["add", "-A"], ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "x"]):  # 照合が git を呼ぶよう head を持たせる
                 subprocess.run([real_git, "-C", str(self.cwd), *g], check=True, capture_output=True)
             p = subprocess.Popen([sys.executable, str(LAUNCH), "--host", "claude", "--cwd", str(self.cwd), "--prompt-file", str(self.prompt)],
@@ -2825,7 +2826,7 @@ class TestLaunch(unittest.TestCase):
             self.assertIn("読み取り専用にできない", rec["problems"][0])
         self.assertFalse(self.args_file.exists())  # 起動しない
 
-    def test_grok_write_grants_state_and_worktree_git_dir(self):
+    def test_grok_write_grants_only_the_work_record_and_the_commit_dirs(self):
         repo = self.cwd / "repo"
         subprocess.run(["git", "init", "-q", str(repo)], check=True)
         subprocess.run(["git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "-q", "--allow-empty", "-m", "i"], check=True)
@@ -2843,9 +2844,7 @@ class TestLaunch(unittest.TestCase):
                                              str(common / "logs" / "refs" / "heads" / "bb-writ"), str(common / "worktrees" / "wt")]))
 
     def test_grok_parallel_launches_have_separate_homes(self):
-        env = {**os.environ, "HOME": str(self.home), "PATH": f"{self.bin}:/usr/bin:/bin", "BB_WRIT_CONFIG_DIR": str(self.cfg), "BB_WRIT_STATE_DIR": str(self.state),
-               "FAKE_ARGS": str(self.args_file), "FAKE_TEXT": GOOD.encode().decode("unicode_escape")}
-        (self.bin / "fake_env.json").write_text(json.dumps({k: v for k, v in env.items() if k.startswith("FAKE_")}))
+        env = self.launch_env()
         procs = [subprocess.Popen([sys.executable, str(LAUNCH), "--host", "grok", "--cwd", str(self.cwd), "--prompt-file", str(self.prompt), "--write"],
                                   env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE) for _ in range(8)]
         homes = {json.loads(pr.communicate()[0])["grok_home"] for pr in procs}
@@ -2878,7 +2877,7 @@ class TestLaunch(unittest.TestCase):
         rc, rec = self.run_launch("codex", env_extra={"FAKE_EXIT": "3"})  # 報告は形が整っていても、終了コードで失敗にする
         self.assertEqual((rc, rec["status"], rec["problems"][0]), (2, "failed", "終了コード 3"), rec)
 
-    def test_quota_is_reported_not_retried_elsewhere(self):
+    def test_quota_is_reported_only_when_the_child_did_not_succeed(self):
         rc, rec = self.run_launch("codex", "quota")
         self.assertEqual(rec["status"], "quota")
         # 結果が失敗（is_error）なら、終了コード 0 で本文があっても成功ではない（利用枠の文言を照らす）
@@ -2999,9 +2998,7 @@ class TestLaunch(unittest.TestCase):
         out = self.state / 'existing'
         self.run_launch('codex', extra=['--out', str(out)])
         record = (out / 'record.json').read_text()
-        # 拒否が退行しても本物の codex と専用ログインに届かないよう、run_launch と同じく偽の CLI・試験のホームと設定で起動する
-        env = {**os.environ, 'HOME': str(self.home), 'PATH': f'{self.bin}:/usr/bin:/bin', 'BB_WRIT_CONFIG_DIR': str(self.cfg),
-               'BB_WRIT_STATE_DIR': str(self.state)}
+        env = self.launch_env()  # 拒否が退行しても、本物の codex と専用ログインに届かない（偽の CLI・試験のホームと設定）
         p = subprocess.run([sys.executable, str(LAUNCH), '--host', 'codex', '--cwd', str(self.cwd),
                             '--prompt-file', str(self.prompt), '--out', str(out)],
                            env=env, capture_output=True, text=True)

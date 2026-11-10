@@ -1164,8 +1164,8 @@ class TestNoteBeforePublish(unittest.TestCase):
     """push・pr は、作業の記録の目的・制約・確かめ方・指摘の扱いが空なら出せない（指摘の扱いは、監査役をどの push・pr でも立てるので、
     --reviewed none: でも要る）。
     言い直し・記録・指摘の扱いの一覧を飛ばしたまま、長いセッションで作業が進んだ。照らすのは欄が空かどうかだけで、
-    中身の真偽・書いた順・どの周の審査の指摘かは見ない（前の周の扱いが残っていれば通る）。拒否の文言は確かめず、
-    拒否の JSON の note.empty（雛形の順の欄の名前）を見る。"""
+    中身の真偽・書いた順・どの周の審査の指摘かは見ない（前の周の扱いが残っていれば通る）。空の欄は、拒否の文言でなく、
+    拒否の JSON の note.empty（雛形の順の欄の名前）で見る。理由の文は、記録のパスと欄の名前が出ることと、読めない記録の理由だけを見る。"""
     setUp, tearDown, w, begin, head, review_record = (TestAccountCheck.setUp, TestAccountCheck.tearDown, TestAccountCheck.w,
                                                       TestAccountCheck.begin, TestVerifiedCommit.head, TestAccountCheck.review_record)
     fill_note = False
@@ -1252,8 +1252,6 @@ class TestNoteBeforePublish(unittest.TestCase):
             tok, _ = self.claim(self.head_note(purpose=purpose, triage="x"))
             self.assertEqual(self.publish(tok, f"push:feat@c{i}", self.head())[0], 0, purpose)
             self.w("release", "--dir", str(self.wt), "--token", tok)
-        tok, _ = self.claim(self.head_note())
-        self.w("release", "--dir", str(self.wt), "--token", tok)
         # 欄の名前は括弧の中を省いてよい。省いた行も欄なので、前の欄の中身に数えない
         short = "- 指摘の扱い: F1 対応する\n"
         tok, _ = self.claim(self.head_note(check="").replace("- 決めたことと根拠", short + "- 決めたことと根拠"))
@@ -1275,7 +1273,6 @@ class TestNoteBeforePublish(unittest.TestCase):
             rc, res = self.publish(tok, f"push:feat@x{i}", self.head())
             self.assertEqual((rc, res["note"]["empty"]), (2, ["目的"]), body)
             self.w("release", "--dir", str(self.wt), "--token", tok)
-        tok, _ = self.claim(self.head_note())
 
     def test_renew_names_the_empty_fields_without_refusing(self):
         tok, _ = self.claim()
@@ -1649,9 +1646,9 @@ class TestOpRun(unittest.TestCase):
 
     def test_stopping_op_run_leaves_the_command_and_its_record_to_the_supervisor(self):
         """op run が止められても、監督役がコマンドを最後まで動かし、担当を保ち、done を書く。その間、外部操作と手での done は止める。"""
+        tok = self.claim()  # 2 つの場面で同じ担当を使う（片方が途中で落ちても、もう片方が動く）
         for sig in (signal.SIGKILL, signal.SIGTERM):
             with self.subTest(sig=sig):
-                tok = self.claim() if sig == signal.SIGKILL else self.tok2
                 key = f"push:feat@{int(sig)}"
                 go, done = self.go_file(f"go{int(sig)}"), Path(self.tmp.name) / f"done{int(sig)}"
                 body = (f"import os, sys, time\nwhile not os.path.exists({str(go)!r}): time.sleep(0.05)\n"
@@ -1692,7 +1689,6 @@ class TestOpRun(unittest.TestCase):
                 self.assertEqual(rec["state"], "done")
                 self.assertIn("exit 3", rec["result"])
                 self.assertIn("late output 1999", rec["result"])
-                self.tok2 = tok
 
     def test_a_broken_lease_file_does_not_stop_the_supervisor(self):
         tok = self.claim()
@@ -1877,15 +1873,14 @@ class TestOpRun(unittest.TestCase):
                 self.assertNotIn("Traceback", p.stderr)  # 監督役が終わり際に落ちていない
                 self.assertNotIn("Traceback", (r / "supervise.err").read_text() if (r / "supervise.err").exists() else "")
 
-    def stop_at(self, gate, at, ran, extra=""):
-        tok = self.claim() if not hasattr(self, "gtok") else self.gtok
-        self.gtok = tok
+    def stop_at(self, gate, at, ran):
+        tok = self.claim()
         gate.mkdir(exist_ok=True)
         self.gos = [*getattr(self, "gos", []), gate / "before-check", gate / "before-start"]  # 落ちても監督役を待たせたままにしない
         key = f"push:{at}"
         for name in ("after-begin", "relay", "relay-told", "before-done", "before-print", *(["before-check"] if at == "before-start" else [])):
             (gate / name).write_text("")  # 手前の止まり所は通す
-        p = self.start_run(tok, key, f"import sys, time\n{extra}open({str(ran)!r}, 'w')\ntime.sleep(1)", env={"BB_WRIT_SUPERVISE_GATE": str(gate)})
+        p = self.start_run(tok, key, f"import sys, time\nopen({str(ran)!r}, 'w')\ntime.sleep(1)", env={"BB_WRIT_SUPERVISE_GATE": str(gate)})
         self.wait_file(gate / f"at-{at}")
         os.kill(int((gate / f"at-{at}").read_text()), signal.SIGTERM)  # 監督役に、窓の中で止めを送る
         time.sleep(0.2)
@@ -2005,7 +2000,9 @@ class TestOpRun(unittest.TestCase):
         self.assertIn("gate None", self.wait_done("push:feat@1")["result"])
 
     def test_a_second_op_run_right_after_the_first_begins_is_refused(self):
-        """ロックは begin と同じ排他の中で作る（外で作ると、その間に 2 本目が通った）。"""
+        """1 本目が begin を通った直後（監督役を起こす前）の 2 本目は拒否される。ロックを begin と同じ排他の中で作るため
+        （外で作っていたころは、その間に 2 本目が通った）。止まり所 after-begin は排他を抜けた後にあるので、排他の中で作ることそのものは
+        ここでは確かめない。"""
         tok = self.claim()
         gate = Path(self.tmp.name) / "gate5"
         gate.mkdir()
@@ -2089,17 +2086,6 @@ class TestOpRun(unittest.TestCase):
         self.assertLessEqual(next(clock), 80)  # 60 秒を少し過ぎたところで諦めた
         os.environ["BB_WRIT_SUPERVISE_GATE"] = str(gate / "missing")
         work.gate("x")  # 無い場所なら、すぐ進む
-
-    @unittest.skipUnless(PERMISSIONS_BIND, "権限の制限が効かない（root など）")
-    def test_a_lock_file_that_cannot_be_removed_after_done_is_not_reported_as_a_failed_done(self):
-        tok = self.claim()
-        d = self.lease_file().parent
-        try:
-            rc, r = self.run_op(tok, "push:feat@1", "--reviewed", self.head(), *self.script(f"import os; print('ok'); os.chmod({str(d)!r}, 0o555)"))
-        finally:
-            os.chmod(d, 0o755)  # 一時ディレクトリを消せるように戻す
-        self.assertEqual(rc, 0, r)  # done は書けた。ロックのファイルを消せなかっただけ
-        self.assertEqual(r["op"]["state"], "done")
 
     @unittest.skipUnless(PERMISSIONS_BIND, "権限の制限が効かない（root など）")
     def test_the_gate_skips_a_place_it_cannot_write(self):
@@ -2376,7 +2362,7 @@ class TestOpRun(unittest.TestCase):
         d = self.lease_file().parent
         work = self.work_module()
         log = work.run_log(d, "push:feat@1")
-        try:  # 出力を消せない（置き場に書けない）。ロックも消せないが、op_step の結果を保ち、次の操作は数えない
+        try:  # 出力を消せない（置き場に書けない）。ロックも消せないが、op_step の結果を保ち（done の失敗として報告しない）、次の操作は数えない
             rc, r = self.run_op(tok, "push:feat@1", "--reviewed", self.head(), *self.script(f"import os; print('x'); os.chmod({str(d)!r}, 0o555)"))
         finally:
             os.chmod(d, 0o755)
