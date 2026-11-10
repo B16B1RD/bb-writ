@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""別系統の CLI（Claude Code・Codex・Grok Build）を bb-writ 専用のログインで起動し、報告を回収して検査する（plan-v3 4.2 の launcher）。
+"""別系統の CLI（Claude Code・Codex・Grok Build）を bb-writ 専用のログインで起動し、報告を回収して検査する（launcher）。
 
 使い方:
   python3 launch.py --host codex|claude|grok --cwd <対象> --prompt-file <依頼> [--model M] [--effort E] [--write | --interrogate | --audit] [--out <dir>] [--timeout 秒]

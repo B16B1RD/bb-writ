@@ -619,7 +619,7 @@ class TestAccountCheck(unittest.TestCase):
 
 
 class TestVerifiedCommit(unittest.TestCase):
-    """公開する操作は、検証した commit が作業場所の HEAD と同じときだけ通す（plan-v3 6.2。検証の後に変わった成果物を出さない）。"""
+    """公開する操作は、検証した commit が作業場所の HEAD と同じときだけ通す（検証の後に変わった成果物を出さない）。"""
 
     setUp, tearDown, w, claim, begin = (TestAccountCheck.setUp, TestAccountCheck.tearDown, TestAccountCheck.w,
                                         TestAccountCheck.claim, TestAccountCheck.begin)
