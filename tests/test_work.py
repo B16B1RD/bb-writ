@@ -39,7 +39,8 @@ class TestWork(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.dir = Path(self.tmp.name) / "wt"
         self.dir.mkdir()
-        self.env = {**os.environ, "BB_WRIT_STATE_DIR": str(Path(self.tmp.name) / "state")}
+        # 利用者の全体の Git 設定（core.hooksPath・commit.gpgsign など）を読まない
+        self.env = {**os.environ, "BB_WRIT_STATE_DIR": str(Path(self.tmp.name) / "state"), "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}
 
     def tearDown(self):
         self.tmp.cleanup()

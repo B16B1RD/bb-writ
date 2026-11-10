@@ -22,7 +22,8 @@ class TestParallel(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.repo = Path(self.tmp.name) / 'repo'
         self.repo.mkdir()
-        self.env = {**os.environ, 'BB_WRIT_STATE_DIR': str(Path(self.tmp.name) / 'state')}
+        # 利用者の全体の Git 設定を読まない（全体の core.hooksPath があると、利用者の hook が試験の commit のたびに動いた）
+        self.env = {**os.environ, 'BB_WRIT_STATE_DIR': str(Path(self.tmp.name) / 'state'), 'GIT_CONFIG_GLOBAL': os.devnull, 'GIT_CONFIG_NOSYSTEM': '1'}
         self.git(self.repo, 'init', '-q', '-b', 'main')
         self.git(self.repo, 'config', 'user.name', 'Test')
         self.git(self.repo, 'config', 'user.email', 'test')
