@@ -2633,6 +2633,201 @@ class TestLaunch(unittest.TestCase):
                 self.assertIn(words, p.stderr)
                 self.assertFalse(self.args_file.exists())  # 子を起こさない
 
+    # --- launcher は、自分が状態の置き場に作った一時の置き場を自分で片付ける（sweep_leftovers） ---
+
+    def stamp(self, days_ago=0.0, tail="-0123456789abcdef"):
+        """launcher が置き場に付ける形の名前（先頭が日時）。日時は days_ago 日前。"""
+        return time.strftime("%Y%m%d-%H%M%S", time.localtime(time.time() - days_ago * 86400)) + tail
+
+    def leftover(self, kind, name, *rows, link_to=None):
+        """状態の置き場に、launcher が作る形の一時の置き場を置き、それを指す委任の記録（rows）を足す。kind は "tmp"（読み取り専用の Codex の子の
+        一時ディレクトリ）か "home"（Grok の子の起動ごとの home）。中には、子が残す写しの形（書けないディレクトリと読むだけのファイル）を置く。"""
+        p = self.state / "delegations" / name / "tmp" if kind == "tmp" else self.state / "grok-homes" / name
+        p.parent.mkdir(parents=True, exist_ok=True)
+        if link_to is not None:
+            p.symlink_to(link_to, target_is_directory=True)
+        else:
+            deep = p / "copy" / "deep"
+            deep.mkdir(parents=True)
+            (deep / "f").write_text("x")
+            os.chmod(deep / "f", 0o444)
+            os.chmod(deep, 0o555)
+            self.addCleanup(lambda: deep.is_dir() and os.chmod(deep, 0o755))  # 残った場合も、一時ディレクトリを消せるように
+        with open(self.state / "delegations.jsonl", "a") as f:
+            for r in rows:
+                f.write(json.dumps({"scratch" if kind == "tmp" else "grok_home": os.path.realpath(p), "cwd": str(self.cwd.resolve()),
+                                    "session": "s-" + name, "status": "ok", **r}) + "\n")
+        return p
+
+    def sweep_by_a_launch(self):
+        """何でもない起動を 1 回する（launcher は起動のたびに片付ける）。記録を返す。"""
+        rc, rec = self.run_launch("claude")
+        self.assertEqual((rc, rec["status"]), (0, "ok"), rec)
+        return rec
+
+    def test_the_launcher_removes_its_leftovers_after_the_retention(self):
+        """最後に使われてから 7 日を過ぎた一時の置き場は、記録の状態によらず消える（時間切れの子のものも）。報告と記録は消えない。"""
+        old = time.time() - 8 * 86400
+        gone = [self.leftover("tmp", self.stamp(9, "-" + s), {"at": old, "status": s}) for s in ("ok", "timeout", "failed", "not-run")]
+        gone.append(self.leftover("home", self.stamp(9, "-home"), {"at": old}))
+        with_report = gone[0].parent  # --out を渡さない起動は、報告と記録が同じ置き場にある
+        (with_report / "record.json").write_text("{}")
+        (with_report / "report.md").write_text("報告")
+        rows = (self.state / "delegations.jsonl").read_text()
+        rec = self.sweep_by_a_launch()
+        self.assertEqual([p for p in gone if os.path.lexists(p)], [])
+        self.assertEqual(sorted(rec["swept"]["removed"]), sorted(str(p) for p in gone))
+        self.assertEqual(rec["swept"]["problems"], [])
+        self.assertEqual(sorted(x.name for x in with_report.iterdir()), ["record.json", "report.md"])
+        self.assertEqual([p.parent.name for p in gone[1:4] if p.parent.exists()], [])  # tmp だけだった置き場は、空になったら外す
+        self.assertTrue((self.state / "delegations.jsonl").read_text().startswith(rows))  # 委任の記録は消さない（足すだけ）
+
+    def test_places_used_recently_or_without_a_date_stay(self):
+        now = time.time()
+        kept = [self.leftover("tmp", self.stamp(30, "-resumed"), {"at": now - 30 * 86400}, {"at": now - 86400}),  # 古い置き場でも、続きの起動が最近
+                self.leftover("tmp", self.stamp(1, "-noat"), {}),       # 記録に時刻が無い（前の版の記録）: 名前の日時で決める
+                self.leftover("tmp", "名前に日時が無い", {}),             # 記録にも名前にも時刻が無ければ、期限では消さない
+                self.leftover("tmp", self.stamp(6.5, "-edge"), {"at": now - 6.5 * 86400}),
+                self.leftover("home", self.stamp(1, "-home"), {"at": now - 86400})]
+        rec = self.sweep_by_a_launch()
+        self.assertEqual([p for p in kept if not p.is_dir()], [])
+        self.assertNotIn("swept", rec)
+
+    def test_places_of_a_cleaned_up_task_go_without_waiting(self):
+        """片付けたタスクの作業場所（状態の置き場の worktrees/<リポジトリ>/<タスク>）を見ていた子の置き場は、期限を待たずに消える。"""
+        trees = (self.state / "worktrees" / "repo-0123456789").resolve()
+        (trees / "alive").mkdir(parents=True)
+        now = time.time()
+        gone = self.leftover("tmp", self.stamp(0, "-gone"), {"at": now, "cwd": str(trees / "cleaned")}, {"at": now, "cwd": str(trees / "cleaned" / "sub")})
+        kept = [self.leftover("tmp", self.stamp(0, "-alive"), {"at": now, "cwd": str(trees / "alive")}),
+                self.leftover("tmp", self.stamp(0, "-mixed"), {"at": now, "cwd": str(trees / "cleaned")}, {"at": now, "cwd": str(trees / "alive")}),
+                # 作業場所でない対象が無いだけでは、すぐには消さない（外した媒体や、作り直される場所かもしれない）
+                self.leftover("tmp", self.stamp(0, "-elsewhere"), {"at": now, "cwd": str(Path(self.tmp.name).resolve() / "no-such-place")}),
+                self.leftover("tmp", self.stamp(0, "-repo"), {"at": now, "cwd": str(trees.parent / "no-such-repo")}),
+                self.leftover("home", self.stamp(0, "-nocwd"), {"at": now, "cwd": None})]
+        rec = self.sweep_by_a_launch()
+        self.assertFalse(os.path.lexists(gone))
+        self.assertEqual([p for p in kept if not p.is_dir()], [])
+        self.assertEqual(rec["swept"]["removed"], [str(gone)])
+
+    def test_a_real_read_only_codex_child_of_a_cleaned_up_task_is_swept_and_cannot_be_continued(self):
+        """本物の起動が書いた記録の形で: タスクの作業場所を見た読み取り専用の Codex の子の一時ディレクトリは、作業場所が消えた後の起動で消え、
+        その記録からは続きから起動できない。"""
+        task = self.state / "worktrees" / "repo-0123456789" / "0123456789abcdef"
+        task.mkdir(parents=True)
+        (task / "a.txt").write_text("x\n")
+        rc, first = self.run_launch("codex", cwd=task)
+        self.assertEqual(first["status"], "ok", first)
+        scratch = Path(first["scratch"])
+        self.assertTrue(scratch.is_dir())
+        self.sweep_by_a_launch()
+        self.assertTrue(scratch.is_dir())  # 作業場所がある間は残る
+        shutil.rmtree(task)
+        rec = self.sweep_by_a_launch()
+        self.assertFalse(scratch.exists())
+        self.assertEqual([os.path.realpath(x) for x in rec["swept"]["removed"]], [str(scratch)])
+        self.assertTrue((Path(first["out"]) / "record.json").is_file())  # 記録は残る
+        self.args_file.unlink()
+        p = self.run_launch(None, extra=["--resume", first["out"]], raw=True)
+        self.assertEqual(p.returncode, 2, p.stdout)
+        self.assertIn("新しく起動する", p.stderr)
+        self.assertFalse(self.args_file.exists())
+
+    def test_a_place_without_a_record_is_judged_by_the_date_in_its_name(self):
+        """記録の無い置き場は、動いている最初の起動（記録は終わりに書く）か、記録を書く前に止まった起動のもの。名前の日時だけで決める。"""
+        places = [self.leftover("tmp", self.stamp(0, "-running")), self.leftover("tmp", self.stamp(8, "-dead")),
+                  self.leftover("home", self.stamp(0, "-running")), self.leftover("home", self.stamp(8, "-dead")),
+                  self.leftover("home", "tmpabc123")]
+        self.sweep_by_a_launch()
+        self.assertEqual([os.path.lexists(p) for p in places], [True, False, True, False, True])
+
+    def test_a_session_being_continued_keeps_its_places(self):
+        """続きが動いている session の置き場は、期限を過ぎていても消さない。続きが終わった後の起動で消える。"""
+        rc, first = self.run_launch("claude", extra=["--timeout", "2"], env_extra={"FAKE_HANG": "1"})
+        old = time.time() - 8 * 86400
+        mine = self.leftover("tmp", self.stamp(9, "-mine"), {"at": old, "session": first["session"]})
+        asked = self.leftover("home", self.stamp(9, "-asked"), {"at": old, "session": "another", "session_asked": first["session"]})
+        other = self.leftover("tmp", self.stamp(9, "-other"), {"at": old, "session": "someone-else"})
+        p = self.launch_in_background(["--resume", first["out"], "--timeout", "60"])  # 続きの launcher 自身も、起動のときに片付ける
+        self.assertEqual([x.is_dir() for x in (mine, asked, other)], [True, True, False])
+        rec = self.sweep_by_a_launch()  # 別の launcher が片付けても、続きの session の置き場は残る
+        self.assertEqual([x.is_dir() for x in (mine, asked)], [True, True])
+        self.assertNotIn("swept", rec)
+        p.send_signal(signal.SIGTERM)
+        p.communicate(timeout=60)
+        self.sweep_by_a_launch()
+        self.assertEqual([x.exists() for x in (mine, asked)], [False, False])
+
+    def test_only_real_places_inside_the_state_are_removed(self):
+        """消すのは、状態の置き場の delegations/<名前>/tmp と grok-homes/<名前> の実のディレクトリだけ。symlink の行き先と、記録が指す外の場所は消さない。"""
+        old = time.time() - 8 * 86400
+        outside = Path(self.tmp.name).resolve() / "outside"
+        for d in "abcde":
+            (outside / d / "tmp").mkdir(parents=True)
+            (outside / d / "tmp" / "keep").write_text("x")
+        link_tmp = self.leftover("tmp", self.stamp(9, "-linktmp"), {"at": old}, link_to=outside / "a" / "tmp")
+        link_dir = self.state / "delegations" / self.stamp(9, "-linkdir")
+        link_dir.symlink_to(outside / "b", target_is_directory=True)
+        link_home = self.leftover("home", self.stamp(9, "-linkhome"), {"at": old}, link_to=outside / "c" / "tmp")
+        with open(self.state / "delegations.jsonl", "a") as f:  # 記録が、状態の置き場の外を指す
+            f.write(json.dumps({"scratch": str(outside / "d" / "tmp"), "grok_home": str(outside / "d"), "at": old, "session": "x",
+                                "cwd": str(self.state.resolve() / "worktrees" / "r" / "gone")}) + "\n")
+        inner = self.leftover("tmp", self.stamp(9, "-inner"), {"at": old})  # 消える置き場の中の、外への symlink
+        os.chmod(inner / "copy" / "deep", 0o755)
+        (inner / "copy" / "deep" / "link").symlink_to(outside / "e" / "tmp", target_is_directory=True)
+        rec = self.sweep_by_a_launch()
+        self.assertEqual(sorted(str(x.relative_to(outside)) for x in outside.rglob("keep")), [f"{d}/tmp/keep" for d in "abcde"])
+        self.assertTrue(link_tmp.is_symlink() and link_dir.is_symlink() and link_home.is_symlink())
+        self.assertEqual(rec["swept"], {"removed": [str(inner)], "problems": []})
+
+    def test_a_resume_is_refused_once_its_place_is_gone(self):
+        """一時の置き場が無い記録からは、続きから起動しない（空で作り直して、前の起動の写しを失ったまま続けさせない）。"""
+        for host, key, word in (("codex", "scratch", "一時ディレクトリ（scratch）が無い"), ("grok", "grok_home", "grok_home が無い")):
+            for shape in ("gone", "link"):
+                with self.subTest(host=host, shape=shape):
+                    rc, first = self.run_launch(host, extra=["--timeout", "2"], cwd=self.grok_target() if host == "grok" else None, env_extra={"FAKE_HANG": "1"})
+                    self.assertTrue(first["resumable"], first)
+                    place = Path(first[key])
+                    shutil.rmtree(place)
+                    if shape == "link" and host == "codex":  # 置き場の名前が、別の場所への symlink に替わっている
+                        elsewhere = Path(tempfile.mkdtemp(dir=self.tmp.name))
+                        place.symlink_to(elsewhere, target_is_directory=True)
+                    self.args_file.unlink(missing_ok=True)
+                    p = self.run_launch(None, extra=["--resume", first["out"]], raw=True)
+                    self.assertEqual(p.returncode, 2, p.stdout)
+                    self.assertIn(word, p.stderr)
+                    self.assertIn("新しく起動する", p.stderr)
+                    self.assertFalse(self.args_file.exists())  # 子を起こさない
+                    self.assertFalse(place.is_dir() and not place.is_symlink())  # 空で作り直さない
+
+    def test_a_place_that_cannot_be_removed_does_not_stop_the_launch(self):
+        stuck = self.leftover("tmp", self.stamp(9, "-stuck"), {"at": time.time() - 8 * 86400})
+        for patch, word in (("def no(p):\n    raise PermissionError(13, '消せない', str(p))\nlaunch.remove_tree = no", "片付けられない"),
+                            ("def boom(now):\n    raise RuntimeError('想定外')\nlaunch.sweep_leftovers = boom", "片付けが失敗した"),
+                            ("launch.sweep_lock = lambda block: None", None)):  # ほかの launcher が片付けている間は、待たずに飛ばす
+            with self.subTest(patch.split("\n")[-1]):
+                rc, rec = self.launch_patched(patch, ["--host", "claude", "--cwd", str(self.cwd)])
+                self.assertEqual((rc, rec["status"]), (0, "ok"), rec)
+                self.assertTrue(stuck.is_dir())
+                if word:
+                    self.assertEqual(rec["swept"]["removed"], [])
+                    self.assertIn(word, rec["swept"]["problems"][0])
+                else:
+                    self.assertNotIn("swept", rec)
+
+    def test_each_record_says_when_the_launch_ended(self):
+        """片付けの期限の時計。記録と委任の記録の行の両方に、起動の終わりの時刻（at）がある。"""
+        before = time.time()
+        rc, rec = self.run_launch("claude")
+        self.assertTrue(before - 0.01 <= rec["at"] <= time.time() + 0.01, rec["at"])
+        self.assertEqual(json.loads((self.state / "delegations.jsonl").read_text().splitlines()[-1])["at"], rec["at"])
+        self.assertEqual(json.loads((Path(rec["out"]) / "record.json").read_text())["at"], rec["at"])
+
+    def test_a_launch_with_nothing_to_remove_makes_nothing_for_the_sweep(self):
+        rec = self.sweep_by_a_launch()
+        self.assertFalse((self.state / "resuming").exists())  # 片付けの排他のファイルも作らない
+        self.assertNotIn("swept", rec)
+
     def test_resume_takes_the_launch_only_from_the_record(self):
         """続きを違う権限・違う対象で起動しない。続きから起動できない記録では、子を起こさずに止める。"""
         rc, rec = self.run_launch("claude", extra=["--timeout", "2"], env_extra={"FAKE_HANG": "1"})

@@ -19,6 +19,10 @@ Linux の外では、プロセスグループを止めるだけ（stopped_after_
 push・pr でこれを求める）。依頼文の中身が審査だったかは見ない。
 --audit は、読み取り専用の子が返す前の判定（スキルの要求を守ったかの監査）の子だという宣言で、記録の audit に残す
 （work.py が、すべての push・pr で HEAD を対象にしたこの記録を求める）。依頼文の中身が監査だったかは見ない。
+起動のたびに、自分が状態の置き場に作った一時の置き場（読み取り専用の Codex の子の一時ディレクトリ delegations/<名前>/tmp と、
+Grok の子の起動ごとの home grok-homes/<名前>）のうち、もう続きから起動されないものを消す（sweep_leftovers）。消すのは、最後に使われてから
+LEFTOVER_DAYS 日を過ぎたものと、task cleanup で消えたタスクの作業場所を見ていた子のもの。消した場所は記録の swept に並べる。
+消した置き場を指す記録からは --resume できない（理由を出して拒む）。報告と記録（out の中、delegations.jsonl）は消さない。
 トークンは画面にもログにも出さない（Claude Code は dotenvx run で子の環境にだけ渡す）。
 """
 from __future__ import annotations  # macOS の Command Line Tools の python3（3.9）でも型注釈で落ちないように
@@ -950,6 +954,152 @@ def hold_session(session: str):
     return f
 
 
+LEFTOVER_DAYS = 7  # 子の一時の置き場を、最後に使われてから残す日数（過ぎたら launcher が消し、その記録からは続きから起動できない）
+
+
+def sweep_lock(block: bool):
+    """片付けと、続きの起動の照合（session の排他を取り、一時の置き場があるかを見る）を直列にする排他。取れなければ None。
+    直列にしないと、照合を通った続きの足元で置き場が消える。launcher が終わると OS が放す。"""
+    d = state_dir() / "resuming"
+    d.mkdir(parents=True, exist_ok=True)
+    f = open(d / ".sweep", "w")
+    try:
+        fcntl.flock(f, fcntl.LOCK_EX | (0 if block else fcntl.LOCK_NB))
+    except OSError:
+        f.close()
+        return None
+    return f
+
+
+def session_idle(session: str) -> bool:
+    """この session の続きが動いていないか。排他のファイルは作らない（無ければ、続きが起動されたことが無い）。sweep_lock の下で呼ぶ。"""
+    try:
+        f = open(state_dir() / "resuming" / hashlib.sha256(session.encode()).hexdigest()[:32], "r+")
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False  # 読めない排他は、動いているものとして扱う（消さない側に倒す）
+    try:
+        fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return True
+    except OSError:
+        return False
+    finally:
+        f.close()
+
+
+def stamp_time(name: str):
+    """置き場の名前の先頭の日時（launcher が付ける %Y%m%d-%H%M%S）。読めなければ None。"""
+    try:
+        return time.mktime(time.strptime(name[:15], "%Y%m%d-%H%M%S"))
+    except (ValueError, OverflowError):
+        return None
+
+
+def task_worktree_gone(cwd, base: Path) -> bool:
+    """cwd が、もう無いタスクの作業場所（状態の置き場の worktrees/<リポジトリ>/<タスク> とその下）か。
+    task cleanup が消した作業場所を見ていた子は、続きから起動できない（対象が無い）。ほかの場所が無いだけでは、こう扱わない
+    （外した媒体や、作り直される場所かもしれない。そちらは期限で消える）。"""
+    if not isinstance(cwd, str) or not cwd:
+        return False
+    trees = Path(os.path.realpath(base / "worktrees"))
+    try:
+        rel = Path(os.path.abspath(cwd)).relative_to(trees)
+    except ValueError:
+        return False
+    return len(rel.parts) >= 2 and not os.path.lexists(trees / rel.parts[0] / rel.parts[1])
+
+
+def remove_tree(p: Path):
+    """置き場を中身ごと消す。symlink はたどらない（rmtree は symlink の行き先に入らず、p が symlink なら拒む）。
+    子が書けないディレクトリ（中身が 0444・0555 の写し）を残していても消せるよう、失敗した実のディレクトリだけ書けるようにしてやり直す。"""
+    def retry(func, path, _):
+        for d in (os.path.dirname(path), path):
+            if os.path.isdir(d) and not os.path.islink(d):
+                os.chmod(d, stat.S_IMODE(os.lstat(d).st_mode) | 0o700)
+        func(path)
+    shutil.rmtree(p, **({"onexc": retry} if sys.version_info >= (3, 12) else {"onerror": retry}))
+
+
+def leftover_places(base: Path) -> list:
+    """launcher が状態の置き場に作る一時の置き場のうち、いまあるもの: 読み取り専用の Codex の子の一時ディレクトリ
+    （delegations/<名前>/tmp）と、Grok の子の起動ごとの home（grok-homes/<名前>）。実のディレクトリだけ（symlink は数えない）。
+    記録に書かれた場所でなく、ここで並べたものだけを片付けの対象にする（記録が状態の置き場の外を指していても、そこは消さない）。"""
+    found = []
+    for parent, inside in ((base / "delegations", "tmp"), (base / "grok-homes", None)):
+        try:
+            entries = sorted(os.scandir(parent), key=lambda e: e.name)
+        except OSError:
+            continue
+        for e in entries:
+            if not e.is_dir(follow_symlinks=False):
+                continue
+            p = Path(e.path) / inside if inside else Path(e.path)
+            if not p.is_symlink() and p.is_dir():
+                found.append((p, e.name))
+    return found
+
+
+def sweep_leftovers(now: float) -> dict:
+    """もう続きから起動されない一時の置き場（leftover_places）を消し、{"removed": [消した場所], "problems": [消せなかった理由]} を返す。
+    消すのは次のどちらか: それを指す記録の対象が、どれも、もう無いタスクの作業場所（task_worktree_gone）。
+    または、最後に使われてから LEFTOVER_DAYS 日を過ぎた（記録の状態で分けない。時間切れの子も、ok の子も同じ）。
+    最後に使われた時刻は、それを指す記録の at（起動の終わり）と、置き場の名前の日時のうち新しいほう。どちらも無ければ、期限では消さない。
+    記録の無い置き場は、動いている最初の起動（記録は終わりに書く）か、記録を書く前に止まった起動のもので、名前の日時だけで決める
+    （LEFTOVER_DAYS 日を超えて動き続ける起動の置き場は守らない）。続きが動いている session の置き場は消さない。
+    報告と記録（out の record.json・report.md、delegations.jsonl）は消さない。作っていない置き場（resuming/ の排他の空のファイルなど）にも触れない。"""
+    out = {"removed": [], "problems": []}
+    base = state_dir()
+    uses = {}
+    try:
+        with open(base / "delegations.jsonl", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                try:
+                    r = json.loads(line)
+                except (ValueError, RecursionError):
+                    continue
+                if isinstance(r, dict):
+                    for k in ("scratch", "grok_home"):
+                        if isinstance(r.get(k), str) and r[k]:
+                            uses.setdefault(os.path.realpath(r[k]), []).append(r)
+    except OSError:
+        pass  # まだ委任していない・読めない: 記録の無い置き場として、名前の日時だけで決める
+
+    def due(p: Path, name: str) -> tuple:
+        rs = uses.get(os.path.realpath(p), [])
+        times = [r["at"] for r in rs if isinstance(r.get("at"), (int, float)) and not isinstance(r.get("at"), bool)]
+        named = stamp_time(name)
+        last = max(times + ([named] if named is not None else []), default=None)
+        gone = bool(rs) and all(task_worktree_gone(r.get("cwd"), base) for r in rs)
+        return gone or (last is not None and now - last > LEFTOVER_DAYS * 86400), rs
+
+    todo = [(p, name) for p, name in leftover_places(base) if due(p, name)[0]]
+    if not todo:
+        return out  # 何も作らずに返る（排他のファイルも）
+    gate = sweep_lock(block=False)
+    if gate is None:  # ほかの launcher が片付けている
+        return out
+    try:
+        for p, name in todo:
+            yes, rs = due(p, name)
+            sessions = {s for r in rs for s in (r.get("session"), r.get("session_asked")) if isinstance(s, str) and s}
+            if not yes or p.is_symlink() or not p.is_dir() or not all(session_idle(s) for s in sessions):
+                continue
+            try:
+                remove_tree(p)
+                out["removed"].append(str(p))
+                if p.name == "tmp" and p.parent.parent.name == "delegations":
+                    try:
+                        p.parent.rmdir()  # tmp だけだった置き場（--out をほかに渡した起動）は、空になったら外す。報告のある置き場は空でないので残る
+                    except OSError:
+                        pass
+            except OSError as e:
+                out["problems"].append(f"一時の置き場を片付けられない: {p}: {e!r}"[:300])
+    finally:
+        gate.close()
+    return out
+
+
 def launcher_error(out_dir: Path) -> str:
     """想定外の例外のトレースバックを out に残し、その場所を返す。"""
     import traceback
@@ -992,6 +1142,8 @@ def main() -> int:
             ap.error(f"前の起動の記録は続きから起動できない（{(prev.get('problems') or ['理由が記録に無い'])[0]}"[:300]
                      + "）。権限の照合に当たった・止めきれないプロセスがあった・Git の管理情報が変わったなどの記録は、確かめてから最初から起動し直す: "
                      + str(a.resume))
+        # 片付け（sweep_leftovers）と直列にする。排他を取って一時の置き場があるのを見るまでの間に、置き場を消させない
+        gate = sweep_lock(block=True)
         a.lock = hold_session(prev["session"])
         if a.lock is None:
             ap.error(f"同じ session の続きが動いている。終わるのを待つ: {a.resume}")
@@ -1002,10 +1154,16 @@ def main() -> int:
         left = sorted({f for r in [prev, *a.history] for k in ("cwd_residue", "home_residue") for f in r.get(k) or [] if os.path.lexists(f)})
         if left:  # 片付けずに続けると、続きの比較で「前からあるもの」になり、ok で見えなくなる
             ap.error(f"これまでの起動の空の残りを確かめて片付けてから続ける: {left[:20]}"[:600])
+        swept_note = (f"launcher は、最後に使われてから {LEFTOVER_DAYS} 日を過ぎた子の一時の置き場と、片付けたタスクの作業場所を見ていた子の一時の置き場を消す。"
+                      "続きからでなく、新しく起動する")
         if prev["host"] == "grok" and not (isinstance(prev.get("grok_home"), str) and Path(prev["grok_home"]).is_dir()):
-            ap.error(f"--resume の記録の grok_home が無い（Grok は前の home の session の記録から続ける）: {a.resume}")
+            ap.error(f"--resume の記録の grok_home が無い（Grok は前の home の session の記録から続ける）。{swept_note}: {a.resume}")
         if prev["host"] == "codex" and not prev["write"] and not isinstance(prev.get("scratch"), str):
             ap.error(f"--resume の記録に、読み取り専用の Codex の一時ディレクトリ（scratch）が無い: {a.resume}")
+        if prev["host"] == "codex" and not prev["write"] and (Path(prev["scratch"]).is_symlink() or not Path(prev["scratch"]).is_dir()):
+            # 無いまま続けると、空の一時ディレクトリを作り直して起動し、子は前の起動で写した対象を失ったまま続きを始める
+            ap.error(f"--resume の記録の一時ディレクトリ（scratch）が無い。{swept_note}: {a.resume}")
+        gate.close()
         a.host, a.cwd, a.model, a.effort, a.write = prev["host"], Path(prev["cwd"]), prev["model_requested"], prev["effort_requested"], prev["write"]
         a.session, a.grok_home = prev["session"], prev.get("grok_home") and Path(prev["grok_home"])
         a.interrogate = prev.get("interrogate") is True
@@ -1036,6 +1194,10 @@ def main() -> int:
         unresolved = Path(os.path.abspath(scratch_at))
         if any(d.name == ".git" or all((d / n).exists() for n in ("HEAD", "objects", "refs")) for d in [*scratch.parents, *unresolved.parents]):
             ap.error(f"bb-writ の状態の置き場 {state_dir()} が Git の管理ディレクトリの中にある。読み取り専用の Codex は一時ディレクトリに書けるので、外に置く")
+    try:  # 自分の作った一時の置き場のうち、もう続きから起動されないものを消す。消せなくても子の起動は止めない（記録の swept に出す）
+        swept = sweep_leftovers(time.time())
+    except Exception as e:  # 片付けの想定外の失敗も同じ
+        swept = {"removed": [], "problems": [f"一時の置き場の片付けが失敗した: {e!r}"[:300]]}
     out_dir = (a.out or state_dir() / "delegations" / stamp).resolve()
     try:
         out_dir.mkdir(parents=True, exist_ok=False)
@@ -1048,7 +1210,8 @@ def main() -> int:
         pass
     rec = {"host": a.host, "cwd": str(a.cwd), "model_requested": a.model, "effort_requested": a.effort,
            "write": a.write, "interrogate": a.interrogate, "audit": a.audit, "out": str(out_dir), "session_asked": a.session, **({"resumed_from": str(a.resume.resolve())} if a.resume else {}),
-           "load": {"cpus": os.cpu_count(), "start": load_now()}}  # 時間切れが混雑によるかを後で見分ける材料
+           "load": {"cpus": os.cpu_count(), "start": load_now()},  # 時間切れが混雑によるかを後で見分ける材料
+           **({"swept": swept} if swept["removed"] or swept["problems"] else {})}
     blocked = []  # 続きから起動させない理由（権限が分からない、プロセスを止めきれない、Git の管理情報が変わった、照合できない）
     rec["head"] = rec["saw"] = clean_head(a.cwd)  # 子を起こす前に（子が見る作業ツリー）。saw は、後で head を外しても残す
 
@@ -1281,6 +1444,7 @@ def main() -> int:
                        "対応する・記録のみ・退ける と理由を書く（入口の条件 (6)。push・pr はこの欄が空なら拒否される）")
     rec["duration_s"] = round(time.time() - t0, 1)
     rec["load"]["end"] = load_now()
+    rec["at"] = round(time.time(), 3)  # 起動の終わり。一時の置き場を最後に使った時刻として、片付けの期限に使う（sweep_leftovers）
     # 続きから起動してよいのは、session があり、権限・プロセス・Git・照合のどれにも当たらなかった起動だけ（空の残りは、片付けてから続けられる）
     if "sig" in stop:  # 止められた。ok で返った報告はそのまま使う（子が TERM の前に書き終えていた）
         rec["stopped_by_signal"] = stop["sig"]
