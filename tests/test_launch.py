@@ -612,7 +612,7 @@ class TestLaunch(unittest.TestCase):
         self.args_file.unlink()
         p = self.run_launch(None, extra=["--resume", rec["out"]], raw=True)
         self.assertEqual(p.returncode, 2, p.stdout)
-        self.assertIn(str(d / ".bashrc"), p.stderr)
+        self.assertIn(str(d.resolve() / ".bashrc"), p.stderr)  # launcher は、解いた道筋で出す
         self.assertFalse(self.args_file.exists())
         for f in rec["cwd_residue"]:
             shutil.rmtree(f) if Path(f).is_dir() else Path(f).unlink()
@@ -707,7 +707,7 @@ class TestLaunch(unittest.TestCase):
         p = self.run_launch("claude", extra=["--out", str(out)], raw=True)
         self.assertEqual(p.returncode, 2)
         self.assertNotIn("Traceback", p.stderr)
-        self.assertIn(str(out), p.stderr)
+        self.assertIn(str(out.resolve()), p.stderr)  # launcher は、解いた道筋で出す
         self.assertFalse(self.args_file.exists())
 
     def test_a_git_error_in_another_encoding_does_not_lose_the_record(self):
