@@ -25,7 +25,8 @@ kill -9 は、動いているどれにも、どの段の間にも。偽の行は
 - 置き場の排他 hold_place の 3 段: 開く（os.open）→ 排他（fcntl.flock）→ まだその名前にあるか（samestat）。
 - 最初の起動（main の「最初の起動は、作った直後のここで取る」と codex_read_only の scratch.mkdir、grok_home の mkdtemp）:
   作る → hold_place → 子 → 記録の行を書く（main の終わり。at は起動の終わりの時刻）→ 終わる（排他は、プロセスが終わると OS が放す）。
-  hold_place に失敗した最初の起動は、子を起こさず、置き場を指す行を書いて終わる（読み取り専用の Codex。記録の scratch は排他の前に入る）。
+  hold_place に失敗した最初の起動は、子を起こさず、置き場を指す行を書いて終わる（読み取り専用の Codex。記録の scratch は排他の前に入る。
+  Grok の最初の起動は、失敗しても置き場を指す行を書かないが、モデルは Codex の形で写す。正直な範囲では、この段に届かない）。
   対象（タスクの作業場所）が無くなっていれば、子は起きず、launcher は置き場を指す失敗の行を書いて終わる。
 - 続き（main の --resume の「続きが使う一時の置き場の排他を、ここで取って終わりまで持つ」）: hold_place → place_due（記録を読む → いまの
   時刻で決める）→ 子 → 行を書く → 終わる。
@@ -57,6 +58,11 @@ test_a_resume_waits_while_another_launcher_holds_its_place）、開いた後に�
 作り直す・いまの時刻の偽の行を足す・時計を 8 日戻す、のそれぞれでは、続きの子が半分の置き場で起きた（どれもモデルの予想どおり）。
 違いは 1 つ出て、モデルを直した: 対象の作業場所が無いまま続きの照合を通った場合（行を消す偽の行）、モデルは子を起こしたが、実物は
 子を起こせずに失敗の行を書いて終わった（今は、そう写してある）。
+
+外しても、このモデルの試験が落ちない判定（2026-11-10 に注入して確かめた）: 続きが、対象の無くなった作業場所の置き場を拒む判定（place_due の
+作業場所の有無）は、このモデルの約束には要らない。対象が無ければ子は起きないので、A2 は破れない（拒否の理由を、分かる文で先に出すための
+判定で、tests/test_launch.py の test_a_place_due_for_removal_cannot_be_continued_even_before_it_is_removed が実物で見る）。対象が無いと子が
+起きない分岐（nochild）を外すと、モデルは実物より多くの動き（実物では起きない子）を許すだけで、正直な範囲の合否は変わらない。
 
 対象の関数: hold_place・leftover_places・leftover_uses・leftover_due・place_due・sweep_leftovers・remove_tree・grok_home と、main の
 --resume の置き場の照合・最初の起動の排他・記録を書く段。これらを変えたら、このモデル（step）が今の本文を写しているかを読み直す
