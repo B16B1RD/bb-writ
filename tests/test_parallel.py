@@ -96,6 +96,64 @@ class TestParallel(unittest.TestCase):
             self.assertTrue(Path(t['dir']).is_dir(), t['task'])
         self.assertEqual(len(self.git(self.repo, 'branch', '--list', 'bb-writ/*').splitlines()), 7)
 
+    def test_looking_for_unclosed_tasks_writes_nothing(self):
+        """unclosed を調べるのは見るだけ。リポジトリの object も、作業場所も、状態の置き場も変えない（統合の照合は一時の置き場で行う）。"""
+        diverged = self.start()
+        self.change(diverged, 'side')
+        self.w('release', '--dir', diverged['dir'], '--token', diverged['token'])
+        (self.repo / 'main-only').write_text('x\n')  # 統合先が進んで、タスクと分かれる（照合が merge-tree を通る）
+        self.git(self.repo, 'add', 'main-only')
+        self.git(self.repo, 'commit', '-qm', '統合先の変更')
+        record = Path(diverged['note']['path']).parent
+        shutil.rmtree(record)  # 記録の置き場が無いタスク（見るだけなら、作り直さない）
+        state = Path(self.tmp.name) / 'state'
+
+        def snapshot():
+            return (self.git(self.repo, 'count-objects', '-v'), self.git(self.repo, 'for-each-ref'), self.git(self.repo, 'worktree', 'list'),
+                    sorted(str(x.relative_to(state)) for x in state.rglob('*') if 'worktrees' not in x.relative_to(state).parts))
+        before = snapshot()
+        listed = self.w('task', 'list', '--dir', self.repo)
+        self.assertEqual([(t['task'], t['lease'], t['commits'], t['landed']) for t in listed['unclosed']], [(diverged['task'], 'released', 1, False)])
+        self.assertEqual(snapshot(), before)
+        self.assertFalse(record.exists())
+
+    def test_a_broken_record_of_another_task_does_not_stop_a_new_task(self):
+        """ほかのタスクの担当の記録（書く子が書き換えうる）が壊れていても、task start は新しいタスクの担当と token を返す。
+        壊れたタスクは、確かめられないものとして unclosed に並ぶ。task list も、前の版が通していた形（JSON として読める値）では止まらない。"""
+        for name, lease, listable in (('深い入れ子', '[' * 100000 + ']' * 100000, False), ('float にできない期限', '{"token": "t", "expires_at": 1' + '0' * 400 + '}', True),
+                                      ('JSON でない', '{', False), ('期限が文字列', '{"token": "t", "expires_at": "あした"}', True)):
+            with self.subTest(name):
+                other = self.start()
+                self.change(other, 'f-' + other['task'])
+                broken = Path(other['note']['path']).parent / 'lease.json'
+                broken.write_text(lease)
+                new = self.start()
+                self.assertTrue(new['ok'] and new['token'], new)
+                got = {t['task']: t for t in new['unclosed']}
+                self.assertEqual((got[other['task']]['commits'], got[other['task']]['landed']), (1, False))
+                if listable:
+                    self.assertIn(other['task'], {t['task'] for t in self.w('task', 'list', '--dir', self.repo)['unclosed']})
+                broken.unlink()  # 次の場面に持ち越さない
+                self.w('release', '--dir', new['dir'], '--token', new['token'])
+
+    def test_unclosed_tasks_are_found_by_the_registry_not_by_what_the_records_say(self):
+        """並べるのは、タスクの一覧の識別子から決まる作業場所だけ（一覧の json の dir の値や、識別子の形でない名前のファイルは使わない）。
+        landed は、checkout の HEAD でなく、そのタスクの統合先と比べる。"""
+        self.git(self.repo, 'branch', 'release')
+        to_release = self.w('task', 'start', '--dir', self.repo, '--holder', 'x', '--target', 'release')
+        head = self.change(to_release, 'for-release')
+        self.git(self.repo, 'merge', '-q', '--ff-only', head)  # checkout の HEAD（main）には入ったが、統合先（release）には入っていない
+        self.w('release', '--dir', to_release['dir'], '--token', to_release['token'])
+        registry = next((Path(self.tmp.name) / 'state' / 'work').glob('repo-*')) / 'tasks'
+        elsewhere = Path(self.tmp.name) / 'elsewhere'
+        elsewhere.mkdir()
+        entry = registry / (to_release['task'] + '.json')
+        entry.write_text(json.dumps({**json.loads(entry.read_text()), 'dir': str(elsewhere)}))
+        (registry / 'not-a-task.json').write_text(entry.read_text())
+        (Path(to_release['dir']).parent / 'not-a-task').mkdir()
+        got = self.start()['unclosed']
+        self.assertEqual([(t['task'], t['dir'], t['target'], t['landed']) for t in got], [(to_release['task'], to_release['dir'], 'release', False)])
+
     def test_a_task_in_a_submodule_works_in_the_submodule(self):
         sub = Path(self.tmp.name) / 'sub-origin'
         sub.mkdir()

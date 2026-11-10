@@ -92,6 +92,7 @@ import signal
 import stat
 import subprocess
 import sys
+import tempfile
 import time
 from contextlib import contextmanager
 from pathlib import Path
@@ -101,10 +102,14 @@ def state_dir() -> Path:
     return Path(os.path.abspath(os.environ.get("BB_WRIT_STATE_DIR", Path.home() / ".local" / "state" / "bb-writ")))  # git -C の先でも同じ場所
 
 
-def root(d: Path) -> Path:
-    base = state_dir() / "work"
+def record_at(d: Path) -> Path:
+    """作業場所 d の記録の置き場（作らない）。"""
     real = str(d.resolve())
-    r = base / (Path(real).name + "-" + hashlib.sha256(real.encode()).hexdigest()[:10])
+    return state_dir() / "work" / (Path(real).name + "-" + hashlib.sha256(real.encode()).hexdigest()[:10])
+
+
+def root(d: Path) -> Path:
+    r = record_at(d)
     r.mkdir(parents=True, exist_ok=True)
     return r
 
@@ -601,13 +606,25 @@ def git(d, *args, fds=()):
     return p.stdout.strip()
 
 
-def contained(repo, commit, ref):
+def contained(repo, commit, ref, look_only=False):
     """commit の変更が ref に入っているか。祖先でなくても（squash・rebase で統合した後に統合先が進んでも）、
-    commit を ref へマージした結果が ref のツリーのままなら入っている。衝突・取り消し・未統合の commit は入っていない。"""
+    commit を ref へマージした結果が ref のツリーのままなら入っている。衝突・取り消し・未統合の commit は入っていない。
+    git merge-tree --write-tree は、マージした結果の object をリポジトリに書く。look_only（見るだけの呼び出し）では、
+    一時の置き場に書かせ、リポジトリの object は読むだけにする。"""
     if sh(['git', 'merge-base', '--is-ancestor', commit, ref], repo)[0] == 0:
         return True
-    p = subprocess.run(['git', '-C', str(repo), 'merge-tree', '--write-tree', ref, commit], stdin=subprocess.DEVNULL,
-                       capture_output=True, text=True)
+    env, scratch = None, None
+    if look_only:
+        scratch = tempfile.TemporaryDirectory()
+        objects = git(repo, 'rev-parse', '--path-format=absolute', '--git-path', 'objects')
+        env = {**os.environ, 'GIT_OBJECT_DIRECTORY': scratch.name,
+               'GIT_ALTERNATE_OBJECT_DIRECTORIES': os.pathsep.join(x for x in (objects, os.environ.get('GIT_ALTERNATE_OBJECT_DIRECTORIES')) if x)}
+    try:
+        p = subprocess.run(['git', '-C', str(repo), 'merge-tree', '--write-tree', ref, commit], stdin=subprocess.DEVNULL,
+                           capture_output=True, text=True, env=env)
+    finally:
+        if scratch:
+            scratch.cleanup()
     if p.returncode not in (0, 1) or not p.stdout:
         raise ValueError('変更が保存先に入っているかを確かめられない: ' + (p.stderr.strip() or 'git が失敗した')
                          + '（git merge-tree --write-tree を使う。Git が 2.38 より古いと、ここで止まる）')
@@ -689,40 +706,40 @@ def worktrees(repo):
     return result
 
 
-def unclosed_tasks(repo, rr, registry, skip=None):
+def unclosed_tasks(repo, rr, registry):
     """担当のいない（解放済みか、期限の切れた）タスクのうち、作業場所が残っているもの。作業場所は task cleanup だけが消すので、
-    呼ばれなかったタスクは残り続ける。それを、次の task start と task list で見えるようにする（ここでは何も消さない）。
+    呼ばれなかったタスクは残り続ける。それを、次の task start と task list で見えるようにする。見るだけで、何も消さず、
+    リポジトリにも状態の置き場にも何も書かない（統合の照合の object は一時の置き場に書かせ、記録の置き場は作らずに読む）。
     commits は、基点から HEAD までの commit の数（0 なら、まだ何も commit していないタスク）。landed は、HEAD の変更が統合先に
     入っているか（task cleanup の保存先の照合と同じ contained。squash・rebase で入ったものも真）。確かめられなければ None。
     未 commit の変更・無視されるファイル・終わっていない操作は見ない（片付けるときに task cleanup が見る。大きい作業場所の
-    git status を、task start のたびに回さない）。"""
+    git status を、task start のたびに回さない）。ほかのタスクの記録は書く子が書き換えうるので、読めない・形の違う値は、
+    そのタスクを「確かめられない」として並べるだけにし、ここからは例外を出さない（task start と task list を止めない）。"""
     found, now = [], time.time()
     for p in sorted(registry.glob('*.json')):
-        try:
-            task = read(p)
-        except (OSError, ValueError):
-            continue
-        if not isinstance(task, dict) or p.stem == skip or not re.fullmatch('[a-f0-9]{16}', p.stem):
+        if not re.fullmatch('[a-f0-9]{16}', p.stem):
             continue
         dest = task_dir(rr, p.stem)
         if not dest.is_dir():
             continue
+        entry = {'task': p.stem, 'dir': str(dest), 'target': None, 'lease': 'unreadable', 'commits': None, 'landed': None}
         try:
-            lease = read(root(dest) / 'lease.json')
-        except (OSError, ValueError):
-            lease = {}  # 読めない担当の記録は、切れたものとして並べる（alive も壊れた値を切れたものとみなす）
-        if alive(lease, now):
-            continue
-        commits = landed = None
-        try:
-            if re.fullmatch('[0-9a-f]{40}|[0-9a-f]{64}', str(task.get('base'))) and isinstance(task.get('target'), str):
-                head = git(dest, 'rev-parse', '--verify', 'HEAD')
-                commits = int(git(dest, 'rev-list', '--count', task['base'] + '..' + head))
-                landed = contained(repo, head, 'refs/heads/' + task['target'])
-        except (ValueError, OSError):
+            lease = read(record_at(dest) / 'lease.json')  # 記録の置き場は作らない（見るだけ）
+            if alive(lease, now):
+                continue
+            entry['lease'] = 'released' if lease is None else 'expired'
+        except Exception:  # 深い入れ子・float にできない期限など。担当がいるとは言えないので、並べる
             pass
-        found.append({'task': p.stem, 'dir': str(dest), 'target': task.get('target'), 'lease': 'released' if lease is None else 'expired',
-                      'commits': commits, 'landed': landed})
+        try:
+            task = read(p)
+            if isinstance(task, dict) and re.fullmatch('[0-9a-f]{40}|[0-9a-f]{64}', str(task.get('base'))) and isinstance(task.get('target'), str):
+                entry['target'] = task['target']
+                head = git(dest, 'rev-parse', '--verify', 'HEAD')
+                entry['commits'] = int(git(dest, 'rev-list', '--count', task['base'] + '..' + head))
+                entry['landed'] = contained(repo, head, 'refs/heads/' + task['target'], look_only=True)
+        except Exception:
+            pass
+        found.append(entry)
     return found
 
 
@@ -735,7 +752,7 @@ def task_command(a):
             tasks = []
             for p in sorted(registry.glob('*.json')):
                 task = read(p)
-                lease = read(root(Path(task['dir'])) / 'lease.json')
+                lease = read(record_at(Path(task['dir'])) / 'lease.json')  # 一覧は見るだけ（記録の置き場を作らない）
                 tasks.append({**task, 'lease': {k: v for k, v in lease.items() if k != 'token'} if lease else None})
             rest = unclosed_tasks(repo, rr, registry)
             return out({'ok': True, 'tasks': tasks, 'integration': read(rr / 'integration.json'), **({'unclosed': rest} if rest else {})})
@@ -755,6 +772,7 @@ def task_command(a):
                 target = full.removeprefix('refs/heads/')
             git(repo, 'show-ref', '--verify', 'refs/heads/' + target)
             base = git(repo, 'rev-parse', '--verify', (a.base or 'refs/heads/' + target) + '^{commit}')
+            rest = unclosed_tasks(repo, rr, registry)  # 片付けを呼ばれなかったタスクを、始めるたびに見せる（新しいタスクを作る前に調べる）
             ident = secrets.token_hex(8)
             dest = task_dir(rr, ident)
             task = {'task': ident, 'dir': str(dest), 'branch': 'bb-writ/' + ident,
@@ -775,7 +793,6 @@ def task_command(a):
             with locked(wr):
                 write(wr / 'task.json', task)
                 res, code = claim_at(wr, dest, a.holder, a.lease)
-            rest = unclosed_tasks(repo, rr, registry, skip=ident)  # 片付けを呼ばれなかったタスクを、始めるたびに見せる
             return out({**task, **res, **({'unclosed': rest} if rest else {})}, code)
         if a.action == 'resume':
             if not re.fullmatch('[a-f0-9]{16}', a.task):
