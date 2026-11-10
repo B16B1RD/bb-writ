@@ -105,7 +105,7 @@ class TestParallel(unittest.TestCase):
 
     def test_a_separate_git_dir_is_refused_with_the_reason(self):
         at = Path(self.tmp.name) / 'sep'
-        subprocess.run(['git', 'init', '-q', '-b', 'main', '--separate-git-dir', str(Path(self.tmp.name) / 'sep.git'), str(at)], check=True)
+        subprocess.run(['git', 'init', '-q', '-b', 'main', '--separate-git-dir', str(Path(self.tmp.name) / 'sep.git'), str(at)], env=self.env, check=True)
         self.git(at, '-c', 'user.name=t', '-c', 'user.email=t', 'commit', '-q', '--allow-empty', '-m', 'i')
         got = self.w('task', 'start', '--dir', at, '--holder', 'x', code=6)
         self.assertIn('separate-git-dir', got['reason'])
@@ -117,13 +117,13 @@ class TestParallel(unittest.TestCase):
         self.git(outer, 'init', '-q', '-b', 'main')
         self.git(outer, '-c', 'user.name=t', '-c', 'user.email=t', 'commit', '-q', '--allow-empty', '-m', 'i')
         inner = Path(self.tmp.name) / 'inner'
-        subprocess.run(['git', 'init', '-q', '-b', 'main', '--separate-git-dir', str(outer / 'in.git'), str(inner)], check=True)
+        subprocess.run(['git', 'init', '-q', '-b', 'main', '--separate-git-dir', str(outer / 'in.git'), str(inner)], env=self.env, check=True)
         self.git(inner, '-c', 'user.name=t', '-c', 'user.email=t', 'commit', '-q', '--allow-empty', '-m', 'i')
         self.w('task', 'start', '--dir', inner, '--holder', 'x', code=6)
         named = Path(self.tmp.name) / 'gd' / '.git'  # 管理ディレクトリの名前が .git でも、その親に作らない
         named.parent.mkdir()
         tree = Path(self.tmp.name) / 'tree'
-        subprocess.run(['git', 'init', '-q', '-b', 'main', '--separate-git-dir', str(named), str(tree)], check=True)
+        subprocess.run(['git', 'init', '-q', '-b', 'main', '--separate-git-dir', str(named), str(tree)], env=self.env, check=True)
         self.git(tree, '-c', 'user.name=t', '-c', 'user.email=t', 'commit', '-q', '--allow-empty', '-m', 'i')
         self.w('task', 'start', '--dir', tree, '--holder', 'x', code=6)
 
