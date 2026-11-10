@@ -2766,9 +2766,13 @@ class TestLaunch(unittest.TestCase):
         rows = self.state / "delegations.jsonl"
 
         def forge(place):  # その置き場を指す記録を、「片付けたタスクを見ていた別の session のもの」だけにする（本物の行は消す）
-            kept = [x for x in (rows.read_text().splitlines() if rows.exists() else []) if os.path.realpath(place) not in x]
-            key = "scratch" if place.name == "tmp" else "grok_home"
-            rows.write_text("".join(x + "\n" for x in kept) + json.dumps({key: os.path.realpath(place), "cwd": gone, "session": "changed", "at": 0}) + "\n")
+            # 本物の行は、道筋を解いて比べる（Grok の記録の grok_home は解く前の道筋で、一時の置き場が symlink の下にある macOS では、
+            # 解いた道筋の文字列では見つからず、本物の行が残って置き場が対象にならなかった）
+            key, real = "scratch" if place.name == "tmp" else "grok_home", os.path.realpath(place)
+            kept = [x for x in (rows.read_text().splitlines() if rows.exists() else [])
+                    if not any(isinstance(v, str) and v and os.path.realpath(v) == real for v in (json.loads(x).get("scratch"), json.loads(x).get("grok_home")))]
+            self.assertTrue(all(real not in x for x in kept))
+            rows.write_text("".join(x + "\n" for x in kept) + json.dumps({key: real, "cwd": gone, "session": "changed", "at": 0}) + "\n")
 
         def places():
             return set((self.state / "delegations").glob("*/tmp")) | set((self.state / "grok-homes").glob("*"))
@@ -2819,10 +2823,15 @@ class TestLaunch(unittest.TestCase):
         少ない環境でも同じ（降りた段の fd を開いたままにしない）。上限は、launcher のプロセスで下げて確かめる。"""
         old = time.time() - 8 * 86400
         deep = self.leftover("tmp", self.stamp(9, "-a-deep"), {"at": old})
-        d = deep / "t"
-        for _ in range(1200):
-            os.mkdir(d)
-            d = d / "t"
+        fd = os.open(deep, os.O_RDONLY)  # fd からの相対で作る（絶対パスでは、道筋の長さの上限を超える。macOS は 1,024）
+        try:
+            for _ in range(1200):
+                os.mkdir("t", dir_fd=fd)
+                below = os.open("t", os.O_RDONLY, dir_fd=fd)
+                os.close(fd)
+                fd = below
+        finally:
+            os.close(fd)
         after = self.leftover("tmp", self.stamp(9, "-b-after"), {"at": old})
         patch = "import resource\nresource.setrlimit(resource.RLIMIT_NOFILE, (200, resource.getrlimit(resource.RLIMIT_NOFILE)[1]))"
         rc, rec = self.launch_patched(patch, ["--host", "claude", "--cwd", str(self.cwd)])
