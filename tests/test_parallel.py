@@ -4,6 +4,7 @@ import json
 import os
 import shlex
 import shutil
+import signal
 from pathlib import Path
 import subprocess
 import sys
@@ -204,7 +205,8 @@ class TestParallel(unittest.TestCase):
         self.journal(dir=str(Path(a['dir']).resolve()), verified=head)
         self.w('task', 'cleanup', '--dir', a['dir'], '--token', a['token'], '--saved', 'kept')
 
-    def test_a_failed_fast_forward_after_the_target_moved_leaves_no_record(self):
+    def test_a_failed_fast_forward_leaves_no_record(self):
+        # ff を、ref を書く段の hook で失敗させる（統合先が別の commit へ進んで ff が拒まれたときと同じく、何も反映していない）
         a = self.start()
         head = self.change(a, 'a')
         expected = self.git(self.repo, 'rev-parse', 'main')
@@ -219,9 +221,18 @@ class TestParallel(unittest.TestCase):
         a = self.start()
         head = self.change(a, 'a')
         c = self.w('claim', '--dir', self.repo, '--holder', 'x')
+        pidfile = Path(self.tmp.name) / 'slow.pid'
         p = subprocess.Popen([sys.executable, '-B', str(WORK), 'op', 'run', '--dir', self.repo, '--token', c['token'], '--key', 'local:slow',
-                              '--', 'sleep', '20'], env=self.env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        self.addCleanup(p.kill)
+                              '--', 'sh', '-c', f'echo $$ > {shlex.quote(str(pidfile))}; exec sleep 20'],
+                             env=self.env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+        def stop():  # op run を止めても、監督役（別のセッション）とコマンドは残る。コマンドを止め、監督役が終わるのを待ってから片付ける
+            try:
+                os.kill(int(pidfile.read_text()), signal.SIGTERM)
+                p.wait(timeout=15)
+            except (OSError, ValueError, subprocess.TimeoutExpired):
+                p.kill()
+        self.addCleanup(stop)
         rr = next((Path(self.tmp.name) / 'state' / 'work').glob('repo-*'))
         deadline = time.time() + 15
         while time.time() < deadline and not any(rr.glob('*.lock')) and not (rr / 'ops.jsonl').exists():
@@ -229,6 +240,7 @@ class TestParallel(unittest.TestCase):
         time.sleep(0.5)
         lease = json.loads((rr / 'lease.json').read_text())
         lease['expires_at'] = 1
+        lease['token'] = 'x'  # 監督役は token が同じ担当の期限を 1 秒ごとに延ばす。延ばされて「生きた担当がいる」の拒否に変わらないように
         (rr / 'lease.json').write_text(json.dumps(lease))
         got = self.integrate(a, self.git(self.repo, 'rev-parse', 'main'), head, code=6)
         self.assertIn('op run', got['reason'])
