@@ -1409,13 +1409,15 @@ class TestLaunch(unittest.TestCase):
         # 守らない範囲:
         # - SimpleNamespace(...) という名前の呼び出しでない組み方（argparse.Namespace・別名・types.SimpleNamespace）は見ない。2 か所の
         #   片方だけをそう組むと、その片方の欠けは見ずに通る（見つけた数が 0 のときだけ落ちる）。
-        # - 値の中身は見ない。空の文字列の session、resume を真にした名前空間、f-string を通って文字列になる値（Codex の effort）は通る。
+        # - 値の中身は見ない。空の文字列の session と、f-string を通って文字列になる値（Codex の effort の None）は通る。resume を真にした
+        #   名前空間も、session が文字列なら通る（Codex の書く名前空間は session が None なので落ちる）。
         # - host の変数には claude と codex だけを入れる（台本の hosts の一覧は読まない）。台本が host の変数で grok を起動するように
-        #   なっても、Grok の経路（grok_home を読む）は通さない。host='grok' を直に書いた名前空間は通す。
+        #   なっても、Grok の経路（grok_home を読む）は動かさない。host='grok' を直に書いた名前空間は Grok の経路まで動かすが、
+        #   grok_home が無ければ落ち、読み取り専用の Grok は、この試験の対象が一時ディレクトリの下にあるので値がそろっていても落ちる。
         # - command() の後の台本の処理（組んだコマンドの書き換え・実行）は見ない。
         # 台本の正当な書き換えでも落ちる形: 組んだ後に属性を足す（a.resume = None。値は SimpleNamespace(...) の中に書く）、command() に
         # 渡さない SimpleNamespace(...) を tests/verify_*.py に置く（全部を command() に渡すものとして扱う）、キーワードの値が
-        # host・repo・uuid 以外の名前を読む（NameError。下の辞書に足す）。
+        # 組み込みの名前と host・repo・uuid のどれでもない名前を読む（NameError。下の辞書に足す）。
         import ast
         import uuid
         from types import SimpleNamespace
