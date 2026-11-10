@@ -442,6 +442,12 @@ def load_launch():
 
 class TestLaunch(unittest.TestCase):
     def setUp(self):
+        # 試験の中から直に呼ぶ git（リポジトリを用意する commit など）と、起こす launcher が、利用者の全体の Git 設定（core.hooksPath など）を
+        # 読まないように（全体の設定を渡す試験は、env_extra で上書きする）
+        from unittest import mock
+        no_global = mock.patch.dict(os.environ, {"GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"})
+        no_global.start()
+        self.addCleanup(no_global.stop)
         self.tmp = tempfile.TemporaryDirectory()
         t = Path(self.tmp.name)
         self.bin, self.cfg, self.state, self.cwd = t / "bin", t / "cfg", t / "state", t / "repo"
