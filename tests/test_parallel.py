@@ -63,6 +63,39 @@ class TestParallel(unittest.TestCase):
                                                          'verified': '0' * 40, 'target': 'refs/heads/main', **over}))
         return rr / 'integration.json'
 
+    def test_a_new_task_reports_the_tasks_nobody_closed(self):
+        """片付け（task cleanup）を呼ばれなかったタスクは、次の task start と task list の出力の unclosed に出る。担当のいるタスクと、
+        片付けたタスクは出ない。出すだけで、何も消さない。"""
+        first = self.start()
+        self.assertNotIn('unclosed', first)  # 無ければ欄も無い
+        self.integrate(first, self.git(self.repo, 'rev-parse', 'main'), self.change(first, 'closed'))
+        self.w('task', 'cleanup', '--dir', first['dir'], '--token', first['token'], '--saved', 'main')
+        landed = self.start()
+        self.integrate(landed, self.git(self.repo, 'rev-parse', 'main'), self.change(landed, 'landed'))
+        squashed = self.start()
+        self.change(squashed, 'squashed')
+        self.git(self.repo, 'merge', '-q', '--squash', squashed['branch'])  # 統合先には、別の commit として入る
+        self.git(self.repo, 'commit', '-qm', 'squash')
+        unlanded = self.start()
+        self.change(unlanded, 'unlanded')
+        unused = self.start()
+        for t in (landed, squashed, unlanded, unused):
+            self.w('release', '--dir', t['dir'], '--token', t['token'])
+        expired = self.w('task', 'start', '--dir', self.repo, '--holder', 'x', '--lease', '0.0001')
+        self.change(expired, 'expired')
+        held = self.start()
+        new = self.start()
+        got = {t['task']: (t['lease'], t['commits'], t['landed']) for t in new['unclosed']}
+        self.assertEqual(got, {landed['task']: ('released', 1, True), squashed['task']: ('released', 1, True),
+                               unlanded['task']: ('released', 1, False), unused['task']: ('released', 0, True),
+                               expired['task']: ('expired', 1, False)})
+        self.assertEqual({t['task']: t['dir'] for t in new['unclosed']}[landed['task']], landed['dir'])
+        listed = self.w('task', 'list', '--dir', self.repo)
+        self.assertEqual({t['task'] for t in listed['unclosed']}, set(got))  # 始めたばかりの new と held は、担当がいるので出ない
+        for t in (landed, squashed, unlanded, unused, expired, held, new):
+            self.assertTrue(Path(t['dir']).is_dir(), t['task'])
+        self.assertEqual(len(self.git(self.repo, 'branch', '--list', 'bb-writ/*').splitlines()), 7)
+
     def test_a_task_in_a_submodule_works_in_the_submodule(self):
         sub = Path(self.tmp.name) / 'sub-origin'
         sub.mkdir()

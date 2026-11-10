@@ -24,6 +24,8 @@
   work.py check   --dir <作業場所> --from <外部操作を実行する場所>      → そこで使われる GitHub のアカウントと、push 先の origin への書き込み権限（書けない・アカウントが分からなければ 5）
   work.py task start --dir <checkout> --holder <誰か> [--base <commit等>] [--target <ブランチ>] → 専用 worktree と担当を作る
   work.py task list --dir <checkout>                               → タスク、担当、未完了の統合
+                     task start と task list は、担当のいない（解放済みか期限切れの）タスクで作業場所が残っているものを unclosed に並べる
+                     （commits は基点からの commit の数、landed は変更が統合先に入っているか）。片付けを呼ばれなかったタスクを見せるだけで、消さない
   work.py task resume --dir <checkout> --task <識別子> --holder <誰か> → 作業場所を保持して担当を取得
   work.py integrate --dir <worktree> --token <t> --expected <統合先commit> --verified <検証済みcommit> → 排他・照合して fast-forward
   work.py task cleanup --dir <worktree> --token <t> --saved <別のブランチかタグ> → 変更が保存先に入っていれば片付け（squash・rebase の統合も可）
@@ -687,6 +689,43 @@ def worktrees(repo):
     return result
 
 
+def unclosed_tasks(repo, rr, registry, skip=None):
+    """担当のいない（解放済みか、期限の切れた）タスクのうち、作業場所が残っているもの。作業場所は task cleanup だけが消すので、
+    呼ばれなかったタスクは残り続ける。それを、次の task start と task list で見えるようにする（ここでは何も消さない）。
+    commits は、基点から HEAD までの commit の数（0 なら、まだ何も commit していないタスク）。landed は、HEAD の変更が統合先に
+    入っているか（task cleanup の保存先の照合と同じ contained。squash・rebase で入ったものも真）。確かめられなければ None。
+    未 commit の変更・無視されるファイル・終わっていない操作は見ない（片付けるときに task cleanup が見る。大きい作業場所の
+    git status を、task start のたびに回さない）。"""
+    found, now = [], time.time()
+    for p in sorted(registry.glob('*.json')):
+        try:
+            task = read(p)
+        except (OSError, ValueError):
+            continue
+        if not isinstance(task, dict) or p.stem == skip or not re.fullmatch('[a-f0-9]{16}', p.stem):
+            continue
+        dest = task_dir(rr, p.stem)
+        if not dest.is_dir():
+            continue
+        try:
+            lease = read(root(dest) / 'lease.json')
+        except (OSError, ValueError):
+            lease = {}  # 読めない担当の記録は、切れたものとして並べる（alive も壊れた値を切れたものとみなす）
+        if alive(lease, now):
+            continue
+        commits = landed = None
+        try:
+            if re.fullmatch('[0-9a-f]{40}|[0-9a-f]{64}', str(task.get('base'))) and isinstance(task.get('target'), str):
+                head = git(dest, 'rev-parse', '--verify', 'HEAD')
+                commits = int(git(dest, 'rev-list', '--count', task['base'] + '..' + head))
+                landed = contained(repo, head, 'refs/heads/' + task['target'])
+        except (ValueError, OSError):
+            pass
+        found.append({'task': p.stem, 'dir': str(dest), 'target': task.get('target'), 'lease': 'released' if lease is None else 'expired',
+                      'commits': commits, 'landed': landed})
+    return found
+
+
 def task_command(a):
     repo = checkout_of(a.dir)
     rr = root(repo)
@@ -698,7 +737,8 @@ def task_command(a):
                 task = read(p)
                 lease = read(root(Path(task['dir'])) / 'lease.json')
                 tasks.append({**task, 'lease': {k: v for k, v in lease.items() if k != 'token'} if lease else None})
-            return out({'ok': True, 'tasks': tasks, 'integration': read(rr / 'integration.json')})
+            rest = unclosed_tasks(repo, rr, registry)
+            return out({'ok': True, 'tasks': tasks, 'integration': read(rr / 'integration.json'), **({'unclosed': rest} if rest else {})})
         if a.action == 'start':
             top = Path(git(a.dir, 'rev-parse', '--show-toplevel')).resolve()  # 作業場所の下の階層からでも、そのタスクの統合先を継ぐ
             common = Path(git(a.dir, 'rev-parse', '--path-format=absolute', '--git-common-dir')).resolve()
@@ -735,7 +775,8 @@ def task_command(a):
             with locked(wr):
                 write(wr / 'task.json', task)
                 res, code = claim_at(wr, dest, a.holder, a.lease)
-            return out({**task, **res}, code)
+            rest = unclosed_tasks(repo, rr, registry, skip=ident)  # 片付けを呼ばれなかったタスクを、始めるたびに見せる
+            return out({**task, **res, **({'unclosed': rest} if rest else {})}, code)
         if a.action == 'resume':
             if not re.fullmatch('[a-f0-9]{16}', a.task):
                 raise ValueError('task list の task 識別子を指定する')
