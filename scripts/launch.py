@@ -1040,7 +1040,9 @@ def remove_tree(p: Path):
     rmtree は使わない（版によって再帰し、失敗時の呼び直しの形も違う）。読めないディレクトリは、親の fd からの名前でモードを 0700 に
     置き換えてから開く（その瞬間に symlink に替えられると、行き先のディレクトリのモードが 0700 に替わる。消しはしない）。
     深い木でも、開いておく fd は KEEP 個ほどまで（上の段から閉じ、戻るときに上から開き直す。その分、手間は深さの 2 乗に比例して増える。
-    深さ 3,000 の木で 0.2 秒ほど）。"""
+    深さ 3,000 の木で 0.2 秒ほど）。ディレクトリの中身は、読み終えてから消す（1 つのディレクトリの項目の一覧を、その間だけメモリに持つ）。
+    読んでいる最中に消すと、その後の読みが残りの項目を返すかは実装による（POSIX は決めていない。macOS の HFS+ では、消した後の
+    readdir が残りを読み飛ばした。shutil.rmtree も、読み終えてから消す）。"""
     KEEP = 32
     flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
 
@@ -1076,11 +1078,12 @@ def remove_tree(p: Path):
         frames.append([fd, name, []])
         os.fchmod(fd, stat.S_IMODE(os.fstat(fd).st_mode) | 0o700)
         with os.scandir(fd) as entries:
-            for e in entries:
-                if e.is_dir(follow_symlinks=False):
-                    frames[-1][2].append(e.name)
-                else:
-                    os.unlink(e.name, dir_fd=fd)  # symlink は、名前だけ消える
+            found = list(entries)  # 読み終えてから消す。消しながら読むと、残りを読み飛ばす実装がある（下の説明）
+        for e in found:
+            if e.is_dir(follow_symlinks=False):
+                frames[-1][2].append(e.name)
+            else:
+                os.unlink(e.name, dir_fd=fd)  # symlink は、名前だけ消える
         held = [f for f in frames[1:] if f[0] is not None]
         if len(held) > KEEP:
             os.close(held[0][0])

@@ -2830,6 +2830,58 @@ class TestLaunch(unittest.TestCase):
         self.assertEqual((sorted(rec["swept"]["removed"]), rec["swept"]["problems"]), (sorted([str(deep), str(after)]), []))
         self.assertFalse(os.path.lexists(deep) or os.path.lexists(after))
 
+    def test_a_place_with_thousands_of_files_in_one_directory_goes_in_one_sweep(self):
+        """1 つのディレクトリに数千のファイルとディレクトリがある置き場も、1 回の片付けで消える（子は、対象の写しを置き場に作る）。
+        消しながら読むと残りを読み飛ばす実装（macOS の HFS+ の readdir）では、項目の多いディレクトリで残りが出る。"""
+        place = self.leftover("tmp", self.stamp(9, "-many"), {"at": time.time() - 8 * 86400})
+        many = place / "copy" / "many"
+        many.mkdir()
+        for i in range(3000):
+            (many / f"f{i:04d}").write_bytes(b"")
+        for i in range(60):
+            (many / f"d{i:02d}").mkdir()
+            (many / f"d{i:02d}" / "x").write_bytes(b"")
+        rec = self.sweep_by_a_launch()
+        self.assertFalse(os.path.lexists(place))
+        self.assertEqual((rec["swept"]["removed"], rec["swept"]["problems"]), ([str(place)], []))
+
+    def test_a_directory_is_read_to_the_end_before_anything_in_it_is_removed(self):
+        """置き場の中のディレクトリは、読み終えてから中身を消す。読んでいる最中に消すと、位置で読み進める実装では、消した分だけ後ろが
+        詰まって残りを読み飛ばし、置き場が消えない。その実装を、launcher の中の os.scandir（fd を渡す呼び出しだけ）を差し替えて作る:
+        呼ばれるたびに今の中身を並べ直して、何番目かで次を返す。"""
+        place = self.leftover("tmp", self.stamp(9, "-skip"), {"at": time.time() - 8 * 86400})
+        for i in range(40):
+            (place / f"f{i:02d}").write_text("x")
+        patch = """
+            import stat
+            real_scandir = os.scandir
+            class Entry:
+                def __init__(self, fd, name):
+                    self.fd, self.name = fd, name
+                def is_dir(self, follow_symlinks=True):
+                    return stat.S_ISDIR(os.stat(self.name, dir_fd=self.fd, follow_symlinks=follow_symlinks).st_mode)
+            class ByPosition:
+                def __init__(self, fd):
+                    self.fd, self.pos = fd, 0
+                def __enter__(self):
+                    return self
+                def __exit__(self, *a):
+                    return False
+                def __iter__(self):
+                    return self
+                def __next__(self):
+                    names = sorted(os.listdir(self.fd))
+                    if self.pos >= len(names):
+                        raise StopIteration
+                    self.pos += 1
+                    return Entry(self.fd, names[self.pos - 1])
+            os.scandir = lambda p=".": ByPosition(p) if isinstance(p, int) else real_scandir(p)
+        """
+        rc, rec = self.launch_patched(patch, ["--host", "claude", "--cwd", str(self.cwd)])
+        self.assertEqual((rc, rec["status"]), (0, "ok"), rec)
+        self.assertFalse(os.path.lexists(place))
+        self.assertEqual((rec["swept"]["removed"], rec["swept"]["problems"]), ([str(place)], []))
+
     def test_times_that_cannot_be_right_do_not_keep_a_place(self):
         """数でない・無限大・未来の時刻の記録は、期限の時計に使わない（偽の行 1 つで、置き場を残し続けられない）。"""
         old = time.time() - 8 * 86400
