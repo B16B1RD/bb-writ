@@ -610,21 +610,18 @@ def contained(repo, commit, ref, look_only=False):
     """commit の変更が ref に入っているか。祖先でなくても（squash・rebase で統合した後に統合先が進んでも）、
     commit を ref へマージした結果が ref のツリーのままなら入っている。衝突・取り消し・未統合の commit は入っていない。
     git merge-tree --write-tree は、マージした結果の object をリポジトリに書く。look_only（見るだけの呼び出し）では、
-    一時の置き場に書かせ、リポジトリの object は読むだけにする。"""
+    一時の置き場（tempfile の決める場所。TMPDIR）に書かせ、リポジトリの object は読むだけにする。"""
     if sh(['git', 'merge-base', '--is-ancestor', commit, ref], repo)[0] == 0:
         return True
-    env, scratch = None, None
+    cmd = ['git', '-C', str(repo), 'merge-tree', '--write-tree', ref, commit]
     if look_only:
-        scratch = tempfile.TemporaryDirectory()
         objects = git(repo, 'rev-parse', '--path-format=absolute', '--git-path', 'objects')
-        env = {**os.environ, 'GIT_OBJECT_DIRECTORY': scratch.name,
-               'GIT_ALTERNATE_OBJECT_DIRECTORIES': os.pathsep.join(x for x in (objects, os.environ.get('GIT_ALTERNATE_OBJECT_DIRECTORIES')) if x)}
-    try:
-        p = subprocess.run(['git', '-C', str(repo), 'merge-tree', '--write-tree', ref, commit], stdin=subprocess.DEVNULL,
-                           capture_output=True, text=True, env=env)
-    finally:
-        if scratch:
-            scratch.cleanup()
+        with tempfile.TemporaryDirectory() as scratch:
+            env = {**os.environ, 'GIT_OBJECT_DIRECTORY': scratch,
+                   'GIT_ALTERNATE_OBJECT_DIRECTORIES': os.pathsep.join(x for x in (objects, os.environ.get('GIT_ALTERNATE_OBJECT_DIRECTORIES')) if x)}
+            p = subprocess.run(cmd, stdin=subprocess.DEVNULL, capture_output=True, text=True, env=env)
+    else:
+        p = subprocess.run(cmd, stdin=subprocess.DEVNULL, capture_output=True, text=True)
     if p.returncode not in (0, 1) or not p.stdout:
         raise ValueError('変更が保存先に入っているかを確かめられない: ' + (p.stderr.strip() or 'git が失敗した')
                          + '（git merge-tree --write-tree を使う。Git が 2.38 より古いと、ここで止まる）')
@@ -709,12 +706,14 @@ def worktrees(repo):
 def unclosed_tasks(repo, rr, registry):
     """担当のいない（解放済みか、期限の切れた）タスクのうち、作業場所が残っているもの。作業場所は task cleanup だけが消すので、
     呼ばれなかったタスクは残り続ける。それを、次の task start と task list で見えるようにする。見るだけで、何も消さず、
-    リポジトリにも状態の置き場にも何も書かない（統合の照合の object は一時の置き場に書かせ、記録の置き場は作らずに読む）。
+    リポジトリにも状態の置き場にも何も書かない（統合の照合の object は一時の置き場に書かせ、記録の置き場は作らずに読む。
+    一時の置き場は tempfile の決める場所で、TMPDIR を状態の置き場やリポジトリの中に向けた場合は、そこに書いて消す）。
     commits は、基点から HEAD までの commit の数（0 なら、まだ何も commit していないタスク）。landed は、HEAD の変更が統合先に
     入っているか（task cleanup の保存先の照合と同じ contained。squash・rebase で入ったものも真）。確かめられなければ None。
     未 commit の変更・無視されるファイル・終わっていない操作は見ない（片付けるときに task cleanup が見る。大きい作業場所の
     git status を、task start のたびに回さない）。ほかのタスクの記録は書く子が書き換えうるので、読めない・形の違う値は、
-    そのタスクを「確かめられない」として並べるだけにし、ここからは例外を出さない（task start と task list を止めない）。"""
+    そのタスクを「確かめられない」として並べるだけにし、ここからは例外を出さない（task start を止めない）。task list は、
+    担当の記録が JSON として読めないタスクがあると、前からのとおり、ここへ来る前に理由を出して止まる（壊れた記録を黙って通さない）。"""
     found, now = [], time.time()
     for p in sorted(registry.glob('*.json')):
         if not re.fullmatch('[a-f0-9]{16}', p.stem):

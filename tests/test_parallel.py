@@ -135,6 +135,16 @@ class TestParallel(unittest.TestCase):
                     self.assertIn(other['task'], {t['task'] for t in self.w('task', 'list', '--dir', self.repo)['unclosed']})
                 broken.unlink()  # 次の場面に持ち越さない
                 self.w('release', '--dir', new['dir'], '--token', new['token'])
+        with self.subTest('タスクの一覧の json が壊れている'):
+            other = self.start()
+            self.change(other, 'g-' + other['task'])
+            self.w('release', '--dir', other['dir'], '--token', other['token'])
+            registry = next((Path(self.tmp.name) / 'state' / 'work').glob('repo-*')) / 'tasks'
+            (registry / (other['task'] + '.json')).write_text('{')
+            new = self.start()
+            self.assertTrue(new['ok'] and new['token'], new)
+            got = {t['task']: t for t in new['unclosed']}
+            self.assertEqual((got[other['task']]['lease'], got[other['task']]['commits'], got[other['task']]['landed']), ('released', None, None))
 
     def test_unclosed_tasks_are_found_by_the_registry_not_by_what_the_records_say(self):
         """並べるのは、タスクの一覧の識別子から決まる作業場所だけ（一覧の json の dir の値や、識別子の形でない名前のファイルは使わない）。
