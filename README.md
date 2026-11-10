@@ -8,7 +8,7 @@ https://github.com/user-attachments/assets/dd9c669e-0d1e-4645-a631-ea70809b345a
 
 ## 前提
 
-基本機能に要るもの。基本機能は、`delegate`・`interrogate`・`reflect`・`playbook-eval` で別系統の CLI（使っている CLI 以外の Claude Code・Codex・Grok Build）を起動する場合を除く、すべての使い方。
+基本機能に要るもの。基本機能は、手元で調べる・直す・確かめるまでの使い方。push・PR まで頼む場合と、`delegate`・`interrogate`・`reflect`・`playbook-eval` を使う場合は、[任意機能の準備](#任意機能の準備)も要る。
 
 - OS：Linux・macOS・WSL2。Windows のネイティブ環境（PowerShell など）は対象外。入口がファイルに書く前に実行する `scripts/work.py` が、Unix にしか無い `fcntl` を使うので動かない。読むだけの使い方も、ネイティブ環境では確かめていない。Windows では、WSL2 の中に CLI を入れて、その中で起動する。
 - CLI：Claude Code・Codex・Grok Build のどれか 1 つ。
@@ -16,7 +16,7 @@ https://github.com/user-attachments/assets/dd9c669e-0d1e-4645-a631-ea70809b345a
 - git：2.38 以上（`git --version`）。タスクの作業場所の一覧に 2.36、squash・rebase で統合した後の片付けの確認に 2.38 で入った機能を使う。macOS では、Command Line Tools に付く `git` がこれ以上なら足りる（macOS 15 の Command Line Tools は 2.39.5 と報告されているが、手元では確かめていない）。
 - GitHub CLI（`gh`、ログイン済み）：Issue・PR を名指しして頼むときと、push・PR などの外部操作の前にアカウントと書き込み権限を確かめるときに使う。gh が無いと、名指しした Issue・PR の本文とコメントを読めず、GitHub への外部操作はこの確かめで止まる。Issue・PR を名指しせずに、リポジトリを読む・手元で直すだけなら要らない。
 
-もう一方の CLI・dotenvx・bb-writ 専用のログインは、任意機能（[任意機能の準備](#任意機能の準備)）だけで使う。
+bb-writ 専用のログイン・dotenvx・もう一方の CLI は、push・PR まで頼むときと任意機能で使う（[任意機能の準備](#任意機能の準備)）。専用ログインが無いと、bb-writ は確かめ役・審査役・返す前の判定の子を立てられない。手元の作業は、その子が無いことを返答に書いて進むが、push・PR は、返す前の判定の子の記録が無いので拒否される。
 
 ## インストール
 
@@ -147,10 +147,10 @@ Claude Code は、普通の依頼文だけでは入口を使わない。入口�
 
 ## 任意機能の準備
 
-`delegate`・`interrogate`・`reflect`・`playbook-eval` で別系統の CLI を起動する場合は、[前提](#前提)に加えて次を用意する。
+push・PR まで頼む場合と、`delegate`・`interrogate`・`reflect`・`playbook-eval` を使う場合は、[前提](#前提)に加えて次を用意する。push・PR だけなら、使っている CLI の専用ログインがあれば足りる（もう一方の CLI は要らない）。
 
-- 起動する CLI と、起動される CLI（Claude Code・Codex・Grok Build のうち 2 つ以上）。
-- 起動される CLI の bb-writ 専用ログイン。Codex で `interrogate` を使うときは、同じ Codex の審査役も別プロセスの Codex として起動するので、Codex のログインも要る。
+- 別系統の CLI を使う場合は、起動する CLI と、起動される CLI（Claude Code・Codex・Grok Build のうち 2 つ以上）。
+- 起動される CLI の bb-writ 専用ログイン。push・PR の前の判定の子と、`interrogate` の同じ系統の審査役は、使っている CLI と同じ CLI を別プロセスで起動するので、使っている CLI の専用ログインも要る（Claude Code でも Codex でも Grok Build でも）。
   - Claude Code：`claude setup-token` で得たトークンを、`~/.config/bb-writ/.env` の `CLAUDE_CODE_OAUTH_TOKEN` に [dotenvx](https://dotenvx.com/) で暗号化して置く（鍵の `.env.keys` も同じ場所）。起動するときも dotenvx がトークンを子の環境にだけ渡すので、dotenvx を入れておく。
   - Codex：`CODEX_HOME=~/.config/bb-writ/codex-home codex login`。この専用ログインにも bb-writ を入れた場合、Codex の子はその写しのスキルを読む。写しが起動する側の bb-writ と中身で違うと、Codex の子は起動せず、入れ直すコマンド（`CODEX_HOME` を付けた [Codex の更新](#codex-1)と同じ 3 つ）を示す。
   - Grok Build：`GROK_HOME=~/.config/bb-writ/grok-auth grok login`。
