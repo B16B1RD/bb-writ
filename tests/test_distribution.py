@@ -116,11 +116,14 @@ class TestWorkflows(unittest.TestCase):
     def test_ci_jobs_have_room_for_the_slow_macos_runners(self):
         """macOS の job は、成功した実行で 8〜12.9 分かかり（2026-11。0.24.0 で試験が増えた後の最長が 12.9 分）、日によって 1〜2 割揺れる。
         下限は、その最長の 3 倍（38.7 分）を切り上げた 39 分。上限 10 分では全部通る試験が 3 回続けて打ち切られた（2026-11）。
-        守らない範囲: 式（${{ }}）で書いた上限と、上限を書かない job（既定は 360 分）は見ない。"""
+        見るのは、ファイルの中の「timeout-minutes:」の後に、空白と、引用符 1 つまでを挟んで、数字が続く形だけ（数字は 10 進の数として読む）。
+        守らない範囲: ほかの書き方の上限（式 ${{ }}、符号つき、引用符の中の空白、鍵を引用符で囲む、など）と、上限を書かない job
+        （既定は 360 分）は見ない。ファイルの文字を見るだけなので、step ごとの上限や、コメントの中の timeout-minutes でも落ちる
+        （job の上限でなくても）。"""
         files = sorted((ROOT / ".github" / "workflows").glob("*.y*ml"))
         self.assertTrue(files)
         for p in files:
-            for m in re.finditer(r"timeout-minutes:\s*(\d+)", p.read_text(encoding="utf-8")):
+            for m in re.finditer(r"timeout-minutes:\s*[\"']?(\d+)", p.read_text(encoding="utf-8")):  # 引用符で書いた数も見る
                 self.assertGreaterEqual(int(m.group(1)), 39, f"{p.name} の timeout-minutes: {m.group(1)}。最も遅い OS（macOS）の成功した実行の最長を "
                                         "gh run list・gh run view で見て、その 3 倍以上にする。試験を削って合わせない")
 
