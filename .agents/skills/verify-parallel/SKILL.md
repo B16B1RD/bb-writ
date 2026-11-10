@@ -21,7 +21,7 @@ description: bb-writ の worktree 分離、再開、直列統合、片付けを�
 2. `python3 -B tests/verify_parallel_live.py --out <note.evidence_dir の下の新しいディレクトリ>`。数分かかる。両方の組み合わせで `result: passed` が出て、`result.json` の `status` が `passed` になること。
 3. `<out>/repo` の main に `0-a.txt`・`0-b.txt`・`2-a.txt`・`2-b.txt` があり、それぞれファイル名から `.txt` を取った一行であること。`remaining-tasks.json` の tasks は空、`git -C <out>/repo status --porcelain` は空であること。
 
-スキルの選択も確かめる。Claude の JSONL は本文を引用せず、最初の `tool_use` の種類と `Skill` のスキル名だけを観測する。入口と feature 手引きが使われ、作業分離は生成された worktree と成果物で判断する。実 CLI 試験は手引きの正本の場所を明示するので、自然言語だけでの暗黙の選択を証明したことにはしない。ドライバーは読むだけの反例も、新しい読み取り専用セッションで `bb-writ で README を調べて説明して。変更しないで` と頼み、investigation の選択と、専用 worktree やタスクが増えないことを確認する。
+スキルの選択も確かめる。Claude の JSONL は本文を引用せず、最初の `tool_use` の種類と `Skill` のスキル名だけを観測する。入口と feature 手引きが使われ、作業分離は生成された worktree と成果物で判断する。実 CLI 試験は手引きの正本の場所を明示するので、自然言語だけでの暗黙の選択を証明したことにはしない。ドライバーは読むだけの反例も、新しい読み取り専用セッションで `/bb-writ:bb-writ README.md を読んで説明して。変更はしないで。委任も不要。` と頼み、investigation の選択と、タスクが増えないこと（`task list` が空のまま）を確認する。
 
 ## 証拠
 
@@ -40,4 +40,4 @@ description: bb-writ の worktree 分離、再開、直列統合、片付けを�
 
 ## 片付け
 
-実 CLI の子プロセスは試験ドライバーが終了まで待ち、タイムアウト時は自分が作ったプロセスグループだけ停止する。名前で kill しない。成功時はタスクの worktree とブランチを cleanup 済み。失敗時は未統合の変更と担当記録を残し、`task list` で照合してから再開する。証拠と試験用 repo は残す。不要になった repo は、今回作ったものだけと確認してから削除する。
+実 CLI の子プロセスは試験ドライバーが終了まで待つ。書く 2 セッションは、タイムアウト時に自分が作ったプロセスグループだけ停止する。読むだけのセッションは 180 秒で直下のプロセスを止めるだけなので、時間切れで落ちたときは、残ったプロセスが無いかを確かめる。名前で kill しない。成功時はタスクの worktree とブランチを cleanup 済み。失敗時は未統合の変更と担当記録を残し、`task list` で照合してから再開する。証拠と試験用 repo は残す。不要になった repo は、今回作ったものだけと確認してから削除する。
