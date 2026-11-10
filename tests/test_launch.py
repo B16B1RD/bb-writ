@@ -1400,6 +1400,35 @@ class TestLaunch(unittest.TestCase):
                             continue  # 展開する引数の数は、ここでは決まらない
                         inspect.signature(f).bind(*node.args, **{k.arg: k.value for k in node.keywords})
 
+    def test_live_checks_give_the_launcher_command_every_value_it_reads(self):
+        # 実機の確認の台本は、launcher の main を通らずに、自分で組んだ名前空間で command() を呼ぶ。main が起動の前に決める値
+        # （--resume を足したときの resume・session、--audit を足したときの audit）が増えても、台本は CI で動かないので足し忘れ、
+        # AttributeError で動かなくなっていた（引数の数は合っていたので、上の試験は通った）。台本に書かれた SimpleNamespace(...) を
+        # そのまま組み、偽の CLI の環境で command() に渡す。コマンドの要素が全部文字列であることも見る（session を None のまま渡すと、
+        # Claude Code の --session-id の値が None になり、起動の段で落ちる）。
+        # 守らない範囲: SimpleNamespace(...) 以外で組んだ名前空間、command() の後の台本の処理（組んだコマンドの書き換え・実行）、
+        # Grok の経路（台本は grok を起動しない）。キーワードの値が host・repo・uuid 以外の名前を読むと NameError で落ちる（ここに足す）。
+        import ast
+        import uuid
+        from types import SimpleNamespace
+        from unittest import mock
+        launch, seen = load_launch(), 0
+        env = {"HOME": str(self.home), "PATH": f"{self.bin}:/usr/bin:/bin", "BB_WRIT_CONFIG_DIR": str(self.cfg), "BB_WRIT_STATE_DIR": str(self.state)}
+        for script in sorted((ROOT / "tests").glob("verify_*.py")):
+            for call in ast.walk(ast.parse(script.read_text())):
+                if not (isinstance(call, ast.Call) and isinstance(call.func, ast.Name) and call.func.id == "SimpleNamespace"):
+                    continue
+                by_host = any(isinstance(n, ast.Name) and n.id == "host" for n in ast.walk(call))
+                for host in ("claude", "codex") if by_host else (None,):
+                    seen += 1
+                    with self.subTest(script=script.name, line=call.lineno, host=host), mock.patch.dict(os.environ, env):
+                        a = eval(compile(ast.Expression(call), str(script), "eval"),
+                                 {"SimpleNamespace": SimpleNamespace, "uuid": uuid, "host": host, "repo": self.cwd})
+                        cmd, _, why = launch.command(a, "x", self.state / "scratch")
+                        self.assertIsNone(why)
+                        self.assertEqual([c for c in cmd if not isinstance(c, str)], [], cmd)
+        self.assertGreater(seen, 0, "台本が command() に渡す名前空間を 1 つも見つけられない（組み方を変えたなら、この試験も直す）")
+
     def test_skipping_unwritable_places_is_only_for_read_only_file_systems(self):
         from unittest import mock
         for code, skipped in ((errno.EROFS, True), (errno.EACCES, False), (errno.ENOSPC, False)):
