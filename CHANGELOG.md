@@ -4,6 +4,22 @@ bb-writ を使う人に向けて、版ごとに変わったことを書く。新
 
 commit ごとの細かい変更は、各版の末尾の「commit の一覧」（前の版のタグとの比較）で見られる。
 
+## 0.24.3 - 2026-11-11
+
+### 変えたこと
+
+- README の「任意機能の準備」を、CLI ごとに貼って実行できる手順にした。Claude Code の専用ログインは、置き場の作成、シェルの履歴に残らないトークンの入力、`dotenvx set` の `--no-native`、鍵のファイルの確かめ、実際に 1 回問い合わせる確かめを順に書いた。dotenvx 2.25 以降は、`--no-native` を付けないと鍵を `.env.keys` でなく OS の secret store（macOS のキーチェーンなど）に置くことがあり、そのとき bb-writ は子を起動できなかった。`--no-native` は 2.25 より前の版（1.75.1・2.24.1）でも通った。付けずに置いてしまったときの戻り方（`.env` を消してやり直す）も書いた。確かめの問い合わせは、シェルの `ANTHROPIC_API_KEY` を `env -u` で外して行う（キーがあると、トークンより先に使われた。launcher も子に渡さない）。`claude auth status` は無効なトークンでも `"loggedIn": true` を返すので、確かめに使わない。Linux・WSL2 では、確かめの前に `bwrap`・`socat` があるかを見る。用意したら、同じセッションで頼み直せばよい。
+- Codex の専用ログインは、置き場を先に作る手順を足した。`CODEX_HOME` の指す場所が無いと、Codex は「path does not exist」で止まり、前の README のとおりでは `codex login` で詰まった。`codex login status` での確かめと、専用ログインに bb-writ を入れる手順（任意）も書いた。Grok Build の置き場の作成と確かめ方も書いた。
+- launcher が専用ログインの不足を返す文を、何が無いかで分けた。`.env` が無いときと、鍵の `.env.keys` だけが無いときで、置くコマンドと README の節を示す。Codex・Grok Build の文と、監査役の記録が無いときの push・PR の拒否文にも、README の節を添えた。`delegate` は、子を起動できなかった理由が専用ログインの不足のときに、用意のしかたが README にあることを返答に書く。
+- bb-writ を直す人向け: launcher と work.py の文が指す README の節が、README に見出しとしてあるかを、配布の検査で確かめる。
+
+### 守らないこと
+
+- 読み取り専用の Codex の子は、専用ログインに入れた bb-writ の写しのスキルの一覧は見えるが、本文は Permission denied で読めなかった（launcher が専用ログインの置き場の読みを拒むため。1 回の起動で確かめた）。Codex で立てた審査役・監査役は、スキルの本文を読まずに判定していることがある。この版では直していない。
+- README の手順は、Linux（WSL2）の bash で確かめた。macOS と zsh の実機では確かめていない。
+
+commit の一覧：https://github.com/B16B1RD/bb-writ/compare/bb-writ--v0.24.2...bb-writ--v0.24.3
+
 ## 0.24.2 - 2026-11-11
 
 ### 変えたこと
