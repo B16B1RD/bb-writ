@@ -3441,25 +3441,27 @@ class TestLaunch(unittest.TestCase):
         self.assertIn("README の「任意機能の準備」の「Codex の専用ログイン」", rec["problems"][0])
 
     def test_a_missing_claude_login_says_how_to_set_it_up(self):
-        # 無いのが .env か、鍵の .env.keys だけかで、次にすることを示す。鍵だけ無いのは、dotenvx 2.25 以降が --no-native 無しで
-        # 鍵を OS の secret store に置いたとき（macOS など）
-        (self.cfg / ".env.keys").unlink()
+        # 無いのが .env か、鍵の .env.keys だけかで、次にすることを示す。鍵だけ無いのは、たとえば dotenvx 2.25 以降が --no-native 無しで
+        # 鍵を OS の secret store に置いたとき（macOS など）。守らない範囲: 文を固定しているので、意味を変えない言い換えでも落ちる
+        env, keys = self.cfg / ".env", self.cfg / ".env.keys"
+        setup = f"dotenvx set CLAUDE_CODE_OAUTH_TOKEN <トークン> --no-native -f {env} -fk {keys}"
+        section = "README の「任意機能の準備」の「Claude Code の専用ログイン」"
+        keys.unlink()
         rc, rec = self.run_launch("claude")
         self.assertEqual(rec["status"], "unavailable")
         why = rec["problems"][0]
-        self.assertIn(f"{self.cfg / '.env'} はある", why)
-        self.assertIn("secret store", why)
-        self.assertIn(f"--no-native -f {self.cfg / '.env'} -fk {self.cfg / '.env.keys'}", why)
-        self.assertIn("README の「任意機能の準備」", why)
-        (self.cfg / ".env").unlink()
+        self.assertIn(f"専用ログインの鍵が無い: {env} はあるが {keys} が無い", why)
+        self.assertIn("dotenvx 2.25 以降は、--no-native を付けないと鍵を OS の secret store", why)
+        self.assertIn(setup, why)
+        self.assertIn(section, why)
+        env.unlink()
         rc, rec = self.run_launch("claude")
         self.assertEqual(rec["status"], "unavailable")
         why = rec["problems"][0]
-        self.assertIn(f"{self.cfg / '.env'} が無い", why)
+        self.assertIn(f"専用ログインが無い: {env} が無い", why)
         self.assertNotIn("secret store", why)
-        self.assertIn("claude setup-token", why)
-        self.assertIn("--no-native", why)
-        self.assertIn("README の「任意機能の準備」", why)
+        self.assertIn(f"claude setup-token のトークンを、{setup}", why)
+        self.assertIn(section, why)
 
     def test_a_codex_child_does_not_start_on_a_stale_copy_of_bb_writ(self):
         # Codex の子は専用ログインに入れた写しのスキルと補助スクリプトを読む。この launcher と中身が違えば起動しない

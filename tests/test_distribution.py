@@ -128,22 +128,50 @@ class TestWorkflows(unittest.TestCase):
                                         "gh run list・gh run view で見て、その 3 倍以上にする。試験を削って合わせない")
 
 
-if __name__ == "__main__":
-    unittest.main()
+def script_strings(src):
+    """ソースの文字列の定数を、隣り合う文字列の継ぎ目と f 文字列の値を外して並べる（値の所は \0）。"""
+    import ast
+    out = []
+    for node in ast.walk(ast.parse(src)):
+        if isinstance(node, ast.JoinedStr):
+            out.append("".join(v.value if isinstance(v, ast.Constant) and isinstance(v.value, str) else "\0" for v in node.values))
+        elif isinstance(node, ast.Constant) and isinstance(node.value, str):
+            out.append(node.value)
+    return out
+
+
+def readme_headings(text):
+    """README の見出しを (段, 名前) で並べる。コードブロックの中の行は見出しにしない。"""
+    found, fence = [], False
+    for line in text.splitlines():
+        if line.lstrip().startswith("```"):
+            fence = not fence
+        elif not fence and (m := re.match(r"(#{1,6})\s+(.*?)\s*#*\s*$", line)):
+            found.append((len(m.group(1)), m.group(2)))
+    return found
 
 
 class TestReadmeSections(unittest.TestCase):
     def test_sections_the_scripts_point_users_to_exist_in_the_readme(self):
-        # launcher と work.py は、専用ログインが無いときに README の節の名前を示す。見出しを変えて文だけが古くならないように
-        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        # launcher と work.py は、専用ログインが無いときに README の節の名前を示す。見出しを変えて文だけが古くならないように。
+        # 守らない範囲: 「README の「X」の「Y」」の形でない書き方（「README の X 節」など）は拾わない
+        headings = readme_headings((ROOT / "README.md").read_text(encoding="utf-8"))
         named = []
         for script in ("launch.py", "work.py"):
-            src = (ROOT / "scripts" / script).read_text(encoding="utf-8")
-            for top, sub in re.findall(r"README の「([^」]+)」(?:の「([^」]+)」)?", src):
-                named.append((script, top, sub))
+            for s in script_strings((ROOT / "scripts" / script).read_text(encoding="utf-8")):
+                named += [(script, top, sub) for top, sub in re.findall(r"README の「([^」\0]+)」(?:の「([^」\0]+)」)?", s)]
         self.assertTrue(named, "scripts が README の節を指す文が見つからない（文の形が変わった）")
         for script, top, sub in named:
-            self.assertTrue(f"\n## {top}\n" in readme, f"{script} が指す README の節「{top}」が無い")
+            self.assertIn((2, top), headings, f"{script} が指す README の節「{top}」が無い")
             if sub:
-                body = readme.split(f"\n## {top}\n", 1)[1].split("\n## ", 1)[0]
-                self.assertTrue(f"\n### {sub}\n" in body, f"{script} が指す README の「{top}」の「{sub}」が無い")
+                at = headings.index((2, top))
+                body = []
+                for level, name in headings[at + 1:]:
+                    if level <= 2:
+                        break
+                    body.append((level, name))
+                self.assertIn((3, sub), body, f"{script} が指す README の「{top}」の「{sub}」が無い")
+
+
+if __name__ == "__main__":
+    unittest.main()

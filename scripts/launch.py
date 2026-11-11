@@ -515,9 +515,9 @@ def command(a, prompt: str, scratch: Path) -> tuple[list[str], dict, str | None]
         if not env_file.is_file():
             return [], env, f"専用ログインが無い: {env_file} が無い。{setup}"
         if not keys.is_file():
-            # dotenvx 2.25 から、鍵の既定の置き場が .env.keys でなく OS の secret store（macOS のキーチェーンなど）になった
+            # dotenvx 2.25 から、OS の secret store が使えると、鍵の既定の置き場が .env.keys でなくそちらになった（2.38 から、非対話の実行ではファイル）
             return [], env, (f"専用ログインの鍵が無い: {env_file} はあるが {keys} が無い。dotenvx 2.25 以降は、--no-native を付けないと"
-                             f"鍵を OS の secret store（macOS のキーチェーンなど）に置き、launcher はそれを使わない。{setup}")
+                             f"鍵を OS の secret store（macOS のキーチェーンなど）に置くことがあり、launcher はそれを使わない。{setup}")
         # 親の Claude Code の環境（CLAUDE_CODE_PLUGIN_DIRS の利用者の mod、CLAUDE_EFFORT など。mod は sandbox の外で動く）と API の鍵・接続先を渡さない。
         # 鍵があると専用ログインの代わりに別料金の API へ落ちうる。専用ログインのトークンは dotenvx が子の環境にだけ入れる
         env = {k: v for k, v in env.items() if not k.startswith(("CLAUDE", "ANTHROPIC_"))}

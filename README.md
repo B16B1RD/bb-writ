@@ -154,7 +154,7 @@ push・PR まで頼む場合と、`delegate`・`interrogate`・`reflect`・`play
 - push・PR だけなら、使っている CLI の専用ログインがあれば足りる。返す前の判定の子を、使っている CLI と同じ CLI で起動するため。Claude Code なら、下の dotenvx と、Linux・WSL2 では `bwrap`・`socat` も要る。
 - `interrogate` の別系統の審査役と、`playbook-eval`・`reflect` の別系統の読み手には、もう 1 つの CLI（Claude Code・Codex・Grok Build のどれか）と、その専用ログインが要る。
 
-専用ログインが無いまま push・PR を頼むと、bb-writ は返す前の判定の子を起動できず、push・PR は拒否される。拒否の文と、子を起動できなかったときの返答に、この節が出てくる。
+専用ログインが無いまま push・PR を頼むと、bb-writ は返す前の判定の子を起動できず、push・PR は拒否される。拒否の文と、子を起動できなかったときの返答に、この節が出てくる。用意したら、同じセッションでもう一度頼めばよい（bb-writ は子を起動するたびに専用ログインの置き場を見る）。
 
 ### Claude Code の専用ログイン
 
@@ -165,14 +165,14 @@ mkdir -p -m 700 ~/.config/bb-writ
 claude setup-token
 ```
 
-`claude setup-token` の案内に従ってログインすると、長期のトークンが表示される（Claude の契約が要る）。表示されたトークンをコピーし、次の 2 行目で、何も表示されない入力に貼って Enter を押す。トークンはシェルの履歴に残らない。
+`claude setup-token` の案内に従ってログインすると、長期のトークンが表示される（Claude の契約が要る）。表示されたトークンをコピーし、次の 1 行目を実行してから、何も表示されない入力に貼って Enter を押す。トークンをコマンド行に書かないので、シェルの履歴に残らない。
 
 ```sh
 IFS= read -rs T
 dotenvx set CLAUDE_CODE_OAUTH_TOKEN "$T" --no-native -f ~/.config/bb-writ/.env -fk ~/.config/bb-writ/.env.keys; unset T
 ```
 
-`--no-native` を省かない。dotenvx 2.25 以降は、鍵を `.env.keys` でなく OS の secret store（macOS のキーチェーンなど）に置くのが既定で、そこに置かれると bb-writ は鍵を見つけられず、子を起動しない。
+`--no-native` を省かない。dotenvx 2.25 以降は、OS の secret store（macOS のキーチェーンなど）が使えると、鍵を `.env.keys` でなくそこに置くことがある。そこに置かれると、bb-writ は鍵を見つけられず、子を起動しない。`--no-native` を付けずに置いてしまったときは、`rm ~/.config/bb-writ/.env` で消してから、`IFS= read -rs T` からやり直す。
 
 できたかを確かめる：
 
@@ -180,23 +180,27 @@ dotenvx set CLAUDE_CODE_OAUTH_TOKEN "$T" --no-native -f ~/.config/bb-writ/.env -
 CLAUDE_CONFIG_DIR=~/.config/bb-writ/claude-home dotenvx run -q -f ~/.config/bb-writ/.env -fk ~/.config/bb-writ/.env.keys -- claude -p "ok とだけ返して" --model haiku < /dev/null
 ```
 
-`ok` と返れば、専用ログインで動く。トークンが違うと `Failed to authenticate. API Error: 401` で終わるので、`claude setup-token` からやり直す。`claude auth status` は、トークンが無効でも `"loggedIn": true` を返すので、確かめに使わない。`~/.config/bb-writ/claude-home` は、子の Claude Code の設定と会話記録の置き場で、初めて使うときにできる。
+`ok` と返り、`ls ~/.config/bb-writ/.env.keys` で鍵のファイルが見つかれば、専用ログインで動く（鍵がファイルに無いと、この確かめが通っても bb-writ は子を起動しない）。トークンが違うと `Failed to authenticate. API Error: 401` で終わるので、`claude setup-token` からやり直す。`claude auth status` は、トークンが無効でも `"loggedIn": true` を返すので、確かめに使わない。`~/.config/bb-writ/claude-home` は、子の Claude Code の設定と会話記録の置き場で、初めて使うときにできる。
 
 Linux・WSL2 では、子の Claude Code が OS の sandbox（bubblewrap）の中で動く。sandbox を起動できなければ、子は起動しない。`command -v bwrap socat` で 2 つとも見つからなければ入れる（Debian・Ubuntu では `sudo apt install bubblewrap socat`）。macOS では要らない。
 
 ### Codex の専用ログイン
 
 ```sh
+mkdir -p ~/.config/bb-writ/codex-home
 CODEX_HOME=~/.config/bb-writ/codex-home codex login
 ```
 
+置き場を先に作る。`CODEX_HOME` の指す場所が無いと、Codex は「path does not exist」で止まる。
+
 確かめるには `CODEX_HOME=~/.config/bb-writ/codex-home codex login status` を実行し、`Logged in` で始まる行が出ればよい。
 
-この専用ログインに bb-writ を入れるかは任意。入れると、子のスキルの一覧に bb-writ が出る。入れた写しは版ごとに入れ直す。写しが起動する側の bb-writ と中身で違うと、Codex の子は起動せず、入れ直すコマンド（`CODEX_HOME` を付けた [Codex の更新](#codex-1)と同じ 3 つ）を示す。
+この専用ログインに bb-writ を入れるかは任意。入れると、子のスキルの一覧に bb-writ が出る。入れるときは、[インストール](#codex)の 2 つのコマンドの先頭に `CODEX_HOME=~/.config/bb-writ/codex-home` を付けて実行する。入れた写しは版ごとに入れ直す。写しが起動する側の bb-writ と中身で違うと、Codex の子は起動せず、入れ直すコマンド（`CODEX_HOME` を付けた [Codex の更新](#codex-1)と同じ 3 つ）を示す。
 
 ### Grok Build の専用ログイン
 
 ```sh
+mkdir -p ~/.config/bb-writ/grok-auth
 GROK_HOME=~/.config/bb-writ/grok-auth grok login
 ```
 
