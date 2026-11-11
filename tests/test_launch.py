@@ -3433,6 +3433,12 @@ class TestLaunch(unittest.TestCase):
         rc, rec = self.run_launch("grok", cwd=self.grok_target())
         self.assertEqual(rec["status"], "unavailable")
         self.assertIn("GROK_HOME=", rec["problems"][0])
+        self.assertIn("README の「任意機能の準備」の「Grok Build の専用ログイン」", rec["problems"][0])
+        (self.cfg / "codex-home" / "auth.json").unlink()
+        rc, rec = self.run_launch("codex")
+        self.assertEqual(rec["status"], "unavailable")
+        self.assertIn("CODEX_HOME=", rec["problems"][0])
+        self.assertIn("README の「任意機能の準備」の「Codex の専用ログイン」", rec["problems"][0])
 
     def test_a_missing_claude_login_says_how_to_set_it_up(self):
         # 無いのが .env か、鍵の .env.keys だけかで、次にすることを示す。鍵だけ無いのは、dotenvx 2.25 以降が --no-native 無しで

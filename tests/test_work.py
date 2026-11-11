@@ -744,6 +744,8 @@ class TestReviewedCommit(unittest.TestCase):
                 self.assertEqual(rc, 6, (key, reviewed, r))
                 self.assertIn("監査役", r["reason"], (key, reviewed))
                 self.assertIn("--audit", r["reason"], (key, reviewed))
+                # 監査役を起動できない（専用ログインが無い）利用者に、用意の仕方の置き場を示す
+                self.assertIn("README の「任意機能の準備」", r["reason"], (key, reviewed))
         # 読み取り専用で ok の、片側だけが監査役と言う・書く子・ok でない記録は数えない
         self.review_record(self.head(), record={"audit": False}, audit=True)
         self.review_record(self.head(), record={"audit": True}, audit=False)

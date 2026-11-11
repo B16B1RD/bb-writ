@@ -130,3 +130,20 @@ class TestWorkflows(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestReadmeSections(unittest.TestCase):
+    def test_sections_the_scripts_point_users_to_exist_in_the_readme(self):
+        # launcher と work.py は、専用ログインが無いときに README の節の名前を示す。見出しを変えて文だけが古くならないように
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        named = []
+        for script in ("launch.py", "work.py"):
+            src = (ROOT / "scripts" / script).read_text(encoding="utf-8")
+            for top, sub in re.findall(r"README の「([^」]+)」(?:の「([^」]+)」)?", src):
+                named.append((script, top, sub))
+        self.assertTrue(named, "scripts が README の節を指す文が見つからない（文の形が変わった）")
+        for script, top, sub in named:
+            self.assertTrue(f"\n## {top}\n" in readme, f"{script} が指す README の節「{top}」が無い")
+            if sub:
+                body = readme.split(f"\n## {top}\n", 1)[1].split("\n## ", 1)[0]
+                self.assertTrue(f"\n### {sub}\n" in body, f"{script} が指す README の「{top}」の「{sub}」が無い")
