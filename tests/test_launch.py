@@ -3428,11 +3428,32 @@ class TestLaunch(unittest.TestCase):
         (self.cfg / ".env.keys").unlink()
         rc, rec = self.run_launch("claude")
         self.assertEqual(rec["status"], "unavailable")
-        self.assertIn("専用ログインが無い", rec["problems"][0])
+        self.assertIn("専用ログインの鍵が無い", rec["problems"][0])
         (self.cfg / "grok-auth" / "auth.json").unlink()
         rc, rec = self.run_launch("grok", cwd=self.grok_target())
         self.assertEqual(rec["status"], "unavailable")
         self.assertIn("GROK_HOME=", rec["problems"][0])
+
+    def test_a_missing_claude_login_says_how_to_set_it_up(self):
+        # 無いのが .env か、鍵の .env.keys だけかで、次にすることを示す。鍵だけ無いのは、dotenvx 2.25 以降が --no-native 無しで
+        # 鍵を OS の secret store に置いたとき（macOS など）
+        (self.cfg / ".env.keys").unlink()
+        rc, rec = self.run_launch("claude")
+        self.assertEqual(rec["status"], "unavailable")
+        why = rec["problems"][0]
+        self.assertIn(f"{self.cfg / '.env'} はある", why)
+        self.assertIn("secret store", why)
+        self.assertIn(f"--no-native -f {self.cfg / '.env'} -fk {self.cfg / '.env.keys'}", why)
+        self.assertIn("README の「任意機能の準備」", why)
+        (self.cfg / ".env").unlink()
+        rc, rec = self.run_launch("claude")
+        self.assertEqual(rec["status"], "unavailable")
+        why = rec["problems"][0]
+        self.assertIn(f"{self.cfg / '.env'} が無い", why)
+        self.assertNotIn("secret store", why)
+        self.assertIn("claude setup-token", why)
+        self.assertIn("--no-native", why)
+        self.assertIn("README の「任意機能の準備」", why)
 
     def test_a_codex_child_does_not_start_on_a_stale_copy_of_bb_writ(self):
         # Codex の子は専用ログインに入れた写しのスキルと補助スクリプトを読む。この launcher と中身が違えば起動しない

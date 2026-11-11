@@ -1006,7 +1006,9 @@ def op_step(a, r: Path, live, now: float, action: str):
             return ({"ok": False, "reason": f"作業場所の HEAD {head} を対象にした監査役（返す前の判定）の記録が無い。--reviewed none: でも要る"
                         "（none: は interrogate を省く宣言で、子を省く宣言でない）。launcher（launch.py）に --audit を付け、この commit を "
                         "checkout した未 commit の変更が無い場所を --cwd にして、`playbook-verify` の「返す前の判定」の依頼文で立て、"
-                        "status が ok で返った記録が要る。指摘は、作業の記録の指摘の扱いの欄に書いてから出す"
+                        "status が ok で返った記録が要る。指摘は、作業の記録の指摘の扱いの欄に書いてから出す。"
+                        "launcher が unavailable で返るなら（専用ログインが無いなど）、その problems の理由に従い、"
+                        "bb-writ の README の「任意機能の準備」で専用ログインを用意する"
                         + (f"。{unread}" if unread else "")}, 6)
         audit = audits
         f = r / "note.md"

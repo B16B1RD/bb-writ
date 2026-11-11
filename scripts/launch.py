@@ -510,8 +510,14 @@ def command(a, prompt: str, scratch: Path) -> tuple[list[str], dict, str | None]
         for tool in ("claude", "dotenvx"):
             if not shutil.which(tool):
                 return [], env, f"{tool} が PATH に無い"
-        if not env_file.is_file() or not keys.is_file():
-            return [], env, f"専用ログインが無い: {env_file} と {keys.name}（claude setup-token の結果を dotenvx で保存する）"
+        setup = (f"claude setup-token のトークンを、dotenvx set CLAUDE_CODE_OAUTH_TOKEN <トークン> --no-native -f {env_file} -fk {keys} で置く"
+                 "（手順と確かめ方は README の「任意機能の準備」の「Claude Code の専用ログイン」）")
+        if not env_file.is_file():
+            return [], env, f"専用ログインが無い: {env_file} が無い。{setup}"
+        if not keys.is_file():
+            # dotenvx 2.25 から、鍵の既定の置き場が .env.keys でなく OS の secret store（macOS のキーチェーンなど）になった
+            return [], env, (f"専用ログインの鍵が無い: {env_file} はあるが {keys} が無い。dotenvx 2.25 以降は、--no-native を付けないと"
+                             f"鍵を OS の secret store（macOS のキーチェーンなど）に置き、launcher はそれを使わない。{setup}")
         # 親の Claude Code の環境（CLAUDE_CODE_PLUGIN_DIRS の利用者の mod、CLAUDE_EFFORT など。mod は sandbox の外で動く）と API の鍵・接続先を渡さない。
         # 鍵があると専用ログインの代わりに別料金の API へ落ちうる。専用ログインのトークンは dotenvx が子の環境にだけ入れる
         env = {k: v for k, v in env.items() if not k.startswith(("CLAUDE", "ANTHROPIC_"))}
@@ -564,7 +570,7 @@ def command(a, prompt: str, scratch: Path) -> tuple[list[str], dict, str | None]
             return [], env, "grok が PATH に無い"
         login = cfg / "grok-auth"
         if not (login / "auth.json").is_file():
-            return [], env, f"専用ログインが無い: {login}/auth.json（GROK_HOME={login} grok login）"
+            return [], env, f"専用ログインが無い: {login}/auth.json（GROK_HOME={login} grok login。README の「任意機能の準備」の「Grok Build の専用ログイン」）"
         src = a.grok_home and grok_session_dir(a.grok_home, a.session)
         if a.grok_home and not src:
             return [], env, f"前の home {a.grok_home} に session {a.session} の記録が 1 つだけ見つからない（symlink の下は見ない）"
@@ -593,7 +599,7 @@ def command(a, prompt: str, scratch: Path) -> tuple[list[str], dict, str | None]
         return [], env, "codex が PATH に無い"
     home = cfg / "codex-home"
     if not (home / "auth.json").is_file():
-        return [], env, f"専用ログインが無い: {home}/auth.json（CODEX_HOME={home} codex login）"
+        return [], env, f"専用ログインが無い: {home}/auth.json（CODEX_HOME={home} codex login。README の「任意機能の準備」の「Codex の専用ログイン」）"
     why = codex_stale_copy(home)
     if why:
         return [], env, why

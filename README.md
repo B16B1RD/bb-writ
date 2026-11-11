@@ -147,16 +147,62 @@ Claude Code は、普通の依頼文だけでは入口を使わない。入口�
 
 ## 任意機能の準備
 
-push・PR まで頼む場合と、`delegate`・`interrogate`・`reflect`・`playbook-eval` を使う場合は、[前提](#前提)に加えて次を用意する。push・PR だけなら、使っている CLI の専用ログインと、その CLI を子として起動する準備（下の、Claude Code の dotenvx と、Linux・WSL2 の `bwrap`・`socat`）があれば足りる（もう一方の CLI は要らない）。
+push・PR まで頼む場合と、`delegate`・`interrogate`・`reflect`・`playbook-eval` を使う場合は、[前提](#前提)に加えて、ここの準備が要る。bb-writ は、審査役・確かめ役・返す前の判定の子を、CLI の別プロセスとして起動する。その子は、普段のログインでなく、bb-writ だけが使うログイン（専用ログイン）で動く。分けるのは、子の使った量を普段の作業と区別し、普段の設定（個人の指示・hook・プラグイン）を子に混ぜないため。
 
-- 別系統の CLI を使う場合は、起動する CLI と、起動される CLI（Claude Code・Codex・Grok Build のうち 2 つ以上）。
-- 起動される CLI の bb-writ 専用ログイン。push・PR の前の判定の子と、`interrogate` の同じ系統の審査役は、使っている CLI と同じ CLI を別プロセスで起動するので、使っている CLI の専用ログインも要る（Claude Code でも Codex でも Grok Build でも）。
-  - Claude Code：`claude setup-token` で得たトークンを、`~/.config/bb-writ/.env` の `CLAUDE_CODE_OAUTH_TOKEN` に [dotenvx](https://dotenvx.com/) で暗号化して置く（鍵の `.env.keys` も同じ場所）。起動するときも dotenvx がトークンを子の環境にだけ渡すので、dotenvx を入れておく。
-  - Codex：`CODEX_HOME=~/.config/bb-writ/codex-home codex login`。この専用ログインにも bb-writ を入れた場合、Codex の子はその写しのスキルを読む。写しが起動する側の bb-writ と中身で違うと、Codex の子は起動せず、入れ直すコマンド（`CODEX_HOME` を付けた [Codex の更新](#codex-1)と同じ 3 つ）を示す。
-  - Grok Build：`GROK_HOME=~/.config/bb-writ/grok-auth grok login`。
-- Linux・WSL2 で Claude Code を子として起動するなら、`bwrap`（bubblewrap）と `socat`。子は OS の sandbox の中で動き、sandbox を起動できなければ起動しない。
+何を用意するか：
 
-呼び出し方は [`delegate` の手引き](skills/delegate/SKILL.md) にある。
+- push・PR だけなら、使っている CLI の専用ログインがあれば足りる。返す前の判定の子を、使っている CLI と同じ CLI で起動するため。Claude Code なら、下の dotenvx と、Linux・WSL2 では `bwrap`・`socat` も要る。
+- `interrogate` の別系統の審査役と、`playbook-eval`・`reflect` の別系統の読み手には、もう 1 つの CLI（Claude Code・Codex・Grok Build のどれか）と、その専用ログインが要る。
+
+専用ログインが無いまま push・PR を頼むと、bb-writ は返す前の判定の子を起動できず、push・PR は拒否される。拒否の文と、子を起動できなかったときの返答に、この節が出てくる。
+
+### Claude Code の専用ログイン
+
+[dotenvx](https://dotenvx.com/docs/install) を入れてから、次を順に実行する。トークンは暗号化した `~/.config/bb-writ/.env` に置き、復号の鍵は同じ場所の `.env.keys` に置く。bb-writ は子を起動するときだけ、dotenvx でトークンを子の環境に渡す。
+
+```sh
+mkdir -p -m 700 ~/.config/bb-writ
+claude setup-token
+```
+
+`claude setup-token` の案内に従ってログインすると、長期のトークンが表示される（Claude の契約が要る）。表示されたトークンをコピーし、次の 2 行目で、何も表示されない入力に貼って Enter を押す。トークンはシェルの履歴に残らない。
+
+```sh
+IFS= read -rs T
+dotenvx set CLAUDE_CODE_OAUTH_TOKEN "$T" --no-native -f ~/.config/bb-writ/.env -fk ~/.config/bb-writ/.env.keys; unset T
+```
+
+`--no-native` を省かない。dotenvx 2.25 以降は、鍵を `.env.keys` でなく OS の secret store（macOS のキーチェーンなど）に置くのが既定で、そこに置かれると bb-writ は鍵を見つけられず、子を起動しない。
+
+できたかを確かめる：
+
+```sh
+CLAUDE_CONFIG_DIR=~/.config/bb-writ/claude-home dotenvx run -q -f ~/.config/bb-writ/.env -fk ~/.config/bb-writ/.env.keys -- claude -p "ok とだけ返して" --model haiku < /dev/null
+```
+
+`ok` と返れば、専用ログインで動く。トークンが違うと `Failed to authenticate. API Error: 401` で終わるので、`claude setup-token` からやり直す。`claude auth status` は、トークンが無効でも `"loggedIn": true` を返すので、確かめに使わない。`~/.config/bb-writ/claude-home` は、子の Claude Code の設定と会話記録の置き場で、初めて使うときにできる。
+
+Linux・WSL2 では、子の Claude Code が OS の sandbox（bubblewrap）の中で動く。sandbox を起動できなければ、子は起動しない。`command -v bwrap socat` で 2 つとも見つからなければ入れる（Debian・Ubuntu では `sudo apt install bubblewrap socat`）。macOS では要らない。
+
+### Codex の専用ログイン
+
+```sh
+CODEX_HOME=~/.config/bb-writ/codex-home codex login
+```
+
+確かめるには `CODEX_HOME=~/.config/bb-writ/codex-home codex login status` を実行し、`Logged in` で始まる行が出ればよい。
+
+この専用ログインに bb-writ を入れるかは任意。入れると、子のスキルの一覧に bb-writ が出る。入れた写しは版ごとに入れ直す。写しが起動する側の bb-writ と中身で違うと、Codex の子は起動せず、入れ直すコマンド（`CODEX_HOME` を付けた [Codex の更新](#codex-1)と同じ 3 つ）を示す。
+
+### Grok Build の専用ログイン
+
+```sh
+GROK_HOME=~/.config/bb-writ/grok-auth grok login
+```
+
+Grok Build にはログインの状態を見るコマンドが無い。`~/.config/bb-writ/grok-auth/auth.json` ができていればよい。ログインが切れていると、子は「Not signed in」で終わる。そのときは同じコマンドでログインし直す。
+
+呼び出し方の詳細は [`delegate` の手引き](skills/delegate/SKILL.md) にある。
 
 ## 開発
 
