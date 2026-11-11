@@ -15,7 +15,7 @@ description: 子に委任するとき、別系統の CLI（Claude Code・Codex�
 - **モデルと effort:** 課題の難しさで選ぶ。読む・集める・定型の編集は軽い段（Claude Code: `haiku`・`sonnet`、Codex: `gpt-6-luna`・`gpt-6-sol`）、設計の是非・重要な検証・行き詰まりの判断は重い段（`opus`・`fable`、`gpt-6.1-sol`・`gpt-6-astra`）。実効値（実際に使われたモデル・effort）が確認できなければ「不明」と書く。
 - **別系統の判断:** 設計の是非や重要な検証では、もう一方の CLI を bb-writ 専用のログインで起動する。同じ系統の名前を変えて呼んだだけで「別モデルで確認した」としない。片方しか使えない場所では、新しい文脈の同系統で進め、独立性の差を記録する。
 - **専用ログイン:** Claude Code は `~/.config/bb-writ/.env` の `CLAUDE_CODE_OAUTH_TOKEN`（dotenvx で暗号化し、鍵は同じ場所の `.env.keys`。`dotenvx set` に `--no-native` を付けないと、dotenvx 2.25 以降は鍵を OS の secret store に置くことがあり、launcher はそれを使わない。`dotenvx run -f ~/.config/bb-writ/.env -fk ~/.config/bb-writ/.env.keys -- claude ...`）と `CLAUDE_CONFIG_DIR=~/.config/bb-writ/claude-home`。Codex は `CODEX_HOME=~/.config/bb-writ/codex-home`。Grok Build は `GROK_HOME=~/.config/bb-writ/grok-auth`。オーナーの `~/.claude`・`~/.codex`・`~/.grok` の写しを作らない。トークンを画面・ログ・会話に出さない。
-- **権限:** 親・組織・対象リポジトリの制約を委任で広げない。読み取り専用を保証したい経路は、ツール名の列挙でなく実際の書き込み拒否で試す。判定を任せる子（審査役・確かめ役・返す前の判定の子）は、どのホストでも launcher で読み取り専用に立てる。launcher を起動できなければ（専用ログインが無いなど）、その子は立てず、審査や判定が無いことを範囲に書く。返答には、launcher が返した `problems` の理由と、専用ログインの用意のしかたが bb-writ の README の「任意機能の準備」にあることを書く（利用者が次に何をすれば子を立てられるかが分かるように）。
+- **権限:** 親・組織・対象リポジトリの制約を委任で広げない。読み取り専用を保証したい経路は、ツール名の列挙でなく実際の書き込み拒否で試す。判定を任せる子（審査役・確かめ役・返す前の判定の子）は、どのホストでも launcher で読み取り専用に立てる。launcher を起動できなければ（専用ログインが無いなど）、その子は立てず、審査や判定が無いことを範囲に書く。返答には、launcher が返した `problems` の理由を書く。理由が専用ログインの不足（「専用ログインが無い」「専用ログインの鍵が無い」）なら、用意のしかたが bb-writ の README の「任意機能の準備」にあることも書く（利用者が次に何をすれば子を立てられるかが分かるように。利用枠などほかの理由では書かない）。
 
 ## launcher（別系統の子の起動と報告の検査）
 
