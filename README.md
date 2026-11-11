@@ -221,7 +221,7 @@ mkdir -p -m 700 ~/.config/bb-writ ~/.config/bb-writ/grok-auth
 GROK_HOME=~/.config/bb-writ/grok-auth grok login
 ```
 
-Grok Build にはログインの状態を見るコマンドが無い。`~/.config/bb-writ/grok-auth/auth.json` ができていればよい。ログインが切れていると、子は「Not signed in」で終わる。そのときは同じコマンドでログインし直す。
+Grok Build のコマンドには、ログインの状態を見るものが無い（`grok --help` の一覧は `login` と `logout` だけ）。`~/.config/bb-writ/grok-auth/auth.json` ができていればよい。認証が通らないと、子は「Not signed in」で終わる。そのときは同じコマンドでログインし直す。
 
 呼び出し方の詳細は [`delegate` の手引き](skills/delegate/SKILL.md) にある。
 
