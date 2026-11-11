@@ -183,6 +183,8 @@ dotenvx set CLAUDE_CODE_OAUTH_TOKEN "$T" --no-native -f ~/.config/bb-writ/.env -
 
 `--no-native` を省かない。dotenvx 2.25 以降は、OS の secret store（macOS のキーチェーンなど）が使えると、鍵を `.env.keys` でなくそこに置くことがある。そこに置かれると、bb-writ は鍵を見つけられず、子を起動しない。
 
+Linux・WSL2 では、子の Claude Code が OS の sandbox（bubblewrap）の中で動き、sandbox を起動できなければ子は起動しない。`command -v bwrap socat` を実行し、どちらかが出なければ入れる（Debian・Ubuntu では `sudo apt install bubblewrap socat`）。macOS では要らない。
+
 できたかを確かめる。まず、鍵のファイルがあるかを見る。
 
 ```sh
@@ -194,12 +196,10 @@ ls ~/.config/bb-writ/.env.keys
 鍵のファイルがあれば、専用ログインで 1 回問い合わせる。
 
 ```sh
-CLAUDE_CONFIG_DIR=~/.config/bb-writ/claude-home dotenvx run -q -f ~/.config/bb-writ/.env -fk ~/.config/bb-writ/.env.keys -- claude -p "ok とだけ返して" --model haiku < /dev/null
+env -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN CLAUDE_CONFIG_DIR=~/.config/bb-writ/claude-home dotenvx run -q -f ~/.config/bb-writ/.env -fk ~/.config/bb-writ/.env.keys -- claude -p "ok とだけ返して" --model haiku < /dev/null
 ```
 
-`ok` と返れば、専用ログインで動く。`Failed to authenticate. API Error: 401` で終われば、トークンが違うので、`claude setup-token` からやり直す。`claude auth status` は、トークンが無効でも `"loggedIn": true` を返すので、確かめに使わない。`~/.config/bb-writ/claude-home` は、子の Claude Code の設定と会話記録の置き場で、初めて使うときにできる。
-
-Linux・WSL2 では、子の Claude Code が OS の sandbox（bubblewrap）の中で動く。sandbox を起動できなければ、子は起動しない。`command -v bwrap socat` で 2 つとも見つからなければ入れる（Debian・Ubuntu では `sudo apt install bubblewrap socat`）。macOS では要らない。
+`ok` と返れば、専用ログインで動く。先頭の `env -u` は、シェルにある API キーを外す（キーがあると、トークンより先に使われる。launcher も子に渡さない）。`Failed to authenticate. API Error: 401` で終われば、トークンが違うので、`claude setup-token` からやり直す。`claude auth status` は、トークンが無効でも `"loggedIn": true` を返すので、確かめに使わない。`~/.config/bb-writ/claude-home` は、子の Claude Code の設定と会話記録の置き場で、初めて使うときにできる。
 
 ### Codex の専用ログイン
 
