@@ -3464,7 +3464,8 @@ class TestLaunch(unittest.TestCase):
         self.assertIn(section, why)
 
     def test_a_codex_child_does_not_start_on_a_stale_copy_of_bb_writ(self):
-        # Codex の子は専用ログインに入れた写しのスキルと補助スクリプトを読む。この launcher と中身が違えば起動しない
+        # Codex の子は専用ログインに入れた写しのスキルと補助スクリプトを読む（読み取り専用の子は一覧だけで、本文は読めなかった）。
+        # この launcher と中身が違えば起動しない
         cache = self.cfg / "codex-home" / "plugins" / "cache"
 
         def copy(ver="9.9.9", mp="bb-writ", dirs=("skills", "scripts")):

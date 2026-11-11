@@ -476,7 +476,7 @@ def codex_breach(turns: list, denies: list[str]) -> str | None:
 def codex_stale_copy(home: Path) -> str | None:
     """専用ログインの Codex に入った bb-writ の写しが、この launcher の skills/・scripts/ と中身で違えば理由。写しが無ければ None。
     Claude Code の子には --plugin-dir でこの bb-writ を渡すが、Codex には起動ごとに置き場を渡す引数が無く、子は写しのスキルと
-    補助スクリプトを読む（版を上げる前の変更は届かず、入れ直すまでの間に古い写しで 88 回中 8 回動いた。-c で plugins の enabled を
+    補助スクリプトを読む（読み取り専用の子は、スキルの一覧は写しから見えるが、写しの本文は launcher が専用ログインの置き場の読みを拒むので読めなかった（2026-11-11）。版を上げる前の変更は届かず、入れ直すまでの間に古い写しで 88 回中 8 回動いた。-c で plugins の enabled を
     切ってもスキルは見えたままだった。0.166.0）。版の番号でなく中身で比べる（版を上げていない変更を見逃すため）。
     写しにだけあるファイル（古い版の残りも）・写しの置き場がどれか 1 つでも違えば止める。守らない範囲: 読めないファイルは例外のまま
     failed になり、symlink の置き場の中は数えない（rglob がたどらない）。"""
