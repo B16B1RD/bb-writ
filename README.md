@@ -191,12 +191,12 @@ Linux・WSL2 では、子の Claude Code が OS の sandbox（bubblewrap）の�
 ls ~/.config/bb-writ/.env.keys
 ```
 
-見つからなければ、鍵が secret store に置かれている（`--no-native` を付けずに置いた）。`.env` を残したまま置き直しても鍵のファイルはできないので、`rm ~/.config/bb-writ/.env` で消してから、`IFS= read -rs T` からやり直す（トークンが手元に無ければ、`claude setup-token` から）。
+見つからなければ、鍵が secret store に置かれている（`--no-native` を付けずに置いた）か、鍵のファイルが消えている。`.env` を残したまま置き直しても鍵のファイルはできないので、`rm ~/.config/bb-writ/.env` で消してから、`IFS= read -rs T` からやり直す（トークンが手元に無ければ、`claude setup-token` から）。
 
 鍵のファイルがあれば、専用ログインで 1 回問い合わせる。
 
 ```sh
-env -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN CLAUDE_CONFIG_DIR=~/.config/bb-writ/claude-home dotenvx run -q -f ~/.config/bb-writ/.env -fk ~/.config/bb-writ/.env.keys -- claude -p "ok とだけ返して" --model haiku < /dev/null
+CLAUDE_CONFIG_DIR=~/.config/bb-writ/claude-home env -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN dotenvx run -q -f ~/.config/bb-writ/.env -fk ~/.config/bb-writ/.env.keys -- claude -p "ok とだけ返して" --model haiku < /dev/null
 ```
 
 `ok` と返れば、専用ログインで動く。先頭の `env -u` は、シェルにある API キーを外す（キーがあると、トークンより先に使われる。launcher も子に渡さない）。`Failed to authenticate. API Error: 401` で終われば、トークンが違うので、`claude setup-token` からやり直す。`claude auth status` は、トークンが無効でも `"loggedIn": true` を返すので、確かめに使わない。`~/.config/bb-writ/claude-home` は、子の Claude Code の設定と会話記録の置き場で、初めて使うときにできる。
@@ -221,7 +221,7 @@ mkdir -p -m 700 ~/.config/bb-writ ~/.config/bb-writ/grok-auth
 GROK_HOME=~/.config/bb-writ/grok-auth grok login
 ```
 
-Grok Build のコマンドには、ログインの状態を見るものが無い（`grok --help` の一覧は `login` と `logout` だけ）。`~/.config/bb-writ/grok-auth/auth.json` ができていればよい。認証が通らないと、子は「Not signed in」で終わる。そのときは同じコマンドでログインし直す。
+Grok Build には、ログインの状態を見るコマンドが無い（`grok --help` の一覧で、ログインに関わるのは `login` と `logout` だけ。`grok usage` は、この使い方では「can't show your plan's usage here yet」で終わる）。`~/.config/bb-writ/grok-auth/auth.json` ができていればよい。認証が通らないと、子は「Not signed in」で終わる。そのときは同じコマンドでログインし直す。
 
 呼び出し方の詳細は [`delegate` の手引き](skills/delegate/SKILL.md) にある。
 
