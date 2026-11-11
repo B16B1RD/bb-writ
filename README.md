@@ -181,7 +181,7 @@ dotenvx set CLAUDE_CODE_OAUTH_TOKEN "$T" --no-native -f ~/.config/bb-writ/.env -
 
 2 つを 1 度に貼らない。`read` が 2 行目を入力として読み、その後に貼ったトークンがコマンドとして実行されて、履歴に残る。
 
-`--no-native` を省かない。dotenvx 2.25 以降は、OS の secret store（macOS のキーチェーンなど）が使えると、鍵を `.env.keys` でなくそこに置くことがある。そこに置かれると、bb-writ は鍵を見つけられず、子を起動しない。
+`--no-native` を省かない。dotenvx 2.25 以降は、OS の secret store（macOS のキーチェーンなど）が使えると、鍵を `.env.keys` でなくそこに置くことがある。そこに置かれると、bb-writ は鍵を見つけられず、子を起動しない。`--no-native` は 2.25 より前の版でも通る（1.75.1・2.24.1 で確かめた）。
 
 Linux・WSL2 では、子の Claude Code が OS の sandbox（bubblewrap）の中で動き、sandbox を起動できなければ子は起動しない。`command -v bwrap socat` を実行し、どちらかが出なければ入れる（Debian・Ubuntu では `sudo apt install bubblewrap socat`）。macOS では要らない。
 
