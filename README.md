@@ -165,29 +165,46 @@ mkdir -p -m 700 ~/.config/bb-writ
 claude setup-token
 ```
 
-`claude setup-token` の案内に従ってログインすると、長期のトークンが表示される（Claude の契約が要る）。表示されたトークンをコピーし、次の 1 行目を実行してから、何も表示されない入力に貼って Enter を押す。トークンをコマンド行に書かないので、シェルの履歴に残らない。
+`claude setup-token` の案内に従ってログインすると、長期のトークンが表示される（Claude の契約が要る）。表示されたトークンをコピーしておく。
+
+次の 1 行を実行すると、何も表示されない入力待ちになる。そこにトークンを貼って Enter を押す。トークンをコマンド行に書かないので、シェルの履歴に残らない（bash・zsh で動く）。
 
 ```sh
 IFS= read -rs T
+```
+
+続けて、次を実行する。
+
+```sh
 dotenvx set CLAUDE_CODE_OAUTH_TOKEN "$T" --no-native -f ~/.config/bb-writ/.env -fk ~/.config/bb-writ/.env.keys; unset T
 ```
 
-`--no-native` を省かない。dotenvx 2.25 以降は、OS の secret store（macOS のキーチェーンなど）が使えると、鍵を `.env.keys` でなくそこに置くことがある。そこに置かれると、bb-writ は鍵を見つけられず、子を起動しない。`--no-native` を付けずに置いてしまったときは、`rm ~/.config/bb-writ/.env` で消してから、`IFS= read -rs T` からやり直す。
+2 つを 1 度に貼らない。`read` が 2 行目を入力として読み、その後に貼ったトークンがコマンドとして実行されて、履歴に残る。
 
-できたかを確かめる：
+`--no-native` を省かない。dotenvx 2.25 以降は、OS の secret store（macOS のキーチェーンなど）が使えると、鍵を `.env.keys` でなくそこに置くことがある。そこに置かれると、bb-writ は鍵を見つけられず、子を起動しない。
+
+できたかを確かめる。まず、鍵のファイルがあるかを見る。
+
+```sh
+ls ~/.config/bb-writ/.env.keys
+```
+
+見つからなければ、鍵が secret store に置かれている（`--no-native` を付けずに置いた）。`.env` を残したまま置き直しても鍵のファイルはできないので、`rm ~/.config/bb-writ/.env` で消してから、`IFS= read -rs T` からやり直す（トークンが手元に無ければ、`claude setup-token` から）。
+
+鍵のファイルがあれば、専用ログインで 1 回問い合わせる。
 
 ```sh
 CLAUDE_CONFIG_DIR=~/.config/bb-writ/claude-home dotenvx run -q -f ~/.config/bb-writ/.env -fk ~/.config/bb-writ/.env.keys -- claude -p "ok とだけ返して" --model haiku < /dev/null
 ```
 
-`ok` と返り、`ls ~/.config/bb-writ/.env.keys` で鍵のファイルが見つかれば、専用ログインで動く（鍵がファイルに無いと、この確かめが通っても bb-writ は子を起動しない）。トークンが違うと `Failed to authenticate. API Error: 401` で終わるので、`claude setup-token` からやり直す。`claude auth status` は、トークンが無効でも `"loggedIn": true` を返すので、確かめに使わない。`~/.config/bb-writ/claude-home` は、子の Claude Code の設定と会話記録の置き場で、初めて使うときにできる。
+`ok` と返れば、専用ログインで動く。`Failed to authenticate. API Error: 401` で終われば、トークンが違うので、`claude setup-token` からやり直す。`claude auth status` は、トークンが無効でも `"loggedIn": true` を返すので、確かめに使わない。`~/.config/bb-writ/claude-home` は、子の Claude Code の設定と会話記録の置き場で、初めて使うときにできる。
 
 Linux・WSL2 では、子の Claude Code が OS の sandbox（bubblewrap）の中で動く。sandbox を起動できなければ、子は起動しない。`command -v bwrap socat` で 2 つとも見つからなければ入れる（Debian・Ubuntu では `sudo apt install bubblewrap socat`）。macOS では要らない。
 
 ### Codex の専用ログイン
 
 ```sh
-mkdir -p ~/.config/bb-writ/codex-home
+mkdir -p -m 700 ~/.config/bb-writ ~/.config/bb-writ/codex-home
 CODEX_HOME=~/.config/bb-writ/codex-home codex login
 ```
 
@@ -200,7 +217,7 @@ CODEX_HOME=~/.config/bb-writ/codex-home codex login
 ### Grok Build の専用ログイン
 
 ```sh
-mkdir -p ~/.config/bb-writ/grok-auth
+mkdir -p -m 700 ~/.config/bb-writ ~/.config/bb-writ/grok-auth
 GROK_HOME=~/.config/bb-writ/grok-auth grok login
 ```
 

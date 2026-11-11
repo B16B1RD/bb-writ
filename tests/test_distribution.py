@@ -154,7 +154,7 @@ def readme_headings(text):
 class TestReadmeSections(unittest.TestCase):
     def test_sections_the_scripts_point_users_to_exist_in_the_readme(self):
         # launcher と work.py は、専用ログインが無いときに README の節の名前を示す。見出しを変えて文だけが古くならないように。
-        # 守らない範囲: 「README の「X」の「Y」」の形でない書き方（「README の X 節」など）は拾わない
+        # 守らない範囲: 「README の「X」の「Y」」の形でない書き方（「README の X 節」など）、+ でつないだ文字列、f 文字列の値で入れた名前は拾わない
         headings = readme_headings((ROOT / "README.md").read_text(encoding="utf-8"))
         named = []
         for script in ("launch.py", "work.py"):
