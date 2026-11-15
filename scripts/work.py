@@ -295,7 +295,7 @@ FIELDS = re.findall(r"^- (.+?):$", NOTE, re.M)  # 雛形の欄の名前
 REQUIRED = FIELDS[:3]  # 担当を取った場で知らせる欄。push・pr の前は、指摘の扱い（監査役をどの push・pr でも立てる）も空なら拒否する
 TRIAGE = FIELDS[3]
 PREMISE = FIELDS[4]
-PREMISE_ROUNDS = 3  # この数の審査役を立てた後は、直しが仕組みに重なっていないかを確かめさせる（interrogate の 5 が前提を疑う 3 周目と同じ数。Important の有無は見ない）
+PREMISE_ROUNDS = 3  # この数の読み取り専用の子（審査役・確かめ役など）を立てた後は、直しが仕組みに重なっていないかを確かめさせる（interrogate の 5 が前提を疑う 3 周目と同じ数。Important の有無は見ない）
 
 
 def field_line(name: str):
