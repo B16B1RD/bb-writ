@@ -122,6 +122,7 @@ class TestWork(unittest.TestCase):
         for left in (600, -600):
             for stored, given in ((None, ()), ("", ("--token", ""))):  # token の欄が無い記録と省いた --token、空の token どうし
                 with self.subTest(expires_in=left, stored=stored, given=given):
+                    marker.unlink(missing_ok=True)  # 前の段で走った印で、この段を落とさない
                     record.write_text(json.dumps({"holder": "child", "expires_at": time.time() + left,
                                                   **({} if stored is None else {"token": stored})}))
                     rc, r = self.w("op", "begin", *given, "--key", f"local:x{left}{len(given)}", "--what", "x")
