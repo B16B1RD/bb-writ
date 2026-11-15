@@ -813,10 +813,11 @@ class TestParallel(unittest.TestCase):
     def test_a_task_whose_owner_may_still_be_waiting_is_not_offered_for_closing(self):
         """統合を終えた持ち主が子を待つ間に担当の期限が切れても、切れてから 24 時間（担当の期限の上限）を過ぎるまでは、
         ほかのセッションの task start・task list の unclosed に出さない（Issue #32。手引きどおり task resume → task cleanup で
-        作業場所を消され、戻った持ち主の renew が 3 で拒否された）。過ぎたものは、止まった持ち主のタスクとして出る。"""
+        作業場所を消され、戻った持ち主の renew が 3 で拒否された）。過ぎたものは、止まった持ち主のタスクとして出る。
+        期限の上限を超えた将来の期限（書く子が書き換えうる）は、前のとおり切れたものとして出る（待っているとみなして隠さない）。"""
         a = self.start()
         self.integrate(a, self.git(self.repo, 'rev-parse', 'main'), self.change(a, 'a'))
-        for ago, offered in ((120, False), (24 * 3600 - 120, False), (24 * 3600 + 120, True)):
+        for ago, offered in ((120, False), (24 * 3600 - 120, False), (24 * 3600 + 120, True), (-(24 * 3600 + 120), True)):
             with self.subTest(ago=ago):
                 self.expire(a, ago)
                 b = self.start()
