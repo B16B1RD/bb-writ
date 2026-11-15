@@ -794,6 +794,33 @@ class TestParallel(unittest.TestCase):
         self.assertTrue((self.repo / 'a').exists())
         self.assertTrue((self.repo / 'b').exists())
 
+    def expire(self, task):
+        f = Path(task['note']['path']).parent / 'lease.json'
+        f.write_text(json.dumps({**json.loads(f.read_text()), 'expires_at': time.time() - 120}))
+
+    def test_an_expired_lease_nobody_took_still_integrates_and_cleans_up(self):
+        """期限が切れても、誰も取っていなければ、持ち主の integrate と task cleanup は通る（Issue #31。審査役を待つ間に切れ、
+        integrate が 3 で拒否された）。"""
+        a = self.start()
+        head = self.change(a, 'a')
+        self.expire(a)
+        self.integrate(a, self.git(self.repo, 'rev-parse', 'main'), head)
+        self.expire(a)
+        self.w('task', 'cleanup', '--dir', a['dir'], '--token', a['token'], '--saved', 'main')
+        self.assertFalse(Path(a['dir']).exists())
+
+    def test_an_expired_lease_taken_by_another_stops_the_old_token(self):
+        """期限の後に別の者が task resume で取ったら、元の token の integrate と task cleanup は 3 で拒否される。"""
+        a = self.start()
+        head = self.change(a, 'a')
+        self.expire(a)
+        self.w('task', 'resume', '--dir', self.repo, '--task', a['task'], '--holder', 'Codex')
+        main = self.git(self.repo, 'rev-parse', 'main')
+        self.integrate(a, main, head, code=3)
+        self.w('task', 'cleanup', '--dir', a['dir'], '--token', a['token'], '--saved', 'main', code=3)
+        self.assertEqual(self.git(self.repo, 'rev-parse', 'main'), main)
+        self.assertTrue(Path(a['dir']).exists())
+
     def test_expired_lease_cannot_be_taken_over_during_integration(self):
         a = self.w('task', 'start', '--dir', self.repo, '--holder', 'Claude Code', '--lease', '0.05')
         ah = self.change(a, 'a')
