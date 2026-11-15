@@ -1826,37 +1826,76 @@ class TestLaunch(unittest.TestCase):
 
     def test_the_model_comes_from_the_role_unless_the_parent_gives_one(self):
         # 親が --model・--effort を省くと、役割とホストの表で決める（親が毎回手で選ぶと、同じ審査役が Opus high と Sonnet medium に割れた）
-        flag = {"claude": "--model", "codex": "-m", "grok": "-m"}
-        cases = [("claude", [], "read", "sonnet", "medium", 1800), ("claude", ["--audit"], "audit", "opus", "high", 1800),
-                 ("claude", ["--interrogate"], "interrogate", "fable", "medium", 1800),
-                 ("claude", ["--write"], "write", "sonnet", "medium", 1800),
-                 ("claude", ["--write", "--hardest"], "hardest", "fable", "medium", 3600),
-                 ("codex", [], "read", "gpt-6-sol", "medium", 1800), ("codex", ["--write", "--hardest"], "hardest", "gpt-6.1-sol", "high", 3600),
-                 ("grok", [], "read", "grok-4.7", "medium", 1800), ("grok", ["--write"], "write", "grok-4.7", "medium", 1800)]
-        for host, extra, role, model, effort, timeout in cases:
+        flags = {"read": [], "audit": ["--audit"], "interrogate": ["--interrogate"], "write": ["--write"], "hardest": ["--write", "--hardest"]}
+        table = {("claude", "read"): ("sonnet", "medium"), ("claude", "audit"): ("opus", "high"), ("claude", "interrogate"): ("fable", "medium"),
+                 ("claude", "write"): ("sonnet", "medium"), ("claude", "hardest"): ("fable", "medium"),
+                 ("codex", "read"): ("gpt-6-sol", "medium"), ("codex", "audit"): ("gpt-6-sol", "medium"), ("codex", "interrogate"): ("gpt-6-sol", "medium"),
+                 ("codex", "write"): ("gpt-6-sol", "medium"), ("codex", "hardest"): ("gpt-6.1-sol", "high"),
+                 ("grok", "read"): ("grok-4.7", "medium"), ("grok", "audit"): ("grok-4.7", "medium"), ("grok", "interrogate"): ("grok-4.7", "medium"),
+                 ("grok", "write"): ("grok-4.7", "medium")}
+
+        def given(host, argv):  # 子の CLI に渡ったモデルと effort
+            m = argv[argv.index("--model" if host == "claude" else "-m") + 1]
+            if host == "codex":
+                return m, next(x for x in argv if x.startswith("model_reasoning_effort=")).split("=", 1)[1].strip('"')
+            return m, argv[argv.index("--effort") + 1]
+
+        for (host, role), (model, effort) in table.items():
             self.args_file.unlink(missing_ok=True)
-            rc, rec = self.run_launch(host, extra=extra)
-            started = self.args_file.exists()  # Grok の読み取り専用は、対象が /tmp の下なので起こさない（unavailable）。記録の値で見る
-            self.assertEqual(started, not (host == "grok" and not extra), (host, extra, rec))
-            argv = json.loads(self.args_file.read_text()) if started else [flag[host], model]
-            self.assertEqual((argv[argv.index(flag[host]) + 1], rec["model_requested"], rec["effort_requested"], rec["role"], rec["chosen_by"], rec["timeout_s"]),
-                             (model, model, effort, role, "table", timeout), (host, extra, rec))
+            rc, rec = self.run_launch(host, extra=flags[role])
+            self.assertEqual((rec["model_requested"], rec["effort_requested"], rec["role"], rec["chosen_by"], rec["timeout_s"]),
+                             (model, effort, role, "table", 3600 if role == "hardest" else 1800), (host, role, rec))
+            if host == "grok" and role in ("read", "audit", "interrogate"):  # 対象が /tmp の下なので、Grok の読み取り専用は起こさない
+                self.assertFalse(self.args_file.exists(), rec)
+            else:
+                self.assertEqual(given(host, json.loads(self.args_file.read_text())), (model, effort), (host, role))
         # 親が渡したものが勝つ。片方だけなら、残りを表から取る
         for extra, want in ((["--audit", "--model", "sonnet", "--effort", "low"], ("sonnet", "low", "given")),
                             (["--audit", "--effort", "medium"], ("opus", "medium", "given+table")),
-                            (["--write", "--hardest", "--timeout", "900"], ("fable", "medium", "table"))):
+                            (["--audit", "--model", "sonnet"], ("sonnet", "high", "given+table")),
+                            (["--write", "--hardest", "--timeout", "900"], ("fable", "medium", "table", 900)),
+                            (["--write", "--timeout", "900"], ("sonnet", "medium", "table", 900))):
             rc, rec = self.run_launch("claude", extra=extra)
-            self.assertEqual((rec["model_requested"], rec["effort_requested"], rec["chosen_by"]), want, extra)
-        self.assertEqual(rec["timeout_s"], 900)
+            self.assertEqual((rec["model_requested"], rec["effort_requested"], rec["chosen_by"], rec["timeout_s"]),
+                             want if len(want) == 4 else (*want, 1800), extra)
+            self.assertEqual(given("claude", json.loads(self.args_file.read_text())), want[:2], extra)
         # 表に無い組み合わせと、書く子でない --hardest は、子を起こさずに引数の誤りとして止まる
-        for host, extra, why in (("grok", ["--write", "--hardest"], "既定のモデルが無い"), ("claude", ["--hardest"], "--write と一緒に")):
+        for host, extra, why in (("grok", ["--write", "--hardest"], "既定のモデルが無い"), ("grok", ["--write", "--hardest", "--model", "grok-4.7"], "既定のモデルが無い"),
+                                 ("grok", ["--write", "--hardest", "--effort", "high"], "既定のモデルが無い"), ("claude", ["--hardest"], "--write と一緒に"),
+                                 ("claude", ["--audit", "--write", "--hardest"], "--audit"), ("claude", ["--interrogate", "--write", "--hardest"], "--interrogate")):
             self.args_file.unlink(missing_ok=True)
             p = self.run_launch(host, extra=extra, raw=True)
             self.assertEqual(p.returncode, 2, (extra, p.stderr))
             self.assertIn(why, p.stderr)
             self.assertFalse(self.args_file.exists(), extra)  # 子は起きていない
+        self.args_file.unlink(missing_ok=True)
         p = self.run_launch("grok", extra=["--write", "--hardest", "--model", "grok-4.7", "--effort", "high"], raw=True)
         self.assertEqual(json.loads(p.stdout)["chosen_by"], "given", p.stderr)  # 両方渡せば、表に無くても起こせる
+        self.assertEqual(given("grok", json.loads(self.args_file.read_text())), ("grok-4.7", "high"))
+
+    def test_the_default_time_limit_is_the_one_the_launcher_waits(self):
+        # 記録の timeout_s と、実際に子を待って止める時間が同じ（最も難しい書く子の既定を小さくして、既定のまま時間切れになるのを見る）
+        # 1800 秒を超える待ちだけを縮める退行（min(a.timeout, 1800) など）は、試験に 30 分以上かかるので見ない
+        rc, rec = self.launch_patched("launch.TIMEOUTS['hardest'] = 2", ["--host", "claude", "--cwd", str(self.cwd), "--write", "--hardest"],
+                                      env_extra={"FAKE_HANG": "1"})
+        self.assertEqual((rec["status"], rec["timeout_s"]), ("timeout", 2), rec)
+        self.assertIn("2 秒で終わらなかった", " ".join(rec["problems"]))
+
+    def test_a_resume_keeps_the_role_and_takes_no_new_hardest(self):
+        # 続きは前の記録のモデル・effort と役割で起こす。最も難しい書く子の続きの時間の上限の既定も 3600 のまま。--hardest は一緒に渡せない
+        rc, first = self.run_launch("claude", extra=["--write", "--hardest", "--timeout", "2"], env_extra={"FAKE_HANG": "1"})
+        self.assertEqual((first["status"], first["role"], first["resumable"]), ("timeout", "hardest", True), first)
+        p = self.run_launch(None, extra=["--resume", first["out"], "--hardest"], raw=True)
+        self.assertEqual(p.returncode, 2, p.stderr)
+        self.assertIn("hardest", p.stderr)
+        rc, again = self.run_launch(None, extra=["--resume", first["out"]])
+        self.assertEqual((again["role"], again["model_requested"], again["effort_requested"], again["timeout_s"]),
+                         ("hardest", "fable", "medium", 3600), again)
+        rc, more = self.run_launch(None, extra=["--resume", again["out"], "--timeout", "900"])  # 続きの続きも役割を保ち、渡した上限が勝つ
+        self.assertEqual((more["role"], more["timeout_s"]), ("hardest", 900), more)
+        rc, other = self.run_launch("claude", extra=["--write", "--timeout", "2"], env_extra={"FAKE_HANG": "1"})
+        rc, other_again = self.run_launch(None, extra=["--resume", other["out"]])  # 最も難しくない書く子の続きは 1800 のまま
+        self.assertEqual((other_again["role"], other_again["timeout_s"]), ("write", 1800), other_again)
 
     def test_write_grants_only_the_work_record(self):
         # 書く子に state 全体（タスクの一覧・統合の記録・他の worktree）を渡さない

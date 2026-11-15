@@ -1281,8 +1281,8 @@ def main() -> int:
     ap.add_argument("--audit", action="store_true", help="読み取り専用の子が返す前の判定（遵守の監査）の子だと記録に残す")
     ap.add_argument("--hardest", action="store_true", help="最も難しい依頼（設計、大きな移行・リファクタリング、長い無人実行）を任せる書く子（--write と一緒に）。--model・--effort を省くと最上段で起こす")
     ap.add_argument("--out", type=Path)
-    ap.add_argument("--timeout", type=int, help="秒。既定は 1800（--hardest は 3600）")
-    ap.add_argument("--resume", type=Path, help="前の起動の out。同じ session・同じ権限で続きから起動する（host・cwd・model・effort・write・interrogate・audit は記録から取る）")
+    ap.add_argument("--timeout", type=int, help="秒。既定は 1800（--hardest は 3600）。0 は省いたのと同じ。負の値は確かめない")
+    ap.add_argument("--resume", type=Path, help="前の起動の out。同じ session・同じ権限で続きから起動する（host・cwd・model・effort・write・interrogate・audit と役割（hardest）は記録から取る）")
     a = ap.parse_args()
     a.session, a.grok_home, a.codex_turns, a.prev_head, a.scratch, a.history = None, None, 0, None, None, []
     if a.resume:

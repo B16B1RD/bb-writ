@@ -8,7 +8,7 @@ commit ごとの細かい変更は、各版の末尾の「commit の一覧」（
 
 ### 変えたこと
 
-- launcher（`scripts/launch.py`）は、`--model`・`--effort` を省くと、子の役割とホストからモデルと effort を選ぶ。表は `CHOICES` にある。親が毎回手で選んでいたので、同じ審査役が Opus `high` と Sonnet `medium` に割れていた。親が渡せば、それが勝つ。Claude Code の子は、審査役（`--interrogate`）が Fable 5.2 `medium`、監査役（`--audit`）が Opus `high`、読み取り専用の子と書く子が Sonnet `medium`。記録に `role`・`chosen_by`（`table`・`given`・`given+table`）・`timeout_s` が残る。
+- launcher（`scripts/launch.py`）は、`--model`・`--effort` を省くと、子の役割とホストからモデルと effort を選ぶ。表は `CHOICES` にある。親が毎回手で選んでいたので、同じ審査役が Opus `high` と Sonnet `medium` に割れていた。親が渡せば、それが勝つ。Claude Code の子は、審査役（`--interrogate`）が Fable 5.2 `medium`、監査役（`--audit`）が Opus `high`、読み取り専用の子と書く子が Sonnet `medium`。記録に `role`・`timeout_s` と、最初の起動では `chosen_by`（`table`・`given`・`given+table`）が残る（`--resume` の続きは前の記録のモデルと effort を使う）。
 - 審査役の値は測って決めた。後で実物で確かめた欠陥のある変更 3 つを、Opus `high`・Opus `medium`・Fable 5.2 `medium` に 2 回ずつ審査させると、欠陥を挙げた数は 4・2・6、所要時間の中央値は 151・93・117 秒だった。Opus `medium` は見落としが増えたので、監査役は Opus `high` のまま。
 - 書く子に `--hardest` を足した（`--write` と一緒に使う）。最も難しい依頼（設計、大きな移行・リファクタリング、長い無人実行）を任せる書く子で、Claude Code では Fable 5.2 `medium`、Codex では `gpt-6.1-sol` `high`、時間の上限の既定は 3600 秒。
 - 入口は、依頼が最も難しい種類かを決めて記録に書き、最も難しい依頼は実装を `--hardest` の書く子に任せて、自分は分け方・確かめ・統合に回る。ほかの依頼は自分で書く。範囲が明確な直しを Sonnet の書く子と Opus の確かめ役に任せると、Opus 1 人で書くより時間が約 1.8 倍になり、3 題中 1 題で隠した試験に落ちたため。
