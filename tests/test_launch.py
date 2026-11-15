@@ -666,6 +666,25 @@ class TestLaunch(unittest.TestCase):
         self.assertIsNone(again["head"], again)
         self.assertNotIn("next", again)
 
+    def test_the_duration_does_not_follow_a_jump_of_the_wall_clock(self):
+        """所要時間（duration_s）は、壁時計が飛んでも延びない。WSL2 の壁時計は約 35 秒ごとに約 2.3 秒進み、それに重なった時間切れの
+        起動の duration_s が 5 秒を超えた（単調時計では毎回約 3.8 秒。Issue #33）。子を待ち終えた後に、壁時計だけを 100 秒進める。"""
+        rc, rec = self.launch_patched("""
+            import time
+            real, ahead = time.time, [0]
+            time.time = lambda: real() + ahead[0]
+            wait = launch.wait_for_exit
+            def jump_after(*args, **kwargs):
+                try:
+                    return wait(*args, **kwargs)
+                finally:
+                    ahead[0] = 100
+            launch.wait_for_exit = jump_after
+        """, ["--host", "claude", "--cwd", str(self.cwd)])
+        self.assertEqual((rc, rec["status"]), (0, "ok"), rec)
+        self.assertLess(rec["duration_s"], 50, rec)
+        self.assertGreater(rec["at"], time.time() + 50, rec)  # 起動の終わりの時刻（片付けの期限に使う）は、壁時計のまま
+
     def test_a_timed_out_child_gets_a_term_and_time_to_clean_up(self):
         """時間切れも、まず TERM を送って子の片付けを待つ（いきなり KILL すると、子の CLI の置き場が残る）。"""
         rc, rec = self.run_launch("claude", "stop", extra=["--timeout", "2"])
