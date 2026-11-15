@@ -1873,9 +1873,9 @@ class TestLaunch(unittest.TestCase):
         self.assertEqual(json.loads(p.stdout)["chosen_by"], "given", p.stderr)  # 両方渡せば、表に無くても起こせる
         self.assertEqual(given("grok", json.loads(self.args_file.read_text())), ("grok-4.7", "high"))
 
-    def test_the_default_time_limit_is_the_one_the_launcher_waits(self):
-        # 記録の timeout_s と、実際に子を待って止める時間が同じ（最も難しい書く子の既定を小さくして、既定のまま時間切れになるのを見る）
-        # 1800 秒を超える待ちだけを縮める退行（min(a.timeout, 1800) など）は、試験に 30 分以上かかるので見ない
+    def test_a_hardest_writer_times_out_at_its_default_limit(self):
+        # 最も難しい書く子は、--timeout を省くと、その役割の既定の上限で時間切れになる（既定を 2 秒にして、既定のまま時間切れになるのを見る）。
+        # 待った秒数そのものは測らない: 待ちを記録の値から少しずらす退行（数秒長く・半分に）と、1800 秒を超える待ちだけを縮める退行は見ない
         rc, rec = self.launch_patched("launch.TIMEOUTS['hardest'] = 2", ["--host", "claude", "--cwd", str(self.cwd), "--write", "--hardest"],
                                       env_extra={"FAKE_HANG": "1"})
         self.assertEqual((rec["status"], rec["timeout_s"]), ("timeout", 2), rec)
