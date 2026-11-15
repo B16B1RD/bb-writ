@@ -24,8 +24,8 @@
   work.py check   --dir <作業場所> --from <外部操作を実行する場所>      → そこで使われる GitHub のアカウントと、push 先の origin への書き込み権限（書けない・アカウントが分からなければ 5）
   work.py task start --dir <checkout> --holder <誰か> [--base <commit等>] [--target <ブランチ>] → 専用 worktree と担当を作る
   work.py task list --dir <checkout>                               → タスク、担当、未完了の統合
-                     task start と task list は、担当のいない（解放済みか期限切れの）タスクで作業場所が残っているものを unclosed に並べる
-                     （commits は基点からの commit の数、landed は変更が統合先に入っているか）。片付けを呼ばれなかったタスクを見せるだけで、消さない
+                     task start と task list は、担当のいない（解放済みか、期限が切れて 24 時間を過ぎた）タスクで作業場所が残っているものを
+                     unclosed に並べる（切れて 24 時間以内のものは、持ち主が子を待っているだけかもしれないので並べない。commits は基点からの commit の数、landed は変更が統合先に入っているか）。片付けを呼ばれなかったタスクを見せるだけで、消さない
   work.py task resume --dir <checkout> --task <識別子> --holder <誰か> → 作業場所を保持して担当を取得
   work.py integrate --dir <worktree> --token <t> --expected <統合先commit> --verified <検証済みcommit> → 排他・照合して fast-forward
   work.py task cleanup --dir <worktree> --token <t> --saved <別のブランチかタグ> → 変更が保存先に入っていれば片付け（squash・rebase の統合も可）
@@ -558,6 +558,15 @@ def alive(lease, now):
         return False
 
 
+def maybe_waiting(lease, now):
+    """期限が切れてから MAX_LEASE_MIN 以内の担当か。持ち主は子を待っているだけかもしれない（担当の生死はプロセスで判定できないので、
+    時間だけで決める）。誰も取り直していなければ持ち主の操作は通る（held_lease）ので、ほかのセッションに閉じるタスクとして見せない（Issue #32）。"""
+    try:
+        return bool(lease) and now - MAX_LEASE_MIN * 60 < float(lease['expires_at']) <= now
+    except (KeyError, TypeError, ValueError):
+        return False
+
+
 def lease_minutes(v):
     m = float(v)
     if not 0 <= m <= MAX_LEASE_MIN:
@@ -710,7 +719,8 @@ def worktrees(repo):
 
 
 def unclosed_tasks(repo, rr, registry):
-    """担当のいない（解放済みか、期限の切れた）タスクのうち、作業場所が残っているもの。作業場所は task cleanup だけが消すので、
+    """担当のいない（解放済みか、期限が切れて MAX_LEASE_MIN を過ぎた）タスクのうち、作業場所が残っているもの。期限が切れて間もない
+    タスクは、持ち主が子を待っているだけかもしれないので並べない（maybe_waiting）。作業場所は task cleanup だけが消すので、
     呼ばれなかったタスクは残り続ける。それを、次の task start と task list で見えるようにする。見るだけで、何も消さず、
     リポジトリにも状態の置き場にも何も書かない（統合の照合の object は一時の置き場に書かせ、記録の置き場は作らずに読む。
     一時の置き場は tempfile の決める場所で、TMPDIR を状態の置き場やリポジトリの中に向けた場合は、そこに書いて消す）。
@@ -731,7 +741,7 @@ def unclosed_tasks(repo, rr, registry):
         entry = {'task': p.stem, 'dir': str(dest), 'target': None, 'lease': 'unreadable', 'commits': None, 'landed': None}
         try:
             lease = read(record_at(dest) / 'lease.json')  # 記録の置き場は作らない（見るだけ）
-            if alive(lease, now):
+            if alive(lease, now) or maybe_waiting(lease, now):
                 continue
             entry['lease'] = 'released' if lease is None else 'expired'
         except Exception:  # 深い入れ子・float にできない期限など。担当がいるとは言えないので、並べる

@@ -81,8 +81,9 @@ class TestParallel(unittest.TestCase):
         unused = self.start()
         for t in (landed, squashed, unlanded, unused):
             self.w('release', '--dir', t['dir'], '--token', t['token'])
-        expired = self.w('task', 'start', '--dir', self.repo, '--holder', 'x', '--lease', '0.0001')
+        expired = self.start('x')
         self.change(expired, 'expired')
+        self.expire(expired, 24 * 3600 + 120)  # 切れて間もないものは出ない（test_a_task_whose_owner_may_still_be_waiting_is_not_offered_for_closing）
         held = self.start()
         new = self.start()
         got = {t['task']: (t['lease'], t['commits'], t['landed']) for t in new['unclosed']}
@@ -794,9 +795,9 @@ class TestParallel(unittest.TestCase):
         self.assertTrue((self.repo / 'a').exists())
         self.assertTrue((self.repo / 'b').exists())
 
-    def expire(self, task):
+    def expire(self, task, ago=120):
         f = Path(task['note']['path']).parent / 'lease.json'
-        f.write_text(json.dumps({**json.loads(f.read_text()), 'expires_at': time.time() - 120}))
+        f.write_text(json.dumps({**json.loads(f.read_text()), 'expires_at': time.time() - ago}))
 
     def test_an_expired_lease_nobody_took_still_integrates_and_cleans_up(self):
         """期限が切れても、誰も取っていなければ、持ち主の integrate と task cleanup は通る（Issue #31。審査役を待つ間に切れ、
@@ -815,10 +816,9 @@ class TestParallel(unittest.TestCase):
         作業場所を消され、戻った持ち主の renew が 3 で拒否された）。過ぎたものは、止まった持ち主のタスクとして出る。"""
         a = self.start()
         self.integrate(a, self.git(self.repo, 'rev-parse', 'main'), self.change(a, 'a'))
-        f = Path(a['note']['path']).parent / 'lease.json'
         for ago, offered in ((120, False), (24 * 3600 - 120, False), (24 * 3600 + 120, True)):
             with self.subTest(ago=ago):
-                f.write_text(json.dumps({**json.loads(f.read_text()), 'expires_at': time.time() - ago}))
+                self.expire(a, ago)
                 b = self.start()
                 listed = self.w('task', 'list', '--dir', self.repo)
                 for got in (b.get('unclosed', []), listed.get('unclosed', [])):
