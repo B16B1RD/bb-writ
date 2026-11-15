@@ -102,6 +102,17 @@ class TestWork(unittest.TestCase):
             self.assertEqual(rc, 0, (args[:2], r))
         self.assertEqual(self.w("claim", "--holder", "B")[0], 0)  # 手放した後は空いている
 
+    def test_an_op_without_a_token_is_refused_even_when_the_lease_has_none(self):
+        """持ち主の照合は、空の token を担当なしとして拒否する（op の --token は省ける。token の無い担当の記録と、省いた token が
+        どちらも空で一致して通らないように。期限の切れた記録でも同じ）。"""
+        rc, a = self.w("claim", "--holder", "A")
+        record = next((Path(self.tmp.name) / "state" / "work").glob("wt-*")) / "lease.json"
+        for left in (600, -600):
+            with self.subTest(expires_in=left):
+                record.write_text(json.dumps({"holder": "child", "expires_at": time.time() + left}))
+                rc, r = self.w("op", "begin", "--key", f"local:x{left}", "--what", "x")
+                self.assertEqual(rc, 3, r)
+
     def test_a_broken_expiry_of_the_holders_own_lease_is_not_a_crash(self):
         """書く子は担当の記録を書き換えうる。期限の値が壊れていても、持ち主の照合は落ちずに答える（期限を読む前に、記録の形と token を見る）。"""
         record = lambda: next((Path(self.tmp.name) / "state" / "work").glob("wt-*")) / "lease.json"
