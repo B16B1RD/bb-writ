@@ -809,6 +809,25 @@ class TestParallel(unittest.TestCase):
         self.w('task', 'cleanup', '--dir', a['dir'], '--token', a['token'], '--saved', 'main')
         self.assertFalse(Path(a['dir']).exists())
 
+    def test_a_task_whose_owner_may_still_be_waiting_is_not_offered_for_closing(self):
+        """統合を終えた持ち主が子を待つ間に担当の期限が切れても、切れてから 24 時間（担当の期限の上限）を過ぎるまでは、
+        ほかのセッションの task start・task list の unclosed に出さない（Issue #32。手引きどおり task resume → task cleanup で
+        作業場所を消され、戻った持ち主の renew が 3 で拒否された）。過ぎたものは、止まった持ち主のタスクとして出る。"""
+        a = self.start()
+        self.integrate(a, self.git(self.repo, 'rev-parse', 'main'), self.change(a, 'a'))
+        f = Path(a['note']['path']).parent / 'lease.json'
+        for ago, offered in ((120, False), (24 * 3600 - 120, False), (24 * 3600 + 120, True)):
+            with self.subTest(ago=ago):
+                f.write_text(json.dumps({**json.loads(f.read_text()), 'expires_at': time.time() - ago}))
+                b = self.start()
+                listed = self.w('task', 'list', '--dir', self.repo)
+                for got in (b.get('unclosed', []), listed.get('unclosed', [])):
+                    self.assertEqual([(t['task'], t['lease'], t['commits'], t['landed']) for t in got if t['task'] == a['task']],
+                                     [(a['task'], 'expired', 1, True)] if offered else [])
+                self.w('task', 'cleanup', '--dir', b['dir'], '--token', b['token'], '--saved', 'main')
+        self.w('renew', '--dir', a['dir'], '--token', a['token'])  # 誰も取っていないので、持ち主は続けられる
+        self.assertTrue(Path(a['dir']).is_dir())
+
     def test_an_expired_lease_taken_by_another_stops_the_old_token(self):
         """期限の後に別の者が task resume で取ったら、元の token の integrate と task cleanup は 3 で拒否される。"""
         a = self.start()
