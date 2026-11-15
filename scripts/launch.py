@@ -1336,7 +1336,8 @@ def main() -> int:
         a.session, a.grok_home = prev["session"], prev.get("grok_home") and Path(prev["grok_home"])
         a.interrogate = prev.get("interrogate") is True
         a.audit = prev.get("audit") is True
-        a.role = prev.get("role") if prev.get("role") in CHOICES else None  # 表より前の記録には無い（時間の上限の既定だけに使う）
+        a.role = prev.get("role") if prev.get("role") in CHOICES else None  # 表より前の記録には無い（時間の上限の既定だけに使う）。
+        # 手で書き換えた記録の role が list・dict だと TypeError で止まる（launcher の書いた記録は文字列。守らない）
         # 前の起動で照らし終えた turn の数（その turn は、その起動の deny で照らした）と、前の起動が見た commit
         a.codex_turns, a.prev_head, a.scratch = prev.get("codex_turns") or 0, prev.get("head"), prev.get("scratch")
     elif a.write and a.interrogate:
