@@ -895,7 +895,7 @@ def integrate(a):
         if dest.resolve() != repo.resolve():
             raise ValueError('ローカル統合先は元の checkout に限る。対象側の PR 経路などで統合する')
         target_lease = read(rr / 'lease.json')
-        if alive(target_lease, time.time()):
+        if alive(target_lease, time.time()):  # この拒否を外す退行を落とす試験は無い（守らない範囲）
             raise ValueError('統合先の checkout に生きた担当がいる。書き換えず待つ')
         held = run_holder(rr)
         if held:  # 担当の期限が切れても、動いているコマンドの足元で統合先を動かさない（claim と同じ）

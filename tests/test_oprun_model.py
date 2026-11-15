@@ -5,7 +5,8 @@
 過去の修正を戻した版をフラグで作り、それぞれが反例を出すことも試す（一度も落ちたことのない検査は、何も確かめていない）。
 TLA+ の同じモデル（TLC）とは、モデルを最後に変えた版（MODELED_MODEL と MODELED_STATES を書いた 2026-11-15 の版。持ち主の照合が
 期限を見ない Issue #31 の変更）で、状態数（MODELED_STATES）と、戻した版の違反と反例の動作の数が一致した（TLC は行き詰まりの検査を
-外して流す。token を使い切った終わりの状態は行き詰まりになり、このモデルも行き詰まりは見ない）。
+外して流す。token を使い切った終わりの状態は行き詰まりになり、このモデルも行き詰まりは見ない）。TLA+ の HolderKeepsAccess は ENABLED で書くので、
+Next から外しただけの動作も可能と数える（ここでは successors で見るので、外すと破れる）。
 モデル（MODEL_PARTS の関数と、それが読む定数）を変えると、その本文のハッシュ（MODELED_MODEL）が変わって落ちる。
 同じ変更を TLA+ のモデルに入れて TLC と照らしてから、MODELED_MODEL と MODELED_STATES を書き換える（TLC は CI に置かないので、
 照らし直したかは試験で確かめない）。
@@ -23,6 +24,8 @@ dispatch は claim・release・op done の分岐だけを、op_step は担当の
 生きているか（ほかの者が取れるか）と、持ち主の操作を通すか（期限を見ず、記録の token で照らす）・done を書けるかを写す。写す関数が拒否を足すだけの変更は、モデルが許す動きを減らすだけなので、不変条件は保たれる
 （それでもハッシュは落ちる）。監督役がコマンドを起こさずに done を書く経路（起こす前に止められた、Popen の失敗）は、
 StartCmd → CmdExit と cmd の値だけが違う状態に届き、不変条件は cmd が running かしか見ないので写さない。
+op run が切れた担当を延ばすこと（OpRunBegin の lease_alive）は写すが、どの不変条件もそれに頼らない（消しても破れない。
+監督役の KeepLease が延ばし、run_holder が動いている操作を数えて claim を止める）。消したことは MODELED_MODEL だけが捕まえる。
 run_holder が外れたロックのファイルを消すのは、モデルでは独立した動作（Gc）で、実コードのように呼ぶたびにすぐ消すとは限らない
 （実コードの動きはモデルの動きに含まれ、写しすぎは不変条件を破る側にしか働かない）。
 写さない経路（ハッシュも掛けない。変えても、この試験は落ちない）: task_command（task start・resume の claim、cleanup の
@@ -48,7 +51,7 @@ WORK = Path(__file__).resolve().parents[1] / "scripts" / "work.py"
 
 MODELED_AT = "f590441"
 MODELED_STATES = 84981
-MODELED_MODEL = "5c82f497195faffd"
+MODELED_MODEL = "82b497bb1163628f"
 MODELED = {
     "read": "8372930316b7ee94",
     "write": "00c93a6aa7ceb1e8",
@@ -262,12 +265,19 @@ def violated(s, f):
     if "wrote" not in sup and any(held_key(s, k, f) for k in n) and not any(
             rec[k] != "done" and (cmd[k] == "running" or left[k] or sup[k] in ALIVE or oprun[k] == "spawning") for k in n):
         return "BlockedOnlyWhileWorking"
-    # 記録の token が自分のもの（誰も取り直さず、手放してもいない）なら、排他と動いている操作が無いとき、持ち主は手放せる
-    # （期限が切れただけで締め出されない。Issue #31。手放せることを、ほかの持ち主の操作が通ることの代表にする）
+    # 記録の token が自分のもの（誰も取り直さず、手放してもいない）なら、排他と動いている操作が無いとき、期限が切れていても、
+    # 持ち主は手放せ・切れた担当を延ばせ・まだ無い鍵で op run を始め・始めたままの鍵を閉じられる。持ち主でない者は延ばせない（Issue #31）
     if "wrote" not in sup and not any(held_key(s, k, f) for k in n) and lease_tok != 0:
-        can = {step[1] for step, _ in successors(s, f) if step[0] == "Release"}
-        if any(tok_of[a] == lease_tok and a not in can for a in range(len(AGENTS))):
-            return "HolderKeepsAccess"
+        steps = {step for step, _ in successors(s, f)}
+        for a in range(len(AGENTS)):
+            if tok_of[a] != lease_tok:
+                if ("Renew", a) in steps:
+                    return "HolderKeepsAccess"
+                continue
+            need = {("Release", a)} | ({("Renew", a)} if not lease_alive else set())
+            need |= {("OpRunBegin", a, k) for k in n if rec[k] == "none"} | {("ManualDone", a, k) for k in n if rec[k] == "begun"}
+            if not need <= steps:
+                return "HolderKeepsAccess"
     return None
 
 
@@ -317,7 +327,8 @@ MEANING = {
     "AtMostOneCmd": "同じ作業場所で、外部操作が同時に 2 つ走った",
     "SupKeepsLease": "監督役が生きているのに、担当がその監督役の token でなくなった（done を書けない）",
     "BlockedOnlyWhileWorking": "終わっていない外部操作が無いのに、作業場所が止まった（run_holder が数え続ける）",
-    "HolderKeepsAccess": "誰も取り直していないのに、記録の token の持ち主が担当を手放せない（期限切れで締め出された）",
+    "HolderKeepsAccess": "誰も取り直していないのに、記録の token の持ち主が手放す・延ばす・op run を始める・閉じるのどれかをできない"
+                         "（期限切れで締め出された）か、持ち主でない者が担当を延ばせる",
 }
 
 

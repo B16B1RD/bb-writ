@@ -821,6 +821,20 @@ class TestParallel(unittest.TestCase):
         self.assertEqual(self.git(self.repo, 'rev-parse', 'main'), main)
         self.assertTrue(Path(a['dir']).exists())
 
+    def test_a_broken_lease_record_stops_integrate_and_cleanup_without_a_crash(self):
+        """integrate と task cleanup も、形の違う担当の記録と空の token を、担当なしとして 3 で拒否する（落ちない）。"""
+        a = self.start()
+        head = self.change(a, 'a')
+        f = Path(a['note']['path']).parent / 'lease.json'
+        main = self.git(self.repo, 'rev-parse', 'main')
+        for record, token in (([1], a['token']), ({'token': '', 'holder': 'x', 'expires_at': time.time() + 600}, '')):
+            with self.subTest(record=record):
+                f.write_text(json.dumps(record))
+                self.w('integrate', '--dir', a['dir'], '--token', token, '--expected', main, '--verified', head, code=3)
+                self.w('task', 'cleanup', '--dir', a['dir'], '--token', token, '--saved', 'main', code=3)
+        self.assertEqual(self.git(self.repo, 'rev-parse', 'main'), main)
+        self.assertTrue(Path(a['dir']).exists())
+
     def test_expired_lease_cannot_be_taken_over_during_integration(self):
         a = self.w('task', 'start', '--dir', self.repo, '--holder', 'Claude Code', '--lease', '0.05')
         ah = self.change(a, 'a')

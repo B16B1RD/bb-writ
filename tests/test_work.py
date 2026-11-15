@@ -93,13 +93,24 @@ class TestWork(unittest.TestCase):
         """期限は、止まった持ち主の担当をほかの者が取り直せるようにするためのもの。誰も取っていなければ、子を待っていただけの
         持ち主は、同じ token で続けられる（監査役を 22 分待った持ち主が、push の直前に締め出された。Issue #31）。"""
         rc, a = self.w("claim", "--holder", "A")
-        for args in (("renew", "--token", a["token"]),
-                     ("op", "begin", "--token", a["token"], "--key", "local:x", "--what", "x"),
-                     ("op", "done", "--token", a["token"], "--key", "local:x", "--result", "ok"),
-                     ("release", "--token", a["token"])):
-            self.expire()
-            rc, r = self.w(*args)
-            self.assertEqual(rc, 0, (args[:2], r))
+        record = next((Path(self.tmp.name) / "state" / "work").glob("wt-*")) / "lease.json"
+        left = lambda: json.loads(record.read_text())["expires_at"] - time.time()  # noqa: E731
+        self.expire()
+        rc, r = self.w("renew", "--token", a["token"])
+        self.assertEqual(rc, 0, r)
+        self.assertGreater(left(), 19 * 60)  # 切れた担当を延ばす
+        self.assertEqual(self.w("claim", "--holder", "B")[0], 3)  # 延ばした後は、ほかの者は取れない
+        self.expire()
+        rc, r = self.w("op", "begin", "--token", a["token"], "--key", "local:x", "--what", "x")
+        self.assertEqual(rc, 0, r)
+        self.assertLess(left(), 0)  # op begin は延ばさない（延ばすのは renew と op run）
+        rc, r = self.w("op", "done", "--token", a["token"], "--key", "local:x", "--result", "ok")
+        self.assertEqual(rc, 0, r)
+        rc, r = self.w("release", "--token", a["token"])
+        self.assertEqual(rc, 0, r)
+        for args in (("renew", "--token", a["token"]), ("op", "begin", "--token", a["token"], "--key", "local:y", "--what", "y"),
+                     ("release", "--token", a["token"])):  # 手放した本人の token も、手放した後は通らない
+            self.assertEqual(self.w(*args)[0], 3, args[:2])
         self.assertEqual(self.w("claim", "--holder", "B")[0], 0)  # 手放した後は空いている
 
     def test_an_op_without_a_token_is_refused_even_when_the_lease_has_none(self):
@@ -107,14 +118,24 @@ class TestWork(unittest.TestCase):
         どちらも空で一致して通らないように。期限の切れた記録でも同じ）。"""
         rc, a = self.w("claim", "--holder", "A")
         record = next((Path(self.tmp.name) / "state" / "work").glob("wt-*")) / "lease.json"
+        marker = Path(self.tmp.name) / "ran"
         for left in (600, -600):
-            with self.subTest(expires_in=left):
-                record.write_text(json.dumps({"holder": "child", "expires_at": time.time() + left}))
-                rc, r = self.w("op", "begin", "--key", f"local:x{left}", "--what", "x")
-                self.assertEqual(rc, 3, r)
+            for stored, given in ((None, ()), ("", ("--token", ""))):  # token の欄が無い記録と省いた --token、空の token どうし
+                with self.subTest(expires_in=left, stored=stored, given=given):
+                    record.write_text(json.dumps({"holder": "child", "expires_at": time.time() + left,
+                                                  **({} if stored is None else {"token": stored})}))
+                    rc, r = self.w("op", "begin", *given, "--key", f"local:x{left}{len(given)}", "--what", "x")
+                    self.assertEqual(rc, 3, r)
+                    rc, r = self.w("op", "run", *given, "--key", f"local:r{left}{len(given)}", "--what", "x",
+                                   "--", sys.executable, "-c", f"open({str(marker)!r}, 'w')")
+                    self.assertEqual(rc, 3, r)
+                    self.assertFalse(marker.exists())  # コマンドは走らない
+                    if given:
+                        self.assertEqual(self.w("renew", *given)[0], 3)
 
-    def test_a_broken_expiry_of_the_holders_own_lease_is_not_a_crash(self):
-        """書く子は担当の記録を書き換えうる。期限の値が壊れていても、持ち主の照合は落ちずに答える（期限を読む前に、記録の形と token を見る）。"""
+    def test_a_broken_lease_record_of_the_holder_is_answered_without_a_crash(self):
+        """書く子は担当の記録を書き換えうる。期限の値が壊れていても（文字列・欠け）、記録の形が違っても（配列・token の欠け）、
+        持ち主の照合は落ちずに答える（期限は読まず、記録の形と token を見る）。holder の欠けた記録は前からのとおり守らない。"""
         record = lambda: next((Path(self.tmp.name) / "state" / "work").glob("wt-*")) / "lease.json"
         for name, broken, code in (("期限が文字列", lambda d: {**d, "expires_at": "あした"}, 0),
                                    ("期限が無い", lambda d: {k: v for k, v in d.items() if k != "expires_at"}, 0),
@@ -122,13 +143,13 @@ class TestWork(unittest.TestCase):
             with self.subTest(name):
                 rc, a = self.w("claim", "--holder", "A")
                 self.assertEqual(rc, 0, a)
-                record().write_text(json.dumps(broken(json.loads(record().read_text()))))
-                rc, r = self.w("renew", "--token", a["token"])
-                self.assertEqual(rc, code, r)
-                if code == 0:
-                    self.assertEqual(self.w("release", "--token", a["token"])[0], 0)
-                else:
-                    record().unlink()
+                f = record()
+                try:
+                    f.write_text(json.dumps(broken(json.loads(f.read_text()))))
+                    rc, r = self.w("renew", "--token", a["token"])
+                    self.assertEqual(rc, code, r)
+                finally:
+                    f.unlink(missing_ok=True)  # 落ちても、次の段の claim を巻き込まない
 
     def test_unknown_result_op_is_pending_and_not_restarted(self):
         rc, a = self.w("claim", "--holder", "A")
@@ -1602,13 +1623,24 @@ class TestOpRun(unittest.TestCase):
         """期限の値が壊れた担当でも、op run は延ばす前に落ちない（落ちると、begun とロックのファイルが残った）。"""
         tok = self.claim()
         d = json.loads(self.lease_file().read_text())
-        for n, broken in enumerate(({**d, "expires_at": "あした"}, {k: v for k, v in d.items() if k != "expires_at"})):
+        for n, broken in enumerate(({**d, "expires_at": "あした"}, {k: v for k, v in d.items() if k != "expires_at"},
+                                    {**d, "expires_at": time.time() + 10 * 365 * 86400})):
             with self.subTest(broken=broken.get("expires_at", "（無い）")):
                 self.lease_file().write_text(json.dumps(broken))
                 rc, r = self.op(tok, f"local:x{n}", *self.script("print(1)"))
                 self.assertEqual(rc, 0, r)
                 self.assertEqual(r["op"]["state"], "done")
                 self.assertEqual(list(self.lease_file().parent.glob("running*.lock")), [])
+                left = json.loads(self.lease_file().read_text())["expires_at"] - time.time()
+                self.assertTrue(19 * 60 < left <= 20 * 60, left)  # 壊れた・上限を超える期限も、20 分先に書き直す
+
+    def test_op_run_does_not_shorten_a_longer_lease(self):
+        """op run が延ばすのは、残りが 20 分を切った担当だけ。長い担当を 20 分に縮めない。"""
+        tok = self.claim()
+        self.assertEqual(self.w("renew", "--dir", str(self.wt), "--token", tok, "--lease", "60")[0], 0)
+        rc, r = self.op(tok, "local:long", *self.script("print(1)"))
+        self.assertEqual(rc, 0, r)
+        self.assertGreater(json.loads(self.lease_file().read_text())["expires_at"] - time.time(), 50 * 60)
 
     def test_a_file_that_cannot_be_executed_is_recorded_as_failed(self):
         tok = self.claim()
