@@ -26,8 +26,10 @@ dispatch は claim・release・op done の分岐だけを、op_step は担当の
 StartCmd → CmdExit と cmd の値だけが違う状態に届き、不変条件は cmd が running かしか見ないので写さない。
 op run が切れた担当を延ばすこと（OpRunBegin の lease_alive）は写すが、どの不変条件もそれに頼らない（消しても破れない。
 監督役の KeepLease が延ばし、run_holder が動いている操作を数えて claim を止める）。消したことは MODELED_MODEL だけが捕まえる。
-HolderKeepsAccess は、持ち主でない者の Renew は見るが、Release は見ない（持ち主でない者が手放せる写し方は、MODELED_MODEL だけが
-捕まえる。実コードは test_work.py の test_expired_lease_can_be_taken_over_and_old_holder_is_stopped が守る）。
+HolderKeepsAccess は、持ち主でない者の Renew は見るが、Release と ManualDone は見ない（持ち主でない者が手放せる・閉じられる
+写し方は、MODELED_MODEL だけが捕まえる。持ち主でない者の OpRunBegin は SupKeepsLease が捕まえる。実コードの release は
+test_work.py の test_expired_lease_can_be_taken_over_and_old_holder_is_stopped が守る。op done の token の照合は、Issue #31 の前からの
+op_step の check_token）。
 run_holder が外れたロックのファイルを消すのは、モデルでは独立した動作（Gc）で、実コードのように呼ぶたびにすぐ消すとは限らない
 （実コードの動きはモデルの動きに含まれ、写しすぎは不変条件を破る側にしか働かない）。
 写さない経路（ハッシュも掛けない。変えても、この試験は落ちない）: task_command（task start・resume の claim、cleanup の
