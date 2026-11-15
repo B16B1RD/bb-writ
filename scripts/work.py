@@ -565,6 +565,14 @@ def lease_minutes(v):
     return m
 
 
+def held_lease(lease, token):
+    """持ち主の操作（renew・release・op・integrate・task cleanup）が照らす担当。期限は見ない。期限は、止まった持ち主の担当を
+    ほかの者が取り直せるようにするためのもので、誰も取り直していなければ記録の token は持ち主のままなので、子を待っていただけの
+    持ち主を締め出さない（Issue #31）。取り直されると token が変わり、release すると記録が消えるので、どちらの後も元の token は通らない。
+    形の違う記録と空の token は、担当なしとして拒否させる（期限の値は読まない。壊れていても落ちない）。"""
+    return lease if isinstance(lease, dict) and isinstance(token, str) and token else None
+
+
 def check_token(lease, token):
     if not lease or lease.get("token") != token:
         return "この token の担当ではない（引き継がれたか、解放された）。作業を止め、status で今の担当を確かめる"
@@ -633,9 +641,7 @@ def clean(d, ignored=False):
 
 
 def current_lease(r, token):
-    lease = read(r / 'lease.json')
-    if not alive(lease, time.time()):
-        lease = None
+    lease = held_lease(read(r / 'lease.json'), token)
     why = check_token(lease, token)
     if why:
         raise PermissionError(why)
@@ -1199,12 +1205,12 @@ def op_run(a, r: Path, argv: list) -> int:
                 res, code = {"ok": False, "reason": f"この作業場所で、op run の外部操作がまだ動いている: {held}。"
                              "終わるのを待つ（終われば監督役が done を書く）"}, 4
             else:
-                res, code = op_step(a, r, lease if alive(lease, now) else None, now, "begin")
+                res, code = op_step(a, r, held_lease(lease, a.token), now, "begin")
             if not code:
                 fd = os.open(run_lock(r, a.key), os.O_RDWR | os.O_CREAT | os.O_TRUNC, 0o600)
                 fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)  # 鍵ごとの新しいファイルなので取れる（同じ鍵は op_step が 4 で拒否する）
                 os.write(fd, a.key.encode("utf-8"))
-                if float(lease["expires_at"]) < now + 20 * 60:
+                if not alive(lease, now) or float(lease["expires_at"]) < now + 20 * 60:  # 切れた・壊れた期限も延ばす
                     lease["expires_at"] = now + 20 * 60
                     write(r / "lease.json", lease)
         if code:
@@ -1496,7 +1502,8 @@ def dispatch(a, r: Path, run_argv):
             res, code = claim_at(r, a.dir, a.holder, a.lease)
             return out(res, code)
         if a.cmd in ("renew", "release"):
-            why = check_token(live, a.token)
+            mine = held_lease(lease, a.token)
+            why = check_token(mine, a.token)
             if why:
                 return out({"ok": False, "reason": why, "holder": live and live["holder"]}, 3)
             held = run_holder(r) if a.cmd == "release" else None
@@ -1504,8 +1511,8 @@ def dispatch(a, r: Path, run_argv):
                 return out({"ok": False, "reason": f"op run の外部操作がまだ動いている: {held}。終わるのを待ってから手放す"}, 4)
             if a.cmd == "renew":
                 n = note(r)  # 単位ごとに呼ばれるので、空の欄をここで知らせる（拒否はしない）。読めなければ期限を書く前に止まる
-                live["expires_at"] = now + a.lease * 60
-                write(r / "lease.json", live)
+                mine["expires_at"] = now + a.lease * 60
+                write(r / "lease.json", mine)
                 return out({"ok": True, **({"note": {"path": n["path"], "empty": n["empty"]}} if "empty" in n else {})})
             (r / "lease.json").unlink()
             return out({"ok": True})
@@ -1514,7 +1521,7 @@ def dispatch(a, r: Path, run_argv):
         held = run_holder(r)
         if held and ((a.action == "done" and a.key == held) or (a.action == "begin" and (a.key or "").split(":")[0] in EXTERNAL)):
             return out({"ok": False, "reason": f"この作業場所で、op run の外部操作がまだ動いている: {held}。終わるのを待つ（終われば監督役が done を書く）"}, 4)
-        res, code = op_step(a, r, live, now, a.action)
+        res, code = op_step(a, r, held_lease(lease, a.token), now, a.action)
         if a.action == "done" and (not code or (code == 4 and res.get("op", {}).get("state") == "done")):
             try:
                 run_log(r, a.key).unlink(missing_ok=True)  # 閉じた（または既に終わっていた）。残しておいた出力はもう要らない

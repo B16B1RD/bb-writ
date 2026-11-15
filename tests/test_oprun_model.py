@@ -3,9 +3,9 @@
 審査が 1 周に 1 つずつ交互実行を見つけ、そのたびに直していたため、このモデルが写す範囲は 1 回の全探索でたどる。
 範囲は担当 2・鍵 2・token 3。担当の期限切れはいつでも起こせる（実際の時間を写さない、保守的な写し方）。
 過去の修正を戻した版をフラグで作り、それぞれが反例を出すことも試す（一度も落ちたことのない検査は、何も確かめていない）。
-TLA+ の同じモデル（TLC）とは、モデルを最後に変えた版（MODELED_MODEL と MODELED_STATES を書いた 2026-10-24 の版）で、状態数
-（MODELED_STATES）と、戻した版の違反と反例の動作の列が一致した。その後に MODELED_AT を進めたとき、モデルは変えていない
-（MODELED_MODEL が同じ）。
+TLA+ の同じモデル（TLC）とは、モデルを最後に変えた版（MODELED_MODEL と MODELED_STATES を書いた 2026-11-15 の版。持ち主の照合が
+期限を見ない Issue #31 の変更）で、状態数（MODELED_STATES）と、戻した版の違反と反例の動作の数が一致した（TLC は行き詰まりの検査を
+外して流す。token を使い切った終わりの状態は行き詰まりになり、このモデルも行き詰まりは見ない）。
 モデル（MODEL_PARTS の関数と、それが読む定数）を変えると、その本文のハッシュ（MODELED_MODEL）が変わって落ちる。
 同じ変更を TLA+ のモデルに入れて TLC と照らしてから、MODELED_MODEL と MODELED_STATES を書き換える（TLC は CI に置かないので、
 照らし直したかは試験で確かめない）。
@@ -19,8 +19,8 @@ MODELED は、モデルが写す経路の関数と、その本文のハッシュ
 ハッシュは、写す関数が変わったことを知らせて、モデルを見直させるためのもの。ハッシュを進めたときにモデルと照らしたかは確かめない。
 dispatch は claim・release・op done の分岐だけを、op_step は担当の token の照合と同じ鍵の begin・done の拒否だけを写すが、
 ハッシュは関数全体に掛ける（op_step は --reviewed などの写さない照合でも変わる）。locked は作業場所の排他、run_lock は鍵ごとに
-別のロックのファイル、ops は鍵ごとの最後の state、read・write は lease.json の token と期限、alive・check_token は担当が
-生きているかと done を書けるかを写す。写す関数が拒否を足すだけの変更は、モデルが許す動きを減らすだけなので、不変条件は保たれる
+別のロックのファイル、ops は鍵ごとの最後の state、read・write は lease.json の token と期限、alive・check_token・held_lease は、担当が
+生きているか（ほかの者が取れるか）と、持ち主の操作を通すか（期限を見ず、記録の token で照らす）・done を書けるかを写す。写す関数が拒否を足すだけの変更は、モデルが許す動きを減らすだけなので、不変条件は保たれる
 （それでもハッシュは落ちる）。監督役がコマンドを起こさずに done を書く経路（起こす前に止められた、Popen の失敗）は、
 StartCmd → CmdExit と cmd の値だけが違う状態に届き、不変条件は cmd が running かしか見ないので写さない。
 run_holder が外れたロックのファイルを消すのは、モデルでは独立した動作（Gc）で、実コードのように呼ぶたびにすぐ消すとは限らない
@@ -46,9 +46,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent)); import process_limit  
 
 WORK = Path(__file__).resolve().parents[1] / "scripts" / "work.py"
 
-MODELED_AT = "cacf1f5"
+MODELED_AT = "f590441"
 MODELED_STATES = 84981
-MODELED_MODEL = "bf1892257d184533"
+MODELED_MODEL = "5c82f497195faffd"
 MODELED = {
     "read": "8372930316b7ee94",
     "write": "00c93a6aa7ceb1e8",
@@ -58,13 +58,14 @@ MODELED = {
     "run_lock": "fdd3edfffe9c0b10",
     "alive": "f1f9574a8ad75670",
     "check_token": "6297f65bcd57f11c",
+    "held_lease": "2e230a09eab2bcdd",
     "claim_at": "5c4ad919e7f42cfd",
     "run_holder": "ed7f517a536e94fd",
     "keep_lease": "1ff486dd87b26989",
-    "op_run": "c3b8e16c85d2c4e4",
+    "op_run": "ec713203b25a8d89",
     "finish": "cac6b578315e4a7d",
     "supervise": "126b7e2bbc8b5c5a",
-    "dispatch": "082ef59c4580fe1b",
+    "dispatch": "7b2ce7ae7c39483f",
 }
 
 
@@ -157,7 +158,7 @@ ALIVE = {"started", "waiting", "wrote"}  # 監督役が生きている段
 FIELDS = ("lease_tok", "lease_alive", "next_tok", "tok_of", "rec", "lock_file", "holders", "oprun", "sup", "sup_tok", "cmd", "left")
 
 # 今のコードと、過去の修正を 1 つずつ戻した版。True が今のコード
-NOW = {"cmd_holds_lock": True, "done_lock_free": True, "claim_checks_run": True}
+NOW = {"cmd_holds_lock": True, "done_lock_free": True, "claim_checks_run": True, "holder_by_token": True}
 REVERTED = {
     # d1b5462: コマンド（とそれが残したもの）にもロックの fd を渡す（supervise の Popen の pass_fds）
     "cmd_holds_lock": "AtMostOneCmd",
@@ -165,6 +166,8 @@ REVERTED = {
     "done_lock_free": "BlockedOnlyWhileWorking",
     # c877d78: op run のコマンドが動いている間は担当を取らせない（claim_at の run_holder）
     "claim_checks_run": "SupKeepsLease",
+    # Issue #31: 持ち主の操作は期限を見ず、記録の token で照らす（held_lease）。戻すと、誰も取っていないのに持ち主が手放せない
+    "holder_by_token": "HolderKeepsAccess",
 }
 
 
@@ -197,16 +200,18 @@ def successors(s, f):
     if lease_alive:  # 時間が過ぎて担当が切れる（keep_lease の延長が間に合わない場合を含む）
         yield ("Expire",), mk(lease_alive=False)
     for a in range(len(AGENTS)):
-        live = lease_alive and lease_tok != 0 and tok_of[a] == lease_tok
+        live = (lease_alive or f["holder_by_token"]) and lease_tok != 0 and tok_of[a] == lease_tok  # held_lease・check_token
         if not mutex and not lease_alive and next_tok <= MAX_TOK and (not f["claim_checks_run"] or not held):  # claim_at
             yield ("Claim", a, next_tok), mk(lease_tok=next_tok, lease_alive=True, next_tok=next_tok + 1, tok_of=upd(tok_of, a, next_tok))
         if not mutex and live and not held:  # dispatch の release
             yield ("Release", a), mk(lease_tok=0, lease_alive=False)
+        if not mutex and live and not lease_alive:  # dispatch の renew。生きた担当の renew は、モデルでは状態を変えない
+            yield ("Renew", a), mk(lease_alive=True)
         for k in range(len(KEYS)):
-            if not mutex and live and not held and rec[k] == "none":  # op_run の排他の中: begun を書き、ロックを作って持つ
+            if not mutex and live and not held and rec[k] == "none":  # op_run の排他の中: begun を書き、ロックを作って持ち、担当を延ばす
                 yield ("OpRunBegin", a, k), mk(rec=upd(rec, k, "begun"), lock_file=upd(lock_file, k, True),
                                                holders=upd(holders, k, frozenset({"oprun"})), oprun=upd(oprun, k, "spawning"),
-                                               sup_tok=upd(sup_tok, k, tok_of[a]))
+                                               sup_tok=upd(sup_tok, k, tok_of[a]), lease_alive=True)
                 # begun を書いた後、ロックのファイルを作る前に kill -9 される（排他は OS が外す）。作った後の死は OpRunKilled と同じ
                 yield ("OpRunKilledInBegin", a, k), mk(rec=upd(rec, k, "begun"), oprun=upd(oprun, k, "dead"))
             if not mutex and live and rec[k] == "begun" and not held_key(s, k, f):  # dispatch の op done（照合で閉じる）
@@ -257,6 +262,12 @@ def violated(s, f):
     if "wrote" not in sup and any(held_key(s, k, f) for k in n) and not any(
             rec[k] != "done" and (cmd[k] == "running" or left[k] or sup[k] in ALIVE or oprun[k] == "spawning") for k in n):
         return "BlockedOnlyWhileWorking"
+    # 記録の token が自分のもの（誰も取り直さず、手放してもいない）なら、排他と動いている操作が無いとき、持ち主は手放せる
+    # （期限が切れただけで締め出されない。Issue #31。手放せることを、ほかの持ち主の操作が通ることの代表にする）
+    if "wrote" not in sup and not any(held_key(s, k, f) for k in n) and lease_tok != 0:
+        can = {step[1] for step, _ in successors(s, f) if step[0] == "Release"}
+        if any(tok_of[a] == lease_tok and a not in can for a in range(len(AGENTS))):
+            return "HolderKeepsAccess"
     return None
 
 
@@ -285,6 +296,7 @@ STEPS = {  # work.py の言葉で。文の言い回しは試験しない（番�
     "Expire": "担当の期限が切れる（延長が間に合わない）",
     "Claim": "{a} が担当を取る（claim_at。token {t}）",
     "Release": "{a} が担当を手放す（dispatch の release）",
+    "Renew": "{a} が切れた担当を延ばす（dispatch の renew。記録の token が同じ）",
     "OpRunBegin": "{a} が鍵 {k} で op run を始める（op_run の排他の中で begun を書き、ロックのファイルを作って flock を持つ）",
     "ManualDone": "{a} が鍵 {k} を op done で閉じる（dispatch の done）",
     "OpRunKilledInBegin": "{a} が鍵 {k} で op run を始め、begun を書いた後、ロックのファイルを作る前に kill -9 される",
@@ -305,6 +317,7 @@ MEANING = {
     "AtMostOneCmd": "同じ作業場所で、外部操作が同時に 2 つ走った",
     "SupKeepsLease": "監督役が生きているのに、担当がその監督役の token でなくなった（done を書けない）",
     "BlockedOnlyWhileWorking": "終わっていない外部操作が無いのに、作業場所が止まった（run_holder が数え続ける）",
+    "HolderKeepsAccess": "誰も取り直していないのに、記録の token の持ち主が担当を手放せない（期限切れで締め出された）",
 }
 
 
@@ -312,7 +325,7 @@ def story(bad, trace):
     """反例を、番号付きの手順の文にする。"""
     rows = []
     for i, (name, *args) in enumerate(trace, 1):
-        by_agent = name in ("Claim", "Release", "OpRunBegin", "OpRunKilledInBegin", "ManualDone")  # 動作の引数は (担当, token)・(担当, 鍵)・(担当,)・(鍵,)
+        by_agent = name in ("Claim", "Release", "Renew", "OpRunBegin", "OpRunKilledInBegin", "ManualDone")  # 動作の引数は (担当, token)・(担当, 鍵)・(担当,)・(鍵,)
         who = {"a": AGENTS[args[0]]} if by_agent else {}
         if name == "Claim":
             who["t"] = args[1]
