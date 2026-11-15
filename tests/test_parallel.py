@@ -829,6 +829,16 @@ class TestParallel(unittest.TestCase):
         self.w('renew', '--dir', a['dir'], '--token', a['token'])  # 誰も取っていないので、持ち主は続けられる
         self.assertTrue(Path(a['dir']).is_dir())
 
+    def test_a_session_that_took_over_a_recently_expired_task_can_close_it(self):
+        """unclosed に出さないだけで、止まった持ち主の続きを task resume で引き受けたセッションは、期限が切れて間もなくても
+        task cleanup で閉じられる（取り直した担当の前の期限で拒否しない）。"""
+        a = self.start()
+        self.integrate(a, self.git(self.repo, 'rev-parse', 'main'), self.change(a, 'a'))
+        self.expire(a)
+        b = self.w('task', 'resume', '--dir', self.repo, '--task', a['task'], '--holder', 'Codex')
+        self.w('task', 'cleanup', '--dir', a['dir'], '--token', b['token'], '--saved', 'main')
+        self.assertFalse(Path(a['dir']).exists())
+
     def test_an_expired_lease_taken_by_another_stops_the_old_token(self):
         """期限の後に別の者が task resume で取ったら、元の token の integrate と task cleanup は 3 で拒否される。"""
         a = self.start()
