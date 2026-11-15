@@ -367,6 +367,7 @@ class TestOpRunModel(unittest.TestCase):
                          "MODELED_MODEL と MODELED_STATES を書き換える（tests/test_oprun_model.py の冒頭）")
 
     def test_each_reverted_fix_gives_a_counterexample(self):
+        self.assertEqual(set(REVERTED), set(NOW), "今のコードのフラグごとに、戻した版の行が要る（行を消すと、その修正を確かめなくなる）")
         for flag, inv in REVERTED.items():
             with self.subTest(reverted=flag):
                 bad, _, trace = check({**NOW, flag: False})
