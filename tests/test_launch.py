@@ -682,8 +682,23 @@ class TestLaunch(unittest.TestCase):
             launch.wait_for_exit = jump_after
         """, ["--host", "claude", "--cwd", str(self.cwd)])
         self.assertEqual((rc, rec["status"]), (0, "ok"), rec)
+        self.assertGreaterEqual(rec["duration_s"], 0, rec)  # 始めと終わりで時計を混ぜると、どちらかの向きで外れる
         self.assertLess(rec["duration_s"], 50, rec)
         self.assertGreater(rec["at"], time.time() + 50, rec)  # 起動の終わりの時刻（片付けの期限に使う）は、壁時計のまま
+
+    def test_a_jump_of_the_wall_clock_does_not_bring_the_timeout_forward(self):
+        """時間切れの期限も、壁時計が飛んでも早まらない（子を待ち始めてすぐ、壁時計だけを 100 秒進める）。"""
+        rc, rec = self.launch_patched("""
+            import time
+            real, ahead, nap = time.time, [0], time.sleep
+            time.time = lambda: real() + ahead[0]
+            def jump_then_sleep(s):
+                ahead[0] = 100
+                nap(s)
+            time.sleep = jump_then_sleep
+        """, ["--host", "claude", "--cwd", str(self.cwd), "--timeout", "3"], env_extra={"FAKE_HANG": "1"})
+        self.assertEqual((rc, rec["status"], rec["problems"][0]), (2, "timeout", "3 秒で終わらなかった"), rec)
+        self.assertGreaterEqual(rec["duration_s"], 2.9, rec)  # 期限を壁時計で見ると、最初の待ちで TERM を送って 1 秒も経たずに終わる
 
     def test_a_timed_out_child_gets_a_term_and_time_to_clean_up(self):
         """時間切れも、まず TERM を送って子の片付けを待つ（いきなり KILL すると、子の CLI の置き場が残る）。"""
@@ -2015,8 +2030,8 @@ class TestLaunch(unittest.TestCase):
                 if status == "timeout":  # 時間切れの理由だけ（止めた子の CLI は残りに並ばない）。期限を守る（所要時間で捕まえるのは、2 秒より大きな延びだけ）
                     self.assertEqual(rec["problems"], ["3 秒で終わらなかった", f"--resume {rec['out']} で続きから起動できる"], rec)
                     # 期限は launcher が測る時間で見る。launcher の処理は毎回約 3.8 秒で終わる。壁時計で測っていたときは、ときどき
-                    # 約 2.3 秒延びて 5 秒を越えた（WSL2 の壁時計が約 35 秒ごとに約 2.3 秒進み、それに重なった起動。15 回に 1〜2 回。
-                    # Issue #33。今は launcher も試験も単調時計で測る）。試験の側の時間では、返らないことだけを捕まえる
+                    # 約 2.3 秒延びて 5 秒を越えた（WSL2 の壁時計が約 35 秒ごとに約 2.3 秒進み、それに重なった起動。70 回中 4 回。
+                    # Issue #33。今は所要時間を launcher も試験も単調時計で測る）。試験の側の時間では、返らないことだけを捕まえる
                     self.assertLess(rec["duration_s"], 5, rec)
                     self.assertLess(took, 10, rec)
                 for pid in pids:
