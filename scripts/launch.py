@@ -2,13 +2,14 @@
 """別系統の CLI（Claude Code・Codex・Grok Build）を bb-writ 専用のログインで起動し、報告を回収して検査する（launcher）。
 
 使い方:
-  python3 launch.py --host codex|claude|grok --cwd <対象> --prompt-file <依頼> [--model M] [--effort E] [--write | --interrogate | --audit] [--out <dir>] [--timeout 秒]
+  python3 launch.py --host codex|claude|grok --cwd <対象> --prompt-file <依頼> [--model M] [--effort E] [--write [--hardest] | --interrogate | --audit] [--out <dir>] [--timeout 秒]
   python3 launch.py --resume <前の起動の out> --prompt-file <続きの依頼> [--out <dir>] [--timeout 秒]
 
 標準出力に 1 行の JSON を出す。status は ok / not-run / invalid-report / timeout / failed / quota / unavailable。ok のときだけ終了コード 0。
 timeout は、時間切れで止め、ほかの照合に当たらなかったもの。記録の session で、--resume が同じ session・同じ権限の続きを起動する。
 報告を使えるのは ok と、読んだだけの報告として使う not-run。
 子には、最後に ```json {"conclusion": ..., "evidence": [{"what": ..., "where": ...}], "unknowns": [...], "execution": {...}} ``` を書かせる。
+--model・--effort を省くと、役割（--audit・--interrogate・読み取り専用・--write・--write --hardest）とホストから CHOICES の表で決める。
 JSON が返ったことを成功にしない: 結論が空、証拠が無い、証拠の where がファイルを指すのに存在しない、実行の欄の形が違う、は invalid-report。
 読み取り専用の子で、実行の欄が無いか、対象の試験・検査を実行できなかったと書いた報告は not-run（読んだだけの報告。起動して形の整った報告が返ったことと区別する）。
 書く子の実行の欄は記録するだけ（作業場所の試験は親が確かめる）。実行の欄の真偽（本当に動かしたか）は見ない。
@@ -53,7 +54,20 @@ sys.dont_write_bytecode = True  # work.py の import で、プラグインの置
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from work import root as work_record  # noqa: E402  作業場所ごとの記録の置き場（担当・記録・証拠）
 
-DEFAULTS = {"claude": ("sonnet", "medium"), "codex": ("gpt-6-sol", "medium"), "grok": ("grok-4.7", "medium")}
+# 親が --model・--effort を省いたときの、役割ごとのモデルと effort（モデルはコードが選ぶ。親が渡せば、それが勝つ）。
+# 最も難しい依頼（設計、大きな移行・リファクタリング、長い無人実行）を任せる書く子（--hardest）は最上段。
+# Haiku は入れない（読み取りの子の 26 件中 10 件が報告の形を守れなかった）。表に無い組み合わせは --model と --effort を渡す。
+# Claude の審査役は Fable 5.2 medium: 後で実物で確かめた欠陥のある変更 3 つで、Opus high（基準）・Opus medium・Fable medium を
+# 2 回ずつ審査させ、欠陥を挙げた数は 4・2・6、所要時間の中央値は 151・93・117 秒だった（2026-11-15。試験を回さない条件。揺れは測っていない）。
+# Opus medium は基準より見落としたので、監査役は Opus high のまま。
+CHOICES = {
+    "audit": {"claude": ("opus", "high"), "codex": ("gpt-6-sol", "medium"), "grok": ("grok-4.7", "medium")},
+    "interrogate": {"claude": ("fable", "medium"), "codex": ("gpt-6-sol", "medium"), "grok": ("grok-4.7", "medium")},
+    "read": {"claude": ("sonnet", "medium"), "codex": ("gpt-6-sol", "medium"), "grok": ("grok-4.7", "medium")},
+    "write": {"claude": ("sonnet", "medium"), "codex": ("gpt-6-sol", "medium"), "grok": ("grok-4.7", "medium")},
+    "hardest": {"claude": ("fable", "medium"), "codex": ("gpt-6.1-sol", "high")},
+}
+TIMEOUTS = {"hardest": 3600}  # 既定の --timeout（表に無い役割は 1800）。最上段の書く子は 1 回が長い
 QUOTA = re.compile(r"usage limit|rate limit|quota|exceeded your|too many requests|(?:status|code|http|error)\W{0,12}429\b|\b429 too many|limit reached|out of credits", re.I)
 CONTRACT = """
 
@@ -1265,8 +1279,9 @@ def main() -> int:
     ap.add_argument("--write", action="store_true", help="変更を許す（既定は読み取り専用）")
     ap.add_argument("--interrogate", action="store_true", help="読み取り専用の子が interrogate の審査役だと記録に残す")
     ap.add_argument("--audit", action="store_true", help="読み取り専用の子が返す前の判定（遵守の監査）の子だと記録に残す")
+    ap.add_argument("--hardest", action="store_true", help="最も難しい依頼（設計、大きな移行・リファクタリング、長い無人実行）を任せる書く子（--write と一緒に）。--model・--effort を省くと最上段で起こす")
     ap.add_argument("--out", type=Path)
-    ap.add_argument("--timeout", type=int, default=1800)
+    ap.add_argument("--timeout", type=int, help="秒。既定は 1800（--hardest は 3600）")
     ap.add_argument("--resume", type=Path, help="前の起動の out。同じ session・同じ権限で続きから起動する（host・cwd・model・effort・write・interrogate・audit は記録から取る）")
     a = ap.parse_args()
     a.session, a.grok_home, a.codex_turns, a.prev_head, a.scratch, a.history = None, None, 0, None, None, []
@@ -1276,8 +1291,8 @@ def main() -> int:
             prev = obj(json.loads((a.resume / "record.json").read_text(encoding="utf-8")))
         except (OSError, ValueError) as e:
             ap.error(f"--resume の記録を読めない: {e!r}"[:300])
-        if a.host or a.cwd or a.model or a.effort or a.write or a.interrogate or a.audit:
-            ap.error("--resume は host・cwd・model・effort・write・interrogate・audit を前の記録から取る（違う権限で続けない）。一緒に渡さない")
+        if a.host or a.cwd or a.model or a.effort or a.write or a.interrogate or a.audit or a.hardest:
+            ap.error("--resume は host・cwd・model・effort・write・interrogate・audit・hardest を前の記録から取る（違う権限で続けない）。一緒に渡さない")
         if not (prev.get("host") in ("claude", "codex", "grok") and all(isinstance(prev.get(k), str) and prev[k] for k in ("cwd", "model_requested", "effort_requested", "session"))
                 and isinstance(prev.get("write"), bool)):
             ap.error(f"--resume の記録に、続きから起動するのに要るもの（host・cwd・model・effort・write・session）が無い: {a.resume}")
@@ -1321,18 +1336,28 @@ def main() -> int:
         a.session, a.grok_home = prev["session"], prev.get("grok_home") and Path(prev["grok_home"])
         a.interrogate = prev.get("interrogate") is True
         a.audit = prev.get("audit") is True
+        a.role = prev.get("role") if prev.get("role") in CHOICES else None  # 表より前の記録には無い（時間の上限の既定だけに使う）
         # 前の起動で照らし終えた turn の数（その turn は、その起動の deny で照らした）と、前の起動が見た commit
         a.codex_turns, a.prev_head, a.scratch = prev.get("codex_turns") or 0, prev.get("head"), prev.get("scratch")
     elif a.write and a.interrogate:
         ap.error("--interrogate は読み取り専用の審査役に付ける。--write と一緒に渡さない")
     elif a.audit and (a.write or a.interrogate):
         ap.error("--audit は読み取り専用の監査役に付ける。--write・--interrogate と一緒に渡さない（審査役と監査役は別の子）")
+    elif a.hardest and not a.write:
+        ap.error("--hardest は書く子に付ける。--write と一緒に渡す")
     elif not (a.host and a.cwd):
         ap.error("--host と --cwd が要る（--resume のときは記録から取る）")
-    elif a.host in ("claude", "grok"):
-        a.session = str(uuid.uuid4())  # 起動の前に決める。時間切れで止めると、結果の JSON が出ず、session が分からなかった（Codex は出力の最初の行に出る）
-    a.model = a.model or DEFAULTS[a.host][0]
-    a.effort = a.effort or DEFAULTS[a.host][1]
+    if not a.resume:
+        a.role = "audit" if a.audit else "interrogate" if a.interrogate else ("hardest" if a.hardest else "write") if a.write else "read"
+        if a.host in ("claude", "grok"):
+            a.session = str(uuid.uuid4())  # 起動の前に決める。時間切れで止めると、結果の JSON が出ず、session が分からなかった（Codex は出力の最初の行に出る）
+        chosen = CHOICES[a.role].get(a.host)
+        if not (a.model and a.effort) and not chosen:
+            ap.error(f"{a.host} の {a.role} の子には既定のモデルが無い。--model と --effort を渡す")
+        a.chosen_by = "given" if a.model and a.effort else "table" if not (a.model or a.effort) else "given+table"
+        a.model = a.model or chosen[0]
+        a.effort = a.effort or chosen[1]
+    a.timeout = a.timeout or TIMEOUTS.get(a.role, 1800)
     a.cwd = a.cwd.resolve()
     stamp = time.strftime("%Y%m%d-%H%M%S") + '-' + secrets.token_hex(8)
     # 読み取り専用の Codex の子が書ける一時ディレクトリは、--out でなく bb-writ の状態の置き場に置く（--out は呼び出し側が選ぶので、
@@ -1363,6 +1388,7 @@ def main() -> int:
     except OSError:  # 読めない依頼文は、子を起こす段で失敗として記録する
         pass
     rec = {"host": a.host, "cwd": str(a.cwd), "model_requested": a.model, "effort_requested": a.effort,
+           **({"role": a.role} if a.role else {}), **({"chosen_by": a.chosen_by} if not a.resume else {}), "timeout_s": a.timeout,
            "write": a.write, "interrogate": a.interrogate, "audit": a.audit, "out": str(out_dir), "session_asked": a.session, **({"resumed_from": str(a.resume.resolve())} if a.resume else {}),
            "load": {"cpus": os.cpu_count(), "start": load_now()},  # 時間切れが混雑によるかを後で見分ける材料
            **({"swept": swept} if swept["removed"] or swept["problems"] else {})}

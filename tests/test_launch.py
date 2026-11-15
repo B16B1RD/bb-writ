@@ -1824,6 +1824,40 @@ class TestLaunch(unittest.TestCase):
             env = json.loads(Path(str(self.args_file) + ".env").read_text())
             self.assertEqual((sorted(env), env["CLAUDE_CODE_DISABLE_BACKGROUND_TASKS"]), (["CLAUDE_CODE_DISABLE_BACKGROUND_TASKS", "CLAUDE_CONFIG_DIR"], "1"), extra)
 
+    def test_the_model_comes_from_the_role_unless_the_parent_gives_one(self):
+        # 親が --model・--effort を省くと、役割とホストの表で決める（親が毎回手で選ぶと、同じ審査役が Opus high と Sonnet medium に割れた）
+        flag = {"claude": "--model", "codex": "-m", "grok": "-m"}
+        cases = [("claude", [], "read", "sonnet", "medium", 1800), ("claude", ["--audit"], "audit", "opus", "high", 1800),
+                 ("claude", ["--interrogate"], "interrogate", "fable", "medium", 1800),
+                 ("claude", ["--write"], "write", "sonnet", "medium", 1800),
+                 ("claude", ["--write", "--hardest"], "hardest", "fable", "medium", 3600),
+                 ("codex", [], "read", "gpt-6-sol", "medium", 1800), ("codex", ["--write", "--hardest"], "hardest", "gpt-6.1-sol", "high", 3600),
+                 ("grok", [], "read", "grok-4.7", "medium", 1800), ("grok", ["--write"], "write", "grok-4.7", "medium", 1800)]
+        for host, extra, role, model, effort, timeout in cases:
+            self.args_file.unlink(missing_ok=True)
+            rc, rec = self.run_launch(host, extra=extra)
+            started = self.args_file.exists()  # Grok の読み取り専用は、対象が /tmp の下なので起こさない（unavailable）。記録の値で見る
+            self.assertEqual(started, not (host == "grok" and not extra), (host, extra, rec))
+            argv = json.loads(self.args_file.read_text()) if started else [flag[host], model]
+            self.assertEqual((argv[argv.index(flag[host]) + 1], rec["model_requested"], rec["effort_requested"], rec["role"], rec["chosen_by"], rec["timeout_s"]),
+                             (model, model, effort, role, "table", timeout), (host, extra, rec))
+        # 親が渡したものが勝つ。片方だけなら、残りを表から取る
+        for extra, want in ((["--audit", "--model", "sonnet", "--effort", "low"], ("sonnet", "low", "given")),
+                            (["--audit", "--effort", "medium"], ("opus", "medium", "given+table")),
+                            (["--write", "--hardest", "--timeout", "900"], ("fable", "medium", "table"))):
+            rc, rec = self.run_launch("claude", extra=extra)
+            self.assertEqual((rec["model_requested"], rec["effort_requested"], rec["chosen_by"]), want, extra)
+        self.assertEqual(rec["timeout_s"], 900)
+        # 表に無い組み合わせと、書く子でない --hardest は、子を起こさずに引数の誤りとして止まる
+        for host, extra, why in (("grok", ["--write", "--hardest"], "既定のモデルが無い"), ("claude", ["--hardest"], "--write と一緒に")):
+            self.args_file.unlink(missing_ok=True)
+            p = self.run_launch(host, extra=extra, raw=True)
+            self.assertEqual(p.returncode, 2, (extra, p.stderr))
+            self.assertIn(why, p.stderr)
+            self.assertFalse(self.args_file.exists(), extra)  # 子は起きていない
+        p = self.run_launch("grok", extra=["--write", "--hardest", "--model", "grok-4.7", "--effort", "high"], raw=True)
+        self.assertEqual(json.loads(p.stdout)["chosen_by"], "given", p.stderr)  # 両方渡せば、表に無くても起こせる
+
     def test_write_grants_only_the_work_record(self):
         # 書く子に state 全体（タスクの一覧・統合の記録・他の worktree）を渡さない
         self.run_launch("codex", extra=["--write"])
