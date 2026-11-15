@@ -2007,16 +2007,16 @@ class TestLaunch(unittest.TestCase):
             with self.subTest(host=host, mode=mode, extra=extra):
                 cwd = cwd or self.grok_target()  # ホームに書けない環境では、この subTest だけ飛ばす
                 (cwd / "late.txt").unlink(missing_ok=True)
-                t0 = time.time()
+                t0 = time.monotonic()
                 rc, rec = self.run_launch(host, mode, extra=extra, cwd=cwd, env_extra={"FAKE_SLEEP": sleep})
-                took = time.time() - t0
+                took = time.monotonic() - t0
                 pids = self.orphans()
                 self.assertEqual((len(pids), rec["status"]), (7, status), rec)
                 if status == "timeout":  # 時間切れの理由だけ（止めた子の CLI は残りに並ばない）。期限を守る（所要時間で捕まえるのは、2 秒より大きな延びだけ）
                     self.assertEqual(rec["problems"], ["3 秒で終わらなかった", f"--resume {rec['out']} で続きから起動できる"], rec)
-                    # 期限は launcher が測る時間で見る。launcher の処理は毎回約 3.43 秒で終わるが、その後、Python のコードの外で
-                    # ときどき約 2 秒延びて 5 秒を越えた（9cc1037 でも同じ。15 回に 1〜2 回。原因は突き止めていない。2026-10-25）。
-                    # 壁時計では、返らないことだけを捕まえる
+                    # 期限は launcher が測る時間で見る。launcher の処理は毎回約 3.8 秒で終わる。壁時計で測っていたときは、ときどき
+                    # 約 2.3 秒延びて 5 秒を越えた（WSL2 の壁時計が約 35 秒ごとに約 2.3 秒進み、それに重なった起動。15 回に 1〜2 回。
+                    # Issue #33。今は launcher も試験も単調時計で測る）。試験の側の時間では、返らないことだけを捕まえる
                     self.assertLess(rec["duration_s"], 5, rec)
                     self.assertLess(took, 10, rec)
                 for pid in pids:
@@ -2118,7 +2118,7 @@ class TestLaunch(unittest.TestCase):
             with self.subTest(host=host, mode=mode, what=what, closed=closed):
                 self.stop_fakes()  # 前の subTest が、止まらない子の CLI として残したもの
                 self.addCleanup(self.stop_fakes)
-                t0 = time.time()
+                t0 = time.monotonic()
                 # 猶予を実際に 30 秒待つと、試験全体が CI の上限を超える
                 rc, rec = self.launch_patched("launch.STOP_GRACE = 1", ["--host", host, "--cwd", str(self.cwd), "--timeout", "2"], mode=mode,
                                               env_extra={"FAKE_SLEEP": sleep, "PYTHONPATH": str(site), "FAKE_SITE": what, **({"FAKE_CLOSE_OUT": "1"} if closed else {})})
@@ -2126,7 +2126,7 @@ class TestLaunch(unittest.TestCase):
                 self.assertEqual((rc, rec["status"]), (2, "timeout" if what == "waitid-storm" else "failed"), rec)  # 止めきれれば、続きから起動できる時間切れ
                 self.assertTrue(any(words in p for p in rec["problems"]), rec)
                 # 時間切れの TERM の後に猶予（waitid-storm は子の終わりが見えないので使い切る）。止まらない CLI はさらに 10 秒待ち、残りを 5 秒止め続ける
-                self.assertLess(time.time() - t0, 25 if what == "unkillable-cli" else 10, rec)
+                self.assertLess(time.monotonic() - t0, 25 if what == "unkillable-cli" else 10, rec)
                 if what == "unkillable-cli":  # 止まらない子の CLI（Popen の子。claude なら偽の dotenvx）を並べる
                     cli = Path(str(self.args_file) + ".cli").read_text().split()[host == "claude"]
                     self.assertTrue(any(p.startswith(f"{cli} ") for p in rec["problems"]), rec)

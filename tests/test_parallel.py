@@ -289,9 +289,9 @@ class TestParallel(unittest.TestCase):
         hook.chmod(0o755)
         self.integrate(a, self.git(self.repo, 'rev-parse', 'main'), head, code=6)
         hook.unlink()
-        t0 = time.time()
+        t0 = time.monotonic()
         self.w('task', 'list', '--dir', self.repo)
-        self.assertLess(time.time() - t0, 5)
+        self.assertLess(time.monotonic() - t0, 5)
 
     def test_a_rebased_task_recovers_from_its_own_stale_record(self):
         a = self.start()
@@ -399,9 +399,9 @@ class TestParallel(unittest.TestCase):
         hook.write_text('#!/bin/sh\nsleep 8 >/dev/null 2>&1 &\n')
         hook.chmod(0o755)
         self.integrate(a, self.git(self.repo, 'rev-parse', 'main'), head)
-        t0 = time.time()
+        t0 = time.monotonic()
         self.w('task', 'list', '--dir', self.repo)
-        self.assertLess(time.time() - t0, 5)
+        self.assertLess(time.monotonic() - t0, 5)
 
     def test_task_start_with_a_tag_of_the_same_name_as_the_branch(self):
         self.git(self.repo, 'tag', 'main')

@@ -1434,7 +1434,7 @@ def main() -> int:
                 become_subreaper()
     except Exception as e:
         prep = [f"起動の前の準備ができない: {e!r}"[:300], f"詳細: {launcher_error(out_dir)}"]
-    t0, stop = time.time(), {}
+    t0, stop = time.monotonic(), {}  # 所要時間は単調時計で測る（WSL2 の壁時計は約 35 秒ごとに約 2.3 秒進み、所要時間が延びた）
     if prep:
         rec.update(status="failed", problems=prep)
     elif why:
@@ -1629,7 +1629,7 @@ def main() -> int:
     if rec["status"] == "ok" and not a.write and rec["head"]:  # work.py が審査に数える子。指摘が届いたその場で、次にすることを出す
         rec["next"] = ("審査の指摘なら、直す前に、作業の記録（claim の note.path）の「指摘の扱い」の欄に、指摘ごとに"
                        "対応する・記録のみ・退ける と理由を書く（入口の条件 (6)。push・pr はこの欄が空なら拒否される）")
-    rec["duration_s"] = round(time.time() - t0, 1)
+    rec["duration_s"] = round(time.monotonic() - t0, 1)
     rec["load"]["end"] = load_now()
     rec["at"] = round(time.time(), 3)  # 起動の終わり。一時の置き場を最後に使った時刻として、片付けの期限に使う（sweep_leftovers）
     # 続きから起動してよいのは、session があり、権限・プロセス・Git・照合のどれにも当たらなかった起動だけ（空の残りは、片付けてから続けられる）
