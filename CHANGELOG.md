@@ -4,6 +4,26 @@ bb-writ を使う人に向けて、版ごとに変わったことを書く。新
 
 commit ごとの細かい変更は、各版の末尾の「commit の一覧」（前の版のタグとの比較）で見られる。
 
+## 0.25.0 - 2026-11-15
+
+### 変えたこと
+
+- launcher（`scripts/launch.py`）は、`--model`・`--effort` を省くと、子の役割とホストからモデルと effort を選ぶ。表は `CHOICES` にある。親が毎回手で選んでいたので、同じ審査役が Opus `high` と Sonnet `medium` に割れていた。親が渡せば、それが勝つ。Claude Code の子は、審査役（`--interrogate`）が Fable 5.2 `medium`、監査役（`--audit`）が Opus `high`、読み取り専用の子と書く子が Sonnet `medium`。記録に `role`・`chosen_by`（`table`・`given`・`given+table`）・`timeout_s` が残る。
+- 審査役の値は測って決めた。後で実物で確かめた欠陥のある変更 3 つを、Opus `high`・Opus `medium`・Fable 5.2 `medium` に 2 回ずつ審査させると、欠陥を挙げた数は 4・2・6、所要時間の中央値は 151・93・117 秒だった。Opus `medium` は見落としが増えたので、監査役は Opus `high` のまま。
+- 書く子に `--hardest` を足した（`--write` と一緒に使う）。最も難しい依頼（設計、大きな移行・リファクタリング、長い無人実行）を任せる書く子で、Claude Code では Fable 5.2 `medium`、Codex では `gpt-6.1-sol` `high`、時間の上限の既定は 3600 秒。
+- 入口は、依頼が最も難しい種類かを決めて記録に書き、最も難しい依頼は実装を `--hardest` の書く子に任せて、自分は分け方・確かめ・統合に回る。ほかの依頼は自分で書く。範囲が明確な直しを Sonnet の書く子と Opus の確かめ役に任せると、Opus 1 人で書くより時間が約 1.8 倍になり、3 題中 1 題で隠した試験に落ちたため。
+- `unknowns` は、Claude Code でスラッシュコマンド（`/bb-writ:unknowns`）から呼んだターンを Fable 5.2 で動かす（frontmatter の `model: fable`）。親が別のモデルでも、そのターンだけ切り替わる。
+- `delegate` の「モデルと effort」を、表で選ぶ形に書き直した。Haiku は、報告の形を守れないことが多かった（読み取りの子の 26 件中 10 件）ので、子に使わない。
+- `work.py op run` の `--reviewed` のヘルプを、実際の数え方（その commit を対象に `ok` で返った読み取り専用の子。審査役・確かめ役など、監査役は除く）に合わせた。
+
+### 守らないこと
+
+- `unknowns` の Fable 5.2 は、スラッシュコマンドで呼んだターンだけに効く。その後のターンはセッションのモデルに戻る。Claude が Skill ツールから呼んだときは切り替わらなかった（Claude Code 2.1.325、1 回の観測。文書は「ターンの残りに効く」と書いている）。Codex と Grok はこの欄を使わない。
+- Grok の `--hardest` には既定のモデルが無い。`--model` と `--effort` を渡す。
+- 審査役と書く子の比較は、各組み合わせ 1〜2 回の観測で、揺れは測っていない。審査役の比較は試験を回さない条件で行った。
+
+commit の一覧：https://github.com/B16B1RD/bb-writ/compare/bb-writ--v0.24.3...bb-writ--v0.25.0
+
 ## 0.24.3 - 2026-11-11
 
 ### 変えたこと
