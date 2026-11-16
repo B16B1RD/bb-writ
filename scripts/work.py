@@ -239,27 +239,24 @@ def reviews_of(commit: str, cwd=None) -> tuple:
     return found, judges, audits, (f"委任の記録 {f} に、読めない行か、out の record.json を読めない行が {broken} 行ある" if broken else "")
 
 
-def work_top(d: Path):
-    """d を含む作業ツリーの最上位（resolve したもの）。作業ツリーでなければ None。"""
-    rc, top, _ = sh(["git", "rev-parse", "--show-toplevel"], d)
-    return Path(top).resolve() if rc == 0 and top else None
-
-
-def task_base(d: Path):
-    """task start で作った作業場所（親のタスクの一覧に dir があるもの）なら、その基点。ほかは None。
-    作業場所の下の階層は、その作業場所の最上位として見る（下の階層を --dir にして基点の確かめを外せた）。
-    作業場所の task.json は書く子が書き換えうるので読まない。記録の置き場は作らない。"""
-    c, top = checkout_or_none(d), work_top(d)
-    if not c or not top or not (record_at(c) / "tasks").is_dir():
-        return None
+def task_place(d: Path) -> tuple:
+    """task start で作った作業場所（親のタスクの一覧に dir があるもの）に d が入っていれば、(その作業場所, 基点)。ほかは (None, None)。
+    下の階層も同じ作業場所と見る（下の階層を --dir にして基点の確かめを外せた）。包含はパスで決め、Git には聞かない
+    （下の階層に .git のファイルを置くと、git の最上位がそこに変わった）。作業場所の task.json は書く子が書き換えうるので読まない。
+    記録の置き場は作らない。"""
+    c = checkout_or_none(d)
+    if not c or not (record_at(c) / "tasks").is_dir():
+        return None, None
+    real = d.resolve()
     for f in (record_at(c) / "tasks").glob("*.json"):
         try:
             t = read(f)
-            if isinstance(t, dict) and Path(t["dir"]).resolve() == top:
-                return t.get("base")
+            place = Path(t["dir"]).resolve() if isinstance(t, dict) else None
+            if place is not None and (real == place or place in real.parents):
+                return place, t.get("base")
         except (OSError, ValueError, KeyError, TypeError):
             continue
-    return None
+    return None, None
 
 
 def is_ancestor(older: str, newer: str, d: Path) -> tuple:
@@ -278,7 +275,7 @@ def review_rounds(d: Path) -> int:
     task start で作った作業場所（親のタスクの一覧に dir があるもの）でなければ数えない。記録は行だけを見る（手で書いた行も数える）。
     作業場所の task.json は書く子が書き換えうるので読まない。手で書いた行の cwd が解けない（NUL・symlink のループ）ときは、
     traceback で止まる（launcher は resolve した cwd を書く。手で書いた記録は確かめない）。"""
-    base, top = task_base(d), work_top(d)
+    top, base = task_place(d)
     if base is None:
         return 0
     try:
@@ -1045,7 +1042,7 @@ def op_step(a, r: Path, live, now: float, action: str):
                     return ({"ok": False, "reason": f"審査を通した commit {reviewed} は HEAD {head} の祖先でない"
                                 + ("（rebase・amend などで履歴から外れたか、確かめられない" + (f": {err}" if err else "") + "）" if rc == 1 else f"（確かめられない: {err}）")
                                 + "。HEAD で審査を通してから出す"}, 6)
-                base = task_base(Path(a.dir))
+                base = task_place(Path(a.dir))[1]
                 # 基点とその前の審査は、このタスクの変更を見ていない。基点より後と確かめられたときだけ通す（確かめの失敗・shallow は拒否する）
                 if base is not None and (reviewed == base or is_ancestor(base, reviewed, a.dir)[0] != 0):
                     return ({"ok": False, "reason": f"審査を通した commit {reviewed} は、このタスクの基点 {base} より後と確かめられない"

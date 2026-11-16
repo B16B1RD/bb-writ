@@ -1257,6 +1257,12 @@ class TestPremiseAfterRounds(unittest.TestCase):
         self.review_record(self.git("rev-parse", "HEAD"), audit=True)
         rc, res = self.delta("push:feat@a", side)  # 基点より後と確かめられないものは通さない（確かめの失敗・shallow と同じ側）
         self.assertEqual((rc, "基点" in res.get("reason", "")), (6, True), res)
+        grafts = Path(self.git("rev-parse", "--path-format=absolute", "--git-path", "info/grafts"))
+        grafts.parent.mkdir(parents=True, exist_ok=True)
+        grafts.write_text(f"{side} {r['base']}\n")  # grafts で基点を side の親に見せても、本当の親で見る
+        rc, res = self.delta("push:feat@a", side)
+        self.assertEqual((rc, "基点" in res.get("reason", "")), (6, True), res)
+        grafts.unlink()
         self.assertEqual(self.ops(), before)  # 拒否は何も記録しない
         # 作業場所の下の階層を --dir・--cwd にしても、同じ作業場所として基点を見る（下の階層で基点の確かめを外せた）
         (self.wt / "sub").mkdir()
@@ -1267,6 +1273,17 @@ class TestPremiseAfterRounds(unittest.TestCase):
                          "--from", str(self.repo), "--verified", self.git("rev-parse", "HEAD"), "--reviewed", r["base"],
                          "--delta", "低:文だけ", "--risk", "中:普通のコード")
         self.assertEqual((rc, "基点" in res.get("reason", "")), (6, True), res)
+        (self.wt / "sub3").mkdir()  # 下の階層に .git のファイルを置き、git の最上位をそこに変えても、同じ作業場所と見る
+        (self.wt / "sub3" / ".git").write_text("gitdir: " + self.git("rev-parse", "--absolute-git-dir") + "\n")
+        sub3 = self.w("claim", "--dir", str(self.wt / "sub3"), "--holder", "C")[1]
+        Path(sub3["note"]["path"]).write_text(FILLED_NOTE, encoding="utf-8")
+        self.review_record(r["base"], interrogate=True, cwd=str(self.wt / "sub3"))
+        rc, res = self.w("op", "begin", "--dir", str(self.wt / "sub3"), "--token", sub3["token"], "--key", "push:feat@sub3", "--what", "x",
+                         "--from", str(self.repo), "--verified", self.git("rev-parse", "HEAD"), "--reviewed", r["base"],
+                         "--delta", "低:文だけ", "--risk", "中:普通のコード")
+        self.assertEqual((rc, "基点" in res.get("reason", "")), (6, True), res)
+        (self.wt / "sub3" / ".git").unlink()
+        (self.wt / "sub3").rmdir()
         reviewed = self.git("rev-parse", "HEAD")
         self.review_record(reviewed, interrogate=True)
         self.review_record(self.commit("docs.md"), audit=True)
@@ -1282,6 +1299,17 @@ class TestPremiseAfterRounds(unittest.TestCase):
             self.review_record(h, interrogate=True, cwd=str(cwd))
         self.review_record(self.commit("docs.md"), audit=True)
         rc, res = self.delta("push:feat@a", heads[2])
+        self.assertEqual((rc, res.get("note", {}).get("empty")), (2, [PREMISE_LINE[2:-1]]), res)
+        sub = self.w("claim", "--dir", str(self.wt / "sub"), "--holder", "B")[1]  # 下の階層を --dir にしても、同じ周で見る
+        Path(sub["note"]["path"]).write_text(FILLED_NOTE, encoding="utf-8")
+        rc, res = self.w("op", "begin", "--dir", str(self.wt / "sub"), "--token", sub["token"], "--key", "push:feat@sub", "--what", "x",
+                         "--from", str(self.repo), "--verified", self.git("rev-parse", "HEAD"), "--reviewed", heads[2],
+                         "--delta", "低:文だけ", "--risk", "中:普通のコード")
+        self.assertEqual((rc, res.get("note", {}).get("empty")), (6, None), res)  # --delta の審査の記録は --cwd が --dir と同じもの
+        self.review_record(heads[2], interrogate=True, cwd=str(self.wt / "sub"))
+        rc, res = self.w("op", "begin", "--dir", str(self.wt / "sub"), "--token", sub["token"], "--key", "push:feat@sub", "--what", "x",
+                         "--from", str(self.repo), "--verified", self.git("rev-parse", "HEAD"), "--reviewed", heads[2],
+                         "--delta", "低:文だけ", "--risk", "中:普通のコード")
         self.assertEqual((rc, res.get("note", {}).get("empty")), (2, [PREMISE_LINE[2:-1]]), res)
         self.assertEqual(self.delta("push:feat@a", heads[2], premise="比べた")[0], 0)
 
