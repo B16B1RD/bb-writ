@@ -857,7 +857,7 @@ class TestLaunch(unittest.TestCase):
                 self.assertIn("HEAD を動かさない", rec["next"])
         rc, rec = self.run_launch("claude", extra=["--interrogate"])  # --interrogate の審査役も、監査役の文でなく順序の文
         self.assertEqual((rc, "HEAD を動かさない" in rec["next"], "前の監査" in rec["next"]), (0, True, False), rec)
-        # 書く子・ok でない子に next を出さない条件は、この変更の前からのもので、head の無い記録（下）でだけ確かめる
+        # 書く子・ok でない子に next を出さないことは test_only_a_child_counted_as_a_review_is_told_to_write_the_triage が見る
         rc, rec = self.run_launch("claude", extra=["--audit"])  # 監査役を立て直すときは、前の監査の項目と、その後の差分に限る（#34）
         self.assertEqual((rc, "指摘の扱い" in rec["next"], "前の監査" in rec["next"], "HEAD を動かさない" in rec["next"]), (0, True, True, False), rec)
         no_untracked = Path(self.tmp.name) / "gitconfig"

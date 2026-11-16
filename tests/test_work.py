@@ -1,6 +1,7 @@
 """担当の貸し出しと外部操作の記録（scripts/work.py）: 二重書き込みの拒否、旧担当の停止、結果が分からない操作の照合。"""
 
 import errno
+import hashlib
 import json
 import os
 import re
@@ -929,8 +930,9 @@ class TestReviewedCommit(unittest.TestCase):
         self.assertEqual((run("push:feat@2", "低:文だけ")[0], marker.exists()), (0, True))
 
     def test_the_change_since_a_review_counts_only_from_an_ancestor_reviewed_here_as_the_risk_needs(self):
-        # 祖先の審査は、この作業場所で立てた記録だけを数える（前のタスクで審査した基点や main の履歴の commit を宣言すると、
-        # このタスクで審査していない変更が通った）。祖先かは、置き換え（git replace）と grafts を外した本当の履歴で見る。
+        # 祖先の審査は、この作業場所で立てた記録だけを数える（前のタスクで審査した main の履歴の commit を宣言すると、
+        # このタスクで審査していない変更が通った。タスクの基点の審査は TestPremiseAfterRounds が見る）。
+        # 祖先かは、置き換え（git replace）・grafts・commit-graph を外した、object の本当の親で見る。
         # merge-base が 0・1 の外で失敗する場面（壊れたリポジトリ）は作らない（0 でなければ拒否する）
         self.auto_risk = self.launcher_reviews = self.launcher_audits = False
         tok = self.claim()
@@ -944,34 +946,58 @@ class TestReviewedCommit(unittest.TestCase):
         elsewhere = self.head()
         self.review_record(elsewhere, interrogate=True, cwd=str(self.repo))  # 別の作業場所で審査した
         self.commit("docs.md")
+        self.commit("docs2.md")
         self.review_record(self.head(), audit=True)
         before = self.ops_file()
         publish = lambda c, risk="中:普通のコード": self.publish(tok, "push:feat@1", "--reviewed", c, "--delta", "低:文だけ", "--risk", risk)
         rc, r = publish(reviewed, "低:文書だけ")
-        self.assertEqual((rc, "審査役の記録が無い" in r["reason"]), (6, True))  # 祖先の審査の記録そのものも要る
+        self.assertEqual((rc, "審査役の記録が無い" in r.get("reason", "")), (6, True))  # 祖先の審査の記録そのものも要る
         rc, r = publish(elsewhere)
-        self.assertEqual((rc, "この作業場所" in r["reason"]), (6, True))
+        self.assertEqual((rc, "この作業場所" in r.get("reason", "")), (6, True))
         rc, r = publish(gone)
-        self.assertEqual((rc, "祖先" in r["reason"]), (6, True))
+        self.assertEqual((rc, "祖先" in r.get("reason", "")), (6, True))
         self.git("replace", "--graft", "HEAD", gone)  # 置き換えで、外れた commit を親に見せる
         rc, r = publish(gone)
-        self.assertEqual((rc, "祖先" in r["reason"]), (6, True))
+        self.assertEqual((rc, "祖先" in r.get("reason", "")), (6, True))
         self.git("replace", "-d", self.head())
         grafts = Path(subprocess.run(["git", "rev-parse", "--path-format=absolute", "--git-path", "info/grafts"], env=self.env, cwd=self.wt,
                                      capture_output=True, text=True, check=True).stdout.strip())
         grafts.parent.mkdir(parents=True, exist_ok=True)
         grafts.write_text(f"{self.head()} {gone}\n")
         rc, r = publish(gone)
-        self.assertEqual((rc, "祖先" in r["reason"]), (6, True))
+        self.assertEqual((rc, "祖先" in r.get("reason", "")), (6, True))
         grafts.unlink()
         self.env["GIT_GRAFT_FILE"] = str(Path(self.tmp.name) / "grafts")
         Path(self.env["GIT_GRAFT_FILE"]).write_text(f"{self.head()} {gone}\n")
         rc, r = publish(gone)
-        self.assertEqual((rc, "祖先" in r["reason"]), (6, True))
+        self.assertEqual((rc, "祖先" in r.get("reason", "")), (6, True))
         del self.env["GIT_GRAFT_FILE"]
+        self.git("tag", "keep-gone", gone)  # commit-graph に、外れた commit を親として書き込む
+        self.git("commit-graph", "write", "--reachable")
+        graph = Path(subprocess.run(["git", "rev-parse", "--path-format=absolute", "--git-path", "objects/info/commit-graph"], env=self.env,
+                                    cwd=self.wt, capture_output=True, text=True, check=True).stdout.strip())
+        data = bytearray(graph.read_bytes())
+        chunks = {bytes(data[8 + 12 * i:12 + 12 * i]): int.from_bytes(data[12 + 12 * i:20 + 12 * i], "big") for i in range(data[6])}
+        count = int.from_bytes(data[chunks[b"OIDF"] + 255 * 4:chunks[b"OIDF"] + 256 * 4], "big")
+        index = {bytes(data[chunks[b"OIDL"] + 20 * i:chunks[b"OIDL"] + 20 * (i + 1)]).hex(): i for i in range(count)}
+        parent = subprocess.run(["git", "rev-parse", "HEAD~1"], env=self.env, cwd=self.wt, capture_output=True, text=True, check=True).stdout.strip()
+        at = chunks[b"CDAT"] + 36 * index[parent] + 20  # HEAD の親の、1 つ目の親の番号
+        data[at:at + 4] = index[gone].to_bytes(4, "big")
+        data[-20:] = hashlib.sha1(bytes(data[:-20])).digest()
+        graph.chmod(0o644)  # git は読み取り専用で書く
+        graph.write_bytes(bytes(data))
+        self.assertEqual(subprocess.run(["git", "merge-base", "--is-ancestor", gone, "HEAD"], env=self.env, cwd=self.wt).returncode, 0)
+        rc, r = publish(gone)
+        self.assertEqual((rc, "祖先" in r.get("reason", "")), (6, True), r)
+        graph.unlink()
+        mixed = parent  # HEAD の 1 つ前（docs.md）
         self.review_record(reviewed)  # --interrogate の無い子（入口の条件 (5) の子と同じ形）だけ
         rc, r = publish(reviewed)
-        self.assertEqual((rc, "--interrogate" in r["reason"]), (6, True))  # 祖先の審査も、危険度の求める形で照らす
+        self.assertEqual((rc, "--interrogate" in r.get("reason", "")), (6, True), r)  # 祖先の審査も、危険度の求める形で照らす
+        self.review_record(mixed)  # ここでは条件 (5) の子、--interrogate の審査役はほかの場所で
+        self.review_record(mixed, interrogate=True, cwd=str(self.repo))
+        rc, r = publish(mixed)
+        self.assertEqual((rc, "--interrogate" in r.get("reason", "")), (6, True), r)
         self.assertEqual(self.ops_file(), before)  # どの拒否も何も記録しない
         self.assertEqual(publish(reviewed, "低:文書だけ")[0], 0)
 
@@ -1202,6 +1228,38 @@ class TestPremiseAfterRounds(unittest.TestCase):
     def refused(self, key, head, premise=None):
         rc, res = self.publish(key, head, premise)
         return rc == 2 and res.get("note", {}).get("empty") == [PREMISE_LINE[2:-1]]
+
+    def delta(self, key, reviewed, premise=None):
+        self.note.write_text(FILLED_NOTE + ("" if premise is None else f"{PREMISE_LINE}{premise}\n"), encoding="utf-8")
+        return self.w("op", "begin", "--dir", str(self.wt), "--token", self.tok, "--key", key, "--what", "x", "--from", str(self.repo),
+                      "--verified", self.git("rev-parse", "HEAD"), "--reviewed", reviewed, "--delta", "低:文だけ", "--risk", "中:普通のコード")
+
+    def test_a_review_of_the_task_base_does_not_cover_the_change_since(self):
+        # 実装の前に作業場所で基点（計画）を --interrogate で審査した記録があると、--delta でタスクの変更の全部が出た（#34 の審査）
+        older = self.git("rev-parse", "HEAD", cwd=self.repo)  # 基点より前の commit
+        self.git("commit", "-q", "--allow-empty", "-m", "base", cwd=self.repo)
+        r = self.start()
+        self.commit("src.py")
+        self.review_record(self.git("rev-parse", "HEAD"), audit=True)
+        for c in (r["base"], older):
+            self.review_record(c, interrogate=True)
+            rc, res = self.delta("push:feat@a", c)
+            self.assertEqual((rc, "基点" in res.get("reason", "")), (6, True), res)
+        reviewed = self.git("rev-parse", "HEAD")
+        self.review_record(reviewed, interrogate=True)
+        self.review_record(self.commit("docs.md"), audit=True)
+        self.assertEqual(self.delta("push:feat@a", reviewed)[0], 0)
+
+    def test_a_change_since_a_review_still_needs_the_premise_after_three_rounds(self):
+        # #34 の場面は 3 周を超えた作業場所からの push そのもの。--delta でも仕組みの要否を求める
+        self.start()
+        heads = [self.commit(f"a{i}") for i in range(3)]
+        for h in heads:
+            self.review_record(h, interrogate=True)
+        self.review_record(self.commit("docs.md"), audit=True)
+        rc, res = self.delta("push:feat@a", heads[2])
+        self.assertEqual((rc, res.get("note", {}).get("empty")), (2, [PREMISE_LINE[2:-1]]), res)
+        self.assertEqual(self.delta("push:feat@a", heads[2], premise="比べた")[0], 0)
 
     def test_audits_do_not_count_as_rounds(self):
         # 監査役は push ごとに立てるので、周に数えると、文書だけの PR でも 3 回目の push で仕組みの要否を求めてしまう

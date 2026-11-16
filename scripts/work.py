@@ -38,8 +38,9 @@ task と integrate の照合拒否は終了コード 6、担当の拒否は 3。
 push・pr には --reviewed も要る（初回の push も）。届ける前の審査（入口の条件 (5)・(6)）を通した commit の ID（16 進）か、
 要らない理由を none:<理由> で書く。無い・形が違う・commit が見つからない・ID でなく参照に解決されたら拒否し（2）、作業場所の HEAD と違えば拒否する（6）。
 HEAD と違っても、その commit が HEAD の祖先で、--delta 低:<理由>（審査の後の差分の危険度。文と試験だけで、振る舞い・主張を変えない
-直し）を付ければ通す（その commit の、この作業場所を --cwd にした審査の記録と、HEAD の監査役は同じく求める。差分の中身と宣言の真偽は見ず、
-監査役が確かめる）。--delta が中・高・形が違う・none: と並ぶ・HEAD そのものの審査と並ぶなら 2、祖先でなければ（置き換え・grafts は外して見る）6。
+直し）を付ければ通す（その commit の、この作業場所を --cwd にした審査の記録と、HEAD の監査役は同じく求める。task start の作業場所では、
+基点とその前の commit の審査は数えない。差分の中身と宣言の真偽は見ず、
+監査役が確かめる）。--delta が中・高・形が違う・none: と並ぶ・HEAD そのものの審査と並ぶなら 2、祖先でないか基点とその前なら（置き換え・grafts・commit-graph は外して見る）6。
 push・pr には --risk 低|中|高:<理由> も要る（変更の危険度。中・高は interrogate を通すので、none: と一緒なら拒否する（2）。理由の真偽は確かめない）。
 中・高で commit を書いたときは、その commit の子の記録のうち、launcher に --interrogate を付けて立てた審査役のものが無ければ拒否する（6。
 条件 (5) の子の記録は、interrogate の審査の代わりにならない）。宣言の真偽（依頼文が interrogate の観点を持っていたか）は見ない。
@@ -238,6 +239,31 @@ def reviews_of(commit: str, cwd=None) -> tuple:
     return found, judges, audits, (f"委任の記録 {f} に、読めない行か、out の record.json を読めない行が {broken} 行ある" if broken else "")
 
 
+def task_base(d: Path):
+    """task start で作った作業場所（親のタスクの一覧に dir があるもの）なら、その基点。ほかは None。
+    作業場所の task.json は書く子が書き換えうるので読まない。"""
+    c = checkout_or_none(d)
+    if not c or not (root(c) / "tasks").is_dir():
+        return None
+    for f in (root(c) / "tasks").glob("*.json"):
+        try:
+            t = read(f)
+            if isinstance(t, dict) and Path(t["dir"]).resolve() == d.resolve():
+                return t.get("base")
+        except (OSError, ValueError, KeyError, TypeError):
+            continue
+    return None
+
+
+def is_ancestor(older: str, newer: str, d: Path) -> tuple:
+    """git merge-base --is-ancestor の (終了コード, エラー)。置き換え（git replace）・grafts（info/grafts・GIT_GRAFT_FILE）・
+    commit-graph は、履歴に無い親を見せられるので、外して object の本当の親で確かめる。"""
+    rc, _, err = sh(["git", "-c", "core.commitGraph=false", "-c", "advice.graftFileDeprecated=false",
+                     "merge-base", "--is-ancestor", older, newer], d,
+                    env={**os.environ, "GIT_NO_REPLACE_OBJECTS": "1", "GIT_GRAFT_FILE": os.devnull})
+    return rc, err
+
+
 def review_rounds(d: Path) -> int:
     """審査の周の数。委任の記録のうち、この作業場所を --cwd にして ok で返った読み取り専用の子の head（launcher が書く完全な ID）の、
     互いに異なるものの数（タスクの基点そのものの審査は除く）。審査役も条件 (5) の確かめ役も数え、監査役（--audit）は数えない。amend・rebase で前の周の commit が
@@ -245,18 +271,7 @@ def review_rounds(d: Path) -> int:
     task start で作った作業場所（親のタスクの一覧に dir があるもの）でなければ数えない。記録は行だけを見る（手で書いた行も数える）。
     作業場所の task.json は書く子が書き換えうるので読まない。手で書いた行の cwd が解けない（NUL・symlink のループ）ときは、
     traceback で止まる（launcher は resolve した cwd を書く。手で書いた記録は確かめない）。"""
-    c = checkout_or_none(d)
-    if not c or not (root(c) / "tasks").is_dir():
-        return 0
-    base = None
-    for f in (root(c) / "tasks").glob("*.json"):
-        try:
-            t = read(f)
-            if isinstance(t, dict) and Path(t["dir"]).resolve() == d.resolve():
-                base = t.get("base")
-                break
-        except (OSError, ValueError, KeyError, TypeError):
-            continue
+    base = task_base(d)
     if base is None:
         return 0
     try:
@@ -1018,13 +1033,15 @@ def op_step(a, r: Path, live, now: float, action: str):
                 if d.group(1) != "低":
                     return ({"ok": False, "reason": f"審査の後の差分の危険度が{d.group(1)}なら、HEAD で審査を通してから出す（--reviewed に HEAD の commit）。"
                                 f"審査の後に変えたファイル: {after}"}, 2)
-                # 置き換え（git replace）と grafts（info/grafts・GIT_GRAFT_FILE）は、履歴に無い親を足せるので、外して本当の履歴で確かめる
-                rc, _, err = sh(["git", "merge-base", "--is-ancestor", reviewed, head], a.dir,
-                                env={**os.environ, "GIT_NO_REPLACE_OBJECTS": "1", "GIT_GRAFT_FILE": os.devnull})
+                rc, err = is_ancestor(reviewed, head, a.dir)
                 if rc:
                     return ({"ok": False, "reason": f"審査を通した commit {reviewed} は HEAD {head} の祖先でない"
-                                + ("（rebase・amend などで履歴から外れたか、確かめられない）" if rc == 1 else f"（確かめられない: {err}）")
+                                + ("（rebase・amend などで履歴から外れたか、確かめられない" + (f": {err}" if err else "") + "）" if rc == 1 else f"（確かめられない: {err}）")
                                 + "。HEAD で審査を通してから出す"}, 6)
+                base = task_base(Path(a.dir))
+                if base is not None and is_ancestor(reviewed, base, a.dir)[0] == 0:  # 基点とその前の審査は、このタスクの変更を見ていない
+                    return ({"ok": False, "reason": f"審査を通した commit {reviewed} は、このタスクの基点 {base} か、その前。"
+                                "基点の審査はタスクの変更を見ていないので、HEAD で審査を通してから出す"}, 6)
                 delta = "低: " + d.group(2).strip()
             found, judges, _, unread = reviews_of(reviewed, a.dir if delta else None)
             if not found:
