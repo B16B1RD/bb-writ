@@ -1284,6 +1284,16 @@ class TestPremiseAfterRounds(unittest.TestCase):
         self.assertEqual((rc, "基点" in res.get("reason", "")), (6, True), res)
         (self.wt / "sub3" / ".git").unlink()
         (self.wt / "sub3").rmdir()
+        # タスクの外（元の checkout）は、タスクの作業場所と見ない。そこでの --delta は、タスクの基点を理由に断らない
+        main = self.w("claim", "--dir", str(self.repo), "--holder", "D")[1]
+        Path(main["note"]["path"]).write_text(FILLED_NOTE, encoding="utf-8")
+        self.git("commit", "-q", "--allow-empty", "-m", "later", cwd=self.repo)
+        self.review_record(r["base"], interrogate=True, cwd=str(self.repo))
+        self.review_record("HEAD", audit=True, cwd=str(self.repo), head=self.git("rev-parse", "HEAD", cwd=self.repo))
+        rc, res = self.w("op", "begin", "--dir", str(self.repo), "--token", main["token"], "--key", "push:main@later", "--what", "x",
+                         "--from", str(self.repo), "--verified", self.git("rev-parse", "HEAD", cwd=self.repo), "--reviewed", r["base"],
+                         "--delta", "低:文だけ", "--risk", "中:普通のコード")
+        self.assertEqual(rc, 0, res)
         reviewed = self.git("rev-parse", "HEAD")
         self.review_record(reviewed, interrogate=True)
         self.review_record(self.commit("docs.md"), audit=True)

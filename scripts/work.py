@@ -241,8 +241,9 @@ def reviews_of(commit: str, cwd=None) -> tuple:
 
 def task_place(d: Path) -> tuple:
     """task start で作った作業場所（親のタスクの一覧に dir があるもの）に d が入っていれば、(その作業場所, 基点)。ほかは (None, None)。
-    下の階層も同じ作業場所と見る（下の階層を --dir にして基点の確かめを外せた）。包含はパスで決め、Git には聞かない
-    （下の階層に .git のファイルを置くと、git の最上位がそこに変わった）。作業場所の task.json は書く子が書き換えうるので読まない。
+    同じリポジトリ（common dir が同じもの）の下の階層も同じ作業場所と見る（下の階層を --dir にして基点の確かめを外せた）。
+    どのタスクの一覧を見るかは common dir で、包含はパスで決める（下の階層に .git のファイルを置くと、git の最上位がそこに変わった）。
+    作業場所の下に置いた別のリポジトリ（clone）は、別のリポジトリとして見る。作業場所の task.json は書く子が書き換えうるので読まない。
     記録の置き場は作らない。"""
     c = checkout_or_none(d)
     if not c or not (record_at(c) / "tasks").is_dir():
