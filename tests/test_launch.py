@@ -855,6 +855,9 @@ class TestLaunch(unittest.TestCase):
                 self.assertIn("指摘の扱い", rec["next"])  # 審査に数える子が返ったその場で、直す前に書く欄を出す
                 # 確かめ役と監査役を 1 つのコマンドで続けて立て、監査役が毎回「直前の確かめ役の指摘の扱いが無い」で止まった（#34）
                 self.assertIn("HEAD を動かさない", rec["next"])
+        rc, rec = self.run_launch("claude", extra=["--interrogate"])  # --interrogate の審査役も、監査役の文でなく順序の文
+        self.assertEqual((rc, "HEAD を動かさない" in rec["next"], "前の監査" in rec["next"]), (0, True, False), rec)
+        # 書く子・ok でない子に next を出さない条件は、この変更の前からのもので、head の無い記録（下）でだけ確かめる
         rc, rec = self.run_launch("claude", extra=["--audit"])  # 監査役を立て直すときは、前の監査の項目と、その後の差分に限る（#34）
         self.assertEqual((rc, "指摘の扱い" in rec["next"], "前の監査" in rec["next"], "HEAD を動かさない" in rec["next"]), (0, True, True, False), rec)
         no_untracked = Path(self.tmp.name) / "gitconfig"

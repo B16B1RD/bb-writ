@@ -903,9 +903,9 @@ class TestReviewedCommit(unittest.TestCase):
         for key in ("push:feat@1", "pr:feat"):
             rc, r = self.publish(tok, key, "--reviewed", reviewed, "--risk", "中:普通のコード")  # 宣言が無ければ、今までどおり
             self.assertEqual((rc, "--delta" in r["reason"], "docs.md" in r["reason"]), (6, True, True), key)
-            for delta in ("中:普通のコード", "高:外部操作"):  # 差分が中・高なら、HEAD で審査を通す
+            for delta in ("中:普通のコード", "高:外部操作"):  # 差分が中・高なら、HEAD で審査を通す（低の形を書けとは返さない）
                 rc, r = self.publish(tok, key, "--reviewed", reviewed, "--delta", delta, "--risk", "中:普通のコード")
-                self.assertEqual((rc, "HEAD" in r["reason"]), (2, True), (key, delta))
+                self.assertEqual((rc, "審査を通してから出す" in r["reason"], "の形で" in r["reason"]), (2, True, False), (key, delta))
             for delta in ("低", "低: ", "low:文だけ", "低 文だけ"):
                 rc, r = self.publish(tok, key, "--reviewed", reviewed, "--delta", delta, "--risk", "中:普通のコード")
                 self.assertEqual((rc, "--delta" in r["reason"]), (2, True), (key, delta))
@@ -914,29 +914,66 @@ class TestReviewedCommit(unittest.TestCase):
         self.review_record(self.head(), audit=True)
         rc, r = self.publish(tok, "push:feat@1", "--reviewed", "none:文書だけ", "--delta", "低:文だけ", "--risk", "低:文書だけ")
         self.assertEqual((rc, "--delta" in r["reason"]), (2, True))  # 審査を通した commit が無い宣言とは並ばない
-        self.assertEqual(self.ops_file(), before)
+        self.review_record(self.head(), interrogate=True)
+        rc, r = self.publish(tok, "pr:feat", "--reviewed", self.head(), "--delta", "低:文だけ", "--risk", "中:普通のコード")
+        self.assertEqual((rc, "--delta" in r["reason"]), (2, True))  # HEAD そのものの審査に、差分の宣言は要らない
+        self.assertEqual(self.ops_file(), before)  # どの拒否も何も記録しない
         self.assertEqual(self.publish(tok, "push:feat@1", "--reviewed", reviewed, "--delta", "低:文と試験だけ", "--risk", "中:普通のコード")[0], 0)
         rec = json.loads(self.ops_file().decode().splitlines()[-1])
         self.assertEqual((rec["reviewed"], rec["delta"], rec["risk"]), (reviewed, "低: 文と試験だけ", "中: 普通のコード"))
-        rc, r = self.publish(tok, "pr:feat", "--reviewed", self.head(), "--delta", "低:文だけ", "--risk", "中:普通のコード")
-        self.assertEqual((rc, "--delta" in r["reason"]), (2, True))  # HEAD そのものの審査に、差分の宣言は要らない
+        marker = Path(self.tmp.name) / "pushed"  # op run も同じ宣言で通り、中なら走らない
+        run = lambda key, delta: self.w("op", "run", "--dir", str(self.wt), "--token", tok, "--key", key, "--what", "x", "--from", str(self.repo),
+                                        "--verified", self.head(), "--reviewed", reviewed, "--delta", delta, "--risk", "中:普通のコード",
+                                        "--", sys.executable, "-c", f"open({str(marker)!r}, 'w')")
+        self.assertEqual((run("push:feat@2", "中:普通のコード")[0], marker.exists()), (2, False))
+        self.assertEqual((run("push:feat@2", "低:文だけ")[0], marker.exists()), (0, True))
 
-    def test_the_change_since_a_review_counts_only_from_an_ancestor_reviewed_as_the_risk_needs(self):
+    def test_the_change_since_a_review_counts_only_from_an_ancestor_reviewed_here_as_the_risk_needs(self):
+        # 祖先の審査は、この作業場所で立てた記録だけを数える（前のタスクで審査した基点や main の履歴の commit を宣言すると、
+        # このタスクで審査していない変更が通った）。祖先かは、置き換え（git replace）と grafts を外した本当の履歴で見る。
+        # merge-base が 0・1 の外で失敗する場面（壊れたリポジトリ）は作らない（0 でなければ拒否する）
         self.auto_risk = self.launcher_reviews = self.launcher_audits = False
         tok = self.claim()
+        self.commit("src/base.py")  # setUp が審査役の記録を置いた最初の commit の後
         self.commit("src/a.py")
         gone = self.head()
         self.review_record(gone, interrogate=True)
         self.git("reset", "-q", "--hard", "HEAD~1")  # 審査した commit を履歴から外した（rebase・amend の後）
         reviewed = self.head()
-        self.review_record(reviewed)  # --interrogate の無い子（入口の条件 (5) の子と同じ形）だけ
+        self.commit("src/b.py")
+        elsewhere = self.head()
+        self.review_record(elsewhere, interrogate=True, cwd=str(self.repo))  # 別の作業場所で審査した
         self.commit("docs.md")
         self.review_record(self.head(), audit=True)
-        rc, r = self.publish(tok, "push:feat@1", "--reviewed", gone, "--delta", "低:文だけ", "--risk", "中:普通のコード")
+        before = self.ops_file()
+        publish = lambda c, risk="中:普通のコード": self.publish(tok, "push:feat@1", "--reviewed", c, "--delta", "低:文だけ", "--risk", risk)
+        rc, r = publish(reviewed, "低:文書だけ")
+        self.assertEqual((rc, "審査役の記録が無い" in r["reason"]), (6, True))  # 祖先の審査の記録そのものも要る
+        rc, r = publish(elsewhere)
+        self.assertEqual((rc, "この作業場所" in r["reason"]), (6, True))
+        rc, r = publish(gone)
         self.assertEqual((rc, "祖先" in r["reason"]), (6, True))
-        rc, r = self.publish(tok, "push:feat@1", "--reviewed", reviewed, "--delta", "低:文だけ", "--risk", "中:普通のコード")
+        self.git("replace", "--graft", "HEAD", gone)  # 置き換えで、外れた commit を親に見せる
+        rc, r = publish(gone)
+        self.assertEqual((rc, "祖先" in r["reason"]), (6, True))
+        self.git("replace", "-d", self.head())
+        grafts = Path(subprocess.run(["git", "rev-parse", "--path-format=absolute", "--git-path", "info/grafts"], env=self.env, cwd=self.wt,
+                                     capture_output=True, text=True, check=True).stdout.strip())
+        grafts.parent.mkdir(parents=True, exist_ok=True)
+        grafts.write_text(f"{self.head()} {gone}\n")
+        rc, r = publish(gone)
+        self.assertEqual((rc, "祖先" in r["reason"]), (6, True))
+        grafts.unlink()
+        self.env["GIT_GRAFT_FILE"] = str(Path(self.tmp.name) / "grafts")
+        Path(self.env["GIT_GRAFT_FILE"]).write_text(f"{self.head()} {gone}\n")
+        rc, r = publish(gone)
+        self.assertEqual((rc, "祖先" in r["reason"]), (6, True))
+        del self.env["GIT_GRAFT_FILE"]
+        self.review_record(reviewed)  # --interrogate の無い子（入口の条件 (5) の子と同じ形）だけ
+        rc, r = publish(reviewed)
         self.assertEqual((rc, "--interrogate" in r["reason"]), (6, True))  # 祖先の審査も、危険度の求める形で照らす
-        self.assertEqual(self.publish(tok, "push:feat@1", "--reviewed", reviewed, "--delta", "低:文だけ", "--risk", "低:文書だけ")[0], 0)
+        self.assertEqual(self.ops_file(), before)  # どの拒否も何も記録しない
+        self.assertEqual(publish(reviewed, "低:文書だけ")[0], 0)
 
     def test_a_moving_ref_an_unknown_commit_or_a_misspelled_none_is_refused(self):
         tok = self.claim()

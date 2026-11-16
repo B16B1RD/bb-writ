@@ -37,9 +37,9 @@ task と integrate の照合拒否は終了コード 6、担当の拒否は 3。
 公開する操作（鍵の種類が push・pr・merge・release）の op begin には --verified <検証した commit> が要る。作業場所の HEAD と違えば拒否する（6）。
 push・pr には --reviewed も要る（初回の push も）。届ける前の審査（入口の条件 (5)・(6)）を通した commit の ID（16 進）か、
 要らない理由を none:<理由> で書く。無い・形が違う・commit が見つからない・ID でなく参照に解決されたら拒否し（2）、作業場所の HEAD と違えば拒否する（6）。
-HEAD と違っても、その commit が HEAD の祖先で、--delta 低:<理由>（審査の後の差分の危険度。文と試験だけで、振る舞い・試験の期待値・
-主張を変えない直し）を付ければ通す（その commit の審査の記録と HEAD の監査役は同じく求める。差分の中身と宣言の真偽は見ず、
-監査役が確かめる）。--delta が中・高・形が違う・none: と並ぶ・HEAD そのものの審査と並ぶなら 2、祖先でなければ 6。
+HEAD と違っても、その commit が HEAD の祖先で、--delta 低:<理由>（審査の後の差分の危険度。文と試験だけで、振る舞い・主張を変えない
+直し）を付ければ通す（その commit の、この作業場所を --cwd にした審査の記録と、HEAD の監査役は同じく求める。差分の中身と宣言の真偽は見ず、
+監査役が確かめる）。--delta が中・高・形が違う・none: と並ぶ・HEAD そのものの審査と並ぶなら 2、祖先でなければ（置き換え・grafts は外して見る）6。
 push・pr には --risk 低|中|高:<理由> も要る（変更の危険度。中・高は interrogate を通すので、none: と一緒なら拒否する（2）。理由の真偽は確かめない）。
 中・高で commit を書いたときは、その commit の子の記録のうち、launcher に --interrogate を付けて立てた審査役のものが無ければ拒否する（6。
 条件 (5) の子の記録は、interrogate の審査の代わりにならない）。宣言の真偽（依頼文が interrogate の観点を持っていたか）は見ない。
@@ -189,15 +189,18 @@ def read_regular(f: Path) -> bytes:
         return h.read()
 
 
-def reviews_of(commit: str) -> tuple:
+def reviews_of(commit: str, cwd=None) -> tuple:
     """launcher の委任の記録（delegations.jsonl）のうち、その commit を対象に起動して ok で返った読み取り専用の子の記録の out と、
     そのうち --interrogate を付けて立てた審査役の out と、--audit を付けて立てた監査役（返す前の判定）の out と、読めないものの説明（無ければ空）。
     行と、out の record.json の両方で head・status・write が合うものだけを数え、interrogate・audit も両方で真のものだけをその役に数える。
     監査役は審査の記録（最初の値）に数えない（push ごとに立てるので、審査の代わりにも周の数にもしない）。
     head は launcher が、対象の作業ツリーが子の起動の前と終わりの両方で commit と同じとき（未 commit の変更が無いとき）だけ書く。
-    審査の中身（子が十分に攻めたか、何人か、依頼文が interrogate の観点を持っていたか）は見ない。手で書き足した記録も見分けない（忘れて飛ばすのを止める）。"""
+    審査の中身（子が十分に攻めたか、何人か、依頼文が interrogate の観点を持っていたか）は見ない。手で書き足した記録も見分けない（忘れて飛ばすのを止める）。
+    cwd を渡すと、その場所を --cwd にして立てた記録だけを数える（--delta の祖先の審査を、ほかの作業場所の審査で代えないため）。"""
+    here = str(Path(cwd).resolve()) if cwd is not None else None
     match = lambda e: (isinstance(e, dict) and e.get("head") == commit and e.get("status") == "ok" and e.get("write") is False
-                       and isinstance(e.get("out"), str) and os.path.isabs(e["out"]))  # launcher は絶対パスを書く
+                       and isinstance(e.get("out"), str) and os.path.isabs(e["out"])  # launcher は絶対パスを書く
+                       and (here is None or (isinstance(e.get("cwd"), str) and os.path.isabs(e["cwd"]) and str(Path(e["cwd"]).resolve()) == here)))
     f = state_dir() / "delegations.jsonl"
     found, judges, audits, broken = [], [], [], 0
     try:
@@ -373,9 +376,9 @@ WRITE_OK = {"ADMIN", "MAINTAIN", "WRITE"}
 NO_GITHUB_REMOTE = r"none of the git remotes configured for this repository point to a known GitHub host|no git remotes found"  # gh 2.102.0
 
 
-def sh(cmd, cwd: Path):
+def sh(cmd, cwd: Path, env=None):
     try:
-        p = subprocess.run(cmd, cwd=cwd, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=60)
+        p = subprocess.run(cmd, cwd=cwd, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=60, env=env)
         return p.returncode, p.stdout.strip(), p.stderr.strip()
     except (OSError, subprocess.TimeoutExpired) as e:
         return 1, "", str(e)
@@ -1007,7 +1010,7 @@ def op_step(a, r: Path, live, now: float, action: str):
                 if a.delta is None:
                     return ({"ok": False, "reason": f"審査を通した commit {reviewed} と作業場所の HEAD {head} が違う。"
                                 f"審査の後に変えた。直した commit で審査を通し直してから出すか、審査の後の差分の危険度が低（文と試験だけで、"
-                                f"振る舞い・試験の期待値・主張を変えない）なら --delta 低:<理由> を付ける（宣言は HEAD の監査役が確かめる。"
+                                f"振る舞い・主張を変えない）なら --delta 低:<理由> を付ける（宣言は HEAD の監査役が確かめる。"
                                 f"`interrogate` の 5）。審査の後に変えたファイル: {after}"}, 6)
                 d = re.fullmatch(r"(低|中|高):(.*)", a.delta, re.S)
                 if not d or not d.group(2).strip():
@@ -1015,15 +1018,19 @@ def op_step(a, r: Path, live, now: float, action: str):
                 if d.group(1) != "低":
                     return ({"ok": False, "reason": f"審査の後の差分の危険度が{d.group(1)}なら、HEAD で審査を通してから出す（--reviewed に HEAD の commit）。"
                                 f"審査の後に変えたファイル: {after}"}, 2)
-                rc, _, err = sh(["git", "merge-base", "--is-ancestor", reviewed, head], a.dir)
+                # 置き換え（git replace）と grafts（info/grafts・GIT_GRAFT_FILE）は、履歴に無い親を足せるので、外して本当の履歴で確かめる
+                rc, _, err = sh(["git", "merge-base", "--is-ancestor", reviewed, head], a.dir,
+                                env={**os.environ, "GIT_NO_REPLACE_OBJECTS": "1", "GIT_GRAFT_FILE": os.devnull})
                 if rc:
                     return ({"ok": False, "reason": f"審査を通した commit {reviewed} は HEAD {head} の祖先でない"
-                                + ("（rebase・amend などで履歴から外れた）" if rc == 1 else f"（確かめられない: {err}）")
+                                + ("（rebase・amend などで履歴から外れたか、確かめられない）" if rc == 1 else f"（確かめられない: {err}）")
                                 + "。HEAD で審査を通してから出す"}, 6)
                 delta = "低: " + d.group(2).strip()
-            found, judges, _, unread = reviews_of(reviewed)
+            found, judges, _, unread = reviews_of(reviewed, a.dir if delta else None)
             if not found:
-                return ({"ok": False, "reason": f"commit {reviewed} を対象にした審査役の記録が無い。launcher（launch.py、読み取り専用）で、"
+                return ({"ok": False, "reason": f"commit {reviewed} を対象にした審査役の記録が無い"
+                            + ("（--delta では、この作業場所を --cwd にして立てたものだけを数える）" if delta else "")
+                            + "。launcher（launch.py、読み取り専用）で、"
                             "この commit を checkout した未 commit の変更が無い場所を --cwd にして審査役を立て、status が ok で返った記録が要る"
                             "（Agent ツールなど launcher を通らない子は記録に残らない）。審査が要らない変更なら none:<理由>"
                             + (f"。{unread}" if unread else "")}, 6)
