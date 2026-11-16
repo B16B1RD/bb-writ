@@ -955,7 +955,7 @@ class TestReviewedCommit(unittest.TestCase):
         rc, r = publish(elsewhere)
         self.assertEqual((rc, "この作業場所" in r.get("reason", "")), (6, True))
         rc, r = publish(gone)
-        self.assertEqual((rc, "祖先" in r.get("reason", "")), (6, True))
+        self.assertEqual((rc, "祖先" in r.get("reason", ""), "hint" in r.get("reason", "")), (6, True, False), r)
         self.git("replace", "--graft", "HEAD", gone)  # 置き換えで、外れた commit を親に見せる
         rc, r = publish(gone)
         self.assertEqual((rc, "祖先" in r.get("reason", "")), (6, True))
@@ -1229,6 +1229,9 @@ class TestPremiseAfterRounds(unittest.TestCase):
         rc, res = self.publish(key, head, premise)
         return rc == 2 and res.get("note", {}).get("empty") == [PREMISE_LINE[2:-1]]
 
+    def ops(self):
+        return b"".join(p.read_bytes() for p in sorted((Path(self.tmp.name).resolve() / "state" / "work").glob("*/ops.jsonl")))
+
     def delta(self, key, reviewed, premise=None):
         self.note.write_text(FILLED_NOTE + ("" if premise is None else f"{PREMISE_LINE}{premise}\n"), encoding="utf-8")
         return self.w("op", "begin", "--dir", str(self.wt), "--token", self.tok, "--key", key, "--what", "x", "--from", str(self.repo),
@@ -1241,21 +1244,42 @@ class TestPremiseAfterRounds(unittest.TestCase):
         r = self.start()
         self.commit("src.py")
         self.review_record(self.git("rev-parse", "HEAD"), audit=True)
+        before = self.ops()
         for c in (r["base"], older):
             self.review_record(c, interrogate=True)
             rc, res = self.delta("push:feat@a", c)
             self.assertEqual((rc, "基点" in res.get("reason", "")), (6, True), res)
+        self.git("checkout", "-q", "-b", "side", older)  # 基点より前から分かれた系統の commit を取り込み、ここで審査した
+        side = self.commit("side.py")
+        self.git("checkout", "-q", "-")
+        self.git("merge", "-q", "--no-edit", side)
+        self.review_record(side, interrogate=True)
+        self.review_record(self.git("rev-parse", "HEAD"), audit=True)
+        rc, res = self.delta("push:feat@a", side)  # 基点より後と確かめられないものは通さない（確かめの失敗・shallow と同じ側）
+        self.assertEqual((rc, "基点" in res.get("reason", "")), (6, True), res)
+        self.assertEqual(self.ops(), before)  # 拒否は何も記録しない
+        # 作業場所の下の階層を --dir・--cwd にしても、同じ作業場所として基点を見る（下の階層で基点の確かめを外せた）
+        (self.wt / "sub").mkdir()
+        sub = self.w("claim", "--dir", str(self.wt / "sub"), "--holder", "B")[1]
+        Path(sub["note"]["path"]).write_text(FILLED_NOTE, encoding="utf-8")
+        self.review_record(r["base"], interrogate=True, cwd=str(self.wt / "sub"))
+        rc, res = self.w("op", "begin", "--dir", str(self.wt / "sub"), "--token", sub["token"], "--key", "push:feat@sub", "--what", "x",
+                         "--from", str(self.repo), "--verified", self.git("rev-parse", "HEAD"), "--reviewed", r["base"],
+                         "--delta", "低:文だけ", "--risk", "中:普通のコード")
+        self.assertEqual((rc, "基点" in res.get("reason", "")), (6, True), res)
         reviewed = self.git("rev-parse", "HEAD")
         self.review_record(reviewed, interrogate=True)
         self.review_record(self.commit("docs.md"), audit=True)
-        self.assertEqual(self.delta("push:feat@a", reviewed)[0], 0)
+        rc, res = self.delta("push:feat@a", reviewed, premise="比べた")  # 基点の前と別の系統の審査で、周は 3 に達している
+        self.assertEqual(rc, 0, res)
 
     def test_a_change_since_a_review_still_needs_the_premise_after_three_rounds(self):
-        # #34 の場面は 3 周を超えた作業場所からの push そのもの。--delta でも仕組みの要否を求める
+        # #34 の場面は 3 周を超えた作業場所からの push そのもの。--delta でも仕組みの要否を求める。下の階層の審査も周に数える
         self.start()
         heads = [self.commit(f"a{i}") for i in range(3)]
-        for h in heads:
-            self.review_record(h, interrogate=True)
+        (self.wt / "sub").mkdir()
+        for h, cwd in zip(heads, (self.wt, self.wt / "sub", self.wt)):
+            self.review_record(h, interrogate=True, cwd=str(cwd))
         self.review_record(self.commit("docs.md"), audit=True)
         rc, res = self.delta("push:feat@a", heads[2])
         self.assertEqual((rc, res.get("note", {}).get("empty")), (2, [PREMISE_LINE[2:-1]]), res)
