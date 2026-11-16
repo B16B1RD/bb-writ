@@ -1289,7 +1289,7 @@ class TestPremiseAfterRounds(unittest.TestCase):
         Path(main["note"]["path"]).write_text(FILLED_NOTE, encoding="utf-8")
         self.git("commit", "-q", "--allow-empty", "-m", "later", cwd=self.repo)
         self.review_record(r["base"], interrogate=True, cwd=str(self.repo))
-        self.review_record("HEAD", audit=True, cwd=str(self.repo), head=self.git("rev-parse", "HEAD", cwd=self.repo))
+        self.review_record(self.git("rev-parse", "HEAD", cwd=self.repo), audit=True, cwd=str(self.repo))
         rc, res = self.w("op", "begin", "--dir", str(self.repo), "--token", main["token"], "--key", "push:main@later", "--what", "x",
                          "--from", str(self.repo), "--verified", self.git("rev-parse", "HEAD", cwd=self.repo), "--reviewed", r["base"],
                          "--delta", "低:文だけ", "--risk", "中:普通のコード")
