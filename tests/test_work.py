@@ -1255,7 +1255,9 @@ class TestPremiseAfterRounds(unittest.TestCase):
         self.git("merge", "-q", "--no-edit", side)
         self.review_record(side, interrogate=True)
         self.review_record(self.git("rev-parse", "HEAD"), audit=True)
-        rc, res = self.delta("push:feat@a", side)  # 基点より後と確かめられないものは通さない（確かめの失敗・shallow と同じ側）
+        # 基点より後と確かめられないものは通さない（確かめの失敗・shallow と同じ側）。基点の確かめが 0・1 の外で失敗する場面
+        # （壊れたリポジトリ）は作らない（先に HEAD の祖先の確かめが同じ object で失敗して拒否する）
+        rc, res = self.delta("push:feat@a", side)
         self.assertEqual((rc, "基点" in res.get("reason", "")), (6, True), res)
         grafts = Path(self.git("rev-parse", "--path-format=absolute", "--git-path", "info/grafts"))
         grafts.parent.mkdir(parents=True, exist_ok=True)
