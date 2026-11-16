@@ -2034,7 +2034,10 @@ class TestLaunch(unittest.TestCase):
                     self.assertEqual(rec["problems"], ["3 秒で終わらなかった", f"--resume {rec['out']} で続きから起動できる"], rec)
                     # 期限は launcher が測る時間で見る。launcher の処理は毎回約 3.8 秒で終わる。壁時計で測っていたときは、ときどき
                     # 約 2.3 秒延びて 5 秒を越えた（WSL2 の壁時計が約 35 秒ごとに約 2.3 秒進み、それに重なった起動。70 回中 4 回。
-                    # Issue #33。今は所要時間を launcher も試験も単調時計で測る）。試験の側の時間では、返らないことだけを捕まえる
+                    # Issue #33。今は所要時間を launcher も試験も単調時計で測る）。WSL2 では単調時計も実際より数 % 遅く進み（adjtimex の
+                    # tick が標準より小さい）、壁時計がそれを飛んで取り戻していた。期限と所要時間は同じ単調時計なので、互いに食い違わない。
+                    # 試験の側の時間では、返らないことだけを捕まえる。試験の側の計測を壁時計に戻す後退を落とす試験は無く、15〜60 秒の待ちの
+                    # 上限（偽の子や印のファイルを待つ所、work.py の試験用の止まり所）は壁時計のまま（飛びは待ちを少し短くするだけ）
                     self.assertLess(rec["duration_s"], 5, rec)
                     self.assertLess(took, 10, rec)
                 for pid in pids:

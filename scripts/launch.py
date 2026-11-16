@@ -1434,7 +1434,7 @@ def main() -> int:
                 become_subreaper()
     except Exception as e:
         prep = [f"起動の前の準備ができない: {e!r}"[:300], f"詳細: {launcher_error(out_dir)}"]
-    t0, stop = time.monotonic(), {}  # 所要時間は単調時計で測る（WSL2 の壁時計は約 35 秒ごとに約 2.3 秒進み、所要時間が延びた）
+    t0, stop = time.monotonic(), {}  # 所要時間は、時間切れの期限と同じ単調時計で測る（WSL2 の壁時計は約 35 秒ごとに約 2.3 秒飛び、所要時間が延びた）
     if prep:
         rec.update(status="failed", problems=prep)
     elif why:
