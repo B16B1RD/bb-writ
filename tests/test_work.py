@@ -1138,6 +1138,7 @@ class TestReviewedCommit(unittest.TestCase):
     def test_no_review_needs_no_reviewer_record(self):
         self.launcher_reviews = False
         tok = self.claim()
+        self.commit("docs.md")  # setUp が最初の commit に置いた審査役の記録の無い HEAD で試す
         self.assertEqual(self.publish(tok, "push:feat@1", "--reviewed", "none: 文書だけ")[0], 0)
 
     def test_merge_release_comment_and_issue_need_no_declaration(self):
