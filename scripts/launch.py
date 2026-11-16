@@ -1628,7 +1628,12 @@ def main() -> int:
         rec.update(head=None, head_lost=f"前の起動の head（{seen}）と違う。続きの子は前の起動で別のものを見た")
     if rec["status"] == "ok" and not a.write and rec["head"]:  # work.py が審査に数える子。指摘が届いたその場で、次にすることを出す
         rec["next"] = ("審査の指摘なら、直す前に、作業の記録（claim の note.path）の「指摘の扱い」の欄に、指摘ごとに"
-                       "対応する・記録のみ・退ける と理由を書く（入口の条件 (6)。push・pr はこの欄が空なら拒否される）")
+                       "対応する・記録のみ・退ける と理由を書く（入口の条件 (6)。push・pr はこの欄が空なら拒否される）"
+                       + ("。直して監査役を立て直すときは、前の監査の項目と、前の監査の commit から HEAD までの差分だけを判定させる"
+                          if a.audit else
+                          "。監査役（--audit）は、扱いを書き、直しを commit し終えて HEAD を動かさないと決めてから立てる"
+                          "（審査役と同じコマンドで続けて立てない）")
+                       + "（`playbook-verify` の「返す前の判定」）")
     rec["duration_s"] = round(time.monotonic() - t0, 1)
     rec["load"]["end"] = load_now()
     rec["at"] = round(time.time(), 3)  # 起動の終わり。一時の置き場を最後に使った時刻として、片付けの期限に使う（sweep_leftovers）
