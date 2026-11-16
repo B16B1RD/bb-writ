@@ -5,7 +5,7 @@
   work.py renew   --dir <作業場所> --token <t> [--lease <分>]          → 引き継がれていれば拒否（3）。旧担当はここで止まる
   work.py release --dir <作業場所> --token <t>                         → コマンドが終わっていない op run があれば拒否（4）
   work.py status  --dir <作業場所>
-  work.py op begin   --dir <作業場所> --token <t> --key <操作の鍵> --what <何をするか> [--from <場所>] [--verified <c>] [--reviewed <c>|none:<理由>] [--risk 低|中|高:<理由>]
+  work.py op begin   --dir <作業場所> --token <t> --key <操作の鍵> --what <何をするか> [--from <場所>] [--verified <c>] [--reviewed <c>|none:<理由>] [--delta 低:<理由>] [--risk 低|中|高:<理由>]
                      → 同じ鍵が既にあれば拒否（4）
   work.py op run     （op begin と同じ引数） -- <コマンド>              → begin が通ったときだけ --from（無ければ作業場所）でコマンドを
                      シェルを通さず標準入力なしで実行し、終了コードと出力（stderr を含む）の末尾 20 行を done に記録する。
@@ -37,6 +37,9 @@ task と integrate の照合拒否は終了コード 6、担当の拒否は 3。
 公開する操作（鍵の種類が push・pr・merge・release）の op begin には --verified <検証した commit> が要る。作業場所の HEAD と違えば拒否する（6）。
 push・pr には --reviewed も要る（初回の push も）。届ける前の審査（入口の条件 (5)・(6)）を通した commit の ID（16 進）か、
 要らない理由を none:<理由> で書く。無い・形が違う・commit が見つからない・ID でなく参照に解決されたら拒否し（2）、作業場所の HEAD と違えば拒否する（6）。
+HEAD と違っても、その commit が HEAD の祖先で、--delta 低:<理由>（審査の後の差分の危険度。文と試験だけで、振る舞い・試験の期待値・
+主張を変えない直し）を付ければ通す（その commit の審査の記録と HEAD の監査役は同じく求める。差分の中身と宣言の真偽は見ず、
+監査役が確かめる）。--delta が中・高・形が違う・none: と並ぶ・HEAD そのものの審査と並ぶなら 2、祖先でなければ 6。
 push・pr には --risk 低|中|高:<理由> も要る（変更の危険度。中・高は interrogate を通すので、none: と一緒なら拒否する（2）。理由の真偽は確かめない）。
 中・高で commit を書いたときは、その commit の子の記録のうち、launcher に --interrogate を付けて立てた審査役のものが無ければ拒否する（6。
 条件 (5) の子の記録は、interrogate の審査の代わりにならない）。宣言の真偽（依頼文が interrogate の観点を持っていたか）は見ない。
@@ -974,7 +977,7 @@ def op_step(a, r: Path, live, now: float, action: str):
         if verified != head:
             return ({"ok": False, "reason": f"検証した commit {verified or a.verified} と作業場所の HEAD {head} が違う。"
                         "検証の後に成果物が変わった。今の HEAD で証拠を取り直してから出す"}, 6)
-    reviewed, reviews, judges, audit = None, None, [], None
+    reviewed, reviews, judges, audit, delta = None, None, [], None, None
     if action == "begin" and a.key.split(":")[0] in REVIEWED:
         if not a.reviewed:
             return ({"ok": False, "reason": "push・pr には --reviewed <届ける前の審査を通した commit> か --reviewed none:<要らない理由> が要る。"
@@ -983,6 +986,8 @@ def op_step(a, r: Path, live, now: float, action: str):
             if not a.reviewed[5:].strip():
                 return ({"ok": False, "reason": "--reviewed none: の後に、審査が要らない理由を書く。" + changed_since_publish(r, a.dir, head)}, 2)
             reviewed = "none: " + a.reviewed[5:].strip()
+            if a.delta is not None:
+                return ({"ok": False, "reason": "--delta は、審査を通した commit（--reviewed <commit>）から HEAD までの差分の宣言。none: とは並べない"}, 2)
         else:
             # HEAD・ブランチ名のような動く参照は、審査した commit を書いた宣言と見分けられないので受けない
             if not re.fullmatch(r"[0-9a-f]{7,64}", a.reviewed):
@@ -994,11 +999,28 @@ def op_step(a, r: Path, live, now: float, action: str):
             if not reviewed.startswith(a.reviewed):  # 16 進だけの名前のブランチ・タグは、git が ID より先に解決する
                 return ({"ok": False, "reason": f"--reviewed {a.reviewed} は ID でなく参照（{reviewed[:12]}）に解決された。完全な ID を書く。"
                             + changed_since_publish(r, a.dir, head)}, 2)
+            if reviewed == head and a.delta is not None:
+                return ({"ok": False, "reason": "--delta は、審査を通した commit が HEAD と違うときの、その後の差分の宣言。HEAD を審査したなら付けない"}, 2)
             if reviewed != head:
                 rc, files, err = sh(["git", "diff", "--name-only", f"{reviewed}..{head}"], a.dir)
                 after = (", ".join(files.splitlines()) or "なし") if rc == 0 else f"（差分を出せない: {err}）"
-                return ({"ok": False, "reason": f"審査を通した commit {reviewed} と作業場所の HEAD {head} が違う。"
-                            f"審査の後に変えた。直した commit で審査を通し直してから出す。審査の後に変えたファイル: {after}"}, 6)
+                if a.delta is None:
+                    return ({"ok": False, "reason": f"審査を通した commit {reviewed} と作業場所の HEAD {head} が違う。"
+                                f"審査の後に変えた。直した commit で審査を通し直してから出すか、審査の後の差分の危険度が低（文と試験だけで、"
+                                f"振る舞い・試験の期待値・主張を変えない）なら --delta 低:<理由> を付ける（宣言は HEAD の監査役が確かめる。"
+                                f"`interrogate` の 5）。審査の後に変えたファイル: {after}"}, 6)
+                d = re.fullmatch(r"(低|中|高):(.*)", a.delta, re.S)
+                if not d or not d.group(2).strip():
+                    return ({"ok": False, "reason": "--delta は 低:<理由> の形で、審査を通した commit から HEAD までの差分の危険度を書く"}, 2)
+                if d.group(1) != "低":
+                    return ({"ok": False, "reason": f"審査の後の差分の危険度が{d.group(1)}なら、HEAD で審査を通してから出す（--reviewed に HEAD の commit）。"
+                                f"審査の後に変えたファイル: {after}"}, 2)
+                rc, _, err = sh(["git", "merge-base", "--is-ancestor", reviewed, head], a.dir)
+                if rc:
+                    return ({"ok": False, "reason": f"審査を通した commit {reviewed} は HEAD {head} の祖先でない"
+                                + ("（rebase・amend などで履歴から外れた）" if rc == 1 else f"（確かめられない: {err}）")
+                                + "。HEAD で審査を通してから出す"}, 6)
+                delta = "低: " + d.group(2).strip()
             found, judges, _, unread = reviews_of(reviewed)
             if not found:
                 return ({"ok": False, "reason": f"commit {reviewed} を対象にした審査役の記録が無い。launcher（launch.py、読み取り専用）で、"
@@ -1056,6 +1078,8 @@ def op_step(a, r: Path, live, now: float, action: str):
         e["audits"] = audit
     if reviewed:
         e["risk"] = risk
+    if delta:
+        e["delta"] = delta
     with open(r / "ops.jsonl", "a", encoding="utf-8") as f:
         f.write(json.dumps(e, ensure_ascii=False) + "\n")
     res = {"ok": True, "op": ops(r)[a.key]}
@@ -1467,7 +1491,8 @@ def main() -> int:
     o.add_argument("--result", default="")
     o.add_argument("--from", dest="frm", type=Path, help="外部操作を実行する場所（push・pr・comment・merge・release・issue で必須）")
     o.add_argument("--verified", help="検証した commit（push・pr・merge・release で必須。作業場所の HEAD と一致させる）")
-    o.add_argument("--reviewed", help="届ける前の審査を通した commit か none:<理由>（push・pr で必須。commit は作業場所の HEAD と一致させ、その commit を対象に launcher で ok で返った読み取り専用の子（審査役・確かめ役など。監査役は除く）の記録が要る。--risk が中・高なら --interrogate を付けた審査役の記録。どちらでも、HEAD を対象に --audit を付けた監査役の記録も要る）")
+    o.add_argument("--reviewed", help="届ける前の審査を通した commit か none:<理由>（push・pr で必須。commit は作業場所の HEAD と一致させるか、HEAD の祖先にして --delta を付け、その commit を対象に launcher で ok で返った読み取り専用の子（審査役・確かめ役など。監査役は除く）の記録が要る。--risk が中・高なら --interrogate を付けた審査役の記録。どちらでも、HEAD を対象に --audit を付けた監査役の記録も要る）")
+    o.add_argument("--delta", help="審査を通した commit（--reviewed）から HEAD までの差分の危険度と理由 低:<理由>（push・pr で、--reviewed の commit が HEAD の祖先のときだけ。中・高なら HEAD で審査を通す）")
     o.add_argument("--risk", help="変更の危険度と理由 低|中|高:<理由>（push・pr で必須。中・高は --reviewed none: と一緒に使えない）")
     c = sub.add_parser("check")
     c.add_argument("--dir", type=Path, required=True)

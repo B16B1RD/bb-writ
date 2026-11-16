@@ -890,6 +890,54 @@ class TestReviewedCommit(unittest.TestCase):
             self.assertIn("docs.md", r["reason"], key)
         self.assertEqual(self.ops_file(), before)  # 拒否は何も記録しない
 
+    def test_a_commit_after_the_review_goes_out_when_the_change_since_is_declared_low(self):
+        # 中の変更で、審査を通した後の文と試験だけの直しのたびに --interrogate の審査役を HEAD で立て直し、14 回続いた（#34）。
+        # 審査を通した祖先と、そこから HEAD までの差分の危険度の宣言で出す。差分の中身（文だけか）は見ない（宣言は監査役が確かめる）
+        self.auto_risk = self.launcher_reviews = self.launcher_audits = False
+        tok = self.claim()
+        reviewed = self.head()
+        self.review_record(reviewed, interrogate=True)
+        self.commit("docs.md")
+        self.commit("tests/test_x.py")
+        before = self.ops_file()
+        for key in ("push:feat@1", "pr:feat"):
+            rc, r = self.publish(tok, key, "--reviewed", reviewed, "--risk", "中:普通のコード")  # 宣言が無ければ、今までどおり
+            self.assertEqual((rc, "--delta" in r["reason"], "docs.md" in r["reason"]), (6, True, True), key)
+            for delta in ("中:普通のコード", "高:外部操作"):  # 差分が中・高なら、HEAD で審査を通す
+                rc, r = self.publish(tok, key, "--reviewed", reviewed, "--delta", delta, "--risk", "中:普通のコード")
+                self.assertEqual((rc, "HEAD" in r["reason"]), (2, True), (key, delta))
+            for delta in ("低", "低: ", "low:文だけ", "低 文だけ"):
+                rc, r = self.publish(tok, key, "--reviewed", reviewed, "--delta", delta, "--risk", "中:普通のコード")
+                self.assertEqual((rc, "--delta" in r["reason"]), (2, True), (key, delta))
+            rc, r = self.publish(tok, key, "--reviewed", reviewed, "--delta", "低:文と試験だけ", "--risk", "中:普通のコード")
+            self.assertEqual((rc, "監査役" in r["reason"]), (6, True), key)  # HEAD の監査役は、宣言があっても要る
+        self.review_record(self.head(), audit=True)
+        rc, r = self.publish(tok, "push:feat@1", "--reviewed", "none:文書だけ", "--delta", "低:文だけ", "--risk", "低:文書だけ")
+        self.assertEqual((rc, "--delta" in r["reason"]), (2, True))  # 審査を通した commit が無い宣言とは並ばない
+        self.assertEqual(self.ops_file(), before)
+        self.assertEqual(self.publish(tok, "push:feat@1", "--reviewed", reviewed, "--delta", "低:文と試験だけ", "--risk", "中:普通のコード")[0], 0)
+        rec = json.loads(self.ops_file().decode().splitlines()[-1])
+        self.assertEqual((rec["reviewed"], rec["delta"], rec["risk"]), (reviewed, "低: 文と試験だけ", "中: 普通のコード"))
+        rc, r = self.publish(tok, "pr:feat", "--reviewed", self.head(), "--delta", "低:文だけ", "--risk", "中:普通のコード")
+        self.assertEqual((rc, "--delta" in r["reason"]), (2, True))  # HEAD そのものの審査に、差分の宣言は要らない
+
+    def test_the_change_since_a_review_counts_only_from_an_ancestor_reviewed_as_the_risk_needs(self):
+        self.auto_risk = self.launcher_reviews = self.launcher_audits = False
+        tok = self.claim()
+        self.commit("src/a.py")
+        gone = self.head()
+        self.review_record(gone, interrogate=True)
+        self.git("reset", "-q", "--hard", "HEAD~1")  # 審査した commit を履歴から外した（rebase・amend の後）
+        reviewed = self.head()
+        self.review_record(reviewed)  # --interrogate の無い子（入口の条件 (5) の子と同じ形）だけ
+        self.commit("docs.md")
+        self.review_record(self.head(), audit=True)
+        rc, r = self.publish(tok, "push:feat@1", "--reviewed", gone, "--delta", "低:文だけ", "--risk", "中:普通のコード")
+        self.assertEqual((rc, "祖先" in r["reason"]), (6, True))
+        rc, r = self.publish(tok, "push:feat@1", "--reviewed", reviewed, "--delta", "低:文だけ", "--risk", "中:普通のコード")
+        self.assertEqual((rc, "--interrogate" in r["reason"]), (6, True))  # 祖先の審査も、危険度の求める形で照らす
+        self.assertEqual(self.publish(tok, "push:feat@1", "--reviewed", reviewed, "--delta", "低:文だけ", "--risk", "低:文書だけ")[0], 0)
+
     def test_a_moving_ref_an_unknown_commit_or_a_misspelled_none_is_refused(self):
         tok = self.claim()
         self.git("branch", "cafe1234", "HEAD")  # 16 進だけの名前のブランチ
