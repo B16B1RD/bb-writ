@@ -687,7 +687,10 @@ class TestLaunch(unittest.TestCase):
         self.assertGreater(rec["at"], time.time() + 50, rec)  # 起動の終わりの時刻（片付けの期限に使う）は、壁時計のまま
 
     def test_a_jump_of_the_wall_clock_does_not_bring_the_timeout_forward(self):
-        """時間切れの期限も、壁時計が飛んでも早まらない（子を待ち始めてすぐ、壁時計だけを 100 秒進める）。"""
+        """時間切れの期限も、壁時計が飛んでも早まらない（子を待ち始めてすぐ、壁時計だけを 100 秒進める）。進めるのは launcher の中で
+        最初に呼ばれた time.sleep（今は wait_for_exit の待ち）で、進んだ時機は確かめない。待ち方を time.sleep 以外に変えたり、期限を
+        決める前に time.sleep を呼んだりした上で期限を壁時計にすると、この試験は通る。期限と所要時間の両方を壁時計に戻した形も
+        この試験は通り、test_the_duration_does_not_follow_a_jump_of_the_wall_clock が落とす（守らない）。"""
         rc, rec = self.launch_patched("""
             import time
             real, ahead, nap = time.time, [0], time.sleep
@@ -697,7 +700,7 @@ class TestLaunch(unittest.TestCase):
                 nap(s)
             time.sleep = jump_then_sleep
         """, ["--host", "claude", "--cwd", str(self.cwd), "--timeout", "3"], env_extra={"FAKE_HANG": "1"})
-        self.assertEqual((rc, rec["status"], rec["problems"][0]), (2, "timeout", "3 秒で終わらなかった"), rec)
+        self.assertEqual((rc, rec["status"], rec["problems"][:1]), (2, "timeout", ["3 秒で終わらなかった"]), rec)
         self.assertGreaterEqual(rec["duration_s"], 2.9, rec)  # 期限を壁時計で見ると、最初の待ちで TERM を送って 1 秒も経たずに終わる
 
     def test_a_timed_out_child_gets_a_term_and_time_to_clean_up(self):
