@@ -3416,14 +3416,15 @@ class TestLaunch(unittest.TestCase):
         self.home = home
         state = home / ".local" / "state" / "bb-writ"  # 実物の既定の置き場。task start の作業場所はこの中にできる
         target = state / "worktrees" / "t" / "x"
-        for d in (".nvm/versions/node/v1/bin", ".nvm/versions/node/v1/lib", ".cargo/registry", ".local/share/keyrings", ".local/share/uv",
+        for d in ("conf", ".nvm/versions/node/v1/bin", ".nvm/versions/node/v1/lib", ".cargo/registry", ".local/share/keyrings", ".local/share/uv",
                   ".config/gh", ".config/git", ".ssh", ".m2", ".nuget/NuGet", "go-install/go/bin", "bin", "Projects/other", "elsewhere"):
             (home / d).mkdir(parents=True)
         target.mkdir(parents=True)
         subprocess.run(["git", "init", "-q", str(target)], check=True)
         (target / "a.txt").write_text("x\n")  # 偽の子の報告が引く証拠
         for f, body in ((".env.keys", "K=1"), (".claude.json", "{}"), (".bash_history", "x"), (".npmrc", "//r/:_authToken=x"),
-                        (".cargo/credentials.toml", "token"), (".gitconfig", "[include]\n\tpath = .gitconfig-extra\n"), (".gitconfig-extra", ""),
+                        (".cargo/credentials.toml", "token"), (".gitconfig", "[include]\n\tpath = .gitconfig-extra\n\tpath = ~/.config/git/../gh/hosts.yml\n\tpath = ~/.ssh/git-include\n\tpath = conf/a\n"),
+                        (".config/gh/hosts.yml", "t"), (".ssh/git-include", ""), ("conf/a", "[include]\n\tpath = b\n"), ("conf/b", ""), (".gitconfig-extra", ""),
                         (".m2/settings.xml", "<settings><servers><server><password>p</password></server></servers></settings>"),
                         (".nuget/NuGet/NuGet.Config", "<configuration><packageSources/></configuration>")):  # 印の無い XML は拒まない
             (home / f).write_text(body)
@@ -3435,7 +3436,7 @@ class TestLaunch(unittest.TestCase):
                   ".config/git/credentials"):
             (home / f).write_text("x")
         (home / ".nuget" / "NuGet" / "Other.Config").write_text("")
-        (home / ".tools-link").symlink_to(home / "elsewhere")  # 行き先がふつうの場所なら、名前と行き先を戻す
+        (home / ".tools-link").symlink_to(home / "elsewhere")  # symlink を通る道筋は、行き先がふつうの場所でも戻さない（行き先で判定すると穴が続いた）
         path = f"{home}/.nvm/versions/node/v1/bin:{home}/go-install/go/bin:{home}/bin:{self.bin}:/usr/bin:/bin"
         rc, rec = self.run_launch("claude", cwd=target, path=path,
                                   env_extra={"BB_WRIT_STATE_DIR": str(state), "GIT_CONFIG_GLOBAL": str(home / ".gitconfig")})
@@ -3444,20 +3445,37 @@ class TestLaunch(unittest.TestCase):
         fs = json.loads(argv[argv.index("--settings") + 1])["sandbox"]["filesystem"]
         self.assertIn(str(home), fs["denyRead"])
         for p in (".nvm/versions/node/v1/lib", ".cargo/registry", ".local/share/uv", "go-install/go", "bin", ".gitconfig", ".gitconfig-extra",
-                  ".config/git", ".nuget/NuGet/NuGet.Config", ".tools-link", "elsewhere"):
+                  ".config/git", ".nuget/NuGet/NuGet.Config", "conf/a", "conf/b"):  # 相対の include は、それを書いたファイルの置き場から
             self.assertTrue(claude_readable(home / p, fs), p)  # 道具の置き場（bin の隣）・Git の設定とその include・印の無い XML
         self.assertTrue(claude_readable(target, fs))  # 拒んだ状態の置き場の中の対象
         for p in (".env.keys", ".claude.json", ".bash_history", ".npmrc", ".cargo/credentials.toml", ".local/share/keyrings", ".config/gh",
                   ".ssh", ".m2/settings.xml", ".secret-link", ".share-link/keyrings", "Projects/other", ".local/state/bb-writ/delegations.jsonl",
                   "go-install", ".azure", ".gemini", ".copilot", ".pki", ".keychain", ".mozilla", ".terraform.d/credentials.tfrc.json",
-                  ".pulumi/credentials.json", ".gradle/gradle.properties", ".bundle/config", ".config/git/credentials"):
+                  ".pulumi/credentials.json", ".gradle/gradle.properties", ".bundle/config", ".config/git/credentials", ".tools-link", "elsewhere",
+                  ".config/gh/hosts.yml", ".ssh/git-include", "b"):  # 認証情報の置き場の中を指す include は戻さない
             self.assertFalse(claude_readable(home / p, fs), p)  # 一覧に無いホーム直下のファイル・戻した中の認証情報・ほかのリポジトリ
         self.assertFalse(claude_readable(self.cfg, fs))  # 専用ログインの置き場（ホームの外に置いても）
         self.assertFalse(any(p == str(home) for p in fs["allowRead"]))  # bin の親がホームなら bin だけ
 
+    def test_claude_read_only_does_not_start_on_the_home_itself(self):
+        # 対象を戻すとホームを丸ごと戻すことになる（ホームを Git で管理する配置）
+        home = self.home.resolve()
+        (home / "a.txt").write_text("x\n")
+        for cwd in (home, home.parent):
+            with self.subTest(cwd=cwd):
+                rc, rec = self.run_launch("claude", cwd=cwd, env_extra={"HOME": str(home)})
+                self.assertEqual(rec["status"], "unavailable", rec)
+                self.assertIn("ホームそのもの", rec["problems"][0])
+        link = Path(self.tmp.name) / "home-link"  # HOME が symlink の道筋なら、実の道筋も拒む
+        link.symlink_to(home)
+        rc, rec = self.run_launch("claude", env_extra={"HOME": str(link)})
+        argv = json.loads(self.args_file.read_text())
+        fs = json.loads(argv[argv.index("--settings") + 1])["sandbox"]["filesystem"]
+        self.assertTrue({str(link), str(home)} <= set(fs["denyRead"]), fs)
+
     def test_read_only_children_without_a_home_to_deny_do_not_start(self):
         # HOME が無いか / だと、ホームの置き場の拒否が 1 つも出ない（黙って開く）。Codex は前から止めていた
-        for host, home in (("claude", "/"), ("claude", ""), ("grok", "/"), ("grok", ""), ("codex", "/")):
+        for host, home in (("claude", "/"), ("claude", ""), ("grok", "/"), ("grok", ""), ("codex", "/"), ("codex", "")):
             with self.subTest(host=host, home=home):
                 rc, rec = self.run_launch(host, cwd=self.grok_target() if host == "grok" else None, env_extra={"HOME": home})
                 self.assertEqual(rec["status"], "unavailable", rec)
@@ -3468,12 +3486,18 @@ class TestLaunch(unittest.TestCase):
         home = self.home.resolve()
         self.home = home
         outside = Path(self.tmp.name) / "aws-outside"
-        for d in (".dotfiles/config/gh", ".dotfiles/ssh", "bin", "work/bin", outside):
-            (home / d).mkdir(parents=True) if not Path(d).is_absolute() else Path(d).mkdir(parents=True)
+        for d in (".dotfiles/config/gh", ".dotfiles/ssh", "bin", "work/bin"):
+            (home / d).mkdir(parents=True)
+        outside.mkdir()
         (home / ".config").symlink_to(home / ".dotfiles" / "config")  # dotfiles でディレクトリごと symlink にする配置
         (home / ".ssh").symlink_to(home / ".dotfiles" / "ssh")
         (home / ".aws").symlink_to(outside)  # ホームの外の置き場
         (home / ".home-link").symlink_to(home)
+        (home / ".gh-link").symlink_to(home / ".dotfiles" / "config" / "gh")  # 認証情報の置き場の中を指す
+        cargo = Path(self.tmp.name) / "cargo-elsewhere"  # 親の symlink を通る認証情報（~/.cargo を別のディスクへ）
+        cargo.mkdir()
+        (cargo / "credentials.toml").write_text("t")
+        (home / ".cargo").symlink_to(cargo)
         (home / "myssh").symlink_to(home / ".dotfiles" / "ssh")
         (home / "myssh-bin").mkdir()
         (home / ".dotfiles" / "gitconfig").write_text('[include]\n\tpath = ~/.gitconfig-a\n[includeIf "gitdir:~/My Work/"]\n\tpath = ~/.gitconfig-work\n'
@@ -3483,18 +3507,19 @@ class TestLaunch(unittest.TestCase):
         for f in (".gitconfig-work", ".gitconfig-nested"):
             (home / f).write_text("")
         (home / ".git-credentials").write_text("[credential]\n\thelper = store\n")  # 正当な Git の設定の形の認証情報のファイル
-        path = f"{home}/myssh/bin:{home}/bin/../.ssh:{home}/work/bin:{self.bin}:/usr/bin:/bin"
+        path = f"{home}/myssh/bin:{home}/bin/../.ssh:{home}/work/bin:{home}/work/..:{self.bin}:/usr/bin:/bin"  # work/.. はホームそのもの
         rc, rec = self.run_launch("claude", path=path, env_extra={"GIT_CONFIG_GLOBAL": str(home / ".gitconfig")})
         self.assertEqual((rc, rec["status"]), (0, "ok"), rec)
         argv = json.loads(self.args_file.read_text())
         fs = json.loads(argv[argv.index("--settings") + 1])["sandbox"]["filesystem"]
         for p in (home / ".dotfiles" / "config" / "gh", home / ".dotfiles" / "ssh", home / "myssh", home / ".ssh", home / ".git-credentials",
-                  outside, home / ".home-link" / ".ssh"):
-            self.assertFalse(claude_readable(p, fs), p)  # 行き先が認証情報の置き場・ホームの外の置き場・ホームそのもの
-        for p in (home / ".dotfiles" / "gitconfig", home / ".gitconfig", home / ".gitconfig-a", home / ".gitconfig-nested", home / ".gitconfig-work",
+                  outside, home / ".home-link" / ".ssh", home / ".gh-link", cargo / "credentials.toml", home / ".cargo"):
+            self.assertFalse(claude_readable(p, fs), p)  # 行き先が認証情報の置き場・その中・ホームの外の置き場・ホームそのもの
+        for p in (home / ".dotfiles" / "gitconfig", home / ".gitconfig-a", home / ".gitconfig-nested", home / ".gitconfig-work",
                   home / "work", home / ".dotfiles"):
-            self.assertTrue(claude_readable(p, fs), p)  # symlink の Git の設定の行き先・入れ子の include・条件に空白のある includeIf
-        self.assertNotIn(str(home), fs["allowRead"])
+            self.assertTrue(claude_readable(p, fs), p)  # 入れ子の include・条件に空白のある includeIf（行き先は、ドットのディレクトリとして戻る）
+        self.assertNotIn(str(home / ".gitconfig"), fs["allowRead"])  # symlink の ~/.gitconfig は戻さない（守らない範囲）
+        self.assertFalse([a for a in fs["allowRead"] if Path(a).resolve() == home], fs["allowRead"])  # どの綴りでもホームそのものは戻さない
         self.assertNotIn(str(home / ".config" / "git"), fs["allowRead"])  # ~/.config が symlink なら、Git の XDG の設定は戻さない
 
     def test_claude_read_only_in_worktree_denies_the_common_git_dir(self):
@@ -3594,25 +3619,35 @@ class TestLaunch(unittest.TestCase):
         (home / ".gitconfig").write_text("[include]\n\tpath = .gitconfig-extra\n")
         (home / ".ssh").mkdir()
         (home / ".bash_history_link").symlink_to("/dev/null")  # 行き先がホームの外の symlink は拒まない（/dev/null を拒むことになる）
-        (self.cwd / "bashrc").write_text("x")
-        (home / ".bashrc").symlink_to(self.cwd / "bashrc")  # 行き先が対象の中の symlink は拒まない（dotfiles のリポジトリを審査する）
+        proj = home / "proj"  # ホームの中の対象（dotfiles のリポジトリを審査する）
+        proj.mkdir()
+        (proj / "a.txt").write_text("x\n")  # 偽の子の報告が引く証拠
+        (proj / "bashrc").write_text("x")
+        (home / ".bashrc").symlink_to(proj / "bashrc")  # 行き先は拒む（対象の中のそのファイルも子から読めない。守らない範囲）
+        (home / "dotfiles").mkdir()
+        (home / "dotfiles" / "npmrc").write_text("t")
+        (home / ".npmrc").unlink()
+        (home / ".npmrc").symlink_to(home / "dotfiles" / "npmrc")  # stow の配置。行き先を拒む
+        (home / ".gitconfig").rename(home / ".gitconfig-real")
+        (home / ".gitconfig").symlink_to(home / ".gitconfig-real")  # Git の設定が symlink なら、行き先も Git の設定として拒まない
         (home / ".profile").symlink_to(home / ".npmrc")  # 行き先がホームの中なら拒む
-        rc, rec = self.run_launch("codex", env_extra={"GIT_CONFIG_GLOBAL": str(home / ".gitconfig")})
+        rc, rec = self.run_launch("codex", cwd=proj, env_extra={"GIT_CONFIG_GLOBAL": str(home / ".gitconfig")})
         self.assertEqual((rc, rec["status"]), (0, "ok"), rec)
         rules = fs_rules(json.loads(self.args_file.read_text()))
-        for f in (".npmrc", ".bash_history", ".env.keys", ".cargo/credentials.toml", ".gem/credentials", ".ssh"):
+        for f in (".bash_history", ".env.keys", ".cargo/credentials.toml", ".gem/credentials", ".ssh"):
             self.assertEqual(rules.get(str(home / f)), "deny", f)
         for f in (".gitconfig", ".gitconfig-extra", ".cargo"):  # Git の設定とその include、認証情報の入れ物そのものは読ませる
             self.assertNotIn(str(home / f), rules)
         self.assertNotIn("/dev/null", rules)
-        self.assertNotIn(str((self.cwd / "bashrc").resolve()), rules)
+        self.assertEqual((rules.get(str(proj / "bashrc")), rules.get(str(home / "dotfiles" / "npmrc"))), ("deny", "deny"), rules)
+        self.assertNotIn(str(home / ".gitconfig-real"), rules)  # symlink の ~/.gitconfig の行き先は Git の設定として拒まない
         self.run_launch("claude", extra=["--write"])
         argv = json.loads(self.args_file.read_text())
         reads = json.loads(argv[argv.index("--settings") + 1])["sandbox"]["filesystem"]["denyRead"]
         self.assertEqual(sorted(reads), sorted([str(home / ".ssh"), str(self.cfg)]))  # 在るものだけ。.npmrc・.cargo の認証情報は書く子に読ませる
         self.assertEqual(json.loads(argv[argv.index("--settings") + 1])["sandbox"]["filesystem"]["allowRead"], [])  # 無い ~/.config/git は渡さない
 
-    def test_grok_read_only_denies_the_credential_places_and_gets_a_narrow_env(self):
+    def test_grok_read_only_denies_the_credential_places_keeps_what_it_runs_and_gets_a_narrow_env(self):
         # 読み取り専用の Grok の子は、ホームの認証情報の置き場を読め、親の環境（SSH_AUTH_SOCK・トークン）がそのまま渡っていた（#43）。
         # ~/.config・~/.grok を丸ごと拒むと Grok が起動しないので、Grok 本体・その bin・Git の設定・専用ログインの auth.json・対象と
         # その共通ディレクトリを含む置き場は中を 1 つずつ拒む。無い場所は書かない（Grok は起動を拒まず、ホームに空のファイルを作って残した）。

@@ -1297,6 +1297,40 @@ class TestNotRunDeclaration(unittest.TestCase):
         self.assertIn("監査役", r["reason"])
         self.assertNotIn("--not-run <子が", r["reason"])
 
+    def test_the_hint_is_not_shown_for_ok_records_or_other_places(self):
+        # ok の審査役だけで --interrogate の記録が無い場面と、--delta で別の場所の not-run だけがある場面では、宣言しても通らないので案内しない
+        tok = self.claim()
+        self.commit("src/page.js")
+        self.review_record(self.head())
+        self.review_record(self.head(), audit=True)
+        rc, r = self.publish(tok, "push:feat@1", "--reviewed", self.head(), "--risk", "中:普通のコード")
+        self.assertEqual(rc, 6, r)
+        self.assertIn("--interrogate", r["reason"])
+        self.assertNotIn("--not-run <子が", r["reason"])
+        reviewed = self.head()
+        self.commit("docs/page.md")
+        self.review_record(self.head(), audit=True)
+        self.could_not_run(reviewed, cwd=str(self.repo), interrogate=True)  # 別の場所（元の checkout）を --cwd にした not-run の --interrogate の子
+        rc, r = self.publish(tok, "push:feat@2", "--reviewed", reviewed, "--delta", "低:文だけ", "--risk", "中:普通のコード")
+        self.assertEqual(rc, 6, r)
+        self.assertNotIn("--not-run <子が", r["reason"])
+        self.commit("src/three.js")  # ok の審査役と not-run の審査役（どちらも --interrogate なし）。中の拒否は --interrogate の記録の無さ
+        self.review_record(self.head())
+        self.could_not_run(self.head())
+        self.review_record(self.head(), audit=True)
+        rc, r = self.publish(tok, "push:feat@3", "--reviewed", self.head(), "--risk", "中:普通のコード")
+        self.assertEqual(rc, 6, r)
+        self.assertNotIn("--not-run <子が", r["reason"])
+        self.commit("src/four.js")  # --delta で、この場所の審査が無く、別の場所の not-run の審査役だけがある
+        reviewed = self.head()
+        self.could_not_run(reviewed, cwd=str(self.repo))
+        self.commit("docs/four.md")
+        self.review_record(self.head(), audit=True)
+        rc, r = self.publish(tok, "push:feat@4", "--reviewed", reviewed, "--delta", "低:文だけ")
+        self.assertEqual(rc, 6, r)
+        self.assertIn("審査役の記録が無い", r["reason"])
+        self.assertNotIn("--not-run <子が", r["reason"])
+
     def test_the_declaration_also_counts_an_interrogate_reviewer_that_could_not_run(self):
         # 監査役だけ通しても、危険度が中・高の変更は --interrogate の審査役の記録が無いと止まる
         tok = self.claim()

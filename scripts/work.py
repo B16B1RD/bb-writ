@@ -252,10 +252,11 @@ def not_run_hint(commit: str, cwd=None, role: int = 0) -> str:
     """宣言なしで、その役（0: 審査役、1: --interrogate の審査役、2: 監査役。reviews_of の並びの番号）の記録が無いと拒否するとき、
     その commit に、その役の子が実行できずに not-run で返った記録（execution が no）があれば、宣言のしかたを示す文。
     関門の外で出す（素の git push・gh pr create）道へ行かせないため。宣言しても通らない場面（ほかの役の not-run だけがある）では出さない。"""
-    if not reviews_of(commit, cwd, not_run=True)[role]:
+    found = reviews_of(commit, cwd, not_run=True)[role]  # 呼ぶのはその役の ok の記録が無いときだけなので、見つかるのは not-run の記録
+    if not found:
         return ""
     return ("。この commit には、子が対象の試験・検査を実行できずに not-run で返った記録がある"
-            f"（{reviews_of(commit, cwd, not_run=True)[role][0]}）。"
+            f"（{found[0]}）。"
             "sandbox のせいで子が実行できない（headless Chrome・Node の子プロセス・127.0.0.1 など。写し方を教えれば動くものは除く）なら、"
             "関門の外で出さず、親が HEAD で同じ試験を実行して証拠（コマンド・終了コード・出力）を作業の記録に書き、"
             "--not-run <子が実行できなかった理由> を付けて op run する（監査役はその証拠を判定する。`playbook-deliver`）")
