@@ -1273,6 +1273,30 @@ class TestNotRunDeclaration(unittest.TestCase):
             self.assertIn("push・pr", r["reason"])
         self.assertEqual(self.ops_file(), b"")
 
+    def test_the_hint_shows_only_where_the_declaration_would_count(self):
+        # 案内は、その役の not-run の記録があるときだけ出す（監査役だけが not-run で審査役の記録が無いと、宣言しても通らない）。
+        # 危険度が中・高で、ok の子と not-run の --interrogate の子が混ざったときは、--interrogate の拒否でも出す（#39 の 1 周目の審査）
+        tok = self.claim()
+        self.commit("src/page.js")
+        self.could_not_run(self.head(), audit=True)
+        rc, r = self.publish(tok, "push:feat@1", "--reviewed", self.head())
+        self.assertEqual(rc, 6, r)
+        self.assertIn("審査役の記録が無い", r["reason"])
+        self.assertNotIn("--not-run", r["reason"])
+        self.review_record(self.head())  # ok の審査役（--interrogate なし）
+        self.could_not_run(self.head(), interrogate=True)
+        rc, r = self.publish(tok, "push:feat@1", "--reviewed", self.head(), "--risk", "中:普通のコード")
+        self.assertEqual(rc, 6, r)
+        self.assertIn("--interrogate", r["reason"])
+        self.assertIn("--not-run <子が実行できなかった理由>", r["reason"])
+        self.commit("src/other.js")  # 審査役は ok と not-run、監査役の記録は無い（監査役の拒否では、審査役の not-run を案内しない）
+        self.review_record(self.head())
+        self.could_not_run(self.head())
+        rc, r = self.publish(tok, "push:feat@1", "--reviewed", self.head())
+        self.assertEqual(rc, 6, r)
+        self.assertIn("監査役", r["reason"])
+        self.assertNotIn("--not-run <子が", r["reason"])
+
     def test_the_declaration_also_counts_an_interrogate_reviewer_that_could_not_run(self):
         # 監査役だけ通しても、危険度が中・高の変更は --interrogate の審査役の記録が無いと止まる
         tok = self.claim()
@@ -1431,9 +1455,17 @@ class TestPremiseAfterRounds(unittest.TestCase):
         # ブラウザで試験するリポジトリでは審査がすべて not-run になり、数えないと 3 周の関門が働かない（#39）。宣言の無い push は今のとおり
         self.start()
         heads = [self.commit(f"a{i}") for i in range(3)]
-        for h in heads:
+        for h in heads[:2]:
             self.review_record(h, status="not-run", execution="no")
+        self.review_record(heads[2], status="not-run", execution=...)  # 実行の欄の無い子と not-needed の子は、宣言があっても周に数えない
+        self.review_record(heads[2], status="not-run", execution="not-needed")
         self.review_record(heads[2], status="not-run", execution="no", audit=True)
+        self.note.write_text(FILLED_NOTE, encoding="utf-8")
+        rc, res = self.w("op", "begin", "--dir", str(self.wt), "--token", self.tok, "--key", "push:feat@z", "--what", "x",
+                         "--from", str(self.repo), "--verified", heads[2], "--reviewed", heads[1], "--delta", "低:文だけ",
+                         "--not-run", "headless Chrome が子の sandbox で起動しない")
+        self.assertEqual(rc, 0, res)  # 数える周は 2 つなので、仕組みの要否はまだ求めない
+        self.review_record(heads[2], status="not-run", execution="no")
         def go(key, *extra, premise=None):
             self.note.write_text(FILLED_NOTE + ("" if premise is None else f"{PREMISE_LINE}{premise}\n"), encoding="utf-8")
             return self.w("op", "begin", "--dir", str(self.wt), "--token", self.tok, "--key", key, "--what", "x",
@@ -1443,6 +1475,8 @@ class TestPremiseAfterRounds(unittest.TestCase):
         self.assertEqual(go("push:feat@a", "--not-run", "headless Chrome が子の sandbox で起動しない", premise="比べた")[0], 0)
         rc, res = go("push:feat@b")  # 宣言が無ければ not-run の記録は審査に数えない（周より前に止まる）
         self.assertEqual(rc, 6, res)
+        self.review_record(heads[2])  # ok の審査役を足すと、宣言なしでは周は 1 つだけで、仕組みの要否は求めない
+        self.assertEqual(go("push:feat@b")[0], 0)
 
     def test_audits_do_not_count_as_rounds(self):
         # 監査役は push ごとに立てるので、周に数えると、文書だけの PR でも 3 回目の push で仕組みの要否を求めてしまう

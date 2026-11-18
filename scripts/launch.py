@@ -106,7 +106,8 @@ SECRET_PLACES = (".config", ".ssh", ".gnupg", ".aws", ".docker", ".kube", ".netr
                  ".claude", ".codex", ".grok", ".azure", ".gemini", ".copilot", ".pki")
 # 読み取り専用の子にだけ読ませない、パッケージの取得の認証情報（書く子は依存を取得する役で、非公開のレジストリの認証を失うので読ませる）。
 # ホーム直下のドットのファイル（.npmrc・.pypirc・.bash_history など）は、読み取り専用の子にはすべて読ませない（home_dotfiles）
-READ_ONLY_SECRETS = (".keychain", ".cargo/credentials.toml", ".cargo/credentials", ".gem/credentials", ".gradle/gradle.properties", ".bundle/config")
+READ_ONLY_SECRETS = (".keychain", ".cargo/credentials.toml", ".cargo/credentials", ".gem/credentials", ".gradle/gradle.properties", ".bundle/config",
+                     ".terraform.d/credentials.tfrc.json", ".pulumi/credentials.json", ".mozilla", ".local/share/com.vercel.cli")
 # XML の設定は、認証情報の印があるときだけ拒む（拒んだファイルは子から空に見え、空の NuGet.Config で dotnet nuget list source が
 # 終了コード 1 になった。2026-11-18、偽のホームで）
 MARKED_SECRETS = (".m2/settings.xml", ".nuget/NuGet/NuGet.Config")
@@ -154,27 +155,32 @@ def secret_reads(cfg: Path) -> dict:
 
 
 def git_config_files() -> set[Path]:
-    """読ませる Git の全体の設定のファイル: ~/.gitconfig と、その include.path・includeIf.*.path が指すもの（相対の道筋はホームから）。"""
+    """読ませる Git の全体の設定のファイル: ~/.gitconfig（GIT_CONFIG_GLOBAL で付け替えたもの）と、include.path・includeIf.*.path が
+    指すもの（入れ子の include も。相対の道筋は、それを書いたファイルの置き場から）。symlink なら行き先も。"""
     home = Path.home()
-    try:
-        out = subprocess.run(["git", "config", "--global", "--get-regexp", r"^include(if\..*)?\.path$"], capture_output=True, text=True,
-                             timeout=GIT_TIMEOUT).stdout
-    except (OSError, subprocess.SubprocessError):
-        out = ""
     files = {home / ".gitconfig"}
     if os.environ.get("GIT_CONFIG_GLOBAL") and os.environ["GIT_CONFIG_GLOBAL"] != os.devnull:  # 全体の設定を付け替えた環境
         files.add(Path(os.path.expanduser(os.environ["GIT_CONFIG_GLOBAL"])))
-    for line in out.splitlines():
-        parts = line.split(None, 1)
-        if len(parts) == 2:
-            q = Path(os.path.expanduser(parts[1].strip()))
-            files.add(q if q.is_absolute() else home / q)
-    return files
+    try:  # --null は鍵と値を改行と NUL で区切る（includeIf の条件に空白があっても割れない）。--show-origin は書いたファイル
+        out = subprocess.run(["git", "config", "--global", "--includes", "--show-origin", "--null", "--get-regexp", r"^include(if\..*)?\.path$"],
+                             capture_output=True, text=True, timeout=GIT_TIMEOUT).stdout
+    except (OSError, subprocess.SubprocessError):
+        out = ""
+    parts = out.split("\0")
+    for origin, entry in zip(parts[0::2], parts[1::2]):
+        value = entry.split("\n", 1)[1] if "\n" in entry else ""
+        if not origin.startswith("file:") or not value.strip():
+            continue
+        q = Path(os.path.expanduser(value.strip()))
+        files.add(q if q.is_absolute() else Path(origin[5:]).parent / q)
+    return files | {Path(os.path.realpath(f)) for f in files if os.path.islink(f)}
 
 
 def read_only_secrets() -> list[Path]:
     """読み取り専用の子に読ませない、ホームの下の認証情報の置き場のうち在るもの（XML の設定は印のあるものだけ）と、
-    Git の設定の中の Git の認証情報（credential store の XDG の置き場）。"""
+    Git の設定の中の Git の認証情報（credential store の XDG の置き場）。
+    守らない範囲: 印を探すのは先頭の 1 MiB だけで、UTF-16 の XML と、印の一覧に無い書き方（NuGet の apikeys など）は拒まない。
+    印を探すファイルを FIFO にすると、launcher はそこで止まる。"""
     home = Path.home()
     out = [home / p for p in SECRET_PLACES + READ_ONLY_SECRETS + (".config/git/credentials",) if os.path.lexists(home / p)]
     for p in MARKED_SECRETS:
@@ -189,50 +195,65 @@ def read_only_secrets() -> list[Path]:
 
 def home_dotfiles() -> list[Path]:
     """ホーム直下の、ディレクトリでないドットの場所（.npmrc・.pypirc・.bash_history・.env.keys・.claude.json など。一覧は完成しない）。
-    Git の設定のファイルは除く。読み取り専用の Codex・Grok の子に 1 つずつ拒む（Claude Code の子はホームを丸ごと拒む）。"""
+    Git の設定のファイルと、行き先がホームの外の symlink（~/.bash_history -> /dev/null など。拒むと行き先を拒むことになる）は除く。
+    読み取り専用の Codex・Grok の子に 1 つずつ拒む（Claude Code の子はホームを丸ごと拒む）。"""
     keep = git_config_files()
+    home = Path(os.path.realpath(Path.home()))
     try:
         entries = sorted(Path.home().iterdir())
     except OSError:
         return []
-    return [e for e in entries if e.name.startswith(".") and not e.is_dir() and e not in keep]
+    return [e for e in entries if e.name.startswith(".") and not e.is_dir() and e not in keep
+            and (not e.is_symlink() or home in Path(os.path.realpath(e)).parents)]
 
 
 def claude_reads(cwd: Path, git_dir: Path | None, env: dict, audit: bool) -> dict:
     """読み取り専用の Claude Code の子の Bash の読み。ホームを丸ごと拒み、道具の置き場と対象を戻し、戻した中の認証情報を拒む（#38）。
-    - 戻す: ドットで始まるディレクトリのうち認証情報の一覧に無いもの（symlink も、行き先が認証情報の置き場・ホームでなければ）、
-      PATH のうちホームの下でドットで始まらないもの（bin はその親。親がホームなら bin だけ）、Git の設定のファイルと ~/.config/git、
-      対象と Git の共通ディレクトリ、監査役なら作業の記録・その場所で立てた子の out・bb-writ のスキル
-    - 拒む: ホーム、戻した中の認証情報（.local/share/keyrings・.cargo/credentials.toml など在るもの）、認証情報の置き場が symlink なら
-      その行き先、bb-writ の設定と状態の置き場（戻した対象・記録は、その中でも読める）
+    - 戻す: ドットで始まるディレクトリのうち認証情報の一覧に無いもの、PATH のうちホームの下でドットで始まらないもの（bin はその親。
+      親がホームなら bin だけ）、Git の設定のファイルと ~/.config/git、対象と Git の共通ディレクトリ、監査役なら作業の記録・
+      その場所で立てた子の out・bb-writ のスキル。対象と記録のほかは、行き先（symlink・.. を解いた道筋）がホームそのもの・認証情報の
+      置き場の中・それを含む場所なら戻さない（~/.config/git は、~/.config の中でも、symlink でなければ戻す）。symlink なら行き先も戻す
+    - 拒む: ホーム、認証情報の置き場のうち、戻した場所の中にあるもの（.local/share/keyrings・.cargo/credentials.toml など）と、symlink の
+      置き場の行き先（ホームの中でも外でも）、bb-writ の設定と状態の置き場（戻した対象・記録は、その中でも読める）
     認証情報の一覧だけを拒むと、一覧に無いホーム直下のファイル（.claude.json・.env.keys・.boto など）が読め、ファイル単位の拒否は、
     子の実行中にそのファイルが置き換え（rename）で書き直されると外れた。ディレクトリごと拒むと、どちらも閉じた（2.1.327、2026-11-18）。
+    前の版（対象と道具に至る経路の外をすべて拒む形）より、一覧に無いドットのディレクトリ（.terraform.d の下などの認証情報を含みうる）が
+    新しく読める。見つかったものは READ_ONLY_SECRETS に足した。
     守らない範囲: 戻したドットのディレクトリの中の、一覧に無い認証情報（拒む一覧は完成しない）。戻した中で 1 つずつ拒んだファイルの置き換え。
-    ホームの外（Windows 側の /mnt/c/Users の下など）。ホーム直下のドットのファイルを読む道具（~/.tool-versions など）は落ちる（見つかったら戻す）。"""
+    ホームの外（Windows 側の /mnt/c/Users の下など）。ホーム直下のドットのファイルを読む道具（~/.tool-versions など）は落ちる（見つかったら戻す）。
+    HOME が symlink の道筋で、PATH が実の道筋で書かれた道具は戻らない（子の試験は動かず not-run になる）。"""
     home = Path.home()
+    real_home = Path(os.path.realpath(home))
     secrets = read_only_secrets()
     real_secrets = {Path(os.path.realpath(p)) for p in secrets}
-    under = lambda p, roots: any(p == r or r in p.parents for r in roots)
-    dotdirs = []
-    for e in sorted(home.iterdir()):
-        if not e.name.startswith(".") or not e.is_dir():
-            continue
-        r = Path(os.path.realpath(e))
-        if r == Path(os.path.realpath(home)) or under(r, real_secrets) or (e.is_symlink() and any(r in q.parents for q in real_secrets)):
-            continue  # symlink の行き先が、ホームそのもの・認証情報の置き場の中・それを含む場所
-        dotdirs += [e] + ([r] if e.is_symlink() else [])
+    git_xdg = home / ".config" / "git"
+
+    def safe(a: Path) -> bool:  # 戻してよい道具・設定の置き場か（行き先で決める）
+        r = Path(os.path.realpath(a))
+        if r == real_home or r in real_secrets:
+            return False
+        if a == git_xdg or git_xdg in a.parents:  # ~/.config の中でも、Git の設定は symlink を通らないときだけ戻す
+            return not any(x.is_symlink() for x in (home / ".config", git_xdg, a)) and r == Path(os.path.abspath(a))
+        if any(q in r.parents for q in real_secrets):
+            return False
+        # symlink・.. を通る道筋は、行き先が認証情報の置き場を含むなら戻さない（中の置き場を、通った道筋では拒めない）
+        return not ((a.is_symlink() or r != Path(os.path.abspath(a))) and any(r in q.parents for q in real_secrets))
+
+    dotdirs = [e for e in sorted(home.iterdir()) if e.name.startswith(".") and e.is_dir()]
     tools = []
     for d in env.get("PATH", "").split(os.pathsep):
         q = Path(d)
         if q.is_absolute() and home in q.parents and not q.relative_to(home).parts[0].startswith(".") and q.exists():
             tools.append(q.parent if q.name == "bin" and q.parent != home else q)
+    places = [a for a in [*dotdirs, *tools, *git_config_files(), git_xdg] if os.path.lexists(a) and safe(a)]
+    places += [Path(os.path.realpath(a)) for a in places if Path(os.path.realpath(a)) != a]
     extra = [work_record(cwd), Path(__file__).resolve().parents[1] / "skills", *outs_of_place(cwd)] if audit else []
-    allow = [*dotdirs, *tools, *(g for g in git_config_files() if os.path.lexists(g)), home / ".config" / "git", cwd,
-             *([git_dir] if git_dir else []), *extra]
-    allow = [a for a in allow if os.path.lexists(a)]
+    allow = [*places, *(a for a in [cwd, *([git_dir] if git_dir else []), *extra] if os.path.lexists(a))]
+    real_allow = [Path(os.path.realpath(a)) for a in allow]
     inner = [p for p in secrets if any(a in p.parents for a in allow)]
-    outside = [Path(os.path.realpath(p)) for p in secrets if p.is_symlink() and home not in Path(os.path.realpath(p)).parents]
-    deny = [home, *inner, *outside, config_dir(), state_dir()]
+    inner += [r for r in real_secrets if r != real_home and any(a in r.parents for a in real_allow)]
+    links = [Path(os.path.realpath(p)) for p in secrets if p.is_symlink()]
+    deny = [home, *inner, *links, config_dir(), state_dir()]
     return {"denyRead": list(dict.fromkeys(str(p) for p in deny)), "allowRead": list(dict.fromkeys(str(p) for p in allow))}
 
 
@@ -496,7 +517,9 @@ CODEX_PROFILE = "bbwrit-read-only"
 
 
 def secret_denies(keep: list[Path], targets: list[Path] | None = None) -> list[str]:
-    """読み取り専用の Codex の子に読ませない場所（名前を挙げた認証情報の置き場と専用ログイン。Claude Code の子の denyRead と同じ一覧）。
+    """読み取り専用の Codex・Grok の子に読ませない場所（targets の既定は read_only_secrets と home_dotfiles と専用ログイン。
+    Claude Code の子はホームを丸ごと拒むので、この一覧を使わない）。ホーム直下のドットのファイルの symlink は、行き先が残すものの中に
+    あれば拒まない（対象の中のファイルを指す ~/.bashrc など）。
     -s read-only のころは、子が ~/.config の下を読めた（2026-10-23 の実測）。bwrap は、無い場所・symlink の場所・拒んだ場所の
     下の場所を書くと起動せず（~/.aws が /mnt/c を指す、~/.config の下の専用ログイン）、拒んだ ~/.codex の下に read を書いても
     codex 本体を実行できなかった（0.163.0、Linux）。そこで、あるものだけを symlink を解いた行き先で書き、入れ子は書かず、
@@ -518,8 +541,10 @@ def secret_denies(keep: list[Path], targets: list[Path] | None = None) -> list[s
         else:
             places.add(d)
 
-    # targets の既定は、読み取り専用の子に読ませない一覧（残す Git の設定の中の Git の認証情報を含む）と、ホーム直下のドットのファイル
-    for d in (targets if targets is not None else read_only_secrets() + home_dotfiles()) + [config_dir()]:
+    # targets の既定は、読み取り専用の子に読ませない一覧（残す Git の設定の中の Git の認証情報を含む）と、ホーム直下のドットのファイル。
+    # ドットのファイルの symlink は、行き先が残すものの中（対象の中のファイルを指す ~/.bashrc など）なら拒まない（認証情報の置き場は、行き先によらず拒む）
+    dot = [] if targets is not None else [f for f in home_dotfiles() if not (f.is_symlink() and any(k in Path(os.path.realpath(f)).parents for k in keep))]
+    for d in (targets if targets is not None else read_only_secrets() + dot) + [config_dir()]:
         if os.path.exists(d):
             add(d)
     return sorted(str(d) for d in places if not any(o in d.parents for o in places))
@@ -691,6 +716,8 @@ def command(a, prompt: str, scratch: Path) -> tuple[list[str], dict, str | None]
             for d in grok_ro_writable(state_dir() / "grok-homes"):
                 if a.cwd == d or d in a.cwd.parents or a.cwd in d.parents:
                     return [], env, f"対象と {d} が重なる。Grok の read-only の sandbox はそこへの書き込みを止めないので、読み取り専用にできない"
+            if not os.environ.get("HOME") or Path.home().resolve() == Path("/"):  # ホームの置き場の deny が 1 つも出ない（黙って開かない）
+                return [], env, "HOME が無いか / を指すので、読み取り専用の Grok の子に認証情報の置き場を拒めない"
             # 読みは、読み取り専用の Codex の子と同じ一覧を secret_denies で拒む（#43）。~/.config・~/.grok を丸ごと拒むと Grok が起動しない
             # （「Not signed in」、bwrap の execvp の Permission denied。1.0.89）ので、Grok 本体・その bin・Git の設定・専用ログインの
             # auth.json・対象を含む置き場は中を 1 つずつ拒む。子は Grok 自身が読む専用ログインの auth.json を読める（sandbox はプロセス全体に掛かる）

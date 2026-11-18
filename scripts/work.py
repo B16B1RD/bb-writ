@@ -56,12 +56,12 @@ push・pr は、--reviewed（none: を含む）に関わらず、作業場所の
 push・pr に --not-run <理由>（子が sandbox のせいで対象の試験・検査を実行できなかった理由）を付けると、その commit を対象に
 not-run で返り、子が実行の欄に実行できなかった（execution が no）と書いた記録も、審査役・--interrogate の審査役・監査役と審査の周に数える
 （ブラウザの試験など、子を何回立てても ok の記録ができず、作業者が関門の外で出したため）。実行の欄の無い報告（launcher が読んだだけとして
-not-run にしたもの）は数えない。理由が空なら、push・pr 以外に付けたら拒否する（2）。宣言は ops.jsonl の not_run に残す。宣言の真偽
+not-run にしたもの）は数えない。理由が空か、push・pr 以外に付けたら拒否する（2）。宣言は ops.jsonl の not_run に残す。宣言の真偽
 （教えれば動いた場面か）と、親が HEAD で試験を実行したかは見ず、監査役が判定する。宣言なしで記録が無いと拒否するとき、not-run の記録があれば
 理由の文で宣言のしかたを示す。スキルの要求を読んでいて弱いもので代える・黙って省く（読者役を
 別の目的の読み手で代える、意味の判断を役割の違う agent に見せる）まま、none: で出したため。
 push・pr は、作業の記録（note.md）の目的・制約・確かめ方・指摘の扱いの欄が空か無ければ拒否する（2）。
-審査が 3 周に達していたら（task start の作業場所を --cwd にして launcher で読み取り専用の子（審査役・確かめ役など）を立てて ok で返った、互いに異なる commit が 3 つ）、仕組みの要否の欄も。
+審査が 3 周に達していたら（task start の作業場所を --cwd にして launcher で読み取り専用の子（審査役・確かめ役など）を立てて ok で返った（--not-run の宣言では、not-run で execution が no のものも）、互いに異なる commit が 3 つ）、仕組みの要否の欄も。
 欄が空かどうかだけを見て、中身の真偽・書いた順・どの周の審査の指摘かは見ない。claim・renew は空の欄を note.empty で知らせる（拒否しない）。
 言い直し・記録・指摘の扱いの一覧を飛ばしたまま、長いセッションで作業が進んだため。仕組みの要否は、審査の周ごとに仕組みへ直しを足し、
 仕組みが目的に要るかを誰も問わないまま周が止まらなかったため（原則の文を足すだけでは、長い作業の中で判断が変わらなかった）。
@@ -248,15 +248,14 @@ def reviews_of(commit: str, cwd=None, not_run: bool = False) -> tuple:
     return found, judges, audits, (f"委任の記録 {f} に、読めない行か、out の record.json を読めない行が {broken} 行ある" if broken else "")
 
 
-def not_run_hint(commit: str, cwd=None) -> str:
-    """宣言なしで審査役・監査役の記録が無いと拒否するとき、その commit に、子が実行できずに not-run で返った記録（execution が no）が
-    あれば、宣言のしかたを示す文。関門の外で出す（素の git push・gh pr create）道へ行かせないため。無ければ空。"""
-    ok = set(reviews_of(commit, cwd)[0] + reviews_of(commit, cwd)[2])
-    found, _, audits, _ = reviews_of(commit, cwd, not_run=True)
-    left = [o for o in found + audits if o not in ok]
-    if not left:
+def not_run_hint(commit: str, cwd=None, role: int = 0) -> str:
+    """宣言なしで、その役（0: 審査役、1: --interrogate の審査役、2: 監査役。reviews_of の並びの番号）の記録が無いと拒否するとき、
+    その commit に、その役の子が実行できずに not-run で返った記録（execution が no）があれば、宣言のしかたを示す文。
+    関門の外で出す（素の git push・gh pr create）道へ行かせないため。宣言しても通らない場面（ほかの役の not-run だけがある）では出さない。"""
+    if not reviews_of(commit, cwd, not_run=True)[role]:
         return ""
-    return (f"。この commit には、子が対象の試験・検査を実行できずに not-run で返った記録がある（{left[0]}）。"
+    return ("。この commit には、子が対象の試験・検査を実行できずに not-run で返った記録がある"
+            f"（{reviews_of(commit, cwd, not_run=True)[role][0]}）。"
             "sandbox のせいで子が実行できない（headless Chrome・Node の子プロセス・127.0.0.1 など。写し方を教えれば動くものは除く）なら、"
             "関門の外で出さず、親が HEAD で同じ試験を実行して証拠（コマンド・終了コード・出力）を作業の記録に書き、"
             "--not-run <子が実行できなかった理由> を付けて op run する（監査役はその証拠を判定する。`playbook-deliver`）")
@@ -348,7 +347,7 @@ FIELDS = re.findall(r"^- (.+?):$", NOTE, re.M)  # 雛形の欄の名前
 REQUIRED = FIELDS[:3]  # 担当を取った場で知らせる欄。push・pr の前は、指摘の扱い（監査役をどの push・pr でも立てる）も空なら拒否する
 TRIAGE = FIELDS[3]
 PREMISE = FIELDS[4]
-PREMISE_ROUNDS = 3  # 審査の周（review_rounds。この作業場所を --cwd にして ok で返った読み取り専用の子（審査役・確かめ役など。監査役は除く）の、互いに異なる commit の数）がこの数に達した後は、直しが仕組みに重なっていないかを確かめさせる（interrogate の 5 が前提を疑う 3 周目と同じ数。Important の有無は見ない）
+PREMISE_ROUNDS = 3  # 審査の周（review_rounds。この作業場所を --cwd にして ok で返った（--not-run の宣言では not-run で execution が no も）読み取り専用の子（審査役・確かめ役など。監査役は除く）の、互いに異なる commit の数）がこの数に達した後は、直しが仕組みに重なっていないかを確かめさせる（interrogate の 5 が前提を疑う 3 周目と同じ数。Important の有無は見ない）
 
 
 def field_line(name: str):
@@ -1101,7 +1100,8 @@ def op_step(a, r: Path, live, now: float, action: str):
         if risk.group(1) != "低" and not judges:
             return ({"ok": False, "reason": f"危険度が{risk.group(1)}の変更は interrogate を通す（入口の条件 (6)）。commit {reviewed} の記録に、"
                         "launcher に --interrogate を付けて立てた審査役のものが無い（条件 (5) の子の記録は代わりにならない）。"
-                        "interrogate の 3 の依頼文で、この commit の審査役を --interrogate を付けて立てる"}, 6)
+                        "interrogate の 3 の依頼文で、この commit の審査役を --interrogate を付けて立てる"
+                        + ("" if not_run else not_run_hint(reviewed, a.dir if delta else None, 1))}, 6)
         risk = risk.group(1) + ": " + risk.group(2).strip()
         _, _, audits, unread = reviews_of(head, not_run=bool(not_run))
         if not audits:
@@ -1111,7 +1111,7 @@ def op_step(a, r: Path, live, now: float, action: str):
                         "status が ok で返った記録が要る。指摘は、作業の記録の指摘の扱いの欄に書いてから出す。"
                         "launcher が unavailable で返るなら（専用ログインが無いなど）、その problems の理由に従い、"
                         "bb-writ の README の「任意機能の準備」で専用ログインを用意する"
-                        + ("" if not_run else not_run_hint(head))
+                        + ("" if not_run else not_run_hint(head, role=2))
                         + (f"。{unread}" if unread else "")}, 6)
         audit = audits
         f = r / "note.md"
@@ -1561,7 +1561,7 @@ def main() -> int:
     o.add_argument("--reviewed", help="届ける前の審査を通した commit か none:<理由>（push・pr で必須。commit は作業場所の HEAD と一致させるか、HEAD の祖先にして --delta を付け、その commit を対象に launcher で ok で返った読み取り専用の子（審査役・確かめ役など。監査役は除く）の記録が要る。--risk が中・高なら --interrogate を付けた審査役の記録。どちらでも、HEAD を対象に --audit を付けた監査役の記録も要る）")
     o.add_argument("--delta", help="審査を通した commit（--reviewed）から HEAD までの差分の危険度と理由 低:<理由>（push・pr で、--reviewed の commit が HEAD の祖先のときだけ。中・高なら HEAD で審査を通す）")
     o.add_argument("--not-run", dest="not_run", help="子が sandbox のせいで対象の試験・検査を実行できなかった理由（push・pr だけ。付けると、"
-                   "その commit を対象に not-run で返り、実行の欄に実行できなかった（no）と書いた子の記録も、審査役・監査役と審査の周に数える。"
+                   "その commit を対象に not-run で返り、実行の欄に実行できなかった（no）と書いた子の記録も、審査役・--interrogate の審査役・監査役と審査の周に数える。"
                    "実行の欄の無い報告は数えない。親が HEAD で実行した試験の証拠を作業の記録に書き、監査役に判定させる）")
     o.add_argument("--risk", help="変更の危険度と理由 低|中|高:<理由>（push・pr で必須。中・高は --reviewed none: と一緒に使えない）")
     c = sub.add_parser("check")
