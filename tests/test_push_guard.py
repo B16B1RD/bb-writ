@@ -112,8 +112,14 @@ OUTWARD = ["git push origin main", "GH_CONFIG_DIR=x git -C . push -q origin HEAD
            "git push -o -n origin main", "git push --push-option -n origin main",
            # 二重引用符の中の \" の後と、heredoc が 2 つ・語の前に空白
            'echo "a\\"b"; git push', "cat <<A; cat <<B\na\nA\nb\nB\ngit push", "cat << EOF\nx\nEOF\ngit push",
-           # ( ) の入れ子
-           "(cd a; (b); git push)"]
+           # ( ) の入れ子、置き換えの中の ( )、case の a) の後
+           "(cd a; (b); git push)", 'echo "$( (true); git push)"', "case x in a) git push;; esac",
+           # 二重引用符の中のバッククォート、${…} の入れ子の後
+           'echo "`git push`"', 'echo "${a:-"${b}"}"; git push',
+           # 試すだけでない git push の引数、タブの区切り、語に続く <<、env -S の値
+           "git push --no-verify origin main", "git\tpush", "x<<E\nE\ngit push", "env -S A=1 git push",
+           # 誤って止める所（守らない。AGENTS.md の規則の表）: gh の -h と、副コマンドの前の --help
+           "gh pr create -h", "gh --help pr create"]
 NOT_OUTWARD = ["python3 /p/scripts/work.py op run --dir . --key push:origin/main@abc -- git push origin main",
                'git commit -m "docs: git push の説明を直す"', 'git commit -m "x; git push"', "git commit -m 'a && git push'",
                'echo "次に git push する"', 'grep -n "git push" README.md', "git status", "gh pr view 3", "git pushx",
@@ -141,6 +147,8 @@ NOT_OUTWARD = ["python3 /p/scripts/work.py op run --dir . --key push:origin/main
                "cat <<EOF\n\tEOF\ngit push\nEOF", "cat << EOF\ngit push\nEOF",
                # 代入でない語（名前が識別子でない）の後は、その語がコマンド
                "a-b=c git push",
+               # git でない道具、dotenvx の run でない副コマンド、heredoc の語の引用符と \
+               "gitk push", "dotenvx get X -- git push", 'cat <<"EOF"\ngit push\nEOF', "cat <<\\EOF\ngit push\nEOF",
                # 二重引用符の中の \" の後も引用符の中、heredoc の終わりは完全に一致した行、2 つ目の heredoc の本文
                'echo "a\\"b; git push"', "cat <<EOF\nEOFX\ngit push\nEOF", "cat <<A; cat <<B\na\nA\ngit push\nB",
                # 数だけの語は向け直しでない（読み飛ばさない）
@@ -243,11 +251,17 @@ class TestPushGuard(unittest.TestCase):
         t = self.transcript(BY_SKILL_TOOL)
         stdin = json.dumps({"tool_name": "Bash", "transcript_path": t, "tool_input": {"command": "git push"}})
         # Claude Code と Grok Build と同じく、command を sh で動かし、プラグインの置き場を CLAUDE_PLUGIN_ROOT で渡す
+        unreadable = Path(self.tmp.name) / "unreadable"  # 在るが読めないスクリプト
+        (unreadable / "scripts").mkdir(parents=True)
+        (unreadable / "scripts" / "push_guard.py").write_text("", encoding="utf-8")
+        (unreadable / "scripts" / "push_guard.py").chmod(0)
+        self.addCleanup((unreadable / "scripts" / "push_guard.py").chmod, 0o600)
         spaced = Path(self.tmp.name) / "plugin root"  # 空白のある置き場
         (spaced / "scripts").mkdir(parents=True)
         (spaced / "scripts" / "push_guard.py").write_text(GUARD.read_text(encoding="utf-8"), encoding="utf-8")
         for name, root, denied in (("置き場がある", ROOT, True), ("空白のある置き場", spaced, True),
-                                   ("置き場が消えた", Path(self.tmp.name) / "gone", False), ("置き場が空", "", False)):
+                                   ("置き場が消えた", Path(self.tmp.name) / "gone", False), ("置き場が空", "", False),
+                                   *((("スクリプトが読めない", unreadable, False),) if os.geteuid() != 0 else ())):  # root は読めてしまう
             with self.subTest(name):
                 p = subprocess.run(["sh", "-c", hooks[0]["command"]], input=stdin, capture_output=True, text=True, timeout=30,
                                    env={**os.environ, "CLAUDE_PLUGIN_ROOT": str(root)})
