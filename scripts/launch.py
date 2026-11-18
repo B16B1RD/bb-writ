@@ -212,10 +212,6 @@ def home_dotfiles() -> list[Path]:
             and (not e.is_symlink() or home in Path(os.path.realpath(e)).parents)]
 
 
-class SecretLinkError(Exception):
-    """認証情報の置き場の中の symlink が、子に読ませる対象・記録そのものかその祖先を指す（許可と拒否が同じ深さで並ぶ）。"""
-
-
 def claude_reads(cwd: Path, git_dir: Path | None, env: dict, audit: bool) -> dict:
     """読み取り専用の Claude Code の子の Bash の読み。ホームを丸ごと拒み、道具の置き場と対象を戻し、戻した中の認証情報を拒む（#38）。
     - 戻す: ドットで始まるディレクトリのうち認証情報の一覧に無いもの、PATH のうちホームの下のディレクトリ（bin はその親。
@@ -233,9 +229,10 @@ def claude_reads(cwd: Path, git_dir: Path | None, env: dict, audit: bool) -> dic
     守らない範囲: 戻したドットのディレクトリの中の、一覧に無い認証情報（拒む一覧は完成しない）。戻した中で 1 つずつ拒んだファイルの置き換え。
     ホームの外（Windows 側の /mnt/c/Users の下など）。ホーム直下のドットのファイルを読む道具（~/.tool-versions など）は落ちる（見つかったら戻す）。
     symlink を通る道具・設定（symlink の ~/.nvm・~/.gitconfig・~/.config/git、HOME が symlink の道筋のときのすべて）は戻らない
-    （子の試験は動かず not-run になる。--not-run の宣言で関門を通す）。認証情報の置き場の中の symlink の行き先は、戻した場所の中にあるものだけを拒む
-    （行き先がほかの拒んだ場所なら、そのまま拒まれる）。行き先が対象・記録の中でも拒むので、子は対象のその部分を読めない。行き先が戻す道具・設定の置き場
-    そのものなら、その置き場は戻さない。置き場の 3 段目より深い所に張った symlink の行き先は拒まない。
+    （子の試験は動かず not-run になる。--not-run の宣言で関門を通す）。認証情報の置き場の中に張った symlink（stow の
+    ~/.config/gh -> ~/.dotfiles/gh など）の行き先は、戻したドットのディレクトリの中なら読める（一覧に無いドットのディレクトリの中の認証情報と
+    同じ形。置き場の中を辿って拒む形は、審査の周ごとに対象・道具を読めなくし、起動を止める配置が見つかったので外した）。
+    認証情報の置き場そのものの symlink が対象・共通ディレクトリを指すと、同じ道筋が許可と拒否に並ぶ（どちらが勝つかは確かめていない）。
     PATH の bin の親は丸ごと戻すので、そこが別のリポジトリ（~/Projects/o/bin）なら、その中の .env なども読める。Git の設定の include が指す
     通常のファイルは、何であれ戻す（利用者自身の設定）。"""
     home = Path.home()
@@ -259,27 +256,8 @@ def claude_reads(cwd: Path, git_dir: Path | None, env: dict, audit: bool) -> dic
     gits = [f for f in git_config_files() if f.is_file()]  # Git の設定として戻すのは通常のファイルだけ（include.path=~ でホームを戻さない）
     places = [a for a in [*dotdirs, *tools, *gits, git_xdg] if os.path.lexists(a) and safe(a)]
     extra = [work_record(cwd), Path(__file__).resolve().parents[1] / "skills", *outs_of_place(cwd)] if audit else []
-    links = [r for p in secrets if str(r := Path(os.path.realpath(p))) != str(p)]  # symlink を通る置き場の行き先
-    # 置き場の中の symlink（stow で張った ~/.config/gh -> ~/.dotfiles/gh など）は辿らずに数え、行き先が戻す場所の中なら拒む（戻す場所より深いので拒否が勝つ。対象の中を指すものは、子は対象のその部分を読めない）。
-    # 行き先が戻す場所そのもの・その祖先なら、同じ深さで許可と拒否が並ぶので、道具・設定の置き場は戻さず、対象・共通ディレクトリ・記録なら止める
-    mine = [cwd, *([git_dir] if git_dir else []), *extra]
-    for top in real_secrets:  # 深さは 3 段まで（~/.config/gh のような張り方。全部を辿ると ~/.claude・~/.codex で数秒かかった）
-        if top.is_dir():
-            for root, dirs, files in os.walk(top):
-                for n in dirs + files:
-                    q = Path(root) / n
-                    if not q.is_symlink():
-                        continue
-                    r = Path(os.path.realpath(q))
-                    if any(k == r or r in k.parents for k in mine):
-                        raise SecretLinkError(f"認証情報の置き場の中の {q} が、子に読ませる {r} かその祖先を指すので、読み取り専用の Claude Code の子に"
-                                              "その置き場の中身を拒めない")
-                    places = [a for a in places if not (a == r or r in a.parents)]
-                    if any(a in r.parents for a in [*places, *mine]):
-                        links.append(r)
-                if len(Path(root).relative_to(top).parts) >= 2:  # 3 段目は見てから、その下へ降りない
-                    dirs[:] = []
-    allow = [*places, *mine]  # 対象・共通ディレクトリ・記録（work.root が作る）・スキル・子の out（在るものだけ）は在る
+    links = [r for p in secrets if str(r := Path(os.path.realpath(p))) != str(p) and r.exists()]  # symlink を通る置き場の在る行き先
+    allow = [*places, cwd, *([git_dir] if git_dir else []), *extra]  # 対象・共通ディレクトリ・記録（work.root が作る）・スキル・子の out は在る
     inner = [p for p in secrets if any(a in p.parents for a in allow)]
     own = [config_dir(), state_dir()]
     deny = [home, *([real_home] if real_home != home else []), *inner, *links, *own, *(Path(os.path.realpath(o)) for o in own)]
@@ -711,10 +689,7 @@ def command(a, prompt: str, scratch: Path) -> tuple[list[str], dict, str | None]
             deny = [str(a.cwd), str(Path.home()), str(Path.home().resolve())] + ([str(git_dir), os.path.commonpath([a.cwd, git_dir])] if git_dir else [])
             # 読みは claude_reads（ホームを丸ごと拒み、道具の置き場と対象を戻す）。監査役は、その場所の作業の記録・その場所で立てた
             # 子の out（依頼文と報告）・bb-writ のスキルも読む（ほかの場所の記録は読ませない）
-            try:
-                reads = claude_reads(a.cwd, git_dir, env, a.audit)
-            except SecretLinkError as e:
-                return [], env, str(e)
+            reads = claude_reads(a.cwd, git_dir, env, a.audit)
             # 子の Bash に渡す環境も最小限にする（読み取り専用の子は git と読むコマンドしか使わない）
             env = {k: v for k, v in env.items() if k in READ_ONLY_ENV or k.upper().endswith("_PROXY") or k.startswith("LC_")}
             env["CLAUDE_CONFIG_DIR"] = str(cfg / "claude-home")

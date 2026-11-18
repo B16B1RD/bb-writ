@@ -3467,11 +3467,7 @@ class TestLaunch(unittest.TestCase):
         home = self.home.resolve()
         (home / "a.txt").write_text("x\n")
         (home / ".config" / "gh").mkdir(parents=True)
-        (home / "repo").mkdir()
-        (home / "repo" / "a.txt").write_text("x\n")
-        (home / ".config" / "repo-link").symlink_to(home / "repo")  # 置き場の中の symlink が対象そのものを指す（許可と拒否が同じ深さで並ぶ）
-        for cwd, why in ((home, "ホームそのもの"), (home.parent, "ホームそのもの"), (home / ".config", "認証情報の置き場そのもの"),
-                         (home / "repo", "その置き場の中身を拒めない")):
+        for cwd, why in ((home, "ホームそのもの"), (home.parent, "ホームそのもの"), (home / ".config", "認証情報の置き場そのもの")):
             with self.subTest(cwd=cwd):
                 rc, rec = self.run_launch("claude", cwd=cwd, env_extra={"HOME": str(home)})
                 self.assertEqual(rec["status"], "unavailable", rec)
@@ -3504,6 +3500,7 @@ class TestLaunch(unittest.TestCase):
         (home / ".config").symlink_to(home / ".dotfiles" / "config")  # dotfiles でディレクトリごと symlink にする配置
         (home / ".ssh").symlink_to(home / ".dotfiles" / "ssh")
         (home / ".aws").symlink_to(outside)  # ホームの外の置き場
+        (home / ".kube").symlink_to(home / "gone")  # 行き先の無い置き場の symlink は、無い道筋を拒みに入れない
         (home / ".home-link").symlink_to(home)
         (home / ".gh-link").symlink_to(home / ".dotfiles" / "config" / "gh")  # 認証情報の置き場の中を指す
         cargo = Path(self.tmp.name) / "cargo-elsewhere"  # 親の symlink を通る認証情報（~/.cargo を別のディスクへ）
@@ -3520,31 +3517,16 @@ class TestLaunch(unittest.TestCase):
             (home / f).write_text("")
         (home / ".git-credentials").write_text("[credential]\n\thelper = store\n")  # 正当な Git の設定の形の認証情報のファイル
         (home / ".gitconfig-a").write_text("[include]\n\tpath = .gitconfig-nested\n[includeIf \"gitdir:/nonexistent/\"]\n\tpath = ~\n\tpath = ~/Projects\n")  # ホーム・ディレクトリを指す include（条件が合わないので git は開かない）
-        (home / ".stow" / "hub").mkdir(parents=True)  # 認証情報の置き場の中に張った symlink（stow）の行き先が、戻すドットのディレクトリの中
-        (home / ".stow" / "hub" / "hosts").write_text("t")
-        (home / ".dotfiles" / "config" / "hub").symlink_to(home / ".stow" / "hub")
         state = home / ".local" / "state" / "bbw-real"
         state.mkdir(parents=True)
         (state / "delegations.jsonl").write_text("")
         (home / "state-link").symlink_to(state)  # 状態の置き場を symlink の道筋で渡す
         (home / "Projects" / "other").mkdir(parents=True)  # ディレクトリを指す include は、Git の設定として戻さない
 
-        deep = home / ".dotfiles" / "config" / "a" / "b"  # 置き場の 3 段目のディレクトリの symlink と、4 段目（見ない）
-        (deep / "c").mkdir(parents=True)
-        for n in ("d3", "d4", "f1"):
-            (home / ".stow" / n).mkdir(parents=True)
-        (deep / "dirlink").symlink_to(home / ".stow" / "d3")
-        (deep / "c" / "dirlink").symlink_to(home / ".stow" / "d4")
-        (home / ".stow" / "f1" / "tok").write_text("t")
-        (home / ".dotfiles" / "config" / "token").symlink_to(home / ".stow" / "f1" / "tok")  # 1 段目のファイルの symlink
-        (home / ".stow2").mkdir()  # 戻すドットのディレクトリそのものを指す symlink は、そのディレクトリごと拒む
-        (home / ".stow2" / "tok").write_text("t")
-        (home / ".dotfiles" / "config" / "whole").symlink_to(home / ".stow2")
         proj = home / ".dotfiles" / "proj"  # 戻すドットのディレクトリの中の対象。置き場の中の symlink が対象の中を指しても、対象は読める
         (proj / "skills" / "x").mkdir(parents=True)
         (proj / "a.txt").write_text("x\n")
-        (home / ".claude" / "skills").mkdir(parents=True)
-        (home / ".claude" / "skills" / "x").symlink_to(proj / "skills" / "x")  # 対象の中を指すものも拒む（子はその部分を読めない。守らない範囲）
+
         (home / ".env.keys").write_text("k")
         path = f"{home}/myssh/bin:{home}/bin/../.ssh:{home}/work/bin:{home}/work/..:{home}/.env.keys:{self.bin}:/usr/bin:/bin"  # work/.. はホームそのもの。PATH のファイル
         rc, rec = self.run_launch("claude", path=path, cwd=proj, env_extra={"GIT_CONFIG_GLOBAL": str(home / ".gitconfig"), "BB_WRIT_STATE_DIR": str(home / "state-link")})
@@ -3553,17 +3535,14 @@ class TestLaunch(unittest.TestCase):
         fs = json.loads(argv[argv.index("--settings") + 1])["sandbox"]["filesystem"]
         for p in (home / ".dotfiles" / "config" / "gh", home / ".dotfiles" / "ssh", home / "myssh", home / ".ssh", home / ".git-credentials",
                   outside, home / ".home-link" / ".ssh", home / ".gh-link", cargo / "credentials.toml", home / ".cargo",
-                  home / ".stow" / "hub" / "hosts", state / "delegations.jsonl", home / "Projects" / "other", home / ".env.keys",
-                  home / ".stow" / "d3", home / ".stow" / "f1" / "tok", home / ".stow2" / "tok"):
+                  state / "delegations.jsonl", home / "Projects" / "other", home / ".env.keys"):
             self.assertFalse(claude_readable(p, fs), p)  # 行き先が認証情報の置き場・その中・ホームの外の置き場・ホームそのもの
         for p in (home / ".dotfiles" / "gitconfig", home / ".gitconfig-a", home / ".gitconfig-nested", home / ".gitconfig-work",
                   home / "work", home / ".dotfiles"):
             self.assertTrue(claude_readable(p, fs), p)  # 入れ子の include・条件に空白のある includeIf（行き先は、ドットのディレクトリとして戻る）
-        for p in (proj, proj / "a.txt", home / ".stow" / "d4"):  # 対象は読める。4 段目は見ない（守らない範囲）
+        for p in (proj, proj / "a.txt", proj / "skills" / "x"):  # 対象は読める
             self.assertTrue(claude_readable(p, fs), p)
-        self.assertFalse(claude_readable(proj / "skills" / "x", fs))  # 置き場の中の symlink が指す対象の中（~/.config/gh -> 対象/gh の形）
         self.assertFalse(set(fs["allowRead"]) & set(fs["denyRead"]), fs)  # 同じ道筋を許可と拒否に並べない（同じ深さの勝ち負けは確かめていない）
-        self.assertNotIn(str(home / ".stow2"), fs["allowRead"])  # 置き場の中の symlink が指す戻す場所そのものは、戻さない
         self.assertTrue(all(os.path.lexists(d) for d in fs["denyRead"]), fs["denyRead"])  # 在るものだけ
         self.assertNotIn(str(home / ".gitconfig"), fs["allowRead"])  # symlink の ~/.gitconfig は戻さない（守らない範囲）
         secrets = [home / ".dotfiles" / "config", home / ".dotfiles" / "ssh", cargo, outside]
@@ -3589,15 +3568,19 @@ class TestLaunch(unittest.TestCase):
         from unittest import mock
         home = self.home.resolve()
         common, wt = home / "src" / "repo" / ".git", home / ".local" / "state" / "x" / "wt"
-        for d in (common / "x", wt, home / ".config"):
+        for d in (common, wt, home / "conf"):
             d.mkdir(parents=True)
-        (home / ".config" / "g").symlink_to(common / "x")  # 置き場の中の symlink が、戻す場所（共通ディレクトリ）の中を指すなら拒む
+        (home / "conf" / "global").write_text("")  # GIT_CONFIG_GLOBAL で付け替えた全体の設定
         launch = load_launch()
-        with mock.patch.dict(os.environ, {"HOME": str(home), "BB_WRIT_STATE_DIR": str(home / ".local" / "state" / "x"), "GIT_CONFIG_GLOBAL": os.devnull}):
+        with mock.patch.dict(os.environ, {"HOME": str(home), "BB_WRIT_STATE_DIR": str(home / ".local" / "state" / "x"),
+                                          "GIT_CONFIG_GLOBAL": str(home / "conf" / "global")}):
             fs = launch.claude_reads(wt, common, {"PATH": "/usr/bin"}, False)
+            audit = launch.claude_reads(wt, common, {"PATH": "/usr/bin"}, True)
+        self.assertTrue(claude_readable(home / "conf" / "global", fs))
+        skills = str(ROOT / "skills")
+        self.assertEqual((skills in fs["allowRead"], skills in audit["allowRead"]), (False, True))  # 監査役にだけ bb-writ のスキルを戻す
         self.assertTrue(claude_readable(common, fs) and claude_readable(wt, fs), fs)
         self.assertFalse(claude_readable(home / "src" / "other", fs))
-        self.assertFalse(claude_readable(common / "x", fs))
         self.assertNotIn(str(home / ".config" / "git"), fs["allowRead"])
         self.assertTrue(all(os.path.lexists(a) for a in fs["allowRead"]), fs)
 
