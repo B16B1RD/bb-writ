@@ -451,6 +451,16 @@ def load_launch():
     return launch
 
 
+def claude_readable(p, fs) -> bool:
+    """読み取り専用の Claude Code の子の Bash が p を読めるか。denyRead・allowRead のうち p を含む最も深い規則で決まる
+    （allowRead は拒んだ中を戻し、その中の denyRead はまた拒む。2.1.327 の実物の子で、ホームの拒否・~/.local の戻し・その中の
+    状態の置き場の拒否・その中の対象の戻しが、この順で効いた）。"""
+    p = str(p)
+    rules = [(r, "deny") for r in fs.get("denyRead", [])] + [(r, "allow") for r in fs.get("allowRead", [])]
+    hits = [(len(r), k) for r, k in rules if p == r or p.startswith(r.rstrip("/") + "/")]
+    return not hits or max(hits)[1] == "allow"
+
+
 class TestLaunch(unittest.TestCase):
     def setUp(self):
         # 試験の中から直に呼ぶ git（リポジトリを用意する commit など）と、起こす launcher が、利用者の全体の Git 設定（core.hooksPath など）を
@@ -1859,9 +1869,8 @@ class TestLaunch(unittest.TestCase):
         self.assertTrue({str(self.cwd.resolve()), str(self.home)} <= set(fs["denyWrite"]))
         home = self.home.resolve()
         for secret in (home / ".config" / "gh", home / ".ssh", home / ".claude", home / ".codex", self.cfg):  # gh のトークン・鍵・各 CLI のログイン
-            covered = any(str(secret) == r or str(secret).startswith(r + "/") for r in fs["denyRead"])
-            self.assertTrue(covered, secret)
-        self.assertFalse(any(str(home / ".config" / "git").startswith(r + "/") or str(home / ".config" / "git") == r for r in fs["denyRead"]))
+            self.assertFalse(claude_readable(secret, fs), secret)
+        self.assertTrue(claude_readable(home / ".config" / "git", fs))
         self.assertIn("AGENTS.md・CLAUDE.md", argv[argv.index("-p") + 1])  # 自動で読まれない対象の指示を、資料として読ませる
 
     def record_of(self, d):
@@ -3393,6 +3402,50 @@ class TestLaunch(unittest.TestCase):
         self.assertEqual(sorted(dirs), sorted([self.record_of(wt), str(common / "objects"), str(common / "refs" / "heads" / "bb-writ"),
                                                str(common / "logs" / "refs" / "heads" / "bb-writ"), str(common / "worktrees" / "cx-wt")]))
 
+    def test_claude_read_only_denies_the_whole_home_and_lets_the_tools_back(self):
+        # 認証情報の一覧だけを拒むと、一覧に無いホーム直下のファイル（.claude.json・.env.keys など）が読め、ファイル単位の拒否は
+        # 置き換えで外れた。ホームを丸ごと拒み、道具の置き場と対象を戻す（#38。2.1.327 の実物の子で確かめた形）
+        home = self.home.resolve()
+        self.home = home
+        state = home / ".local" / "state" / "bb-writ"  # 実物の既定の置き場。task start の作業場所はこの中にできる
+        target = state / "worktrees" / "t" / "x"
+        for d in (".nvm/versions/node/v1/bin", ".nvm/versions/node/v1/lib", ".cargo/registry", ".local/share/keyrings", ".local/share/uv",
+                  ".config/gh", ".config/git", ".ssh", ".m2", ".nuget/NuGet", "go-install/go/bin", "bin", "Projects/other", "elsewhere"):
+            (home / d).mkdir(parents=True)
+        target.mkdir(parents=True)
+        subprocess.run(["git", "init", "-q", str(target)], check=True)
+        (target / "a.txt").write_text("x\n")  # 偽の子の報告が引く証拠
+        for f, body in ((".env.keys", "K=1"), (".claude.json", "{}"), (".bash_history", "x"), (".npmrc", "//r/:_authToken=x"),
+                        (".cargo/credentials.toml", "token"), (".gitconfig", "[include]\n\tpath = .gitconfig-extra\n"), (".gitconfig-extra", ""),
+                        (".m2/settings.xml", "<settings><servers><server><password>p</password></server></servers></settings>"),
+                        (".nuget/NuGet/NuGet.Config", "<configuration><packageSources/></configuration>")):  # 印の無い XML は拒まない
+            (home / f).write_text(body)
+        (home / ".secret-link").symlink_to(home / ".ssh")  # 名前が一覧に無くても、行き先が認証情報の置き場なら戻さない
+        (home / ".tools-link").symlink_to(home / "elsewhere")  # 行き先がふつうの場所なら、名前と行き先を戻す
+        path = f"{home}/.nvm/versions/node/v1/bin:{home}/go-install/go/bin:{home}/bin:{self.bin}:/usr/bin:/bin"
+        rc, rec = self.run_launch("claude", cwd=target, path=path,
+                                  env_extra={"BB_WRIT_STATE_DIR": str(state), "GIT_CONFIG_GLOBAL": str(home / ".gitconfig")})
+        self.assertEqual((rc, rec["status"]), (0, "ok"), rec)
+        argv = json.loads(self.args_file.read_text())
+        fs = json.loads(argv[argv.index("--settings") + 1])["sandbox"]["filesystem"]
+        self.assertIn(str(home), fs["denyRead"])
+        for p in (".nvm/versions/node/v1/lib", ".cargo/registry", ".local/share/uv", "go-install/go", "bin", ".gitconfig", ".gitconfig-extra",
+                  ".config/git", ".nuget/NuGet/NuGet.Config", ".tools-link", "elsewhere"):
+            self.assertTrue(claude_readable(home / p, fs), p)  # 道具の置き場（bin の隣）・Git の設定とその include・印の無い XML
+        self.assertTrue(claude_readable(target, fs))  # 拒んだ状態の置き場の中の対象
+        for p in (".env.keys", ".claude.json", ".bash_history", ".npmrc", ".cargo/credentials.toml", ".local/share/keyrings", ".config/gh",
+                  ".ssh", ".m2/settings.xml", ".secret-link", "Projects/other", ".local/state/bb-writ/delegations.jsonl", "go-install"):
+            self.assertFalse(claude_readable(home / p, fs), p)  # 一覧に無いホーム直下のファイル・戻した中の認証情報・ほかのリポジトリ
+        self.assertFalse(claude_readable(self.cfg, fs))  # 専用ログインの置き場（ホームの外に置いても）
+        self.assertFalse(any(p == str(home) for p in fs["allowRead"]))  # bin の親がホームなら bin だけ
+
+    def test_claude_read_only_without_a_home_to_deny_does_not_start(self):
+        for home in ("/", ""):
+            with self.subTest(home=home):
+                rc, rec = self.run_launch("claude", env_extra={"HOME": home})
+                self.assertEqual(rec["status"], "unavailable", rec)
+                self.assertIn("HOME", rec["problems"][0])
+
     def test_claude_read_only_in_worktree_denies_the_common_git_dir(self):
         repo, wt = self.worktree()
         self.run_launch("claude", cwd=wt, env_extra={"MY_SERVICE_TOKEN": "x", "HTTPS_PROXY": "http://p"})
@@ -3404,9 +3457,9 @@ class TestLaunch(unittest.TestCase):
         passed = set(json.loads(Path(str(self.args_file) + ".allenv").read_text()))
         self.assertNotIn("MY_SERVICE_TOKEN", passed)  # 読み取り専用の子の環境は最小限。プロキシは残す
         self.assertTrue({"PATH", "HOME", "HTTPS_PROXY", "CLAUDE_CONFIG_DIR"} <= passed)
-        reads = sandbox["filesystem"]["denyRead"]
-        self.assertNotIn(str(self.home), reads)  # ホーム全体は拒否しない（bwrap が起動しない）
-        self.assertFalse(any(str(wt).startswith(r + "/") or str(wt) == r for r in reads))  # 対象に至る経路は読める
+        fs = sandbox["filesystem"]
+        self.assertIn(str(self.home), fs["denyRead"])  # ホームは丸ごと拒み、対象と共通ディレクトリを戻す（#38）
+        self.assertTrue(claude_readable(wt, fs) and claude_readable((repo / ".git").resolve(), fs))
         self.assertIn(str(self.home), sandbox["filesystem"]["denyWrite"])
         self.assertEqual(Path(str(self.args_file) + ".scrub").read_text(), "")  # SCRUB は許可の方針を default に戻すので使わない
 
@@ -3427,12 +3480,12 @@ class TestLaunch(unittest.TestCase):
                     + json.dumps({"cwd": str(self.cwd.resolve()), "out": str(other)}) + "\n")
         record = Path(self.record_of(wt))
         record.mkdir(parents=True, exist_ok=True)
-        readable = lambda p, reads: not any(str(p) == r or str(p).startswith(r + "/") for r in reads)
+        readable = claude_readable
         for audit in (False, True):
             with self.subTest(audit=audit):
                 self.run_launch("claude", cwd=wt, extra=["--audit"] if audit else [], env_extra={"BB_WRIT_STATE_DIR": str(self.state)})
                 argv = json.loads(self.args_file.read_text())
-                reads = json.loads(argv[argv.index("--settings") + 1])["sandbox"]["filesystem"]["denyRead"]
+                reads = json.loads(argv[argv.index("--settings") + 1])["sandbox"]["filesystem"]
                 self.assertEqual((readable(record, reads), readable(mine, reads)), (audit, audit))
                 self.assertFalse(readable(other, reads))
 
@@ -3477,6 +3530,61 @@ class TestLaunch(unittest.TestCase):
         self.assertEqual(rec["grok_home"], env["GROK_HOME"])  # 再開に使う home を記録する
         compat = {f"GROK_{v}_{c}_ENABLED" for v in ("CLAUDE", "CURSOR") for c in ("AGENTS", "SKILLS", "RULES", "HOOKS", "MCPS")}
         self.assertEqual(env, {"GROK_HOME": env["GROK_HOME"], "GROK_MEMORY": "0", **{k: "false" for k in compat}})
+
+    def test_read_only_codex_also_denies_home_dotfiles_and_package_credentials_but_writers_keep_them(self):
+        # 一覧に無いホーム直下のドットのファイル（.npmrc・.bash_history・.env.keys）とパッケージの取得の認証情報は、読み取り専用の子に
+        # 読ませない（#38・#43）。書く子は依存を取得する役なので、パッケージの認証情報は読ませたまま。書く子の denyRead は在るものだけ
+        home = self.home.resolve()
+        self.home = home
+        (home / ".cargo").mkdir()
+        (home / ".gem").mkdir()
+        for f in (".npmrc", ".bash_history", ".env.keys", ".gitconfig", ".gitconfig-extra", ".cargo/credentials.toml", ".gem/credentials"):
+            (home / f).write_text("x")
+        (home / ".gitconfig").write_text("[include]\n\tpath = .gitconfig-extra\n")
+        (home / ".ssh").mkdir()
+        rc, rec = self.run_launch("codex", env_extra={"GIT_CONFIG_GLOBAL": str(home / ".gitconfig")})
+        self.assertEqual((rc, rec["status"]), (0, "ok"), rec)
+        rules = fs_rules(json.loads(self.args_file.read_text()))
+        for f in (".npmrc", ".bash_history", ".env.keys", ".cargo/credentials.toml", ".gem/credentials", ".ssh"):
+            self.assertEqual(rules.get(str(home / f)), "deny", f)
+        for f in (".gitconfig", ".gitconfig-extra", ".cargo"):  # Git の設定とその include、認証情報の入れ物そのものは読ませる
+            self.assertNotIn(str(home / f), rules)
+        self.run_launch("claude", extra=["--write"])
+        argv = json.loads(self.args_file.read_text())
+        reads = json.loads(argv[argv.index("--settings") + 1])["sandbox"]["filesystem"]["denyRead"]
+        self.assertEqual(sorted(reads), sorted([str(home / ".ssh"), str(self.cfg)]))  # 在るものだけ。.npmrc・.cargo の認証情報は書く子に読ませる
+
+    def test_grok_read_only_denies_the_credential_places_and_gets_a_narrow_env(self):
+        # 読み取り専用の Grok の子は、ホームの認証情報の置き場を読め、親の環境（SSH_AUTH_SOCK・トークン）がそのまま渡っていた（#43）。
+        # ~/.config・~/.grok を丸ごと拒むと Grok が起動しないので、Grok 本体・その bin・Git の設定・専用ログインの auth.json・対象を
+        # 含む置き場は中を 1 つずつ拒む。無い場所は書かない（Grok は起動を拒まず、ホームに空のファイルを作って残した）
+        home = self.home.resolve()
+        self.home = home
+        for d in (".ssh", ".config/gh", ".config/git", ".grok/bin", ".grok/sessions", "elsewhere", ".nvm/bin"):
+            (home / d).mkdir(parents=True)
+        for f in (".grok/auth.json", ".bash_history", ".npmrc", ".env.keys", ".gitconfig", ".config/git/credentials"):
+            (home / f).write_text("x")
+        (home / ".aws").symlink_to(home / "elsewhere")
+        target = self.grok_target()
+        rc, rec = self.run_launch("grok", cwd=target, env_extra={"SSH_AUTH_SOCK": "/s", "DBUS_SESSION_BUS_ADDRESS": "unix:path=/d",
+                                                                 "MY_SERVICE_TOKEN": "x", "XDG_RUNTIME_DIR": "/run/user/1", "LANG": "C.UTF-8"})
+        self.assertEqual((rc, rec["status"]), (0, "ok"), rec)
+        argv, env = self.grok_argv()
+        profile = self.grok_profile_of(argv, env)
+        deny = json.loads(profile.split("deny = ", 1)[1].splitlines()[0])
+        expect = {home / ".ssh", home / ".config" / "gh", home / ".config" / "git" / "credentials", home / ".grok" / "auth.json",
+                  home / ".grok" / "sessions", home / ".bash_history", home / ".npmrc", home / ".env.keys", home / "elsewhere",
+                  self.cfg.resolve() / ".env", self.cfg.resolve() / ".env.keys", self.cfg.resolve() / "codex-home"}
+        self.assertTrue({str(p) for p in expect} <= set(deny), deny)
+        for kept in (home / ".config" / "git", home / ".grok" / "bin", home / ".gitconfig", self.cfg.resolve() / "grok-auth" / "auth.json",
+                     target.resolve(), home / ".nvm", home):
+            self.assertFalse(any(d == str(kept) or kept.is_relative_to(d) for d in deny), kept)  # 残すものとそれを含む置き場は拒まない
+        self.assertTrue(all(os.path.lexists(d) for d in deny), deny)  # 在るものだけ
+        passed = set(json.loads(Path(str(self.args_file) + ".allenv").read_text()))
+        self.assertFalse({"SSH_AUTH_SOCK", "DBUS_SESSION_BUS_ADDRESS", "MY_SERVICE_TOKEN", "XDG_RUNTIME_DIR"} & passed, passed)
+        self.assertTrue({"PATH", "HOME", "LANG", "GROK_HOME"} <= passed, passed)
+        rc, rec = self.run_launch("grok", extra=["--write"], cwd=target)  # 書く子は変えない（別に扱う）
+        self.assertNotIn("deny = ", self.grok_profile_of(*self.grok_argv()))
 
     def test_grok_parent_api_key_is_not_passed(self):
         self.run_launch("grok", cwd=self.grok_target(), env_extra={"XAI_API_KEY": "k"})

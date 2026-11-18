@@ -100,10 +100,17 @@ def state_dir() -> Path:
     return Path(os.environ.get("BB_WRIT_STATE_DIR", Path.home() / ".local" / "state" / "bb-writ"))
 
 
-# 読み取り専用の子に読ませない、ホームの下の認証情報の置き場（gh・dotenvx の鍵・専用ログインは ~/.config の下）。
+# 子に読ませない、ホームの下の認証情報の置き場（gh・dotenvx の鍵・専用ログインは ~/.config の下）。書く子にも効く。
 # ~/.local/share 全体は拒否しない（uv・mise・pipx の道具がそこにある）
 SECRET_PLACES = (".config", ".ssh", ".gnupg", ".aws", ".docker", ".kube", ".netrc", ".git-credentials", ".local/share/keyrings",
-                 ".claude", ".codex", ".grok")
+                 ".claude", ".codex", ".grok", ".azure", ".gemini", ".copilot", ".pki")
+# 読み取り専用の子にだけ読ませない、パッケージの取得の認証情報（書く子は依存を取得する役で、非公開のレジストリの認証を失うので読ませる）。
+# ホーム直下のドットのファイル（.npmrc・.pypirc・.bash_history など）は、読み取り専用の子にはすべて読ませない（home_dotfiles）
+READ_ONLY_SECRETS = (".keychain", ".cargo/credentials.toml", ".cargo/credentials", ".gem/credentials", ".gradle/gradle.properties", ".bundle/config")
+# XML の設定は、認証情報の印があるときだけ拒む（拒んだファイルは子から空に見え、空の NuGet.Config で dotnet nuget list source が
+# 終了コード 1 になった。2026-11-18、偽のホームで）
+MARKED_SECRETS = (".m2/settings.xml", ".nuget/NuGet/NuGet.Config")
+SECRET_MARK = re.compile(rb"<password|<privateKey|<passphrase|packageSourceCredentials|ClearTextPassword", re.I)
 # Grok は ~/.claude・~/.cursor の指示・スキル・hook・MCP も読む。子に利用者の個人設定を渡さない（1.0.63 で、切らないと子が利用者の呼び名を使った）
 GROK_COMPAT_OFF = {f"GROK_{v}_{c}_ENABLED": "false" for v in ("CLAUDE", "CURSOR") for c in ("AGENTS", "SKILLS", "RULES", "HOOKS", "MCPS")}
 # sandbox を適用できないときの警告（1.0.63 の実物の文言は "warning: sandbox could not be applied: …"）。独自の profile は適用できなければ起動を拒むが、警告の行は念のため結果を捨てる理由にする
@@ -138,32 +145,95 @@ def outs_of_place(cwd: Path) -> list[Path]:
             and isinstance(r.get("out"), str) and os.path.isabs(r["out"]) and Path(r["out"]).is_dir()]
 
 
-def outside_reads(keep: list[Path]) -> list[str]:
-    """ホームの下で、keep のどれにも至らない場所。keep に至る経路の上の兄弟だけを並べ、経路そのものは拒否しない。"""
-    keep_set = {p.resolve() for p in keep}
-    out = []
+def secret_reads(cfg: Path) -> dict:
+    """書く子の Bash に読ませない認証情報の置き場（専用ログインの置き場は ~/.config の外にも置ける）。Git の設定だけは読ませる。
+    在るものだけを渡す（無い場所を渡すと、sandbox がホームに空の場所を作り、時間切れで止めると残る）。"""
+    git = Path.home() / ".config" / "git"
+    return {"denyRead": [str(Path.home() / p) for p in SECRET_PLACES if os.path.lexists(Path.home() / p)] + [str(cfg)],
+            "allowRead": [str(git)] if os.path.lexists(git) else []}
 
-    def walk(d: Path):
+
+def git_config_files() -> set[Path]:
+    """読ませる Git の全体の設定のファイル: ~/.gitconfig と、その include.path・includeIf.*.path が指すもの（相対の道筋はホームから）。"""
+    home = Path.home()
+    try:
+        out = subprocess.run(["git", "config", "--global", "--get-regexp", r"^include(if\..*)?\.path$"], capture_output=True, text=True,
+                             timeout=GIT_TIMEOUT).stdout
+    except (OSError, subprocess.SubprocessError):
+        out = ""
+    files = {home / ".gitconfig"}
+    if os.environ.get("GIT_CONFIG_GLOBAL") and os.environ["GIT_CONFIG_GLOBAL"] != os.devnull:  # 全体の設定を付け替えた環境
+        files.add(Path(os.path.expanduser(os.environ["GIT_CONFIG_GLOBAL"])))
+    for line in out.splitlines():
+        parts = line.split(None, 1)
+        if len(parts) == 2:
+            q = Path(os.path.expanduser(parts[1].strip()))
+            files.add(q if q.is_absolute() else home / q)
+    return files
+
+
+def read_only_secrets() -> list[Path]:
+    """読み取り専用の子に読ませない、ホームの下の認証情報の置き場のうち在るもの（XML の設定は印のあるものだけ）と、
+    Git の設定の中の Git の認証情報（credential store の XDG の置き場）。"""
+    home = Path.home()
+    out = [home / p for p in SECRET_PLACES + READ_ONLY_SECRETS + (".config/git/credentials",) if os.path.lexists(home / p)]
+    for p in MARKED_SECRETS:
         try:
-            entries = sorted(d.iterdir())
+            with open(home / p, "rb") as f:
+                if SECRET_MARK.search(f.read(1 << 20)):
+                    out.append(home / p)
         except OSError:
-            return
-        for e in entries:
-            r = e.resolve() if e.is_symlink() else e
-            if r in keep_set:
-                continue
-            if not e.is_symlink() and any(e in k.parents for k in keep_set):
-                walk(e)
-            else:
-                out.append(str(e))
-
-    walk(Path.home().resolve())
+            continue
     return out
 
 
-def secret_reads(cfg: Path) -> dict:
-    """子の Bash に読ませない認証情報の置き場（専用ログインの置き場は ~/.config の外にも置ける）。Git の設定だけは読ませる。"""
-    return {"denyRead": [str(Path.home() / p) for p in SECRET_PLACES] + [str(cfg)], "allowRead": [str(Path.home() / ".config" / "git")]}
+def home_dotfiles() -> list[Path]:
+    """ホーム直下の、ディレクトリでないドットの場所（.npmrc・.pypirc・.bash_history・.env.keys・.claude.json など。一覧は完成しない）。
+    Git の設定のファイルは除く。読み取り専用の Codex・Grok の子に 1 つずつ拒む（Claude Code の子はホームを丸ごと拒む）。"""
+    keep = git_config_files()
+    try:
+        entries = sorted(Path.home().iterdir())
+    except OSError:
+        return []
+    return [e for e in entries if e.name.startswith(".") and not e.is_dir() and e not in keep]
+
+
+def claude_reads(cwd: Path, git_dir: Path | None, env: dict, audit: bool) -> dict:
+    """読み取り専用の Claude Code の子の Bash の読み。ホームを丸ごと拒み、道具の置き場と対象を戻し、戻した中の認証情報を拒む（#38）。
+    - 戻す: ドットで始まるディレクトリのうち認証情報の一覧に無いもの（symlink も、行き先が認証情報の置き場・ホームでなければ）、
+      PATH のうちホームの下でドットで始まらないもの（bin はその親。親がホームなら bin だけ）、Git の設定のファイルと ~/.config/git、
+      対象と Git の共通ディレクトリ、監査役なら作業の記録・その場所で立てた子の out・bb-writ のスキル
+    - 拒む: ホーム、戻した中の認証情報（.local/share/keyrings・.cargo/credentials.toml など在るもの）、認証情報の置き場が symlink なら
+      その行き先、bb-writ の設定と状態の置き場（戻した対象・記録は、その中でも読める）
+    認証情報の一覧だけを拒むと、一覧に無いホーム直下のファイル（.claude.json・.env.keys・.boto など）が読め、ファイル単位の拒否は、
+    子の実行中にそのファイルが置き換え（rename）で書き直されると外れた。ディレクトリごと拒むと、どちらも閉じた（2.1.327、2026-11-18）。
+    守らない範囲: 戻したドットのディレクトリの中の、一覧に無い認証情報（拒む一覧は完成しない）。戻した中で 1 つずつ拒んだファイルの置き換え。
+    ホームの外（Windows 側の /mnt/c/Users の下など）。ホーム直下のドットのファイルを読む道具（~/.tool-versions など）は落ちる（見つかったら戻す）。"""
+    home = Path.home()
+    secrets = read_only_secrets()
+    real_secrets = {Path(os.path.realpath(p)) for p in secrets}
+    under = lambda p, roots: any(p == r or r in p.parents for r in roots)
+    dotdirs = []
+    for e in sorted(home.iterdir()):
+        if not e.name.startswith(".") or not e.is_dir():
+            continue
+        r = Path(os.path.realpath(e))
+        if r == Path(os.path.realpath(home)) or under(r, real_secrets) or (e.is_symlink() and any(r in q.parents for q in real_secrets)):
+            continue  # symlink の行き先が、ホームそのもの・認証情報の置き場の中・それを含む場所
+        dotdirs += [e] + ([r] if e.is_symlink() else [])
+    tools = []
+    for d in env.get("PATH", "").split(os.pathsep):
+        q = Path(d)
+        if q.is_absolute() and home in q.parents and not q.relative_to(home).parts[0].startswith(".") and q.exists():
+            tools.append(q.parent if q.name == "bin" and q.parent != home else q)
+    extra = [work_record(cwd), Path(__file__).resolve().parents[1] / "skills", *outs_of_place(cwd)] if audit else []
+    allow = [*dotdirs, *tools, *(g for g in git_config_files() if os.path.lexists(g)), home / ".config" / "git", cwd,
+             *([git_dir] if git_dir else []), *extra]
+    allow = [a for a in allow if os.path.lexists(a)]
+    inner = [p for p in secrets if any(a in p.parents for a in allow)]
+    outside = [Path(os.path.realpath(p)) for p in secrets if p.is_symlink() and home not in Path(os.path.realpath(p)).parents]
+    deny = [home, *inner, *outside, config_dir(), state_dir()]
+    return {"denyRead": list(dict.fromkeys(str(p) for p in deny)), "allowRead": list(dict.fromkeys(str(p) for p in allow))}
 
 
 def home_entries(skip: list[Path]) -> tuple[set[str], set[str], set[str]]:
@@ -400,7 +470,7 @@ def copy_grok_session(src: Path, old: Path, new: Path) -> None:
                 shutil.copyfile(os.path.join(top, f), to / f)
 
 
-def grok_home(login: Path, extends: str, read_write: list[Path]) -> tuple[Path, str]:
+def grok_home(login: Path, extends: str, read_write: list[Path], deny: list[str] | None = None) -> tuple[Path, str]:
     """起動ごとの GROK_HOME を作り、(場所, profile 名) を返す。Grok の sandbox は read-only でも GROK_HOME に書けるので、
     sandbox.toml・config.toml・hooks・trusted_folders.toml を後の子と共有しない。共有するのはログインの auth.json（symlink）だけ。
     子が置き換えうるので、home の auth.json を専用ログインへ書き戻すことはしない。
@@ -415,14 +485,17 @@ def grok_home(login: Path, extends: str, read_write: list[Path]) -> tuple[Path, 
         raise OSError(f"起動ごとの home {home} の排他を取れない（{lost}）")
     (home / "auth.json").symlink_to(login / "auth.json")
     rw = [str(p.resolve()) for p in read_write]
-    (home / "sandbox.toml").write_text(f'[profiles.bbwrit]\nextends = "{extends}"\nread_write = {json.dumps(rw)}\n', encoding="utf-8")
+    toml = f'[profiles.bbwrit]\nextends = "{extends}"\nread_write = {json.dumps(rw)}\n'
+    if deny is not None:  # Linux では bubblewrap の bind で読みと書きを拒む（公式文書 18-sandbox）。無い場所を書くと、ホームに空のファイルを作って残した
+        toml += f"deny = {json.dumps(deny, ensure_ascii=False)}\n"
+    (home / "sandbox.toml").write_text(toml, encoding="utf-8")
     return home, "bbwrit"
 
 
 CODEX_PROFILE = "bbwrit-read-only"
 
 
-def secret_denies(keep: list[Path]) -> list[str]:
+def secret_denies(keep: list[Path], targets: list[Path] | None = None) -> list[str]:
     """読み取り専用の Codex の子に読ませない場所（名前を挙げた認証情報の置き場と専用ログイン。Claude Code の子の denyRead と同じ一覧）。
     -s read-only のころは、子が ~/.config の下を読めた（2026-10-23 の実測）。bwrap は、無い場所・symlink の場所・拒んだ場所の
     下の場所を書くと起動せず（~/.aws が /mnt/c を指す、~/.config の下の専用ログイン）、拒んだ ~/.codex の下に read を書いても
@@ -445,8 +518,8 @@ def secret_denies(keep: list[Path]) -> list[str]:
         else:
             places.add(d)
 
-    # 残す Git の設定の中の、Git の認証情報（credential store の XDG の置き場）も拒む
-    for d in [Path.home() / place for place in SECRET_PLACES + (".config/git/credentials",)] + [config_dir()]:
+    # targets の既定は、読み取り専用の子に読ませない一覧（残す Git の設定の中の Git の認証情報を含む）と、ホーム直下のドットのファイル
+    for d in (targets if targets is not None else read_only_secrets() + home_dotfiles()) + [config_dir()]:
         if os.path.exists(d):
             add(d)
     return sorted(str(d) for d in places if not any(o in d.parents for o in places))
@@ -578,14 +651,12 @@ def command(a, prompt: str, scratch: Path) -> tuple[list[str], dict, str | None]
             git_dir, why = grok_git_dir(a.cwd)
             if why:
                 return [], env, why
+            if not os.environ.get("HOME") or Path.home().resolve() == Path("/"):  # ホームを丸ごと拒むと / を拒むことになる
+                return [], env, "HOME が無いか / を指すので、読み取り専用の Claude Code の子の読みを絞れない"
             deny = [str(a.cwd), str(Path.home())] + ([str(git_dir), os.path.commonpath([a.cwd, git_dir])] if git_dir else [])
-            # 読みは、ホームのうち対象・共通ディレクトリ・Git の設定・PATH 上の道具に至る経路の外を拒否する（名前を挙げた置き場の外にある
-            # 別のリポジトリの .env なども読ませない）。ホーム全体を拒否して対象だけ戻すと、bwrap が対象の中の保護ファイルを作れずに起動しなかった（同日）
-            home = Path.home()
-            keep = [a.cwd, *([git_dir] if git_dir else []), home / ".gitconfig", home / ".config" / "git",
-                    *(Path(d) for d in env.get("PATH", "").split(os.pathsep) if d.startswith(str(home)))]
-            if a.audit:  # 監査役は、その場所の作業の記録・その場所で立てた子の out（依頼文と報告）・bb-writ のスキルを読む（ほかの場所の記録は読ませない）
-                keep += [work_record(a.cwd), Path(__file__).resolve().parents[1] / "skills", *outs_of_place(a.cwd)]
+            # 読みは claude_reads（ホームを丸ごと拒み、道具の置き場と対象を戻す）。監査役は、その場所の作業の記録・その場所で立てた
+            # 子の out（依頼文と報告）・bb-writ のスキルも読む（ほかの場所の記録は読ませない）
+            reads = claude_reads(a.cwd, git_dir, env, a.audit)
             # 子の Bash に渡す環境も最小限にする（読み取り専用の子は git と読むコマンドしか使わない）
             env = {k: v for k, v in env.items() if k in READ_ONLY_ENV or k.upper().endswith("_PROXY") or k.startswith("LC_")}
             env["CLAUDE_CONFIG_DIR"] = str(cfg / "claude-home")
@@ -593,7 +664,7 @@ def command(a, prompt: str, scratch: Path) -> tuple[list[str], dict, str | None]
             perm = ["--permission-mode", "dontAsk", "--restricted", "--tools", "Read,Grep,Glob,Bash,Skill"]
             settings = {"permissions": {"allow": ["Read", "Grep", "Glob", "Bash", "Skill"]},
                         "sandbox": {"enabled": True, "allowUnsandboxedCommands": False, "failIfUnavailable": True,
-                                    "filesystem": {"denyWrite": sorted(set(deny)), "denyRead": outside_reads(keep) + [str(cfg)]},
+                                    "filesystem": {"denyWrite": sorted(set(deny)), **reads},
                                     "credentials": secret_env(env)}}
         cmd = ["dotenvx", "run", "-q", "-f", str(env_file), "-fk", str(keys), "--",
                "claude", "-p", prompt, "--output-format", "json", "--model", a.model, "--effort", a.effort,
@@ -620,11 +691,22 @@ def command(a, prompt: str, scratch: Path) -> tuple[list[str], dict, str | None]
             for d in grok_ro_writable(state_dir() / "grok-homes"):
                 if a.cwd == d or d in a.cwd.parents or a.cwd in d.parents:
                     return [], env, f"対象と {d} が重なる。Grok の read-only の sandbox はそこへの書き込みを止めないので、読み取り専用にできない"
-            home, profile = grok_home(login, "read-only", [])
+            # 読みは、読み取り専用の Codex の子と同じ一覧を secret_denies で拒む（#43）。~/.config・~/.grok を丸ごと拒むと Grok が起動しない
+            # （「Not signed in」、bwrap の execvp の Permission denied。1.0.89）ので、Grok 本体・その bin・Git の設定・専用ログインの
+            # auth.json・対象を含む置き場は中を 1 つずつ拒む。子は Grok 自身が読む専用ログインの auth.json を読める（sandbox はプロセス全体に掛かる）
+            git_dir, why = grok_git_dir(a.cwd)
+            if why:
+                return [], env, why
+            keep = [Path(os.path.realpath(shutil.which("grok"))), Path.home() / ".grok" / "bin", Path.home() / ".config" / "git",
+                    login / "auth.json", a.cwd, *([git_dir] if git_dir else [])]
+            home, profile = grok_home(login, "read-only", [], secret_denies(keep))
         if src:
             copy_grok_session(src, a.grok_home, home)
         # 親の GROK_*（GROK_AGENT・GROK_SANDBOX・GROK_CONFIG など）と API キーを渡さない。API キーがあるとログインの代わりに別料金の API へ落ちる
         env = {k: v for k, v in env.items() if not k.startswith("GROK_") and k not in ("XAI_API_KEY", "RUST_LOG")}
+        if not a.write:  # 読み取り専用の子の環境は、読み取り専用の Codex の子と同じ許可の一覧だけ（SSH_AUTH_SOCK・D-Bus・親のトークンが渡っていた。#43）
+            secret = {e["name"] for e in secret_env(env)["envVars"]}
+            env = {k: v for k, v in env.items() if (k in READ_ONLY_ENV or k.upper().endswith("_PROXY") or k.startswith("LC_")) and k not in secret}
         env.update(GROK_HOME=str(home), GROK_MEMORY="0", **GROK_COMPAT_OFF)
         cmd = ["grok", "-p", prompt, "--output-format", "json", "-m", a.model, "--effort", a.effort, "--cwd", str(a.cwd),
                "--sandbox", profile, "--always-approve",
