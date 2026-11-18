@@ -103,7 +103,9 @@ OUTWARD = ["git push origin main", "GH_CONFIG_DIR=x git -C . push -q origin HEAD
            "git --namespace n push", "git --exec-path /x push", "git --super-prefix p push", "git --config-env a=B push",
            # 向け直しの演算子だけの語は、次の語が行き先
            "< in.txt git push", ">> log.txt git push", ">& log.txt git push", "<& 0 git push", ">| f git push",
-           "git push>/dev/null", "git >out push", "git 2>err push", "gh pr create>out.txt",
+           "git push>/dev/null", "git >out push", "git > out push", "git 2>err push", "gh pr create>out.txt",
+           "stdbuf -i 0 git push", "stdbuf -e 0 git push", "git -C '' push",
+           "git push --receive-pack -n origin main", "git push --exec -n origin main", "git push --repo -n main",
            # git push の値を取る引数の値は、試すだけ・使い方の指定でない
            "git push -o -n origin main", "git push --push-option -n origin main",
            # 二重引用符の中の \" の後と、heredoc が 2 つ・語の前に空白
@@ -130,7 +132,11 @@ NOT_OUTWARD = ["python3 /p/scripts/work.py op run --dir . --key push:origin/main
                "cat <<EOF\n EOF \ngit push\nEOF", "cat <<EOF\n  EOF\ngit push\nEOF",
                # 外へ何も出さない
                "git push --dry-run", "git push -n origin main", "gh pr create --help", "git push -h",
-               "git --help push", "git -h push",
+               "git --help push", "git -h push", "git push --help",
+               # 空の一重引用符もコマンドの名前の語（bash は空の名前のコマンドを探して失敗し、git は起きない）
+               "'' git push",
+               # << は終わりの行のタブを外さない（本文が続く）、<< と語の間の空白の後でも本文は読まない
+               "cat <<EOF\n\tEOF\ngit push\nEOF", "cat << EOF\ngit push\nEOF",
                # 代入でない語（名前が識別子でない）の後は、その語がコマンド
                "a-b=c git push",
                # 二重引用符の中の \" の後も引用符の中、heredoc の終わりは完全に一致した行、2 つ目の heredoc の本文
