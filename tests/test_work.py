@@ -3315,7 +3315,8 @@ class TestOpRun(unittest.TestCase):
                         "time.sleep(2.5); print('left', int(json.load(open(f))['expires_at'] - time.time()))")
                 rc, r = self.run_op(tok, f"push:feat@{shift}", "--reviewed", self.head(), *self.script(body))
                 self.assertEqual(rc, 0, r)
-                self.assertGreater(int(r["op"]["result"].split("left ")[1].split()[0]), 20 * 60 - 5)  # 20 分先まで
+                # 20 分先まで（延ばさなければ 5 分か切れたまま）。19 分で見る（WSL2 の壁時計は約 35 秒ごとに +2.3 秒飛び、5 秒の余裕では揺れた）
+                self.assertGreater(int(r["op"]["result"].split("left ")[1].split()[0]), 19 * 60)
 
     def test_the_output_file_is_removed_after_it_is_read(self):
         tok = self.claim()
