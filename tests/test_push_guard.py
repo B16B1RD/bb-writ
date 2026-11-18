@@ -109,10 +109,9 @@ OUTWARD = ["git push origin main", "GH_CONFIG_DIR=x git -C . push -q origin HEAD
            "git push>/dev/null", "git >out push", "git > out push", "git 2>err push", "gh pr create>out.txt",
            # 前置き・大域の引数の値（空の一重引用符も値の語）
            "stdbuf -i 0 git push", "stdbuf -e 0 git push", "git -C '' push",
-           # git push の値を取る引数の値は、試すだけの指定でない
-           "git push --receive-pack -n origin main", "git push --exec -n origin main", "git push --repo -n main",
            # git push の値を取る引数の値は、試すだけ・使い方の指定でない
-           "git push -o -n origin main", "git push --push-option -n origin main",
+           "git push -o -n origin main", "git push --push-option -n origin main", "git push --receive-pack -n origin main",
+           "git push --exec -n origin main", "git push --repo -n main",
            # 二重引用符の中の \" の後と、heredoc が 2 つ・語の前に空白
            'echo "a\\"b"; git push', "cat <<A; cat <<B\na\nA\nb\nB\ngit push", "cat << EOF\nx\nEOF\ngit push",
            # ( ) の入れ子、置き換えの中の ( ) を閉じた後、プロセスの置き換え、case の a) の後
@@ -120,9 +119,11 @@ OUTWARD = ["git push origin main", "GH_CONFIG_DIR=x git -C . push -q origin HEAD
            "case x in a) git push;; esac",
            # 二重引用符の中のバッククォート、${…} の入れ子の後
            'echo "`git push`"', 'echo "${a:-"${b}"}"; git push',
-           # 試すだけの指定でない git push の引数、タブの区切り、語に続く <<、env -S・--split-string の値
-           "git push --no-verify origin main", "git\tpush", "x<<E\nE\ngit push", "env -S x git push",
-           "env --split-string x git push",
+           # 試すだけの指定でない git push の引数、タブの区切り、語に続く <<
+           "git push --no-verify origin main", "git\tpush", "x<<E\nE\ngit push",
+           # env -S・--split-string は値を 1 語として読み飛ばす（本物の env はその値を命令にするので、これは誤って止める側。
+           # AGENTS.md の規則の表の誤って止める例）
+           "env -S x git push", "env --split-string x git push",
            # 終わりの語に引用符や \ を付けた heredoc の、終わりの後
            'cat <<"EOF"\nx\nEOF\ngit push', "cat <<\\EOF\nx\nEOF\ngit push",
            # 誤って止める所（守らない。AGENTS.md の規則の表）: gh の -h と、副コマンドの前の --help
