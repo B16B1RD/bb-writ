@@ -1,6 +1,8 @@
 """入口を呼んだセッションで、関門（work.py op run）を通さない外へ出すコマンドを拒否する hook（scripts/push_guard.py）。
 
 見ないこと: 会話記録の符号化の指定（encoding・errors="replace"）。不正なバイトのある記録で入口の印を読めるかは試験で固定しない。
+git push の試すだけの指定は完全一致で比べる（-nq のような前方一致の違いは、git の引数として現れないので例を置かない）。
+語に続く << の前で語を切ることは、崩れた入力でしか差が出ないので例を置かない。
 読み違えを守らない書き方は、AGENTS.md の規則の表の行にある。"""
 import json
 import os
@@ -112,12 +114,16 @@ OUTWARD = ["git push origin main", "GH_CONFIG_DIR=x git -C . push -q origin HEAD
            "git push -o -n origin main", "git push --push-option -n origin main",
            # 二重引用符の中の \" の後と、heredoc が 2 つ・語の前に空白
            'echo "a\\"b"; git push', "cat <<A; cat <<B\na\nA\nb\nB\ngit push", "cat << EOF\nx\nEOF\ngit push",
-           # ( ) の入れ子、置き換えの中の ( )、case の a) の後
-           "(cd a; (b); git push)", 'echo "$( (true); git push)"', "case x in a) git push;; esac",
+           # ( ) の入れ子、置き換えの中の ( ) を閉じた後、プロセスの置き換え、case の a) の後
+           "(cd a; (b); git push)", 'echo "$( (true); git push)"', 'echo "$( (true))"; git push', "cat <(git push)",
+           "case x in a) git push;; esac",
            # 二重引用符の中のバッククォート、${…} の入れ子の後
            'echo "`git push`"', 'echo "${a:-"${b}"}"; git push',
-           # 試すだけでない git push の引数、タブの区切り、語に続く <<、env -S の値
-           "git push --no-verify origin main", "git\tpush", "x<<E\nE\ngit push", "env -S A=1 git push",
+           # 試すだけの指定でない git push の引数、タブの区切り、語に続く <<、env -S・--split-string の値
+           "git push --no-verify origin main", "git\tpush", "x<<E\nE\ngit push", "env -S x git push",
+           "env --split-string x git push",
+           # 終わりの語に引用符や \ を付けた heredoc の、終わりの後
+           'cat <<"EOF"\nx\nEOF\ngit push', "cat <<\\EOF\nx\nEOF\ngit push",
            # 誤って止める所（守らない。AGENTS.md の規則の表）: gh の -h と、副コマンドの前の --help
            "gh pr create -h", "gh --help pr create"]
 NOT_OUTWARD = ["python3 /p/scripts/work.py op run --dir . --key push:origin/main@abc -- git push origin main",
@@ -147,7 +153,7 @@ NOT_OUTWARD = ["python3 /p/scripts/work.py op run --dir . --key push:origin/main
                "cat <<EOF\n\tEOF\ngit push\nEOF", "cat << EOF\ngit push\nEOF",
                # 代入でない語（名前が識別子でない）の後は、その語がコマンド
                "a-b=c git push",
-               # git でない道具、dotenvx の run でない副コマンド、heredoc の語の引用符と \
+               # git でない道具、dotenvx の run でない副コマンド、終わりの語に引用符や \ を付けた heredoc の本文
                "gitk push", "dotenvx get X -- git push", 'cat <<"EOF"\ngit push\nEOF', "cat <<\\EOF\ngit push\nEOF",
                # 二重引用符の中の \" の後も引用符の中、heredoc の終わりは完全に一致した行、2 つ目の heredoc の本文
                'echo "a\\"b; git push"', "cat <<EOF\nEOFX\ngit push\nEOF", "cat <<A; cat <<B\na\nA\ngit push\nB",
