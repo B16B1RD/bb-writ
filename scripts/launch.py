@@ -204,6 +204,20 @@ def home_entries(skip: list[Path]) -> tuple[set[str], set[str], set[str]]:
     return every, empty, unreadable
 
 
+def cli_place(p: Path) -> bool:
+    """子の CLI（Claude Code）が、CLAUDE_CONFIG_DIR に関わらずホームに作る自分の置き場の、中身の空のディレクトリか。
+    ~/.claude の直下（名前は問わない。2.1.309 の ssh、2.1.327 の bridge-spawn・child-logs・daemon・file-history。使った機能で変わり、
+    名前の一覧は完成しない）と ~/.config/anthropic。子のコマンドは本物の ~/.claude に書けない（Claude Code の子は sandbox の中だけ、
+    Codex・Grok の子は拒否。2026-11-18）ので、ここの空のディレクトリは CLI 自身のもので、.bash_profile のようにほかの道具が読む場所でもない。
+    数えないだけで消さない（次の起動でも使われ、並行する別の委任の子と競う）。どのホストの委任でも同じ（並行する Claude Code の子が作ったものを見る）。
+    空のファイルと、空の ~/.claude そのものは数える。symlink は home_entries がもともと見ず、~/.claude が symlink ならその下も見ない。
+    HOME が空のときは、ここ（Python）はホームを / と読み、子の CLI と一致しない（Node は空と読む）。"""
+    home = Path.home()
+    if p.is_symlink() or not p.is_dir():
+        return False
+    return (p.parent == home / ".claude" and not p.parent.is_symlink()) or p == home / ".config" / "anthropic"
+
+
 def cwd_residue(cwd: Path, before: set[str]) -> list[str]:
     """書く子の起動で対象の直下に新しくでき、中身が空のまま（空のファイルと空のディレクトリだけ。入れ子を含む）で、Git が追跡していない場所。
     Claude Code の sandbox は、守る対象のうち無いもの（.bashrc・.gitconfig・.claude/ の下など）を対象に空で作り、子の CLI が
@@ -1608,15 +1622,7 @@ def main() -> int:
                         "task cleanup が拒否し、git add -A で commit に入る"] + rec["cwd_residue"][:20])
             try:
                 _, empty, unreadable = home_entries(skip)
-                # Claude Code 2.1.309 の sandbox は、設定を組むときに CLAUDE_CONFIG_DIR に関わらずホームに空のディレクトリ .claude/ssh を作る
-                # （サーバー側の機能フラグが有効なとき。~/.claude が無ければそれも）。CLI 自身の置き場で（CLI の中にほかに使う所は見つからない）、
-                # .bash_profile のようにほかの道具が読む場所ではないので数えない。消さない
-                # （消すと、並行する別の委任の子と競う）。どのホストの委任でも数えない（並行する Claude Code の子が作ったものを、ほかの委任が見る）。
-                # 同じ名前の空のファイルは数える。symlink は home_entries がもともと見ない（行き先がホームの 2 段目までの空の場所なら、それを数える）。
-                # ~/.claude が symlink なら、その下は見ない（行き先がホームの直下なら、行き先の ssh は空の残りとして数える）。
-                # HOME が空のときは、ここ（Python）はホームを / と読み、子の CLI と一致しない（Node は空と読む）。そのときの子の .claude/ssh は見ない
-                ssh = Path.home() / ".claude" / "ssh"
-                rec["home_residue"] = sorted(empty - home_before - ({str(ssh)} if ssh.is_dir() else set()))
+                rec["home_residue"] = sorted(f for f in empty - home_before if not cli_place(Path(f)))
                 if unreadable - unreadable_before:  # 子が権限を落とした場所は、残りを確かめられない
                     raise PermissionError(f"読めない場所が増えた: {sorted(unreadable - unreadable_before)[:20]}")
             except Exception as e:

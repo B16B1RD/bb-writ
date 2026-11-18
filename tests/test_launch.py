@@ -178,6 +178,17 @@ FAKE_CLAUDE = textwrap.dedent(r'''
     mode = os.environ.get("FAKE_MODE")
     if mode == "home-claude-only":  # 空の .claude だけを作る
         os.makedirs(os.path.join(os.environ["HOME"], ".claude"))
+    if mode == "home-cli-places":  # 2.1.327 の CLI が、試験を実行した子でホームに作った空のディレクトリ（名前は使った機能で変わる）
+        for d in ("bridge-spawn", "child-logs", "daemon", "file-history", "ssh", "made-up-by-a-later-version"):
+            os.makedirs(os.path.join(os.environ["HOME"], ".claude", d), exist_ok=True)
+        os.makedirs(os.path.join(os.environ["HOME"], ".config", "anthropic"))
+    if mode == "home-cli-places-near":  # 同じ場所でも、空のファイルと、ほかの場所の空のディレクトリは数える
+        home = os.environ["HOME"]
+        os.makedirs(os.path.join(home, ".claude"), exist_ok=True)
+        open(os.path.join(home, ".claude", "empty-file"), "w").close()
+        open(os.path.join(home, ".config", "anthropic"), "w").close()
+        os.makedirs(os.path.join(home, ".anthropic")); os.makedirs(os.path.join(home, ".config", "claude"))
+        os.makedirs(os.path.join(home, ".claude", "kept")); open(os.path.join(home, ".claude", "kept", "x"), "w").write("x")  # 中身のあるものは残りでない
     if (mode or "").startswith("home-ssh"):  # 2.1.309 の sandbox がホームに作る空のディレクトリ
         ssh = os.path.join(os.environ["HOME"], ".claude", "ssh")
         os.makedirs(os.path.dirname(ssh), exist_ok=True)
@@ -2192,9 +2203,10 @@ class TestLaunch(unittest.TestCase):
         self.addCleanup(lambda: [stop_leftover(p) for p in pids])
         return pids
 
-    def test_only_the_empty_ssh_dir_claude_code_makes_in_home_is_not_residue(self):
-        # 2.1.309 の sandbox は、子を起こすたびにホームへ空の .claude/ssh を作り、残りとして委任が毎回 failed になった。
-        # 数えないのは空のディレクトリの ~/.claude/ssh だけで、どのホストでも、~/.claude が前からあってもなくても同じ。消さない
+    def test_empty_dirs_the_claude_cli_makes_in_its_own_places_are_not_residue(self):
+        # 2.1.309 の sandbox は子を起こすたびにホームへ空の .claude/ssh を作り、2.1.327 は使った機能で bridge-spawn・child-logs などと
+        # ~/.config/anthropic も作った。残りとして委任が毎回 failed になった（#40）。数えないのは ~/.claude の直下（名前は問わない）と
+        # ~/.config/anthropic の、空のディレクトリだけで、どのホストでも、~/.claude が前からあってもなくても同じ。消さない
         home = Path(self.tmp.name) / "home"
         h = lambda *p: str(home.joinpath(*p))
         cases = (  # (ホスト, 偽の CLI のモード, 引数, 前から .claude があるか, status, 残り, 後の ~/.claude/ssh)
@@ -2203,8 +2215,12 @@ class TestLaunch(unittest.TestCase):
             ("claude", "home-ssh", (), True, "ok", [], "dir"),  # 利用者のホームにはたいてい前から .claude がある
             ("codex", "home-ssh", (), False, "ok", [], "dir"),  # 並行する Claude Code の子が作ったものを、ほかの委任も見る
             ("grok", "home-ssh", (), True, "ok", [], "dir"),
+            ("claude", "home-cli-places", (), False, "ok", [], "dir"),
+            ("claude", "home-cli-places", ("--write",), True, "ok", [], "dir"),
             ("claude", "home-claude-only", (), False, "failed", [h(".claude")], "absent"),  # 空の .claude そのものは数える
-            ("claude", "home-ssh-near", (), True, "failed", [h(".claude", "other"), h(".claude", "ssh-agent"), h(".config", "ssh")], "dir"),  # 隣・別の場所の ssh は数える
+            ("claude", "home-ssh-near", (), True, "failed", [h(".config", "ssh")], "dir"),  # ~/.claude の直下の隣は数えず、~/.config の下のほかの名前は数える
+            ("claude", "home-cli-places-near", (), True, "failed",
+             [h(".anthropic"), h(".claude", "empty-file"), h(".config", "anthropic"), h(".config", "claude")], "absent"),  # 空のファイル・ほかの場所は数える
             ("claude", "home-ssh-file", (), True, "failed", [h(".claude", "ssh")], "file"),  # 同じ名前の空のファイルは数える
             ("claude", "home-ssh-link", (), True, "failed", [h("elsewhere")], "link"),  # symlink は見ない。行き先の空の場所は数える
             ("claude", "home-residue", (), True, "failed", [h(".bash_profile"), h(".config", "pip"), h(".netrc")], "absent"),
