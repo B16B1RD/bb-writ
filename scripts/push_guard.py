@@ -28,12 +28,14 @@ KEYWORDS = {"then", "else", "do", "elif", "if", "while", "until"}
 WRAPPERS = {"env": {"-u", "--unset", "-C", "--chdir", "-S", "--split-string"},
             "sudo": {"-u", "--user", "-g", "--group", "-C", "--close-from", "-h", "--host", "-p", "--prompt"},
             "nice": {"-n", "--adjustment"}, "time": {"-f", "--format", "-o", "--output"},
-            "nohup": set(), "command": set(), "builtin": set(), "exec": {"-a"}}
+            "nohup": set(), "command": set(), "builtin": set(), "exec": {"-a"}, "setsid": set(), "stdbuf": {"-i", "-o", "-e"}}
 TIMEOUT_WITH_VALUE = {"-s", "--signal", "-k", "--kill-after"}
 GIT_WITH_VALUE = {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path", "--super-prefix", "--config-env",
                   "--attr-source"}
 GH_WITH_VALUE = {"-R", "--repo"}
-NOT_SENT = {"--dry-run", "-n", "--help", "-h"}  # 外へ何も出さない（試すだけ・使い方を見るだけ）
+NOT_SENT = {"--dry-run", "-n", "--help", "-h"}  # git push で外へ何も出さない（試すだけ・使い方を見るだけ）
+PUSH_WITH_VALUE = {"-o", "--push-option", "--receive-pack", "--exec", "--repo"}  # 値が NOT_SENT の語でも、値として読む
+HELP = {"--help", "-h"}  # git の大域の引数の使い方を見るだけの指定。gh は --help だけ（gh の -h は副コマンドによって値になる）
 
 
 def closing(command: str, i: int, open_: str, close: str) -> int:
@@ -162,6 +164,14 @@ def parse(command: str, i: int, until):
                     start = end + 1
             heredocs = []
             i += 1
+        elif ch in "<>":  # 向け直しの演算子（>&・<&・>|・>>）の & と | は区切りでない。語の途中なら語を切る（2> の 2 は残す）
+            if word and not "".join(word).isdigit():
+                flush()
+            word.append(ch)
+            if i + 1 < n and command[i + 1] in "&|>":
+                word.append(command[i + 1])
+                i += 1
+            i += 1
         elif ch in SEPARATORS:
             cut()
             i += 1
@@ -182,8 +192,8 @@ def outward(command: str) -> bool:
             head = w[i]
             if head in KEYWORDS or ("=" in head and head.split("=", 1)[0].isidentifier()):
                 i += 1
-            elif head.lstrip("0123456789")[:1] in ("<", ">"):  # 向け直し（2>/dev/null、> f）。演算子だけの語は次の語が行き先
-                i += 2 if head.lstrip("0123456789") in ("<", ">", ">>", ">&", "<&", ">|") else 1
+            elif redirect(head):  # 向け直し（2>/dev/null、> f）
+                i += redirect(head)
             elif head in WRAPPERS:
                 i += 1
                 while i < n and w[i].startswith("-"):
@@ -204,9 +214,11 @@ def outward(command: str) -> bool:
             continue
         tool, i = w[i].rsplit("/", 1)[-1], i + 1
         if tool == "git":
-            while i < n and w[i].startswith("-"):
-                i += 2 if w[i] in GIT_WITH_VALUE else 1
-            if w[i:i + 1] == ["push"] and not NOT_SENT.intersection(w[i + 1:]):
+            help_ = False
+            while i < n and (w[i].startswith("-") or redirect(w[i])):
+                help_ = help_ or w[i] in HELP
+                i += 2 if w[i] in GIT_WITH_VALUE or redirect(w[i]) == 2 else 1
+            if w[i:i + 1] == ["push"] and not help_ and not dry_or_help(w[i + 1:]):
                 return True
         elif tool == "gh":
             sub = []  # フラグ（-R・--repo は値も）を除いた語の並びの先頭 2 つ
@@ -216,8 +228,29 @@ def outward(command: str) -> bool:
                 else:
                     sub.append(w[i])
                     i += 1
-            if sub in (["pr", "create"], ["pr", "merge"], ["release", "create"]) and not {"--help", "-h"}.intersection(w[i:]):
+            if sub in (["pr", "create"], ["pr", "merge"], ["release", "create"]) and "--help" not in w[i:]:
                 return True
+    return False
+
+
+def redirect(word: str) -> int:
+    """向け直しの語なら、読み飛ばす語の数（演算子だけの語は次の語が行き先で 2、行き先が付いていれば 1）。ほかは 0。"""
+    rest = word.lstrip("0123456789")
+    if rest[:1] not in ("<", ">"):
+        return 0
+    return 2 if rest in ("<", ">", ">>", ">&", "<&", ">|") else 1
+
+
+def dry_or_help(args: list) -> bool:
+    """git push の引数に、外へ何も出さない指定があるか（値を取る引数の値は数えない）。"""
+    k = 0
+    while k < len(args):
+        if args[k] in PUSH_WITH_VALUE:
+            k += 2
+            continue
+        if args[k] in NOT_SENT:
+            return True
+        k += 1
     return False
 
 

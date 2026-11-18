@@ -42,6 +42,11 @@ MARK_INSIDE_USER_TEXT = {"type": "user", "message": {"role": "user", "content":
 MARK_INSIDE_USER_BLOCK = {"type": "user", "message": {"role": "user", "content": [
     {"type": "text", "text": "記録の例: <command-name>/bb-writ:bb-writ</command-name>"}]}}
 # 入口の名前を含むが形の違う行（input が文字列の Skill）。この後ろの印まで読み続ける
+NULL_ROWS = [{"type": "assistant", "message": None, "x": "bb-writ"},
+             {"type": "assistant", "message": {"role": "assistant", "content": [
+                 {"type": "tool_use", "id": "toolu_7", "name": "Skill", "input": None}]}, "x": "bb-writ"}]
+SLASH_WITH_SPACES = {"type": "user", "message": {"role": "user", "content":
+    "  <command-message>bb-writ:bb-writ</command-message>\n<command-name> /bb-writ:bb-writ </command-name>"}}
 BROKEN_ROW = {"type": "assistant", "message": {"role": "assistant", "content": [
     {"type": "tool_use", "id": "toolu_6", "name": "Skill", "input": "bb-writ:bb-writ"}]}}
 OTHER_SLASH_WITH_MARK = {"type": "user", "message": {"role": "user", "content":
@@ -51,7 +56,7 @@ MARK_HEADS_ASSISTANT_BLOCK = {"type": "assistant", "message": {"role": "assistan
     {"type": "text", "text": "<command-name>/bb-writ:bb-writ</command-name>"}]}}
 SKILL_NAME_NOT_TOOL_USE = {"type": "assistant", "message": {"role": "assistant", "content": [
     {"type": "server_tool_use", "id": "srv_1", "name": "Skill", "input": {"skill": "bb-writ:bb-writ"}}]}}
-ENTRIES = {"Skill ツール": BY_SKILL_TOOL, "Skill ツールの短い名前": BY_BARE_NAME, "スラッシュ": BY_SLASH,
+ENTRIES = {"スラッシュ（前後の空白）": SLASH_WITH_SPACES, "Skill ツール": BY_SKILL_TOOL, "Skill ツールの短い名前": BY_BARE_NAME, "スラッシュ": BY_SLASH,
            "スラッシュ（text ブロック）": BY_SLASH_IN_TEXT_BLOCK}
 
 OUTWARD = ["git push origin main", "GH_CONFIG_DIR=x git -C . push -q origin HEAD:main", "cd repo && git -c user.name=w push",
@@ -85,7 +90,26 @@ OUTWARD = ["git push origin main", "GH_CONFIG_DIR=x git -C . push -q origin HEAD
            # 向け直しと、前置きの引数
            "2>/dev/null git push", ">/dev/null git push", "time -p git push", "time -f %e git push", "2> err.txt git push", "nice -n 5 git push", "sudo --user w git push",
            "env --unset X git push", "timeout --signal KILL 60 git push", "timeout --kill-after 5 60 git push",
-           "git --attr-source HEAD push"]
+           "git --attr-source HEAD push",
+           # 制御の語の直後
+           "if git push; then :; fi", "while git push; do :; done", "until git push; do :; done",
+           "if a; then :; elif git push; then :; fi",
+           # 前置きの語と、その値を取る引数（要素ごと）
+           "builtin git push", "exec git push", "exec -a n git push", "setsid git push", "stdbuf -o L git push",
+           "env -C /tmp git push", "env --chdir /tmp git push", "sudo -g g git push", "sudo --group g git push",
+           "sudo -C 3 git push", "sudo --close-from 3 git push", "sudo -h h git push", "sudo --host h git push",
+           "sudo -p p git push", "sudo --prompt p git push", "nice --adjustment 5 git push", "time --format %e git push",
+           "time -o f git push", "time --output f git push", "timeout -s KILL 60 git push",
+           "git --namespace n push", "git --exec-path /x push", "git --super-prefix p push", "git --config-env a=B push",
+           # 向け直しの演算子だけの語は、次の語が行き先
+           "< in.txt git push", ">> log.txt git push", ">& log.txt git push", "<& 0 git push", ">| f git push",
+           "git push>/dev/null", "git >out push", "git 2>err push", "gh pr create>out.txt",
+           # git push の値を取る引数の値は、試すだけ・使い方の指定でない
+           "git push -o -n origin main", "git push --push-option -n origin main",
+           # 二重引用符の中の \" の後と、heredoc が 2 つ・語の前に空白
+           'echo "a\\"b"; git push', "cat <<A; cat <<B\na\nA\nb\nB\ngit push", "cat << EOF\nx\nEOF\ngit push",
+           # ( ) の入れ子
+           "(cd a; (b); git push)"]
 NOT_OUTWARD = ["python3 /p/scripts/work.py op run --dir . --key push:origin/main@abc -- git push origin main",
                'git commit -m "docs: git push の説明を直す"', 'git commit -m "x; git push"', "git commit -m 'a && git push'",
                'echo "次に git push する"', 'grep -n "git push" README.md', "git status", "gh pr view 3", "git pushx",
@@ -105,7 +129,12 @@ NOT_OUTWARD = ["python3 /p/scripts/work.py op run --dir . --key push:origin/main
                # heredoc の終わりの行は完全に一致したものだけ（<< では前後の空白を外さない）
                "cat <<EOF\n EOF \ngit push\nEOF", "cat <<EOF\n  EOF\ngit push\nEOF",
                # 外へ何も出さない
-               "git push --dry-run", "git push -n origin main", "gh pr create --help",
+               "git push --dry-run", "git push -n origin main", "gh pr create --help", "git push -h",
+               "git --help push", "git -h push",
+               # 代入でない語（名前が識別子でない）の後は、その語がコマンド
+               "a-b=c git push",
+               # 二重引用符の中の \" の後も引用符の中、heredoc の終わりは完全に一致した行、2 つ目の heredoc の本文
+               'echo "a\\"b; git push"', "cat <<EOF\nEOFX\ngit push\nEOF", "cat <<A; cat <<B\na\nA\ngit push\nB",
                # 数だけの語は向け直しでない（読み飛ばさない）
                "60 git push", 'git commit -m "feat: x" -m "then git push"', "git log --oneline | grep \"do git push\""]
 
@@ -130,7 +159,7 @@ class TestPushGuard(unittest.TestCase):
 
     def test_outward_bash_calls_are_denied_in_a_session_that_used_the_entry(self):
         for name, entry in ENTRIES.items():
-            t = self.transcript(OTHER_SKILL, BROKEN_ROW, entry)
+            t = self.transcript(OTHER_SKILL, BROKEN_ROW, *NULL_ROWS, entry)
             for c in OUTWARD:
                 with self.subTest(entry=name, command=c):
                     out = self.run_guard(c, t)
@@ -145,12 +174,12 @@ class TestPushGuard(unittest.TestCase):
                 self.assertIsNone(self.run_guard(c, t))
 
     def test_sessions_that_did_not_use_the_entry_are_not_touched(self):
-        for rows in ((), (OTHER_SKILL,), (MENTION_ONLY,), (NOT_SKILL_TOOL,), (MARK_IN_TOOL_RESULT,),
+        for rows in ((), (OTHER_SKILL,), (MENTION_ONLY,), tuple(NULL_ROWS), (NOT_SKILL_TOOL,), (MARK_IN_TOOL_RESULT,),
                      (MARK_QUOTED_BY_ASSISTANT,), (MARK_IN_ASSISTANT_STRING,),
                      (MARK_INSIDE_USER_TEXT,), (MARK_INSIDE_USER_BLOCK,), (BROKEN_ROW,),
                      (OTHER_SLASH_WITH_MARK,), (MARK_HEADS_ASSISTANT_BLOCK,), (SKILL_NAME_NOT_TOOL_USE,)):
             t = self.transcript(*rows)
-            with self.subTest(rows=len(rows)):
+            with self.subTest(rows=[r.get("type") for r in rows], first=json.dumps(rows[:1], ensure_ascii=False)[:60]):
                 self.assertIsNone(self.run_guard("git push origin main", t))
 
     def test_the_denial_survives_an_output_encoding_without_japanese(self):
@@ -190,6 +219,10 @@ class TestPushGuard(unittest.TestCase):
                           ("コマンドが文字列でない", json.dumps({"tool_name": "Bash", "transcript_path": t, "tool_input": {"command": ["git", "push"]}}))):
             with self.subTest(name):
                 self.assertIsNone(self.run_guard(None, None, raw=raw))
+        for name, raw in (("tool_input が null", json.dumps({"tool_name": "Bash", "transcript_path": t, "tool_input": None})),
+                          ("command が null", json.dumps({"tool_name": "Bash", "transcript_path": t, "tool_input": {"command": None}}))):
+            with self.subTest(name):
+                self.assertIsNone(self.run_guard(None, None, raw=raw))
 
     def test_the_hook_runs_the_guard_on_each_bash_call_and_passes_when_the_guard_is_missing(self):
         cfg = json.loads(HOOKS.read_text(encoding="utf-8"))
@@ -202,8 +235,11 @@ class TestPushGuard(unittest.TestCase):
         t = self.transcript(BY_SKILL_TOOL)
         stdin = json.dumps({"tool_name": "Bash", "transcript_path": t, "tool_input": {"command": "git push"}})
         # Claude Code と Grok Build と同じく、command を sh で動かし、プラグインの置き場を CLAUDE_PLUGIN_ROOT で渡す
-        for name, root, denied in (("置き場がある", ROOT, True), ("置き場が消えた", Path(self.tmp.name) / "gone", False),
-                                   ("置き場が空", "", False)):
+        spaced = Path(self.tmp.name) / "plugin root"  # 空白のある置き場
+        (spaced / "scripts").mkdir(parents=True)
+        (spaced / "scripts" / "push_guard.py").write_text(GUARD.read_text(encoding="utf-8"), encoding="utf-8")
+        for name, root, denied in (("置き場がある", ROOT, True), ("空白のある置き場", spaced, True),
+                                   ("置き場が消えた", Path(self.tmp.name) / "gone", False), ("置き場が空", "", False)):
             with self.subTest(name):
                 p = subprocess.run(["sh", "-c", hooks[0]["command"]], input=stdin, capture_output=True, text=True, timeout=30,
                                    env={**os.environ, "CLAUDE_PLUGIN_ROOT": str(root)})
