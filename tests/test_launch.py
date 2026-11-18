@@ -3467,7 +3467,11 @@ class TestLaunch(unittest.TestCase):
         home = self.home.resolve()
         (home / "a.txt").write_text("x\n")
         (home / ".config" / "gh").mkdir(parents=True)
-        for cwd, why in ((home, "ホームそのもの"), (home.parent, "ホームそのもの"), (home / ".config", "認証情報の置き場そのもの")):
+        (home / "repo").mkdir()
+        (home / "repo" / "a.txt").write_text("x\n")
+        (home / ".config" / "repo-link").symlink_to(home / "repo")  # 置き場の中の symlink が対象そのものを指す（許可と拒否が同じ深さで並ぶ）
+        for cwd, why in ((home, "ホームそのもの"), (home.parent, "ホームそのもの"), (home / ".config", "認証情報の置き場そのもの"),
+                         (home / "repo", "その置き場の中身を拒めない")):
             with self.subTest(cwd=cwd):
                 rc, rec = self.run_launch("claude", cwd=cwd, env_extra={"HOME": str(home)})
                 self.assertEqual(rec["status"], "unavailable", rec)
@@ -3515,7 +3519,7 @@ class TestLaunch(unittest.TestCase):
         for f in (".gitconfig-work", ".gitconfig-nested"):
             (home / f).write_text("")
         (home / ".git-credentials").write_text("[credential]\n\thelper = store\n")  # 正当な Git の設定の形の認証情報のファイル
-        (home / ".gitconfig-a").write_text("[include]\n\tpath = .gitconfig-nested\n[includeIf \"gitdir:/nonexistent/\"]\n\tpath = ~\n")  # ホームを指す include
+        (home / ".gitconfig-a").write_text("[include]\n\tpath = .gitconfig-nested\n[includeIf \"gitdir:/nonexistent/\"]\n\tpath = ~\n\tpath = ~/Projects\n")  # ホーム・ディレクトリを指す include（条件が合わないので git は開かない）
         (home / ".stow" / "hub").mkdir(parents=True)  # 認証情報の置き場の中に張った symlink（stow）の行き先が、戻すドットのディレクトリの中
         (home / ".stow" / "hub" / "hosts").write_text("t")
         (home / ".dotfiles" / "config" / "hub").symlink_to(home / ".stow" / "hub")
@@ -3524,7 +3528,7 @@ class TestLaunch(unittest.TestCase):
         (state / "delegations.jsonl").write_text("")
         (home / "state-link").symlink_to(state)  # 状態の置き場を symlink の道筋で渡す
         (home / "Projects" / "other").mkdir(parents=True)  # ディレクトリを指す include は、Git の設定として戻さない
-        (home / ".gitconfig-work").write_text('[includeIf "gitdir:/nonexistent/"]\n\tpath = ~/Projects\n')
+
         deep = home / ".dotfiles" / "config" / "a" / "b"  # 置き場の 3 段目のディレクトリの symlink と、4 段目（見ない）
         (deep / "c").mkdir(parents=True)
         for n in ("d3", "d4", "f1"):
@@ -3540,8 +3544,7 @@ class TestLaunch(unittest.TestCase):
         (proj / "skills" / "x").mkdir(parents=True)
         (proj / "a.txt").write_text("x\n")
         (home / ".claude" / "skills").mkdir(parents=True)
-        (home / ".claude" / "skills" / "x").symlink_to(proj / "skills" / "x")
-        (home / ".claude" / "skills" / "all").symlink_to(proj)
+        (home / ".claude" / "skills" / "x").symlink_to(proj / "skills" / "x")  # 対象の中を指すものも拒む（子はその部分を読めない。守らない範囲）
         (home / ".env.keys").write_text("k")
         path = f"{home}/myssh/bin:{home}/bin/../.ssh:{home}/work/bin:{home}/work/..:{home}/.env.keys:{self.bin}:/usr/bin:/bin"  # work/.. はホームそのもの。PATH のファイル
         rc, rec = self.run_launch("claude", path=path, cwd=proj, env_extra={"GIT_CONFIG_GLOBAL": str(home / ".gitconfig"), "BB_WRIT_STATE_DIR": str(home / "state-link")})
@@ -3556,9 +3559,12 @@ class TestLaunch(unittest.TestCase):
         for p in (home / ".dotfiles" / "gitconfig", home / ".gitconfig-a", home / ".gitconfig-nested", home / ".gitconfig-work",
                   home / "work", home / ".dotfiles"):
             self.assertTrue(claude_readable(p, fs), p)  # 入れ子の include・条件に空白のある includeIf（行き先は、ドットのディレクトリとして戻る）
-        for p in (proj, proj / "skills" / "x", home / ".stow" / "d4"):  # 対象の中は、置き場の中の symlink が指しても読める。4 段目は見ない（守らない範囲）
+        for p in (proj, proj / "a.txt", home / ".stow" / "d4"):  # 対象は読める。4 段目は見ない（守らない範囲）
             self.assertTrue(claude_readable(p, fs), p)
-        self.assertFalse([d for d in fs["denyRead"] if Path(d) == proj or proj in Path(d).parents], fs["denyRead"])
+        self.assertFalse(claude_readable(proj / "skills" / "x", fs))  # 置き場の中の symlink が指す対象の中（~/.config/gh -> 対象/gh の形）
+        self.assertFalse(set(fs["allowRead"]) & set(fs["denyRead"]), fs)  # 同じ道筋を許可と拒否に並べない（同じ深さの勝ち負けは確かめていない）
+        self.assertNotIn(str(home / ".stow2"), fs["allowRead"])  # 置き場の中の symlink が指す戻す場所そのものは、戻さない
+        self.assertTrue(all(os.path.lexists(d) for d in fs["denyRead"]), fs["denyRead"])  # 在るものだけ
         self.assertNotIn(str(home / ".gitconfig"), fs["allowRead"])  # symlink の ~/.gitconfig は戻さない（守らない範囲）
         secrets = [home / ".dotfiles" / "config", home / ".dotfiles" / "ssh", cargo, outside]
         for a in map(Path, fs["allowRead"]):  # 戻す道筋は綴りのままの実の道筋で、ホーム・その祖先・認証情報の置き場とその中でない（前方一致で見えない .. も見る）
@@ -3583,13 +3589,15 @@ class TestLaunch(unittest.TestCase):
         from unittest import mock
         home = self.home.resolve()
         common, wt = home / "src" / "repo" / ".git", home / ".local" / "state" / "x" / "wt"
-        for d in (common, wt):
+        for d in (common / "x", wt, home / ".config"):
             d.mkdir(parents=True)
+        (home / ".config" / "g").symlink_to(common / "x")  # 置き場の中の symlink が、戻す場所（共通ディレクトリ）の中を指すなら拒む
         launch = load_launch()
         with mock.patch.dict(os.environ, {"HOME": str(home), "BB_WRIT_STATE_DIR": str(home / ".local" / "state" / "x"), "GIT_CONFIG_GLOBAL": os.devnull}):
             fs = launch.claude_reads(wt, common, {"PATH": "/usr/bin"}, False)
         self.assertTrue(claude_readable(common, fs) and claude_readable(wt, fs), fs)
         self.assertFalse(claude_readable(home / "src" / "other", fs))
+        self.assertFalse(claude_readable(common / "x", fs))
         self.assertNotIn(str(home / ".config" / "git"), fs["allowRead"])
         self.assertTrue(all(os.path.lexists(a) for a in fs["allowRead"]), fs)
 
