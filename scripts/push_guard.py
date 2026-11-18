@@ -4,109 +4,200 @@
 
 入口を呼ばないセッション（bb-writ を使っていない仕事）と、判定できない入力（会話記録が無い・読めない・形が違う）は通す。
 hooks.json は Bash のすべての呼び出しでこれを起こし、外へ出すコマンドかはここで見る（Claude Code の if の欄は使わない。Grok Build は
-if の欄のある handler を飛ばして読み込みのエラーを出す。Grok Build の呼び出しは tool_name が run_terminal_command で、会話記録の形も
-違うので、ここでは通す）。op run の中の git push は、op run が Bash を通さずに起こすので、ここには来ない。このスクリプトを
-読めないときは、hooks.json のコマンドが 0 で終わる（python3 が開けずに 2 で終わると、Claude Code は Bash を全部拒否する）。標準ライブラリだけ。
+if の欄のある handler を飛ばして読み込みのエラーを出す。Claude Code の文書も、if は $() などを含む呼び出しでは型によらず hook を
+起こすと書き、判定はここに残る。Grok Build の呼び出しは tool_name が run_terminal_command で、会話記録の形も違うので、ここでは通す）。
+op run の中の git push は、op run が Bash を通さずに起こすので、ここには来ない。このスクリプトを読めないときは、hooks.json の
+コマンドが 0 で終わる（python3 が開けずに 2 で終わると、Claude Code は Bash を全部拒否する）。標準ライブラリだけ。
+
+コマンドの読み方は、普段の書き方（連結、複数行の引用符、"$(cat <<'EOF' …)" の中の heredoc、前置きの代入と包むコマンド）を
+bash と同じに読む所までにする。それより珍しい書き方（別の語に包む sh -c・eval・xargs、変数に入れたコマンド名、別名・関数）は
+読まない（AGENTS.md の規則の表に、守らない範囲として書く）。
 """
 import json
 import sys
 
 # 入口を呼んだ印。Skill ツールの呼び出しと、利用者がスラッシュで呼んだときの記録（2026-11-18、Claude Code 2.1.327 で確かめた形）
 ENTRY_SKILLS = {"bb-writ:bb-writ", "bb-writ"}
-ENTRY_COMMAND = "<command-name>/bb-writ:bb-writ</command-name>"
+ENTRY_NAME = "/bb-writ:bb-writ"
 SLASH_HEADS = ("<command-message>", "<command-name>")
-# 外へ出すコマンドの見分けは、正規表現でなく、引用符を見ながら区切りで切り、語に分けて先頭から読む（入力の長さに比例する手間。
-# 正規表現の繰り返しの入れ子は、git の大域の引数が長く続く入力で 10 秒を超えた）。
-SEPARATORS = set(";&|(){}!`\n")
+
+# 区切り（コマンドの境目）。( ) と ` と $( は文脈の出入りとして別に扱う
+SEPARATORS = set(";&|{}!\n")
 KEYWORDS = {"then", "else", "do", "elif", "if", "while", "until"}
-PREFIX = {"time", "nohup", "command", "builtin", "exec"}
-GIT_WITH_VALUE = {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path", "--super-prefix", "--config-env"}
+# 前に付いて、後ろのコマンドを起こす語と、その値を取る引数
+WRAPPERS = {"env": {"-u", "--unset", "-C", "--chdir", "-S", "--split-string"},
+            "sudo": {"-u", "--user", "-g", "--group", "-C", "--close-from", "-h", "--host", "-p", "--prompt"},
+            "nice": {"-n", "--adjustment"}, "time": {"-f", "--format", "-o", "--output"},
+            "nohup": set(), "command": set(), "builtin": set(), "exec": {"-a"}}
+TIMEOUT_WITH_VALUE = {"-s", "--signal", "-k", "--kill-after"}
+GIT_WITH_VALUE = {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path", "--super-prefix", "--config-env",
+                  "--attr-source"}
+GH_WITH_VALUE = {"-R", "--repo"}
+NOT_SENT = {"--dry-run", "-n", "--help", "-h"}  # 外へ何も出さない（試すだけ・使い方を見るだけ）
+
+
+def closing(command: str, i: int, open_: str, close: str) -> int:
+    """command[i] が open_ のとき、対応する close の次の位置（無ければ末尾）。${…}・$((…)) に使う。"""
+    depth = 0
+    for j in range(i, len(command)):
+        if command[j] == open_:
+            depth += 1
+        elif command[j] == close:
+            depth -= 1
+            if depth == 0:
+                return j + 1
+    return len(command)
 
 
 def segments(command: str):
-    """区切り（; & | ( ) { } ! ` 改行）で切った断片を、語の並びで返す。一重引用符の中は区切らない。二重引用符の中は、
-    コマンドの置き換え（` と $( ）だけを区切る。行の継続（\\ と改行）は消し、語の頭の # から行の終わりまで（注釈）と、
-    heredoc（<<語）の本文の行は読み飛ばす（ファイルや文書を書く本文はコマンドでない）。"""
-    words, word, quote, i, heredocs = [], [], None, 0, []
+    return parse(command, 0, None)[0]
+
+
+def parse(command: str, i: int, until):
+    """command[i:] を区切りごとの語の並びに分け、(並びの一覧, 読み終えた位置) を返す。until が ")" か "`" なら、対応する
+    閉じ（置き換えの終わり）で止まる。コマンドの置き換え（$( ) と `）の中は再帰で読んで並びに足し、外側では 1 つの語にする
+    （二重引用符の中でも、引数の中でも、外側のコマンドを切らない）。一重引用符の中、${…}・$((…))、<<< の語、語の頭の # からの
+    注釈、行の継続（\\ と改行）、heredoc（<<語）の本文の行は、コマンドとして読まない。手間は入力の長さに比例する
+    （置き換えの入れ子が Python の再帰の上限を超えると例外になり、main が通す）。"""
+    n = len(command)
+    segs, words, word = [], [], []
+    started, in_dq, depth, heredocs = False, False, 0, []  # depth: until が ")" のときの、中の ( の深さ
+
     def flush():
-        if word:
-            words.append("".join(word)); word.clear()
-    while i < len(command):
+        nonlocal started
+        if word or started:
+            words.append("".join(word))
+        word.clear()
+        started = False
+
+    def cut():
+        nonlocal words
+        flush()
+        if words:
+            segs.append(words)
+        words = []
+
+    while i < n:
         ch = command[i]
-        if quote == "'":
-            word.append(ch) if ch != "'" else None; quote = None if ch == "'" else quote
-        elif quote == '"':
-            if ch == "\\" and i + 1 < len(command):
-                if command[i + 1] != "\n":  # 行の継続は消える
+        if in_dq:
+            if ch == "\\" and i + 1 < n:
+                if command[i + 1] != "\n":
                     word.append(command[i + 1])
-                i += 1
+                i += 2
             elif ch == '"':
-                quote = None
-            elif ch == "`" or command.startswith("$(", i):
-                flush(); yield words; words = []; i += 1 if ch == "`" else 2; quote = None; continue
+                in_dq, started = False, True
+                i += 1
+            elif command.startswith("$((", i) or command.startswith("${", i):
+                j = closing(command, i + 1, command[i + 1], ")" if command[i + 1] == "(" else "}")
+                word.append(command[i:j])
+                i = j
+            elif command.startswith("$(", i) or ch == "`":
+                inner, i = parse(command, i + (2 if ch == "$" else 1), ")" if ch == "$" else "`")
+                segs.extend(inner)
+                word.append("$()")
             else:
                 word.append(ch)
-        elif ch == "\\" and i + 1 < len(command):
-            if command[i + 1] != "\n":  # 行の継続は消える
-                word.append(command[i + 1])
-            i += 1
-        elif ch == "#" and not word:  # 注釈は行の終わりまで
-            end = command.find("\n", i)
-            i = len(command) if end == -1 else end
+                i += 1
             continue
-        elif ch in "'\"":
-            quote = ch
-        elif command.startswith("<<", i) and not command.startswith("<<<", i):
+        if until == "`" and ch == "`" or until == ")" and ch == ")" and depth == 0:
+            cut()
+            return segs, i + 1
+        if ch == "'":
+            end = command.find("'", i + 1)
+            end = n if end == -1 else end
+            word.append(command[i + 1:end])
+            started = True
+            i = end + 1
+        elif ch == '"':
+            in_dq, started = True, True
+            i += 1
+        elif ch == "\\" and i + 1 < n:
+            if command[i + 1] != "\n":
+                word.append(command[i + 1])
+            i += 2
+        elif ch == "#" and not word and not started:  # 注釈は行の終わりまで
+            end = command.find("\n", i)
+            i = n if end == -1 else end
+        elif command.startswith("<<<", i):
+            word.append("<<<")
+            i += 3
+        elif command.startswith("<<", i):
             flush()
-            j = i + 2 + (command[i + 2:i + 3] == "-")
-            while j < len(command) and command[j] in " \t":
+            strip_tabs = command.startswith("<<-", i)
+            j = i + 2 + strip_tabs
+            while j < n and command[j] in " \t":
                 j += 1
             k = j
-            while k < len(command) and not command[k].isspace() and command[k] not in ";&|()<>":
+            while k < n and not command[k].isspace() and command[k] not in ";&|()<>":
                 k += 1
             if k > j:
-                heredocs.append(command[j:k].strip("'\"\\"))
+                heredocs.append((command[j:k].replace("'", "").replace('"', "").replace("\\", ""), strip_tabs))
             i = k
-            continue
+        elif command.startswith("$((", i) or command.startswith("${", i):
+            j = closing(command, i + 1, command[i + 1], ")" if command[i + 1] == "(" else "}")
+            word.append(command[i:j])
+            i = j
+        elif command.startswith("$(", i) or ch == "`":
+            inner, i = parse(command, i + (2 if ch == "$" else 1), ")" if ch == "$" else "`")
+            segs.extend(inner)
+            word.append("$()")
+        elif ch == "(":
+            cut()
+            depth += 1
+            i += 1
+        elif ch == ")":
+            cut()
+            depth = max(depth - 1, 0)
+            i += 1
         elif ch == "\n" and heredocs:
-            flush(); yield words; words = []
-            for delim in heredocs:  # 本文の行を、終わりの行まで読み飛ばす
-                end = command.find("\n", i + 1)
-                while end != -1 and command[i + 1:end].strip() != delim:
-                    i, end = end, command.find("\n", end + 1)
-                i = len(command) if end == -1 else end
+            cut()
+            for delim, strip_tabs in heredocs:  # 本文の行を、終わりの行まで読み飛ばす（<<- だけ行頭のタブを外す）
+                start = i + 1
+                while True:
+                    end = command.find("\n", start)
+                    line = command[start:n if end == -1 else end]
+                    if (line.lstrip("\t") if strip_tabs else line) == delim or end == -1:
+                        i = n if end == -1 else end
+                        break
+                    start = end + 1
             heredocs = []
+            i += 1
         elif ch in SEPARATORS:
-            flush(); yield words; words = []
+            cut()
+            i += 1
         elif ch.isspace():
             flush()
+            i += 1
         else:
             word.append(ch)
-        i += 1
-    flush(); yield words
+            i += 1
+    cut()
+    return segs, n
 
 
 def outward(command: str) -> bool:
     for w in segments(command):
         i, n = 0, len(w)
-        while i < n:  # 前に付く語（制御の語、環境変数の代入、env・timeout・sudo などの包むコマンドとその引数）を読み飛ばす
+        while i < n:  # 前に付く語（制御の語、環境変数の代入、向け直し、包むコマンドとその引数）を読み飛ばす
             head = w[i]
-            if head in KEYWORDS or head in PREFIX or ("=" in head and head.split("=", 1)[0].isidentifier()):
+            if head in KEYWORDS or ("=" in head and head.split("=", 1)[0].isidentifier()):
                 i += 1
-            elif head in ("env", "sudo"):
+            elif head.lstrip("0123456789")[:1] in ("<", ">"):  # 向け直し（2>/dev/null、> f）。演算子だけの語は次の語が行き先
+                i += 2 if head.lstrip("0123456789") in ("<", ">", ">>", ">&", "<&", ">|") else 1
+            elif head in WRAPPERS:
                 i += 1
                 while i < n and w[i].startswith("-"):
-                    i += 2 if w[i] in ("-u", "-C", "-g") else 1
+                    i += 2 if w[i] in WRAPPERS[head] else 1
+            elif head == "timeout":
+                i += 1
+                while i < n and w[i].startswith("-"):
+                    i += 2 if w[i] in TIMEOUT_WITH_VALUE else 1
+                i += 1  # 時間
             elif head == "dotenvx" and w[i + 1:i + 2] == ["run"]:  # dotenvx run …… -- <コマンド>
                 i += 2
                 while i < n and w[i] != "--":
                     i += 1
                 i += 1
-            elif head == "timeout":
-                i += 1
-                while i < n and w[i].startswith("-"):
-                    i += 2 if w[i] in ("-s", "-k") else 1
-                i += 1  # 時間
             else:
                 break
         if i >= n:
@@ -115,16 +206,17 @@ def outward(command: str) -> bool:
         if tool == "git":
             while i < n and w[i].startswith("-"):
                 i += 2 if w[i] in GIT_WITH_VALUE else 1
-            if w[i:i + 1] == ["push"]:
+            if w[i:i + 1] == ["push"] and not NOT_SENT.intersection(w[i + 1:]):
                 return True
         elif tool == "gh":
-            words = []  # フラグ（-R・--repo は値も）を除いた語の並びの先頭 2 つ
-            while i < n and len(words) < 2:
+            sub = []  # フラグ（-R・--repo は値も）を除いた語の並びの先頭 2 つ
+            while i < n and len(sub) < 2:
                 if w[i].startswith("-"):
-                    i += 2 if w[i] in ("-R", "--repo") else 1
+                    i += 2 if w[i] in GH_WITH_VALUE else 1
                 else:
-                    words.append(w[i]); i += 1
-            if words in (["pr", "create"], ["pr", "merge"], ["release", "create"]):
+                    sub.append(w[i])
+                    i += 1
+            if sub in (["pr", "create"], ["pr", "merge"], ["release", "create"]) and not {"--help", "-h"}.intersection(w[i:]):
                 return True
     return False
 
@@ -147,18 +239,26 @@ def used_entry(path: str) -> bool:
     return False
 
 
+def slash_name(text: str):
+    """利用者の行の本文の先頭がスラッシュの記録なら、その名前（<command-name> の中身）。"""
+    if not text.lstrip().startswith(SLASH_HEADS):
+        return None
+    start = text.find("<command-name>")
+    end = text.find("</command-name>", start)
+    return text[start + len("<command-name>"):end].strip() if start != -1 and end != -1 else None
+
+
 def entry_in(row: dict) -> bool:
-    """1 行が入口を呼んだ印か。Skill ツールの呼び出しか、利用者の行の本文の先頭がスラッシュの印（書き手の本文や道具の結果に
-    写った印の文字列は数えない）。"""
+    """1 行が入口を呼んだ印か。Skill ツールの呼び出しか、利用者の行の先頭のスラッシュの記録の名前が入口のもの（書き手の本文や
+    道具の結果、ほかのスラッシュの引数に写った印の文字列は数えない）。"""
     message = row.get("message") or {}
     content, by_user = message.get("content"), message.get("role") == "user"
     if isinstance(content, str):
-        return by_user and content.lstrip().startswith(SLASH_HEADS) and ENTRY_COMMAND in content
+        return by_user and slash_name(content) == ENTRY_NAME
     for b in content if isinstance(content, list) else []:
         if b.get("type") == "tool_use" and b.get("name") == "Skill" and (b.get("input") or {}).get("skill") in ENTRY_SKILLS:
             return True
-        text = b.get("text") or ""
-        if by_user and b.get("type") == "text" and text.lstrip().startswith(SLASH_HEADS) and ENTRY_COMMAND in text:
+        if by_user and b.get("type") == "text" and slash_name(b.get("text") or "") == ENTRY_NAME:
             return True
     return False
 

@@ -41,6 +41,13 @@ MARK_INSIDE_USER_BLOCK = {"type": "user", "message": {"role": "user", "content":
 # 入口の名前を含むが形の違う行（input が文字列の Skill）。この後ろの印まで読み続ける
 BROKEN_ROW = {"type": "assistant", "message": {"role": "assistant", "content": [
     {"type": "tool_use", "id": "toolu_6", "name": "Skill", "input": "bb-writ:bb-writ"}]}}
+OTHER_SLASH_WITH_MARK = {"type": "user", "message": {"role": "user", "content":
+    "<command-message>bb-writ:reflect</command-message>\n<command-name>/bb-writ:reflect</command-name>\n"
+    "<command-args><command-name>/bb-writ:bb-writ</command-name> の行を読んで</command-args>"}}
+MARK_HEADS_ASSISTANT_BLOCK = {"type": "assistant", "message": {"role": "assistant", "content": [
+    {"type": "text", "text": "<command-name>/bb-writ:bb-writ</command-name>"}]}}
+SKILL_NAME_NOT_TOOL_USE = {"type": "assistant", "message": {"role": "assistant", "content": [
+    {"type": "server_tool_use", "id": "srv_1", "name": "Skill", "input": {"skill": "bb-writ:bb-writ"}}]}}
 ENTRIES = {"Skill ツール": BY_SKILL_TOOL, "Skill ツールの短い名前": BY_BARE_NAME, "スラッシュ": BY_SLASH,
            "スラッシュ（text ブロック）": BY_SLASH_IN_TEXT_BLOCK}
 
@@ -63,7 +70,19 @@ OUTWARD = ["git push origin main", "GH_CONFIG_DIR=x git -C . push -q origin HEAD
            # 行の継続・注釈の後の行・dotenvx・gh の副コマンドの前のフラグ・引用符に空白のある値・まとまり
            "git \\\n  push origin main", "git pu\\\nsh", "echo x # c\ngit push", "dotenvx run -f .env -- git push",
            "dotenvx run -- gh pr create", "gh pr --repo o/r merge 3", 'GIT_SSH_COMMAND="ssh -o X=no" git push',
-           "x || { git push; }", "echo a#b; git push"]
+           "x || { git push; }", "echo a#b; git push",
+           # 二重引用符の中のコマンドの置き換えの後（Claude Code が commit で普通に書く形）、引数の中の置き換え
+           "git commit -m \"$(cat <<'EOF'\nmsg\nEOF\n)\" && git push", "git commit -m \"$(cat <<'EOF'\nmsg\nEOF\n)\"\ngit push origin main",
+           'b="$(git branch --show-current)"; git push -u origin "$b"', 'test -z "$(git status --porcelain)" && git push',
+           'echo "n=$((n+1))" && git push', 'echo "a `date` b" && gh pr create --fill', 'git -C "$(pwd)" push',
+           'FOO="$(printf x)" git push',
+           # ${…}・$((…))・<<< の後、空の引用符の語
+           "echo ${#x}; git push", "if [ ${#files[@]} -gt 0 ]; then git push; fi", "echo ''#b; git push",
+           'cat <<< "hello"\ngit push', "echo $((1<<2))\ngit push", 'git -C "" push',
+           # 向け直しと、前置きの引数
+           "2>/dev/null git push", ">/dev/null git push", "time -p git push", "time -f %e git push", "2> err.txt git push", "nice -n 5 git push", "sudo --user w git push",
+           "env --unset X git push", "timeout --signal KILL 60 git push", "timeout --kill-after 5 60 git push",
+           "git --attr-source HEAD push"]
 NOT_OUTWARD = ["python3 /p/scripts/work.py op run --dir . --key push:origin/main@abc -- git push origin main",
                'git commit -m "docs: git push の説明を直す"', 'git commit -m "x; git push"', "git commit -m 'a && git push'",
                'echo "次に git push する"', 'grep -n "git push" README.md', "git status", "gh pr view 3", "git pushx",
@@ -75,7 +94,17 @@ NOT_OUTWARD = ["python3 /p/scripts/work.py op run --dir . --key push:origin/main
                "python3 w.py op run --key pr:x -- gh pr create --body \"手順:\ngh pr merge は op run で\"",
                "python3 w.py op run --key pr:x -- gh pr create --body \"$(cat <<'B'\ngit push の前に\nB\n)\"",
                # 注釈・引用符の中の英文
-               "echo x # then git push later", "echo x # ; git push", 'git commit -m "feat: x" -m "then git push"', "git log --oneline | grep \"do git push\""]
+               "echo x # then git push later", "echo x # ; git push",
+               # 置き換えの中だけの文字列、関門の行の本文の置き換え
+               'git commit -m "bump $(cat VERSION) git push guard"', 'echo "now $(date) git push will follow"',
+               'git commit -m "$(date)" -m "then; git push later"', 'echo "$(printf x); git push"',
+               'python3 w.py op run --key pr:x -- gh pr create --body "$(cat b.md)" --title "feat: (gh pr create) を止める"',
+               # heredoc の終わりの行は完全に一致したものだけ（<< では前後の空白を外さない）
+               "cat <<EOF\n EOF \ngit push\nEOF", "cat <<EOF\n  EOF\ngit push\nEOF",
+               # 外へ何も出さない
+               "git push --dry-run", "git push -n origin main", "gh pr create --help",
+               # 数だけの語は向け直しでない（読み飛ばさない）
+               "60 git push", 'git commit -m "feat: x" -m "then git push"', "git log --oneline | grep \"do git push\""]
 
 
 class TestPushGuard(unittest.TestCase):
@@ -115,7 +144,8 @@ class TestPushGuard(unittest.TestCase):
     def test_sessions_that_did_not_use_the_entry_are_not_touched(self):
         for rows in ((), (OTHER_SKILL,), (MENTION_ONLY,), (NOT_SKILL_TOOL,), (MARK_IN_TOOL_RESULT,),
                      (MARK_QUOTED_BY_ASSISTANT,), (MARK_IN_ASSISTANT_STRING,),
-                     (MARK_INSIDE_USER_TEXT,), (MARK_INSIDE_USER_BLOCK,), (BROKEN_ROW,)):
+                     (MARK_INSIDE_USER_TEXT,), (MARK_INSIDE_USER_BLOCK,), (BROKEN_ROW,),
+                     (OTHER_SLASH_WITH_MARK,), (MARK_HEADS_ASSISTANT_BLOCK,), (SKILL_NAME_NOT_TOOL_USE,)):
             t = self.transcript(*rows)
             with self.subTest(rows=len(rows)):
                 self.assertIsNone(self.run_guard("git push origin main", t))
@@ -178,9 +208,8 @@ class TestPushGuard(unittest.TestCase):
                 self.assertEqual(p.returncode, 0, p.stderr)
                 self.assertEqual(json.loads(p.stdout)["hookSpecificOutput"]["permissionDecision"] if p.stdout.strip() else None,
                                  "deny" if denied else None)
-        # -B: プラグインの置き場に __pycache__ を作らない
+        # -B: プラグインの置き場に __pycache__ を作らない（今は標準ライブラリしか読まないので、無くても作らない。文で固定する）
         self.assertIn("python3 -B", hooks[0]["command"])
-        self.assertFalse((ROOT / "scripts" / "__pycache__").exists())
 
 if __name__ == "__main__":
     unittest.main()
