@@ -2693,7 +2693,7 @@ class TestLaunch(unittest.TestCase):
 
     def test_an_auditor_is_told_to_judge_every_item_of_the_skill_whatever_the_prompt(self):
         """親が書いた監査役の依頼文が判定の項目を狭めても、監査役は playbook-verify の節の項目をすべて判定するよう約束を受ける
-        （続きでも）。監査役でない子には足さない（試験が見るのは、読み取り専用・--interrogate・--write の最初の起動だけ。
+        （Claude Code の続きでも）。監査役でない子には足さない（試験が見るのは、読み取り専用・--interrogate・--write の最初の起動だけ。
         --hardest の子と、監査役でない子の続きに足さないことは見ない）。"""
         sentence = load_launch().AUDIT_CONTRACT
         # 約束の意味を決める句は、句ごと固定する（言い換えると落ちる。語の有無だけでは、意味を逆にした書き換えが通る）
