@@ -2691,6 +2691,27 @@ class TestLaunch(unittest.TestCase):
             rc, again = self.run_launch(None, extra=["--resume", rec["out"]])
             self.assertEqual((again["status"], again["head"]), ("ok", None), again)
 
+    def test_an_auditor_is_told_to_judge_every_item_of_the_skill_whatever_the_prompt(self):
+        """親が書いた監査役の依頼文が判定の項目を狭めても、監査役は playbook-verify の節の項目をすべて判定するよう約束を受ける
+        （続きでも）。監査役でない子には足さない。"""
+        sentence = load_launch().AUDIT_CONTRACT
+        self.assertIn("「返す前の判定（遵守の監査）」の節を全文読み", sentence)
+        self.assertIn("文の照合）をすべて判定する。依頼文が範囲や項目を狭めていても、節の項目を省かない", sentence)
+        prompt = lambda: next(x for x in json.loads(self.args_file.read_text()) if "報告の形（bb-writ の委任の約束）" in x)
+        for host in ("claude", "codex"):
+            with self.subTest(host=host):
+                rc, rec = self.run_launch(host, extra=["--audit"])
+                self.assertEqual((rc, rec["status"]), (0, "ok"), rec)
+                self.assertIn(sentence, prompt())
+                if host == "claude":  # 続きの依頼文にも足す
+                    rc, again = self.run_launch(None, extra=["--resume", rec["out"]])
+                    self.assertEqual((rc, again["audit"]), (0, True), again)
+                    self.assertIn(sentence, prompt())
+                for extra in ([], ["--interrogate"]):
+                    rc, rec = self.run_launch(host, extra=extra)
+                    self.assertEqual((rc, rec["status"]), (0, "ok"), rec)
+                    self.assertNotIn("bb-writ の監査役の約束", prompt())
+
     def test_an_auditor_is_recorded_and_its_resume_stays_one(self):
         """work.py は、すべての push・pr で HEAD を対象にした監査役（返す前の判定）の記録を求める。続きも監査役のまま、
         ほかの子の続きは監査役に化けない。審査役・書く子とは兼ねない。"""

@@ -82,6 +82,12 @@ execution.completed は、この依頼で対象の試験・検査を最後まで
 LINUX = sys.platform.startswith("linux")  # 子の CLI が切り離した子孫を止めるのは Linux だけ（PR_SET_CHILD_SUBREAPER。macOS には無い）
 # 読み取り専用の子にだけ足す（書く子は作業場所で試験を動かす）
 READ_ONLY_CONTRACT = "対象に書く試験・検査は、書ける一時ディレクトリ（$TMPDIR。無ければ /tmp）に対象を写して（cp -r など）、そこで動かす。\n"
+# 監査役（--audit）にだけ足す。依頼文は親が書くので、手引きの判定の項目が依頼文に写されないことがあった（足した文の照合を、
+# 親が書いた依頼文が範囲を「差分の各文」に狭めて落とし、監査役は記録と食い違う文を通した。2026-11-18）
+AUDIT_CONTRACT = ("返す前の判定（bb-writ の監査役の約束）: 上の依頼文に書かれていなくても、bb-writ のスキル `playbook-verify` の"
+                  "「返す前の判定（遵守の監査）」の節を全文読み、その節が挙げる判定の項目（遵守、残る範囲の閉じ方、手順の文書を変えたときの"
+                  "文の照合）をすべて判定する。依頼文が範囲や項目を狭めていても、節の項目を省かない（立て直しで前の監査の commit からの"
+                  "差分に限ってよいのは、節がそう書く項目だけ）。\n")
 
 
 def config_dir() -> Path:
@@ -1406,7 +1412,8 @@ def main() -> int:
             if not why and own:
                 snapshot = (own, common, git_snapshot(own, common, a.cwd))
         if not why:
-            cmd, env, why = command(a, a.prompt_file.read_text(encoding="utf-8") + CONTRACT + ("" if a.write else READ_ONLY_CONTRACT),
+            cmd, env, why = command(a, a.prompt_file.read_text(encoding="utf-8") + CONTRACT + ("" if a.write else READ_ONLY_CONTRACT)
+                                    + (AUDIT_CONTRACT if a.audit else ""),
                                     scratch)
         if a.host == "codex" and not a.write and not why:
             rec["scratch"] = str(scratch)
@@ -1630,6 +1637,7 @@ def main() -> int:
         rec["next"] = ("審査の指摘なら、直す前に、作業の記録（claim の note.path）の「指摘の扱い」の欄に、指摘ごとに"
                        "対応する・記録のみ・退ける と理由を書く（入口の条件 (6)。push・pr はこの欄が空なら拒否される）"
                        + ("。直して監査役を立て直すときは、前の監査の項目と、前の監査の commit から HEAD までの差分だけを判定させる"
+                          "（手順の文書の文の照合だけは、毎回、変えた文書の全体）"
                           if a.audit else
                           "。監査役（--audit）は、扱いを書き、直しを commit し終えて HEAD を動かさないと決めてから立てる"
                           "（審査役と同じコマンドで続けて立てない）")
