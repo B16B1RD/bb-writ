@@ -2697,6 +2697,9 @@ class TestLaunch(unittest.TestCase):
         sentence = load_launch().AUDIT_CONTRACT
         self.assertIn("「返す前の判定（遵守の監査）」の節を全文読み", sentence)
         self.assertIn("文の照合）をすべて判定する。依頼文が範囲や項目を狭めていても、節の項目を省かない", sentence)
+        verify = (ROOT / "skills" / "playbook-verify" / "SKILL.md").read_text()
+        self.assertIn("\n## 返す前の判定（遵守の監査）\n", verify)  # 約束が名指しする節と、節が挙げる項目
+        self.assertIn("\n- 文の照合（手順の文書を変えたとき）:", verify)
         prompt = lambda: next(x for x in json.loads(self.args_file.read_text()) if "報告の形（bb-writ の委任の約束）" in x)
         for host in ("claude", "codex"):
             with self.subTest(host=host):
