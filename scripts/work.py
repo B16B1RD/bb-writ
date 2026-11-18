@@ -1089,7 +1089,7 @@ def op_step(a, r: Path, live, now: float, action: str):
                             + "。launcher（launch.py、読み取り専用）で、"
                             "この commit を checkout した未 commit の変更が無い場所を --cwd にして審査役を立て、status が ok で返った記録が要る"
                             "（Agent ツールなど launcher を通らない子は記録に残らない）。審査が要らない変更なら none:<理由>"
-                            + ("" if not_run else not_run_hint(reviewed, a.dir if delta else None))
+                            + not_run_hint(reviewed, a.dir if delta else None)
                             + (f"。{unread}" if unread else "")}, 6)
             reviews = found
         risk = re.fullmatch(r"(低|中|高):(.*)", a.risk or "", re.S)
@@ -1102,7 +1102,7 @@ def op_step(a, r: Path, live, now: float, action: str):
             return ({"ok": False, "reason": f"危険度が{risk.group(1)}の変更は interrogate を通す（入口の条件 (6)）。commit {reviewed} の記録に、"
                         "launcher に --interrogate を付けて立てた審査役のものが無い（条件 (5) の子の記録は代わりにならない）。"
                         "interrogate の 3 の依頼文で、この commit の審査役を --interrogate を付けて立てる"
-                        + ("" if not_run else not_run_hint(reviewed, a.dir if delta else None, 1))}, 6)
+                        + not_run_hint(reviewed, a.dir if delta else None, 1)}, 6)
         risk = risk.group(1) + ": " + risk.group(2).strip()
         _, _, audits, unread = reviews_of(head, not_run=bool(not_run))
         if not audits:
@@ -1112,7 +1112,7 @@ def op_step(a, r: Path, live, now: float, action: str):
                         "status が ok で返った記録が要る。指摘は、作業の記録の指摘の扱いの欄に書いてから出す。"
                         "launcher が unavailable で返るなら（専用ログインが無いなど）、その problems の理由に従い、"
                         "bb-writ の README の「任意機能の準備」で専用ログインを用意する"
-                        + ("" if not_run else not_run_hint(head, role=2))
+                        + not_run_hint(head, role=2)
                         + (f"。{unread}" if unread else "")}, 6)
         audit = audits
         f = r / "note.md"
