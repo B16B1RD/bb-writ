@@ -104,7 +104,9 @@ OUTWARD = ["git push origin main", "GH_CONFIG_DIR=x git -C . push -q origin HEAD
            # 向け直しの演算子だけの語は、次の語が行き先
            "< in.txt git push", ">> log.txt git push", ">& log.txt git push", "<& 0 git push", ">| f git push",
            "git push>/dev/null", "git >out push", "git > out push", "git 2>err push", "gh pr create>out.txt",
+           # 前置き・大域の引数の値（空の一重引用符も値の語）
            "stdbuf -i 0 git push", "stdbuf -e 0 git push", "git -C '' push",
+           # git push の値を取る引数の値は、試すだけの指定でない
            "git push --receive-pack -n origin main", "git push --exec -n origin main", "git push --repo -n main",
            # git push の値を取る引数の値は、試すだけ・使い方の指定でない
            "git push -o -n origin main", "git push --push-option -n origin main",
