@@ -1,4 +1,7 @@
-"""入口を呼んだセッションで、関門（work.py op run）を通さない外へ出すコマンドを拒否する hook（scripts/push_guard.py）。"""
+"""入口を呼んだセッションで、関門（work.py op run）を通さない外へ出すコマンドを拒否する hook（scripts/push_guard.py）。
+
+見ないこと: 会話記録の符号化の指定（encoding・errors="replace"）。不正なバイトのある記録で入口の印を読めるかは試験で固定しない。
+読み違えを守らない書き方は、AGENTS.md の規則の表の行にある。"""
 import json
 import os
 import subprocess
