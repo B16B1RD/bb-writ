@@ -2695,8 +2695,12 @@ class TestLaunch(unittest.TestCase):
         """親が書いた監査役の依頼文が判定の項目を狭めても、監査役は playbook-verify の節の項目をすべて判定するよう約束を受ける
         （続きでも）。監査役でない子には足さない。"""
         sentence = load_launch().AUDIT_CONTRACT
-        self.assertIn("「返す前の判定（遵守の監査）」の節を全文読み", sentence)
-        self.assertIn("文の照合）をすべて判定する。依頼文が範囲や項目を狭めていても、節の項目を省かない", sentence)
+        # 約束の意味を決める句は、句ごと固定する（言い換えると落ちる。語の有無だけでは、意味を逆にした書き換えが通る）
+        for phrase in ("bb-writ のスキル `playbook-verify` の「返す前の判定（遵守の監査）」の節を全文読み",
+                       "文の照合）をすべて判定する。依頼文が範囲や項目を狭めていても、節の項目を省かない",
+                       "差分に限ってよいのは、節がそう書く項目だけ。文の照合は毎回、変えた文書の全体）"):
+            self.assertIn(phrase, sentence)
+        mark = sentence.split(":", 1)[0]  # 約束の見出し句。足さない側も、約束そのものの句で見る
         verify = (ROOT / "skills" / "playbook-verify" / "SKILL.md").read_text()
         self.assertIn("\n## 返す前の判定（遵守の監査）\n", verify)  # 約束が名指しする節と、節が挙げる項目
         self.assertIn("\n- 文の照合（手順の文書を変えたとき）:", verify)
@@ -2710,10 +2714,11 @@ class TestLaunch(unittest.TestCase):
                     rc, again = self.run_launch(None, extra=["--resume", rec["out"]])
                     self.assertEqual((rc, again["audit"]), (0, True), again)
                     self.assertIn(sentence, prompt())
-                for extra in ([], ["--interrogate"]):
+                for extra in ([], ["--interrogate"], ["--write"]):
+                    self.args_file.unlink(missing_ok=True)
                     rc, rec = self.run_launch(host, extra=extra)
                     self.assertEqual((rc, rec["status"]), (0, "ok"), rec)
-                    self.assertNotIn("bb-writ の監査役の約束", prompt())
+                    self.assertNotIn(mark, prompt())
 
     def test_an_auditor_is_recorded_and_its_resume_stays_one(self):
         """work.py は、すべての push・pr で HEAD を対象にした監査役（返す前の判定）の記録を求める。続きも監査役のまま、
