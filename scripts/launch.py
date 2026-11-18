@@ -214,8 +214,8 @@ def home_dotfiles() -> list[Path]:
 
 def claude_reads(cwd: Path, git_dir: Path | None, env: dict, audit: bool) -> dict:
     """読み取り専用の Claude Code の子の Bash の読み。ホームを丸ごと拒み、道具の置き場と対象を戻し、戻した中の認証情報を拒む（#38）。
-    - 戻す: ドットで始まるディレクトリのうち認証情報の一覧に無いもの、PATH のうちホームの下でドットで始まらないもの（bin はその親。
-      親がホームなら bin だけ）、Git の設定のファイルと ~/.config/git、対象と Git の共通ディレクトリ、監査役なら作業の記録・
+    - 戻す: ドットで始まるディレクトリのうち認証情報の一覧に無いもの、PATH のうちホームの下のディレクトリ（bin はその親。
+      親がホームなら bin だけ）、Git の設定のファイル（通常のファイルだけ）と ~/.config/git、対象と Git の共通ディレクトリ、監査役なら作業の記録・
       その場所で立てた子の out・bb-writ のスキル。対象と記録のほかは、道筋が symlink も .. も通らないもの（realpath と同じ綴り）だけを戻し、
       ホームそのもの・認証情報の置き場・その中は戻さない（symlink を通る道筋を行き先で判定して戻す形は、審査の周ごとに穴が出た。
       この機械で戻す置き場に、symlink を通るものは 0 個だった）
@@ -230,7 +230,7 @@ def claude_reads(cwd: Path, git_dir: Path | None, env: dict, audit: bool) -> dic
     ホームの外（Windows 側の /mnt/c/Users の下など）。ホーム直下のドットのファイルを読む道具（~/.tool-versions など）は落ちる（見つかったら戻す）。
     symlink を通る道具・設定（symlink の ~/.nvm・~/.gitconfig・~/.config/git、HOME が symlink の道筋のときのすべて）は戻らない
     （子の試験は動かず not-run になる。--not-run の宣言で関門を通す）。認証情報の置き場の中の symlink の行き先は、戻した場所の中にあるものだけを拒む
-    （行き先がほかの拒んだ場所なら、そのまま拒まれる）。置き場の 3 段目より深い所に張った symlink の行き先は拒まない。"""
+    （行き先がほかの拒んだ場所なら、そのまま拒まれる。対象・記録の中なら拒まない）。置き場の 3 段目より深い所に張った symlink の行き先は拒まない。"""
     home = Path.home()
     real_home = Path(os.path.realpath(home))
     secrets = read_only_secrets()
@@ -239,7 +239,7 @@ def claude_reads(cwd: Path, git_dir: Path | None, env: dict, audit: bool) -> dic
 
     def safe(a: Path) -> bool:  # 戻してよい道具・設定の置き場か。道筋が symlink も .. も通らないものだけ
         r = Path(os.path.realpath(a))
-        if str(r) != str(a) or r in real_secrets or r == real_home or r in real_home.parents:  # include.path=~ などでホームを戻さない
+        if str(r) != str(a) or r in real_secrets:
             return False
         return a == git_xdg or not any(q in r.parents for q in real_secrets)
 
@@ -247,23 +247,27 @@ def claude_reads(cwd: Path, git_dir: Path | None, env: dict, audit: bool) -> dic
     tools = []
     for d in env.get("PATH", "").split(os.pathsep):
         q = Path(d)
-        if q.is_absolute() and home in q.parents and q.exists():  # ドットで始まるものは safe とドットのディレクトリの戻しで決まる
+        if q.is_absolute() and home in q.parents and q.is_dir():  # ドットで始まるものは safe とドットのディレクトリの戻しで決まる
             tools.append(q.parent if q.name == "bin" and q.parent != home else q)
-    places = [a for a in [*dotdirs, *tools, *git_config_files(), git_xdg] if os.path.lexists(a) and safe(a)]
+    gits = [f for f in git_config_files() if f.is_file()]  # Git の設定として戻すのは通常のファイルだけ（include.path=~ でホームを戻さない）
+    places = [a for a in [*dotdirs, *tools, *gits, git_xdg] if os.path.lexists(a) and safe(a)]
     extra = [work_record(cwd), Path(__file__).resolve().parents[1] / "skills", *outs_of_place(cwd)] if audit else []
     allow = [*places, *(a for a in [cwd, *([git_dir] if git_dir else []), *extra] if os.path.lexists(a))]
     inner = [p for p in secrets if any(a in p.parents for a in allow)]
     links = [r for p in secrets if str(r := Path(os.path.realpath(p))) != str(p)]  # symlink を通る置き場の行き先
     # 置き場の中の symlink（stow で張った ~/.config/gh -> ~/.dotfiles/gh など）の行き先が戻した場所の中なら、行き先も拒む（辿らずに数える）
+    # 行き先が対象・共通ディレクトリ・記録の中なら拒まない（拒むと、子は対象の一部を黙って読めない。~/.claude/skills/x -> 対象/skills/x など）
+    mine = [cwd, *([git_dir] if git_dir else []), *extra]
     for top in real_secrets:  # 深さは 3 段まで（~/.config/gh のような張り方。全部を辿ると ~/.claude・~/.codex で数秒かかった）
         if top.is_dir():
             for root, dirs, files in os.walk(top):
-                if len(Path(root).relative_to(top).parts) >= 2:
-                    dirs[:] = []
                 for n in dirs + files:
                     q = Path(root) / n
-                    if q.is_symlink() and any(a in (r := Path(os.path.realpath(q))).parents or a == r for a in allow):
+                    if q.is_symlink() and any(a == (r := Path(os.path.realpath(q))) or a in r.parents for a in places) \
+                            and not any(k == r or k in r.parents for k in mine):
                         links.append(r)
+                if len(Path(root).relative_to(top).parts) >= 2:  # 3 段目は見てから、その下へ降りない
+                    dirs[:] = []
     own = [config_dir(), state_dir()]
     deny = [home, *([real_home] if real_home != home else []), *inner, *links, *own, *(Path(os.path.realpath(o)) for o in own)]
     return {"denyRead": list(dict.fromkeys(str(p) for p in deny)), "allowRead": list(dict.fromkeys(str(p) for p in allow))}
@@ -1772,7 +1776,7 @@ def main() -> int:
                           "。監査役（--audit）は、扱いを書き、直しを commit し終えて HEAD を動かさないと決めてから立てる"
                           "（審査役と同じコマンドで続けて立てない）")
                        + "（`playbook-verify` の「返す前の判定」）")
-    elif rec["status"] == "not-run" and rec.get("execution") == "no" and not a.write and rec["head"]:
+    elif rec["status"] == "not-run" and rec.get("execution") == "no" and rec["head"]:  # not-run は読み取り専用の子だけ
         # 子が実行できなかった。関門は宣言（--not-run）が無ければ数えない。止まったその場で、関門の外で出さずに済む出口を出す（#39）
         rec["next"] = ("子が対象の試験・検査を実行できなかった。写し方（$TMPDIR に写して動かす）や依頼文の誤りなら、直して立て直す。"
                        "子の sandbox のせいで実行できない（headless Chrome・Node の子プロセス・127.0.0.1 など）なら、親が同じ commit で同じ試験を"

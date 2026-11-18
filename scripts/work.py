@@ -249,7 +249,8 @@ def reviews_of(commit: str, cwd=None, not_run: bool = False) -> tuple:
 
 
 def not_run_hint(commit: str, cwd=None, role: int = 0) -> str:
-    """宣言なしで、その役（0: 審査役、1: --interrogate の審査役、2: 監査役。reviews_of の並びの番号）の記録が無いと拒否するとき、
+    """その役（0: 審査役、1: --interrogate の審査役、2: 監査役。reviews_of の並びの番号）の記録が無いと拒否するとき（宣言があって拒否されるときは、
+    数える記録が無いので空を返す）、
     その commit に、その役の子が実行できずに not-run で返った記録（execution が no）があれば、宣言のしかたを示す文。
     関門の外で出す（素の git push・gh pr create）道へ行かせないため。宣言しても通らない場面（ほかの役の not-run だけがある）では出さない。"""
     found = reviews_of(commit, cwd, not_run=True)[role]  # 呼ぶのはその役の ok の記録が無いときだけなので、見つかるのは not-run の記録
