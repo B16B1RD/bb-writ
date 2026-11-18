@@ -103,7 +103,10 @@ OUTWARD = ["git push origin main", "GH_CONFIG_DIR=x git -C . push -q origin HEAD
            "sudo -C 3 git push", "sudo --close-from 3 git push", "sudo -h h git push", "sudo --host h git push",
            "sudo -p p git push", "sudo --prompt p git push", "nice --adjustment 5 git push", "time --format %e git push",
            "time -o f git push", "time --output f git push", "timeout -s KILL 60 git push",
-           "git --namespace n push", "git --exec-path /x push", "git --super-prefix p push", "git --config-env a=B push",
+           "git --namespace n push", "git --super-prefix p push", "git --config-env a=B push",
+           # git --exec-path は = の無い形だと置き場を表示して終わる（push しない）が、値を取る引数として読み飛ばして止める。
+           # 誤って止める側（AGENTS.md の規則の表の誤って止める例）
+           "git --exec-path /x push",
            # 向け直しの演算子だけの語は、次の語が行き先
            "< in.txt git push", ">> log.txt git push", ">& log.txt git push", "<& 0 git push", ">| f git push",
            "git push>/dev/null", "git >out push", "git > out push", "git 2>err push", "gh pr create>out.txt",
