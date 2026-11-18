@@ -1195,6 +1195,108 @@ PERMISSIONS_BIND = permissions_bind()
 TRIAGE_LINE = "- 指摘の扱い（審査の指摘ごとに、対応する・記録のみ・退ける と理由を、直す前に）:"
 
 
+class TestNotRunDeclaration(unittest.TestCase):
+    """子が sandbox のせいで対象の試験・検査を実行できずに not-run で返ったとき、作業者が --not-run <理由> で宣言すれば、
+    その記録（not-run で、実行の欄に no と書いたもの）を push・pr の審査役・監査役に数える（#39。headless Chrome の試験では、
+    子を何回立てても ok の記録ができず、作業者が関門の外で出した）。宣言の真偽と、親が試験を実行したかは見ない（監査役が判定する）。"""
+    setUp, tearDown, w, claim, head = TestAccountCheck.setUp, TestAccountCheck.tearDown, TestAccountCheck.w, TestAccountCheck.claim, TestVerifiedCommit.head
+    review_record, commit, publish, ops_file = TestAccountCheck.review_record, TestReviewedCommit.commit, TestReviewedCommit.publish, TestReviewedCommit.ops_file
+    begin = TestAccountCheck.begin
+    launcher_reviews = launcher_audits = False  # 記録はこの試験が置く
+    WHY = "headless Chrome が子の sandbox で起動しない（終了コード 134）"
+
+    def could_not_run(self, commit, **over):
+        return self.review_record(commit, status="not-run", execution="no", **over)
+
+    def test_children_that_could_not_run_are_refused_without_the_declaration(self):
+        tok = self.claim()
+        self.commit("src/page.js")
+        self.could_not_run(self.head())
+        self.review_record(self.head(), audit=True)
+        for key in ("push:feat@1", "pr:feat"):
+            rc, r = self.publish(tok, key, "--reviewed", self.head())
+            self.assertEqual(rc, 6, (key, r))
+            self.assertIn("審査役の記録が無い", r["reason"])
+            self.assertIn("--not-run", r["reason"])  # 止まったその場で出口を示す（関門の外で出させない）
+        self.commit("src/other.js")  # 審査役は ok、監査役だけが実行できなかった commit
+        self.review_record(self.head())
+        self.could_not_run(self.head(), audit=True)
+        rc, r = self.publish(tok, "push:feat@1", "--reviewed", self.head())
+        self.assertEqual(rc, 6, r)
+        self.assertIn("監査役", r["reason"])
+        self.assertIn("--not-run", r["reason"])
+        self.assertEqual(self.ops_file(), b"")
+
+    def test_the_declaration_counts_children_that_wrote_they_could_not_run(self):
+        tok = self.claim()
+        self.commit("src/page.js")
+        self.could_not_run(self.head())
+        self.could_not_run(self.head(), audit=True)
+        self.assertEqual(self.publish(tok, "push:feat@1", "--reviewed", self.head(), "--not-run", self.WHY)[0], 0)
+        self.assertEqual(self.publish(tok, "pr:feat", "--reviewed", self.head(), "--not-run", "  " + self.WHY + "\n")[0], 0)
+        recs = {json.loads(x)["key"]: json.loads(x) for x in self.ops_file().decode().splitlines()}
+        self.assertEqual((recs["push:feat@1"]["not_run"], recs["pr:feat"]["not_run"]), (self.WHY, self.WHY))  # 宣言は記録に残る
+        self.assertEqual(len(recs["push:feat@1"]["reviews"]), 1)
+        self.assertEqual(len(recs["push:feat@1"]["audits"]), 1)
+
+    def test_a_report_without_the_execution_field_is_not_counted_even_with_the_declaration(self):
+        # 実行の欄の無い報告は、launcher が読んだだけとして not-run にしたもの。実行を試みたかが分からない
+        tok = self.claim()
+        self.commit("src/page.js")
+        self.review_record(self.head(), status="not-run", execution=...)  # 欄が無い
+        self.review_record(self.head(), status="not-run", execution=None)
+        self.review_record(self.head(), status="not-run", execution="no", record={"execution": None})  # record.json だけが欄を欠く
+        self.review_record(self.head(), status="not-run", execution=None, record={"execution": "no"})  # 行だけが欄を欠く
+        self.review_record(self.head(), status="not-run", execution="not-needed")
+        self.review_record(self.head(), status="failed", execution="no")  # not-run でない失敗は数えない
+        self.review_record(self.head(), status="ok", execution="no", record={"status": "failed"})  # 片側が失敗
+        self.could_not_run(self.head(), audit=True)
+        rc, r = self.publish(tok, "push:feat@1", "--reviewed", self.head(), "--not-run", self.WHY)
+        self.assertEqual(rc, 6, r)
+        self.assertIn("審査役の記録が無い", r["reason"])
+        self.review_record(self.head())  # ok の審査役は、宣言があっても今のとおり数える
+        self.review_record(self.head(), audit=True, status="not-run", execution=...)
+        self.assertEqual(self.publish(tok, "push:feat@1", "--reviewed", self.head(), "--not-run", self.WHY)[0], 0)
+
+    def test_an_empty_reason_or_a_declaration_outside_push_and_pr_is_refused(self):
+        tok = self.claim()
+        self.commit("src/page.js")
+        self.could_not_run(self.head())
+        self.could_not_run(self.head(), audit=True)
+        for why in ("", "  ", "\n"):
+            rc, r = self.publish(tok, "push:feat@1", "--reviewed", self.head(), "--not-run", why)
+            self.assertEqual(rc, 2, (why, r))
+            self.assertIn("--not-run の後に", r["reason"])
+        for key in ("merge:feat", "comment:feat", "local:x"):
+            rc, r = self.begin(tok, key, "--from", str(self.repo), "--verified", self.head(), "--not-run", self.WHY)
+            self.assertEqual(rc, 2, (key, r))
+            self.assertIn("push・pr", r["reason"])
+        self.assertEqual(self.ops_file(), b"")
+
+    def test_the_declaration_also_counts_an_interrogate_reviewer_that_could_not_run(self):
+        # 監査役だけ通しても、危険度が中・高の変更は --interrogate の審査役の記録が無いと止まる
+        tok = self.claim()
+        self.commit("src/page.js")
+        self.could_not_run(self.head())  # --interrogate の無い子だけ
+        self.could_not_run(self.head(), audit=True)
+        rc, r = self.publish(tok, "push:feat@1", "--reviewed", self.head(), "--risk", "中:普通のコード", "--not-run", self.WHY)
+        self.assertEqual(rc, 6, r)
+        self.assertIn("--interrogate", r["reason"])
+        self.could_not_run(self.head(), interrogate=True)
+        self.assertEqual(self.publish(tok, "push:feat@1", "--reviewed", self.head(), "--risk", "中:普通のコード", "--not-run", self.WHY)[0], 0)
+
+    def test_the_declaration_counts_an_ancestor_review_with_a_low_delta(self):
+        tok = self.claim()
+        self.commit("src/page.js")
+        reviewed = self.head()
+        self.could_not_run(reviewed)
+        self.commit("docs/page.md")
+        self.could_not_run(self.head(), audit=True)
+        rc, r = self.publish(tok, "push:feat@1", "--reviewed", reviewed, "--delta", "低:文だけ")
+        self.assertEqual(rc, 6, r)
+        self.assertEqual(self.publish(tok, "push:feat@1", "--reviewed", reviewed, "--delta", "低:文だけ", "--not-run", self.WHY)[0], 0)
+
+
 PREMISE_LINE = "- 仕組みの要否（審査が 3 周に達したら、直しを書く前に、目的の値で仕組みあり・なし・別の形を比べて）:"
 
 
@@ -1324,6 +1426,23 @@ class TestPremiseAfterRounds(unittest.TestCase):
                          "--delta", "低:文だけ", "--risk", "中:普通のコード")
         self.assertEqual((rc, res.get("note", {}).get("empty")), (2, [PREMISE_LINE[2:-1]]), res)
         self.assertEqual(self.delta("push:feat@a", heads[2], premise="比べた")[0], 0)
+
+    def test_rounds_count_children_that_could_not_run_only_with_the_declaration(self):
+        # ブラウザで試験するリポジトリでは審査がすべて not-run になり、数えないと 3 周の関門が働かない（#39）。宣言の無い push は今のとおり
+        self.start()
+        heads = [self.commit(f"a{i}") for i in range(3)]
+        for h in heads:
+            self.review_record(h, status="not-run", execution="no")
+        self.review_record(heads[2], status="not-run", execution="no", audit=True)
+        def go(key, *extra, premise=None):
+            self.note.write_text(FILLED_NOTE + ("" if premise is None else f"{PREMISE_LINE}{premise}\n"), encoding="utf-8")
+            return self.w("op", "begin", "--dir", str(self.wt), "--token", self.tok, "--key", key, "--what", "x",
+                          "--from", str(self.repo), "--verified", heads[2], "--reviewed", heads[2], *extra)
+        rc, res = go("push:feat@a", "--not-run", "headless Chrome が子の sandbox で起動しない")
+        self.assertEqual((rc, res.get("note", {}).get("empty")), (2, [PREMISE_LINE[2:-1]]), res)
+        self.assertEqual(go("push:feat@a", "--not-run", "headless Chrome が子の sandbox で起動しない", premise="比べた")[0], 0)
+        rc, res = go("push:feat@b")  # 宣言が無ければ not-run の記録は審査に数えない（周より前に止まる）
+        self.assertEqual(rc, 6, res)
 
     def test_audits_do_not_count_as_rounds(self):
         # 監査役は push ごとに立てるので、周に数えると、文書だけの PR でも 3 回目の push で仕組みの要否を求めてしまう

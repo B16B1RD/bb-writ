@@ -5,7 +5,7 @@
   work.py renew   --dir <作業場所> --token <t> [--lease <分>]          → 引き継がれていれば拒否（3）。旧担当はここで止まる
   work.py release --dir <作業場所> --token <t>                         → コマンドが終わっていない op run があれば拒否（4）
   work.py status  --dir <作業場所>
-  work.py op begin   --dir <作業場所> --token <t> --key <操作の鍵> --what <何をするか> [--from <場所>] [--verified <c>] [--reviewed <c>|none:<理由>] [--delta 低:<理由>] [--risk 低|中|高:<理由>]
+  work.py op begin   --dir <作業場所> --token <t> --key <操作の鍵> --what <何をするか> [--from <場所>] [--verified <c>] [--reviewed <c>|none:<理由>] [--delta 低:<理由>] [--risk 低|中|高:<理由>] [--not-run <理由>]
                      → 同じ鍵が既にあれば拒否（4）
   work.py op run     （op begin と同じ引数） -- <コマンド>              → begin が通ったときだけ --from（無ければ作業場所）でコマンドを
                      シェルを通さず標準入力なしで実行し、終了コードと出力（stderr を含む）の末尾 20 行を done に記録する。
@@ -52,7 +52,13 @@ commit を書いたときは、launcher の委任の記録（delegations.jsonl�
 短い往復で審査を忘れたまま、または書き手が自分の確かめを審査の代わりにして出すのを止める。
 push・pr は、--reviewed（none: を含む）に関わらず、作業場所の HEAD を対象に launcher に --audit を付けて起動し ok で返った
 読み取り専用の監査役（返す前の判定）の記録が無ければ拒否する（6）。監査役の記録は審査の記録にも周の数にも数えない。
-監査の中身（何を挙げたか、届けてよいと書いたか）は見ない。スキルの要求を読んでいて弱いもので代える・黙って省く（読者役を
+監査の中身（何を挙げたか、届けてよいと書いたか）は見ない。
+push・pr に --not-run <理由>（子が sandbox のせいで対象の試験・検査を実行できなかった理由）を付けると、その commit を対象に
+not-run で返り、子が実行の欄に実行できなかった（execution が no）と書いた記録も、審査役・--interrogate の審査役・監査役と審査の周に数える
+（ブラウザの試験など、子を何回立てても ok の記録ができず、作業者が関門の外で出したため）。実行の欄の無い報告（launcher が読んだだけとして
+not-run にしたもの）は数えない。理由が空なら、push・pr 以外に付けたら拒否する（2）。宣言は ops.jsonl の not_run に残す。宣言の真偽
+（教えれば動いた場面か）と、親が HEAD で試験を実行したかは見ず、監査役が判定する。宣言なしで記録が無いと拒否するとき、not-run の記録があれば
+理由の文で宣言のしかたを示す。スキルの要求を読んでいて弱いもので代える・黙って省く（読者役を
 別の目的の読み手で代える、意味の判断を役割の違う agent に見せる）まま、none: で出したため。
 push・pr は、作業の記録（note.md）の目的・制約・確かめ方・指摘の扱いの欄が空か無ければ拒否する（2）。
 審査が 3 周に達していたら（task start の作業場所を --cwd にして launcher で読み取り専用の子（審査役・確かめ役など）を立てて ok で返った、互いに異なる commit が 3 つ）、仕組みの要否の欄も。
@@ -190,16 +196,19 @@ def read_regular(f: Path) -> bytes:
         return h.read()
 
 
-def reviews_of(commit: str, cwd=None) -> tuple:
+def reviews_of(commit: str, cwd=None, not_run: bool = False) -> tuple:
     """launcher の委任の記録（delegations.jsonl）のうち、その commit を対象に起動して ok で返った読み取り専用の子の記録の out と、
     そのうち --interrogate を付けて立てた審査役の out と、--audit を付けて立てた監査役（返す前の判定）の out と、読めないものの説明（無ければ空）。
     行と、out の record.json の両方で head・status・write が合うものだけを数え、interrogate・audit も両方で真のものだけをその役に数える。
     監査役は審査の記録（最初の値）に数えない（push ごとに立てるので、審査の代わりにも周の数にもしない）。
     head は launcher が、対象の作業ツリーが子の起動の前と終わりの両方で commit と同じとき（未 commit の変更が無いとき）だけ書く。
     審査の中身（子が十分に攻めたか、何人か、依頼文が interrogate の観点を持っていたか）は見ない。手で書き足した記録も見分けない（忘れて飛ばすのを止める）。
-    cwd を渡すと、その場所を --cwd にして立てた記録だけを数える（--delta の祖先の審査を、ほかの作業場所の審査で代えないため）。"""
+    cwd を渡すと、その場所を --cwd にして立てた記録だけを数える（--delta の祖先の審査を、ほかの作業場所の審査で代えないため）。
+    not_run が真なら（作業者が --not-run で、子が sandbox のせいで実行できなかったと宣言した）、status が not-run で、子が実行の欄に
+    実行できなかった（execution が no）と書いた記録も数える。実行の欄が無い報告（読んだだけ）は数えない。"""
     here = str(Path(cwd).resolve()) if cwd is not None else None
-    match = lambda e: (isinstance(e, dict) and e.get("head") == commit and e.get("status") == "ok" and e.get("write") is False
+    done = lambda e: e.get("status") == "ok" or (not_run and e.get("status") == "not-run" and e.get("execution") == "no")
+    match = lambda e: (isinstance(e, dict) and e.get("head") == commit and done(e) and e.get("write") is False
                        and isinstance(e.get("out"), str) and os.path.isabs(e["out"])  # launcher は絶対パスを書く
                        and (here is None or (isinstance(e.get("cwd"), str) and os.path.isabs(e["cwd"]) and str(Path(e["cwd"]).resolve()) == here)))
     f = state_dir() / "delegations.jsonl"
@@ -239,6 +248,20 @@ def reviews_of(commit: str, cwd=None) -> tuple:
     return found, judges, audits, (f"委任の記録 {f} に、読めない行か、out の record.json を読めない行が {broken} 行ある" if broken else "")
 
 
+def not_run_hint(commit: str, cwd=None) -> str:
+    """宣言なしで審査役・監査役の記録が無いと拒否するとき、その commit に、子が実行できずに not-run で返った記録（execution が no）が
+    あれば、宣言のしかたを示す文。関門の外で出す（素の git push・gh pr create）道へ行かせないため。無ければ空。"""
+    ok = set(reviews_of(commit, cwd)[0] + reviews_of(commit, cwd)[2])
+    found, _, audits, _ = reviews_of(commit, cwd, not_run=True)
+    left = [o for o in found + audits if o not in ok]
+    if not left:
+        return ""
+    return (f"。この commit には、子が対象の試験・検査を実行できずに not-run で返った記録がある（{left[0]}）。"
+            "sandbox のせいで子が実行できない（headless Chrome・Node の子プロセス・127.0.0.1 など。写し方を教えれば動くものは除く）なら、"
+            "関門の外で出さず、親が HEAD で同じ試験を実行して証拠（コマンド・終了コード・出力）を作業の記録に書き、"
+            "--not-run <子が実行できなかった理由> を付けて op run する（監査役はその証拠を判定する。`playbook-deliver`）")
+
+
 def task_place(d: Path) -> tuple:
     """task start で作った作業場所（親のタスクの一覧に dir があるもの）に d が入っていれば、(その作業場所, 基点)。ほかは (None, None)。
     同じリポジトリ（common dir が同じもの）の下の階層も同じ作業場所と見る（下の階層を --dir にして基点の確かめを外せた）。
@@ -270,13 +293,15 @@ def is_ancestor(older: str, newer: str, d: Path) -> tuple:
     return rc, err
 
 
-def review_rounds(d: Path) -> int:
+def review_rounds(d: Path, not_run: bool = False) -> int:
     """審査の周の数。委任の記録のうち、この作業場所（その下の階層を含む）を --cwd にして ok で返った読み取り専用の子の head（launcher が書く完全な ID）の、
     互いに異なるものの数（タスクの基点そのものの審査は除く）。審査役も条件 (5) の確かめ役も数え、監査役（--audit）は数えない。amend・rebase で前の周の commit が
     履歴から外れても数える。別の場所（ほかのタスク、写し）を --cwd にした審査は数えない。
     task start で作った作業場所（親のタスクの一覧に dir があるもの）でなければ数えない。記録は行だけを見る（手で書いた行も数える）。
     作業場所の task.json は書く子が書き換えうるので読まない。手で書いた行の cwd が解けない（NUL・symlink のループ）ときは、
-    traceback で止まる（launcher は resolve した cwd を書く。手で書いた記録は確かめない）。"""
+    traceback で止まる（launcher は resolve した cwd を書く。手で書いた記録は確かめない）。
+    not_run が真なら（--not-run の宣言）、not-run で execution が no の子も周に数える（数えないと、審査がすべて not-run になる
+    リポジトリで、3 周の関門が働かない）。"""
     top, base = task_place(d)
     if base is None:
         return 0
@@ -291,7 +316,8 @@ def review_rounds(d: Path) -> int:
         except (ValueError, RecursionError):
             continue
         if (isinstance(e, dict) and isinstance(e.get("head"), str) and re.fullmatch(r"[0-9a-f]{40,64}", e["head"])
-                and e.get("status") == "ok" and e.get("write") is False and e.get("audit") is not True and isinstance(e.get("cwd"), str)
+                and (e.get("status") == "ok" or (not_run and e.get("status") == "not-run" and e.get("execution") == "no"))
+                and e.get("write") is False and e.get("audit") is not True and isinstance(e.get("cwd"), str)
                 and e["head"] != base and (Path(e["cwd"]).resolve() == top or top in Path(e["cwd"]).resolve().parents)):
             heads.add(e["head"])
     return len(heads)
@@ -1001,7 +1027,13 @@ def op_step(a, r: Path, live, now: float, action: str):
         if verified != head:
             return ({"ok": False, "reason": f"検証した commit {verified or a.verified} と作業場所の HEAD {head} が違う。"
                         "検証の後に成果物が変わった。今の HEAD で証拠を取り直してから出す"}, 6)
-    reviewed, reviews, judges, audit, delta = None, None, [], None, None
+    reviewed, reviews, judges, audit, delta, not_run = None, None, [], None, None, None
+    if action == "begin" and getattr(a, "not_run", None) is not None:
+        if a.key.split(":")[0] not in REVIEWED:
+            return ({"ok": False, "reason": "--not-run は、push・pr の関門で、子が sandbox のせいで実行できなかった記録を数える宣言。ほかの操作には付けない"}, 2)
+        if not a.not_run.strip():
+            return ({"ok": False, "reason": "--not-run の後に、子が対象の試験・検査を実行できなかった理由を書く（headless Chrome が子の sandbox で起動しない、など）"}, 2)
+        not_run = a.not_run.strip()
     if action == "begin" and a.key.split(":")[0] in REVIEWED:
         if not a.reviewed:
             return ({"ok": False, "reason": "push・pr には --reviewed <届ける前の審査を通した commit> か --reviewed none:<要らない理由> が要る。"
@@ -1050,13 +1082,14 @@ def op_step(a, r: Path, live, now: float, action: str):
                     return ({"ok": False, "reason": f"審査を通した commit {reviewed} は、このタスクの基点 {base} より後と確かめられない"
                                 "（基点か、その前か、別の系統）。基点の審査はタスクの変更を見ていないので、HEAD で審査を通してから出す"}, 6)
                 delta = "低: " + d.group(2).strip()
-            found, judges, _, unread = reviews_of(reviewed, a.dir if delta else None)
+            found, judges, _, unread = reviews_of(reviewed, a.dir if delta else None, bool(not_run))
             if not found:
                 return ({"ok": False, "reason": f"commit {reviewed} を対象にした審査役の記録が無い"
                             + ("（--delta では、この作業場所を --cwd にして立てたものだけを数える）" if delta else "")
                             + "。launcher（launch.py、読み取り専用）で、"
                             "この commit を checkout した未 commit の変更が無い場所を --cwd にして審査役を立て、status が ok で返った記録が要る"
                             "（Agent ツールなど launcher を通らない子は記録に残らない）。審査が要らない変更なら none:<理由>"
+                            + ("" if not_run else not_run_hint(reviewed, a.dir if delta else None))
                             + (f"。{unread}" if unread else "")}, 6)
             reviews = found
         risk = re.fullmatch(r"(低|中|高):(.*)", a.risk or "", re.S)
@@ -1070,7 +1103,7 @@ def op_step(a, r: Path, live, now: float, action: str):
                         "launcher に --interrogate を付けて立てた審査役のものが無い（条件 (5) の子の記録は代わりにならない）。"
                         "interrogate の 3 の依頼文で、この commit の審査役を --interrogate を付けて立てる"}, 6)
         risk = risk.group(1) + ": " + risk.group(2).strip()
-        _, _, audits, unread = reviews_of(head)
+        _, _, audits, unread = reviews_of(head, not_run=bool(not_run))
         if not audits:
             return ({"ok": False, "reason": f"作業場所の HEAD {head} を対象にした監査役（返す前の判定）の記録が無い。--reviewed none: でも要る"
                         "（none: は interrogate を省く宣言で、子を省く宣言でない）。launcher（launch.py）に --audit を付け、この commit を "
@@ -1078,10 +1111,11 @@ def op_step(a, r: Path, live, now: float, action: str):
                         "status が ok で返った記録が要る。指摘は、作業の記録の指摘の扱いの欄に書いてから出す。"
                         "launcher が unavailable で返るなら（専用ログインが無いなど）、その problems の理由に従い、"
                         "bb-writ の README の「任意機能の準備」で専用ログインを用意する"
+                        + ("" if not_run else not_run_hint(head))
                         + (f"。{unread}" if unread else "")}, 6)
         audit = audits
         f = r / "note.md"
-        gaps = note_gaps(note_body(f), True, review_rounds(Path(a.dir)) if reviews else 0)
+        gaps = note_gaps(note_body(f), True, review_rounds(Path(a.dir), bool(not_run)) if reviews else 0)
         if gaps:
             return ({"ok": False, "note": {"path": str(f), "empty": gaps}, "reason": f"作業の記録 {f} の欄が空か無い: {'、'.join(gaps)}。目的・制約・確かめ方は担当を取った直後に、"
                         "審査役・監査役の指摘の扱いは直す前に、審査が 3 周に達したら仕組みの要否も、その欄へ書く（`playbook-deliver` の「記録を残す」と入口の条件 (6)、"
@@ -1111,6 +1145,8 @@ def op_step(a, r: Path, live, now: float, action: str):
         e["risk"] = risk
     if delta:
         e["delta"] = delta
+    if not_run:
+        e["not_run"] = not_run
     with open(r / "ops.jsonl", "a", encoding="utf-8") as f:
         f.write(json.dumps(e, ensure_ascii=False) + "\n")
     res = {"ok": True, "op": ops(r)[a.key]}
@@ -1524,6 +1560,9 @@ def main() -> int:
     o.add_argument("--verified", help="検証した commit（push・pr・merge・release で必須。作業場所の HEAD と一致させる）")
     o.add_argument("--reviewed", help="届ける前の審査を通した commit か none:<理由>（push・pr で必須。commit は作業場所の HEAD と一致させるか、HEAD の祖先にして --delta を付け、その commit を対象に launcher で ok で返った読み取り専用の子（審査役・確かめ役など。監査役は除く）の記録が要る。--risk が中・高なら --interrogate を付けた審査役の記録。どちらでも、HEAD を対象に --audit を付けた監査役の記録も要る）")
     o.add_argument("--delta", help="審査を通した commit（--reviewed）から HEAD までの差分の危険度と理由 低:<理由>（push・pr で、--reviewed の commit が HEAD の祖先のときだけ。中・高なら HEAD で審査を通す）")
+    o.add_argument("--not-run", dest="not_run", help="子が sandbox のせいで対象の試験・検査を実行できなかった理由（push・pr だけ。付けると、"
+                   "その commit を対象に not-run で返り、実行の欄に実行できなかった（no）と書いた子の記録も、審査役・監査役と審査の周に数える。"
+                   "実行の欄の無い報告は数えない。親が HEAD で実行した試験の証拠を作業の記録に書き、監査役に判定させる）")
     o.add_argument("--risk", help="変更の危険度と理由 低|中|高:<理由>（push・pr で必須。中・高は --reviewed none: と一緒に使えない）")
     c = sub.add_parser("check")
     c.add_argument("--dir", type=Path, required=True)
