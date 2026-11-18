@@ -42,7 +42,7 @@ codex plugin add bb-writ@bb-writ
 grok plugin install B16B1RD/bb-writ --trust
 ```
 
-`--trust` は、プラグインを信頼して有効にすることの確認で、付けないと Grok Build は導入せずに止まる。bb-writ が有効にするのはスキルだけで、hook と MCP サーバーは含まない。
+`--trust` は、プラグインを信頼して有効にすることの確認で、付けないと Grok Build は導入せずに止まる。bb-writ が有効にするのはスキルと、Claude Code 向けの hook 1 つで、MCP サーバーは含まない。Grok Build はこの hook を読み込むが、Grok Build のセッションでは何も止めない（下の「仕組みと含まれるスキル」）。
 
 Grok Build は Claude Code のプラグインも読む（Claude 互換の既定の設定）。Claude Code に bb-writ を入れてあれば、Grok Build に入れなくても使える。両方に入れた場合は、Grok Build に入れたほうが使われる。
 
@@ -144,6 +144,7 @@ Claude Code は、普通の依頼文だけでは入口を使わない。入口�
 - 学び：`reflect`（振り返って行き先へ送る）、`correct`（繰り返す誤りを起こせなくする）。
 - 探索：`unknowns`（実装前に、盲点の洗い出しや案の比較をする）。
 - 原則：1 本ずつ別のスキル `principle-*`（18 本）。入口の「原則の索引」から、仕事の局面に当たるものだけを呼ぶ。
+- hook（Claude Code）：入口を呼んだセッションで、関門（`work.py op run`）を通さない `git push`・`gh pr create`・`gh pr merge`・`gh release create` を拒否する（`hooks/hooks.json`）。入口を呼ばないセッションは止めない。Codex と Grok Build では止めず、同じことを入口の文が求める。
 
 ## 任意機能の準備
 

@@ -1,0 +1,17 @@
+{
+  "description": "bb-writ: 入口を呼んだセッションで、work.py op run を通さない git push・gh pr create・gh pr merge・gh release create を拒否する",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 -B \"${CLAUDE_PLUGIN_ROOT}/scripts/push_guard.py\"",
+            "timeout": 30
+          }
+        ]
+      }
+    ]
+  }
+}
