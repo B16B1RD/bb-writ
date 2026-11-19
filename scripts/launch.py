@@ -61,11 +61,13 @@ from work import root as work_record  # noqa: E402  作業場所ごとの記録�
 # Claude の審査役は Fable 5.2 medium: 後で実物で確かめた欠陥のある変更 3 つで、Opus high（基準）・Opus medium・Fable medium を
 # 2 回ずつ審査させ、欠陥を挙げた数は 4・2・6、所要時間の中央値は 151・93・117 秒だった（2026-11-15。試験を回さない条件。揺れは測っていない）。
 # Opus medium は基準より見落としたので、監査役は Opus high のまま。
+# Claude の書く子（実装役）は Opus high: 入口の本体は、指揮者が成果物を書かず、書く子に書かせて実物を確かめる。その形で 2 題を
+# 1 回ずつ通した（2026-11-20。指揮者は fork した Fable 5.2。書く子の費用は全体の 2 割弱だった。揺れは測っていない）。
 CHOICES = {
     "audit": {"claude": ("opus", "high"), "codex": ("gpt-6-sol", "medium"), "grok": ("grok-4.7", "medium")},
     "interrogate": {"claude": ("fable", "medium"), "codex": ("gpt-6-sol", "medium"), "grok": ("grok-4.7", "medium")},
     "read": {"claude": ("sonnet", "medium"), "codex": ("gpt-6-sol", "medium"), "grok": ("grok-4.7", "medium")},
-    "write": {"claude": ("sonnet", "medium"), "codex": ("gpt-6-sol", "medium"), "grok": ("grok-4.7", "medium")},
+    "write": {"claude": ("opus", "high"), "codex": ("gpt-6-sol", "medium"), "grok": ("grok-4.7", "medium")},
     "hardest": {"claude": ("fable", "medium"), "codex": ("gpt-6.1-sol", "high")},
 }
 TIMEOUTS = {"hardest": 3600}  # 既定の --timeout（表に無い役割は 1800）。最上段の書く子は 1 回が長い
@@ -671,7 +673,10 @@ def command(a, prompt: str, scratch: Path) -> tuple[list[str], dict, str | None]
             # Bash は sandbox で同じ範囲に閉じ、--restricted でファイル系のツールも同じ範囲に閉じる（対象の .claude の設定も読まない）。
             # ネットワークは、これまでどおり出られるようにする（sandbox の既定は宛先なしで、依存の取得もできなくなる）
             perm = ["--permission-mode", "auto", "--restricted", "--tools", "Read,Grep,Glob,Edit,Write,Bash,Skill,WebSearch,WebFetch", "--add-dir", str(work_record(a.cwd))]
-            settings = {"sandbox": {"enabled": True, "allowUnsandboxedCommands": False, "failIfUnavailable": True,
+            # 入口 bb-writ:bb-writ は、呼ぶたびに fork した指揮者（frontmatter の model）を立てる。子が呼ぶと、子の中に
+            # もう 1 人の指揮者が立つので拒む（本体 bb-writ:conduct とほかのスキルは呼べる。読み取り専用の子も同じ）
+            settings = {"permissions": {"deny": ["Skill(bb-writ:bb-writ)"]},
+                        "sandbox": {"enabled": True, "allowUnsandboxedCommands": False, "failIfUnavailable": True,
                                     "network": {"allowedDomains": ["*"]}, "filesystem": secret_reads(cfg), "credentials": secret_env(env)}}
         else:
             # 読み取り専用は、コマンドの許可規則でなく OS の sandbox で守る（git log/diff/show は --output で書けた。2.1.302 で実測）。
@@ -698,7 +703,7 @@ def command(a, prompt: str, scratch: Path) -> tuple[list[str], dict, str | None]
             env["CLAUDE_CONFIG_DIR"] = str(cfg / "claude-home")
             env["CLAUDE_CODE_DISABLE_BACKGROUND_TASKS"] = "1"
             perm = ["--permission-mode", "dontAsk", "--restricted", "--tools", "Read,Grep,Glob,Bash,Skill"]
-            settings = {"permissions": {"allow": ["Read", "Grep", "Glob", "Bash", "Skill"]},
+            settings = {"permissions": {"allow": ["Read", "Grep", "Glob", "Bash", "Skill"], "deny": ["Skill(bb-writ:bb-writ)"]},
                         "sandbox": {"enabled": True, "allowUnsandboxedCommands": False, "failIfUnavailable": True,
                                     "filesystem": {"denyWrite": sorted(set(deny)), **reads},
                                     "credentials": secret_env(env)}}

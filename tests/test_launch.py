@@ -1895,7 +1895,7 @@ class TestLaunch(unittest.TestCase):
         # 親が --model・--effort を省くと、役割とホストの表で決める（親が毎回手で選ぶと、同じ審査役が Opus high と Sonnet medium に割れた）
         flags = {"read": [], "audit": ["--audit"], "interrogate": ["--interrogate"], "write": ["--write"], "hardest": ["--write", "--hardest"]}
         table = {("claude", "read"): ("sonnet", "medium"), ("claude", "audit"): ("opus", "high"), ("claude", "interrogate"): ("fable", "medium"),
-                 ("claude", "write"): ("sonnet", "medium"), ("claude", "hardest"): ("fable", "medium"),
+                 ("claude", "write"): ("opus", "high"), ("claude", "hardest"): ("fable", "medium"),
                  ("codex", "read"): ("gpt-6-sol", "medium"), ("codex", "audit"): ("gpt-6-sol", "medium"), ("codex", "interrogate"): ("gpt-6-sol", "medium"),
                  ("codex", "write"): ("gpt-6-sol", "medium"), ("codex", "hardest"): ("gpt-6.1-sol", "high"),
                  ("grok", "read"): ("grok-4.7", "medium"), ("grok", "audit"): ("grok-4.7", "medium"), ("grok", "interrogate"): ("grok-4.7", "medium"),
@@ -1921,7 +1921,7 @@ class TestLaunch(unittest.TestCase):
                             (["--audit", "--effort", "medium"], ("opus", "medium", "given+table")),
                             (["--audit", "--model", "sonnet"], ("sonnet", "high", "given+table")),
                             (["--write", "--hardest", "--timeout", "900"], ("fable", "medium", "table", 900)),
-                            (["--write", "--timeout", "900"], ("sonnet", "medium", "table", 900))):
+                            (["--write", "--timeout", "900"], ("opus", "high", "table", 900))):
             rc, rec = self.run_launch("claude", extra=extra)
             self.assertEqual((rec["model_requested"], rec["effort_requested"], rec["chosen_by"], rec["timeout_s"]),
                              want if len(want) == 4 else (*want, 1800), extra)
@@ -3635,6 +3635,21 @@ launch.claude_reads = claude_reads
         self.assertFalse(claude_readable(home / "src" / "other", fs))
         self.assertNotIn(str(home / ".config" / "git"), fs["allowRead"])
         self.assertTrue(all(os.path.lexists(a) for a in fs["allowRead"]), fs)
+
+    def test_claude_children_cannot_invoke_the_entry(self):
+        """入口 `bb-writ:bb-writ` は、Claude Code では呼ぶたびに fork した指揮者（frontmatter の model）を立てる。launcher の子
+        （監査役は入口の名前を渡されて本文を読みに行く）が呼ぶと、子の中にもう 1 人の指揮者が立つので、子の設定で拒む。
+        本体 `bb-writ:conduct` とほかのスキルは呼べるまま（読み取り専用の子の許可の一覧に Skill が残る）。
+        見るのは launcher が渡す設定だけ。設定が実物の CLI で効くことは、実物の子で確かめた（2026-11-20、2.1.328）。"""
+        repo, wt = self.worktree()
+        for extra in ([], ["--interrogate"], ["--audit"], ["--write"]):
+            self.args_file.unlink(missing_ok=True)
+            self.run_launch("claude", cwd=wt, extra=extra)
+            argv = json.loads(self.args_file.read_text())
+            permissions = json.loads(argv[argv.index("--settings") + 1]).get("permissions", {})
+            self.assertEqual(permissions.get("deny"), ["Skill(bb-writ:bb-writ)"], extra)
+            if "--write" not in extra:  # 書く子は --permission-mode auto で、許可の一覧を持たない
+                self.assertIn("Skill", permissions.get("allow", []), extra)
 
     def test_claude_read_only_in_worktree_denies_the_common_git_dir(self):
         repo, wt = self.worktree()

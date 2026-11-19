@@ -57,13 +57,23 @@ class TestSkills(unittest.TestCase):
             self.assertNotIn("references/", text, p)
             self.assertNotIn("playbooks/", text, p)
 
+    def test_the_entry_forks_and_hands_over_to_the_body(self):
+        """入口は、Claude Code では fork した子（指揮者）として、frontmatter の model で動く。frontmatter の model だけだと
+        そのターンしか効かず、次の入力でセッションのモデルに戻った（2026-11-19 の実測）。進め方は本体 `conduct` にあり、入口はそれを呼ぶ。
+        確かめるのは frontmatter の 2 行と、本文が本体の名前を挙げることだけ（fork した子が実際にそのモデルで動くかは、実物の CLI で確かめる）。"""
+        text = (ROOT / "skills" / "bb-writ" / "SKILL.md").read_text(encoding="utf-8")
+        head = text.split("---", 2)[1]
+        self.assertIn("\ncontext: fork\n", head)
+        self.assertIn("\nmodel: fable\n", head)
+        self.assertIn("`bb-writ:conduct`", skill_body(self, text, "bb-writ"))
+
     def test_entry_keeps_what_to_ask_and_review_rules_within_the_compaction_head(self):
         """Claude Code は要約の後、呼んだスキルを先頭 5,000 トークンまで戻す（合計の枠を超えた古いものは落ちる）。
-        入口の聞く範囲・呼び直しの文・返答の形・検証の条件 (1)〜(6) の文が、それぞれ 1 つずつ戻る先頭にあることを確かめる。
+        入口の本体（`conduct`。入口が呼び、進め方の全文を持つ）の聞く範囲・呼び直しの文・返答の形・検証の条件 (1)〜(6) の文が、それぞれ 1 つずつ戻る先頭にあることを確かめる。
         確かめるのは目印の語が 1 回だけあり、条件の段落の終わり（5,600 字以内）より前にあることだけで、
         目印同士の順と文の意味は確かめない（意味は新しい文脈の読者役で確かめる）。目印の文を書き換えたら、ここの目印も直す。"""
-        text = (ROOT / "skills" / "bb-writ" / "SKILL.md").read_text(encoding="utf-8")
-        body = skill_body(self, text, "bb-writ")
+        text = (ROOT / "skills" / "conduct" / "SKILL.md").read_text(encoding="utf-8")
+        body = skill_body(self, text, "conduct")
         self.assertEqual(body.count("信じてよい条件"), 1, "検証の条件の段落が 1 つでない")
         start = body.index("信じてよい条件")
         self.assertIn("\n\n", body[start:], "検証の条件の段落の終わりが見つからない")
@@ -73,7 +83,7 @@ class TestSkills(unittest.TestCase):
         # 前置きの長さは置き場で変わり、Claude Code の切り詰めの数え方も確かめていないので、字数は近似にとどまる。
         self.assertLessEqual(end, 5600, f"検証の条件の段落の終わりが {end} 字目")
         anchors = (
-            "このスキルを呼び直して全文を読み直す",
+            "このスキル（`bb-writ:conduct`）を呼び直して全文を読み直す",
             "聞くのは製品上の選択",
             "自分で立てた審査の指摘をどこまで直すかも聞かない",
             "## 返答の形",
@@ -91,12 +101,13 @@ class TestSkills(unittest.TestCase):
             self.assertLess(body.index(anchor), end, anchor)
 
     def test_skills_invoked_after_the_entry_say_to_reinvoke_it_after_compaction(self):
-        """要約の後に入口が合計の枠から落ちたときのため、手引き 8 本・delegate・interrogate の本文の先頭 4,000 字以内に
+        """要約の後に入口の本体が合計の枠から落ちたときのため、手引き 8 本・delegate・interrogate の本文の先頭 4,000 字以内に
         呼び直しの文を置く。単独でも呼ばれる delegate・interrogate は、入口から始めた仕事に限る。
         playbook-pause-safely・playbook-eval・reflect・correct・unknowns・原則・検証スキルには置いていない。
-        目印の文を書き換えたら、ここの目印も直す。"""
-        plain = "会話が要約された後は、入口 `bb-writ` を呼び直して全文を読み直す"
-        scoped = "入口 `bb-writ` から始めた仕事で会話が要約された後は、入口を呼び直して全文を読み直す"
+        呼び直すのは本体 `bb-writ:conduct`。入口 `bb-writ:bb-writ` を呼び直させる前の版の文は、どのスキルにも残さない
+        （Claude Code では、入口を呼ぶたびに fork した指揮者がもう 1 人立つ）。目印の文を書き換えたら、ここの目印も直す。"""
+        plain = "会話が要約された後は、入口の本体 `bb-writ:conduct` を呼び直して全文を読み直す"
+        scoped = "入口 `bb-writ` から始めた仕事で会話が要約された後は、入口の本体 `bb-writ:conduct` を呼び直して全文を読み直す"
         names = {
             "playbook-feature": plain, "playbook-bug": plain, "playbook-docs-skill": plain,
             "playbook-investigation": plain, "playbook-parallel": plain, "playbook-session-pickup": plain,
@@ -108,6 +119,10 @@ class TestSkills(unittest.TestCase):
             at = body.find(sentence)
             self.assertNotEqual(at, -1, name)
             self.assertLess(at, 4000, name)  # 先頭 5,000 トークンの内側
+        for p in sorted((ROOT / "skills").glob("*/SKILL.md")):  # 前の版の文（入口そのものを呼び直させる）
+            text = p.read_text(encoding="utf-8")
+            for old in ("入口 `bb-writ` を呼び直して", "入口を呼び直して"):
+                self.assertNotIn(old, text, p.parent.name)
 
 
 class TestWorkflows(unittest.TestCase):
