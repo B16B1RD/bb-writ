@@ -43,11 +43,13 @@ Claude Code は、依頼文に `/bb-writ:bb-writ` を付けないと bb-writ を
 サマリが出たら、ファイルに保存させて、その道筋を入口に渡します。Claude Code では、入口は呼んだセッションとは別の子として動き、探索の会話が見えないためです。
 
 ```text
-このサマリを notes/changelog-summary.md に保存して
+このサマリをファイルに保存して
 ```
 
+`unknowns` は、保存先の指定が無ければリポジトリの外（`~/.local/state/bb-writ/notes/` の下）に保存し、道筋を示します。その道筋を入口に渡します。
+
 ```text
-/bb-writ:bb-writ notes/changelog-summary.md の探索サマリのとおりに作って。検証タスクも実行して。
+/bb-writ:bb-writ <示された道筋> の探索サマリのとおりに作って。検証タスクも実行して。
 ```
 
 入口の `bb-writ` は `unknowns` を呼びません。入口は依頼を受けるとすぐ進み、聞くのは好みの選択と権限だけです。何を作るかが決まっているなら `bb-writ` だけで足ります。決まっていないなら、`unknowns` から `bb-writ` の順に使います。

@@ -21,8 +21,11 @@ import sys
 # （2026-11-20、2.1.328。対話でも非対話でも）。指揮者（fork した子）の Bash でも、hook に届く会話記録は親のもの。
 # 非対話の実行では、その利用者の行は指揮者が終わるまで書かれず、指揮者の Bash の時点で在るのは、入力を受け付けた行
 # （type が queue-operation、content が入力の文）だけだった（同日）。この行も印に数える
-ENTRY_SKILLS = {"bb-writ:bb-writ", "bb-writ"}
+# 本体 bb-writ:conduct も印に数える（続きの引き受けや要約の後に、入口を通らずに本体を直に呼んだセッションも、進め方の全文を持つ）。
+# 本体の短い名前 conduct は数えない（ほかのプラグインの同じ名前のスキルと区別できない）
+ENTRY_SKILLS = {"bb-writ:bb-writ", "bb-writ", "bb-writ:conduct"}
 ENTRY_NAME = "/bb-writ:bb-writ"
+SLASH_NAMES = {ENTRY_NAME, "/bb-writ:conduct"}
 SLASH_HEADS = ("<command-message>", "<command-name>")
 
 # 区切り（コマンドの境目）。( ) と ` と $( は文脈の出入りとして別に扱う
@@ -287,23 +290,22 @@ def slash_name(text: str):
 
 def slash_line(text: str) -> bool:
     """利用者の行の本文が、入口の名前そのもので始まるか（fork する入口をスラッシュで呼んだときの記録）。名前の直後は空白か終わり。"""
-    rest = text.lstrip()
-    return rest.startswith(ENTRY_NAME) and (len(rest) == len(ENTRY_NAME) or rest[len(ENTRY_NAME)].isspace())
+    return text.startswith(ENTRY_NAME) and (len(text) == len(ENTRY_NAME) or text[len(ENTRY_NAME)].isspace())
 
 
 def entry_in(row: dict) -> bool:
-    """1 行が入口を呼んだ印か。Skill ツールの呼び出しか、利用者の行の先頭のスラッシュの記録の名前が入口のものか、入力を受け付けた
-    行の文が入口の名前で始まるもの（書き手の本文や道具の結果、ほかのスラッシュの引数に写った印の文字列、文の途中に書かれた名前は数えない）。"""
+    """1 行が入口（か本体）を呼んだ印か。Skill ツールの呼び出しか、利用者の行の先頭のスラッシュの記録の名前が入口・本体のものか、
+    利用者の行・入力を受け付けた行の文が入口の名前で始まるもの（書き手の本文や道具の結果、ほかのスラッシュの引数に写った印の文字列、文の途中に書かれた名前は数えない）。"""
     if row.get("type") == "queue-operation":  # 入力を受け付けた行
-        return isinstance(row.get("content"), str) and slash_line(row["content"])
+        return slash_line(row["content"])  # 文字列でない形は、呼び出し側が飛ばす
     message = row.get("message") or {}
     content, by_user = message.get("content"), message.get("role") == "user"
     if isinstance(content, str):
-        return by_user and (slash_name(content) == ENTRY_NAME or slash_line(content))
+        return by_user and (slash_name(content) in SLASH_NAMES or slash_line(content))
     for b in content if isinstance(content, list) else []:
         if b.get("type") == "tool_use" and b.get("name") == "Skill" and (b.get("input") or {}).get("skill") in ENTRY_SKILLS:
             return True
-        if by_user and b.get("type") == "text" and (slash_name(b.get("text") or "") == ENTRY_NAME or slash_line(b.get("text") or "")):
+        if by_user and b.get("type") == "text" and (slash_name(b.get("text") or "") in SLASH_NAMES or slash_line(b.get("text") or "")):
             return True
     return False
 

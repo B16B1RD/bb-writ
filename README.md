@@ -147,8 +147,8 @@ Claude Code は、普通の依頼文だけでは入口を使わない。入口�
 - 検証：`create-verification-skill`（対象のリポジトリに検証スキルを作って 1 回通す）、`create-formal-verification-skill`（順序・途中の死・再開の約束を全部の順序で確かめる検査を作る。pstack の同名のスキルの考え方から書き直した）、`create-property-test-skill`（入力の形・文字コード・大きさの約束を、揺れの一覧を組み合わせた多数の入力で確かめる性質の試験を作る）。
 - 学び：`reflect`（振り返って行き先へ送る）、`correct`（繰り返す誤りを起こせなくする）。
 - 探索：`unknowns`（実装前に、盲点の洗い出しや案の比較をする）。
-- 原則：1 本ずつ別のスキル `principle-*`（18 本）。入口の「原則の索引」から、仕事の局面に当たるものだけを呼ぶ。
-- hook（Claude Code）：入口を呼んだセッション（入口が立てた指揮者の子を含む）で、関門（`work.py op run`）を通さない普段の書き方の `git push`・`gh pr create`・`gh pr merge`・`gh release create` を拒否する（`hooks/hooks.json`）。入口を呼ばないセッションと、`sh -c` などの別の語に包んだ書き方は止めない（範囲は AGENTS.md の規則の表）。Codex と Grok Build では止めず、同じことを入口の文が求める。
+- 原則：1 本ずつ別のスキル `principle-*`（18 本）。本体の「原則の索引」から、仕事の局面に当たるものだけを呼ぶ。
+- hook（Claude Code）：入口か本体を呼んだセッション（入口が立てた指揮者を含む。指揮者が launcher で立てる子は含まない）で、関門（`work.py op run`）を通さない普段の書き方の `git push`・`gh pr create`・`gh pr merge`・`gh release create` を拒否する（`hooks/hooks.json`）。入口を呼ばないセッションと、`sh -c` などの別の語に包んだ書き方は止めない（範囲は AGENTS.md の規則の表）。Codex と Grok Build では止めず、同じことを入口の文が求める。
 
 ## 任意機能の準備
 

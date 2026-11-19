@@ -84,6 +84,9 @@ execution.completed は、この依頼で対象の試験・検査を最後まで
 """
 LINUX = sys.platform.startswith("linux")  # 子の CLI が切り離した子孫を止めるのは Linux だけ（PR_SET_CHILD_SUBREAPER。macOS には無い）
 # 読み取り専用の子にだけ足す（書く子は作業場所で試験を動かす）
+# Claude Code の子に渡す依頼文の先頭に置く 1 行。依頼文の先頭が「/名前 …」だと、claude -p はスラッシュの呼び出しとして扱い、
+# 入口なら子の中で fork した指揮者が立った（設定の拒否は Skill ツールにしか効かない。2026-11-20、2.1.328、読み取り専用の子で確かめた）
+CLAUDE_PROMPT_HEAD = "bb-writ の launcher が渡す依頼文（この行の下の全文が依頼）:\n\n"
 READ_ONLY_CONTRACT = "対象に書く試験・検査は、書ける一時ディレクトリ（$TMPDIR。無ければ /tmp）に対象を写して（cp -r など）、そこで動かす。\n"
 # 監査役（--audit）にだけ足す。依頼文は親が書くので、手引きの判定の項目が依頼文に写されないことがあった（足した文の照合を、
 # 親が書いた依頼文が範囲を「差分の各文」に狭めて落とし、監査役はほかのファイルとの名前の食い違いを範囲外として通した。2026-11-18）
@@ -708,7 +711,7 @@ def command(a, prompt: str, scratch: Path) -> tuple[list[str], dict, str | None]
                                     "filesystem": {"denyWrite": sorted(set(deny)), **reads},
                                     "credentials": secret_env(env)}}
         cmd = ["dotenvx", "run", "-q", "-f", str(env_file), "-fk", str(keys), "--",
-               "claude", "-p", prompt, "--output-format", "json", "--model", a.model, "--effort", a.effort,
+               "claude", "-p", CLAUDE_PROMPT_HEAD + prompt, "--output-format", "json", "--model", a.model, "--effort", a.effort,
                "--permission-prompts", "none", *perm, "--settings", json.dumps(settings),
                "--plugin-dir", str(Path(__file__).resolve().parents[1]),  # --restricted は専用ログインに入れたプラグインを読まないので、この bb-writ を渡す
                "--resume" if a.resume else "--session-id", a.session]

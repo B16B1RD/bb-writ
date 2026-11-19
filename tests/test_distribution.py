@@ -60,12 +60,20 @@ class TestSkills(unittest.TestCase):
     def test_the_entry_forks_and_hands_over_to_the_body(self):
         """入口は、Claude Code では fork した子（指揮者）として、frontmatter の model で動く。frontmatter の model だけだと
         そのターンしか効かず、次の入力でセッションのモデルに戻った（2026-11-19 の実測）。進め方は本体 `conduct` にあり、入口はそれを呼ぶ。
-        確かめるのは frontmatter の 2 行と、本文が本体の名前を挙げることだけ（fork した子が実際にそのモデルで動くかは、実物の CLI で確かめる）。"""
+        本体は fork しない（本体が fork すると、指揮者の中にもう 1 人の指揮者が立つ）。
+        確かめるのは、入口の frontmatter の 2 行、入口の本文の最初の段落の「最初に、」で始まる文が本体の名前を挙げること、本体の frontmatter にその 2 つの
+        キーが無いことだけ（fork した子が実際にそのモデルで動くかは、実物の CLI で確かめる。本体の文が残っているかも見ない）。"""
         text = (ROOT / "skills" / "bb-writ" / "SKILL.md").read_text(encoding="utf-8")
         head = text.split("---", 2)[1]
         self.assertIn("\ncontext: fork\n", head)
         self.assertIn("\nmodel: fable\n", head)
-        self.assertIn("`bb-writ:conduct`", skill_body(self, text, "bb-writ"))
+        paragraphs = [p for p in skill_body(self, text, "bb-writ").split("\n\n") if p.strip() and not p.lstrip().startswith("#")]
+        first = [s for s in paragraphs[0].split("。") if s.startswith("最初に、")]  # 最初に読む先を言う文（書き換えたら、ここの目印も直す）
+        self.assertEqual(len(first), 1, paragraphs[0][:80])
+        self.assertIn("`bb-writ:conduct`", first[0])
+        body_head = (ROOT / "skills" / "conduct" / "SKILL.md").read_text(encoding="utf-8").split("---", 2)[1]
+        self.assertNotIn("\ncontext:", body_head)
+        self.assertNotIn("\nmodel:", body_head)
 
     def test_entry_keeps_what_to_ask_and_review_rules_within_the_compaction_head(self):
         """Claude Code は要約の後、呼んだスキルを先頭 5,000 トークンまで戻す（合計の枠を超えた古いものは落ちる）。
@@ -104,8 +112,9 @@ class TestSkills(unittest.TestCase):
         """要約の後に入口の本体が合計の枠から落ちたときのため、手引き 8 本・delegate・interrogate の本文の先頭 4,000 字以内に
         呼び直しの文を置く。単独でも呼ばれる delegate・interrogate は、入口から始めた仕事に限る。
         playbook-pause-safely・playbook-eval・reflect・correct・unknowns・原則・検証スキルには置いていない。
-        呼び直すのは本体 `bb-writ:conduct`。入口 `bb-writ:bb-writ` を呼び直させる前の版の文は、どのスキルにも残さない
-        （Claude Code では、入口を呼ぶたびに fork した指揮者がもう 1 人立つ）。目印の文を書き換えたら、ここの目印も直す。"""
+        呼び直すのは本体 `bb-writ:conduct`。入口 `bb-writ:bb-writ` を呼び直させる前の版の文と、「`bb-writ:bb-writ` を呼び直…」の
+        言い回しは、どのスキルにも残さない（Claude Code では、入口を呼ぶたびに fork した指揮者がもう 1 人立つ）。見るのはこの 3 つの
+        文字列だけで、別の言い回しで入口を呼び直させる文は見ない。目印の文を書き換えたら、ここの目印も直す。"""
         plain = "会話が要約された後は、入口の本体 `bb-writ:conduct` を呼び直して全文を読み直す"
         scoped = "入口 `bb-writ` から始めた仕事で会話が要約された後は、入口の本体 `bb-writ:conduct` を呼び直して全文を読み直す"
         names = {
@@ -121,7 +130,7 @@ class TestSkills(unittest.TestCase):
             self.assertLess(at, 4000, name)  # 先頭 5,000 トークンの内側
         for p in sorted((ROOT / "skills").glob("*/SKILL.md")):  # 前の版の文（入口そのものを呼び直させる）
             text = p.read_text(encoding="utf-8")
-            for old in ("入口 `bb-writ` を呼び直して", "入口を呼び直して"):
+            for old in ("入口 `bb-writ` を呼び直して", "入口を呼び直して", "`bb-writ:bb-writ` を呼び直"):
                 self.assertNotIn(old, text, p.parent.name)
 
 

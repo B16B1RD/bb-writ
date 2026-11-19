@@ -3639,8 +3639,8 @@ launch.claude_reads = claude_reads
     def test_claude_children_cannot_invoke_the_entry(self):
         """入口 `bb-writ:bb-writ` は、Claude Code では呼ぶたびに fork した指揮者（frontmatter の model）を立てる。launcher の子
         （監査役は入口の名前を渡されて本文を読みに行く）が呼ぶと、子の中にもう 1 人の指揮者が立つので、子の設定で拒む。
-        本体 `bb-writ:conduct` とほかのスキルは呼べるまま（読み取り専用の子の許可の一覧に Skill が残る）。
-        見るのは launcher が渡す設定だけ。設定が実物の CLI で効くことは、実物の子で確かめた（2026-11-20、2.1.328）。"""
+        本体 `bb-writ:conduct` とほかのスキルは呼べるまま（子の道具に Skill が残り、読み取り専用の子の許可の一覧にも Skill が残る）。
+        見るのは launcher が渡す設定と道具の一覧だけ。設定が実物の CLI で効くことは、実物の子で確かめた（2026-11-20、2.1.328）。"""
         repo, wt = self.worktree()
         for extra in ([], ["--interrogate"], ["--audit"], ["--write"]):
             self.args_file.unlink(missing_ok=True)
@@ -3648,8 +3648,24 @@ launch.claude_reads = claude_reads
             argv = json.loads(self.args_file.read_text())
             permissions = json.loads(argv[argv.index("--settings") + 1]).get("permissions", {})
             self.assertEqual(permissions.get("deny"), ["Skill(bb-writ:bb-writ)"], extra)
+            self.assertIn("Skill", argv[argv.index("--tools") + 1].split(","), extra)
             if "--write" not in extra:  # 書く子は --permission-mode auto で、許可の一覧を持たない
                 self.assertIn("Skill", permissions.get("allow", []), extra)
+
+    def test_a_prompt_that_starts_with_a_slash_is_not_run_as_a_command(self):
+        """依頼文の先頭が「/bb-writ:bb-writ …」だと、claude -p はスラッシュの呼び出しとして扱い、子の中で入口が fork した
+        （設定の拒否は Skill ツールにしか効かない。2026-11-20、2.1.328）。launcher は、Claude Code の子に渡す依頼文の先頭に 1 行置く。
+        見るのは、子の CLI に渡る文がスラッシュで始まらず、依頼文がその後にそのまま続くことだけ。"""
+        repo, wt = self.worktree()
+        prompt = wt.parent / "slash-prompt.md"
+        prompt.write_text("/bb-writ:bb-writ この場所を調べて\n", encoding="utf-8")
+        for extra in ([], ["--write"]):
+            self.args_file.unlink(missing_ok=True)
+            self.run_launch("claude", cwd=wt, extra=[*extra, "--prompt-file", str(prompt)])
+            argv = json.loads(self.args_file.read_text())
+            given = argv[argv.index("-p") + 1]
+            self.assertFalse(given.startswith("/"), extra)
+            self.assertIn("\n/bb-writ:bb-writ この場所を調べて\n", given, extra)
 
     def test_claude_read_only_in_worktree_denies_the_common_git_dir(self):
         repo, wt = self.worktree()
