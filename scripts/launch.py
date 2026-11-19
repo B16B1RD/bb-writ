@@ -220,8 +220,9 @@ def claude_reads(cwd: Path, git_dir: Path | None, env: dict, audit: bool) -> dic
       ホームそのもの・認証情報の置き場・その中は戻さない（symlink を通る道筋を行き先で判定して戻す形は、審査の周ごとに穴が出た。
       この機械で戻す置き場に、symlink を通るものは 0 個だった）
     - 拒む: ホーム（symlink の道筋なら実の道筋も）、認証情報の置き場のうち戻した場所の中にあるもの（.local/share/keyrings・
-      .cargo/credentials.toml など）と、symlink を通る認証情報の置き場の行き先（親の symlink を通るものも、ホームの中でも外でも）、
-      bb-writ の設定と状態の置き場（戻した対象・記録は、その中でも読める）
+      .cargo/credentials.toml など）と、symlink を通る認証情報の置き場の起動の時点で在る行き先（親の symlink を通るものも、ホームの中でも外でも。
+      行き先が /dev/null などシステムの道筋でも拒む。起動の後にできた行き先は拒まない）、在る bb-writ の設定と状態の置き場（ホーム直下のドットの
+      ディレクトリに付け替えても戻さない。戻した対象・記録は、その中でも読める）
     認証情報の一覧だけを拒むと、一覧に無いホーム直下のファイル（.claude.json・.env.keys・.boto など）が読め、ファイル単位の拒否は、
     子の実行中にそのファイルが置き換え（rename）で書き直されると外れた。ディレクトリごと拒むと、どちらも閉じた（2.1.327、2026-11-18）。
     0.27.0 までの形（対象と道具に至る経路の外をすべて拒む）より、一覧に無いドットのディレクトリ（.terraform.d の下などの認証情報を
@@ -240,10 +241,12 @@ def claude_reads(cwd: Path, git_dir: Path | None, env: dict, audit: bool) -> dic
     secrets = read_only_secrets()
     real_secrets = {Path(os.path.realpath(p)) for p in secrets}
     git_xdg = home / ".config" / "git"
+    own = [o for o in (config_dir(), state_dir()) if os.path.lexists(o)]
+    real_own = {Path(os.path.realpath(o)) for o in own}
 
     def safe(a: Path) -> bool:  # 戻してよい道具・設定の置き場か。道筋が symlink も .. も通らないものだけ
         r = Path(os.path.realpath(a))
-        if str(r) != str(a) or r in real_secrets:
+        if str(r) != str(a) or r in real_secrets or any(o == r or o in r.parents for o in real_own):  # bb-writ の置き場とその中も戻さない
             return False
         return a == git_xdg or not any(q in r.parents for q in real_secrets)
 
@@ -259,7 +262,6 @@ def claude_reads(cwd: Path, git_dir: Path | None, env: dict, audit: bool) -> dic
     links = [r for p in secrets if str(r := Path(os.path.realpath(p))) != str(p) and r.exists()]  # symlink を通る置き場の在る行き先
     allow = [*places, cwd, *([git_dir] if git_dir else []), *extra]  # 対象・共通ディレクトリ・記録（work.root が作る）・スキル・子の out は在る
     inner = [p for p in secrets if any(a in p.parents for a in allow)]
-    own = [config_dir(), state_dir()]
     deny = [home, *([real_home] if real_home != home else []), *inner, *links, *own, *(Path(os.path.realpath(o)) for o in own)]
     return {"denyRead": list(dict.fromkeys(str(p) for p in deny)), "allowRead": list(dict.fromkeys(str(p) for p in allow))}
 

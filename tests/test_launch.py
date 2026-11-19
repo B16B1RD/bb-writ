@@ -3490,7 +3490,8 @@ class TestLaunch(unittest.TestCase):
 
     def test_claude_read_only_lets_back_only_plain_paths_and_denies_where_credentials_lead(self):
         # 戻す場所を道筋の綴りで決めると、認証情報の置き場への symlink・..・dotfiles の配置で、認証情報が読めた（#38 の 1 周目の審査）。
-        # 行き先で判定して戻す形にも穴が続いたので、symlink も .. も通らない道筋だけを戻し、認証情報の置き場の行き先は拒む（2・3 周目）
+        # 行き先で判定して戻す形にも穴が続いたので、symlink も .. も通らない道筋だけを戻し、認証情報の置き場の行き先は拒む（2 周目）。
+        # 置き場の中を辿って拒む形は、対象や道具を読めなくし起動を止めたので外した（6 周目）
         home = self.home.resolve()
         self.home = home
         outside = Path(self.tmp.name) / "aws-outside"
@@ -3523,9 +3524,13 @@ class TestLaunch(unittest.TestCase):
         (home / "state-link").symlink_to(state)  # 状態の置き場を symlink の道筋で渡す
         (home / "Projects" / "other").mkdir(parents=True)  # ディレクトリを指す include は、Git の設定として戻さない
 
-        proj = home / ".dotfiles" / "proj"  # 戻すドットのディレクトリの中の対象。置き場の中の symlink が対象の中を指しても、対象は読める
+        proj = home / ".dotfiles" / "proj"  # 戻すドットのディレクトリの中の対象。置き場の中の symlink が対象の中・対象そのものを指しても、読めて起動する
         (proj / "skills" / "x").mkdir(parents=True)
         (proj / "a.txt").write_text("x\n")
+        (home / ".claude" / "skills").mkdir(parents=True)
+        (home / ".claude" / "skills" / "x").symlink_to(proj / "skills" / "x")
+        (home / ".claude" / "skills" / "all").symlink_to(proj)
+        (proj / "current").symlink_to(".")  # 対象の中の相対の symlink
 
         (home / ".env.keys").write_text("k")
         path = f"{home}/myssh/bin:{home}/bin/../.ssh:{home}/work/bin:{home}/work/..:{home}/.env.keys:{self.bin}:/usr/bin:/bin"  # work/.. はホームそのもの。PATH のファイル
@@ -3572,11 +3577,14 @@ class TestLaunch(unittest.TestCase):
             d.mkdir(parents=True)
         (home / "conf" / "global").write_text("")  # GIT_CONFIG_GLOBAL で付け替えた全体の設定
         launch = load_launch()
+        (home / ".bb-writ").mkdir()  # 設定の置き場をホーム直下のドットのディレクトリに付け替える。戻すドットのディレクトリと同じ道筋にしない
         with mock.patch.dict(os.environ, {"HOME": str(home), "BB_WRIT_STATE_DIR": str(home / ".local" / "state" / "x"),
-                                          "GIT_CONFIG_GLOBAL": str(home / "conf" / "global")}):
+                                          "BB_WRIT_CONFIG_DIR": str(home / ".bb-writ"), "GIT_CONFIG_GLOBAL": str(home / "conf" / "global")}):
             fs = launch.claude_reads(wt, common, {"PATH": "/usr/bin"}, False)
             audit = launch.claude_reads(wt, common, {"PATH": "/usr/bin"}, True)
         self.assertTrue(claude_readable(home / "conf" / "global", fs))
+        self.assertFalse(claude_readable(home / ".bb-writ", fs))
+        self.assertFalse(set(fs["allowRead"]) & set(fs["denyRead"]), fs)
         skills = str(ROOT / "skills")
         self.assertEqual((skills in fs["allowRead"], skills in audit["allowRead"]), (False, True))  # 監査役にだけ bb-writ のスキルを戻す
         self.assertTrue(claude_readable(common, fs) and claude_readable(wt, fs), fs)
