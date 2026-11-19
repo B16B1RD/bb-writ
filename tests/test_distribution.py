@@ -127,6 +127,15 @@ class TestWorkflows(unittest.TestCase):
                 self.assertGreaterEqual(int(m.group(1)), 39, f"{p.name} の timeout-minutes: {m.group(1)}。最も遅い OS（macOS）の成功した実行の最長を "
                                         "gh run list・gh run view で見て、その 3 倍以上にする。試験を削って合わせない")
 
+    def test_ci_also_runs_the_tests_with_the_temporary_place_under_a_symlink(self):
+        """macOS の一時ディレクトリは symlink の下にあり、解く前と解いた道筋を比べる試験の誤りが macOS の CI で 2 回続けて見つかった
+        （0.24.0、0.28.0 の前）。Linux の job でも、TMPDIR を symlink にした道筋で全試験を回す。見るのは、workflow に ln -s と、
+        その道筋を TMPDIR にして unittest を回す行があることだけ（その step が実際に動くか、どの job で動くかは見ない）。"""
+        text = "\n".join(p.read_text(encoding="utf-8") for p in sorted((ROOT / ".github" / "workflows").glob("*.y*ml")))
+        link = re.search(r"ln -s \S+ (\S+)", text)
+        self.assertTrue(link, "workflow に、一時の置き場の symlink を作る ln -s が無い")
+        self.assertRegex(text, r"TMPDIR=" + re.escape(link.group(1)) + r" python3 -B -m unittest discover")
+
 
 def script_strings(src):
     """ソースの文字列の定数を、隣り合う文字列の継ぎ目と f 文字列の値を外して並べる（値の所は \0）。"""

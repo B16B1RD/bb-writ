@@ -25,3 +25,11 @@ jobs:
         run: python3 -m pip install -r tests/requirements.txt
       - name: 単体試験
         run: python3 -B -m unittest discover -s tests -t . -v
+      # 一時の置き場を symlink の下に置いて、もう 1 回回す（macOS の一時ディレクトリ /var/folders は /private/var への symlink の下にある）。
+      # 解く前の道筋と解いた道筋を比べる試験の誤りは、macOS の CI で初めて見つかった（0.24.0、0.28.0 の前の探索。2 回目）。Linux で同じ形を作れば先に落ちる
+      - name: 単体試験（一時の置き場が symlink の下）
+        if: matrix.os == 'ubuntu-24.04' && matrix.python == '3.11'
+        run: |
+          mkdir -p "$RUNNER_TEMP/real-tmp"
+          ln -s "$RUNNER_TEMP/real-tmp" "$RUNNER_TEMP/link-tmp"
+          TMPDIR="$RUNNER_TEMP/link-tmp" python3 -B -m unittest discover -s tests -t .
