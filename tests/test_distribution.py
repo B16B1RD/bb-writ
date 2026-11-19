@@ -128,10 +128,10 @@ class TestWorkflows(unittest.TestCase):
                                         "gh run list・gh run view で見て、その 3 倍以上にする。試験を削って合わせない")
 
     def test_ci_also_runs_the_tests_with_the_temporary_place_under_a_symlink(self):
-        """macOS の一時ディレクトリは symlink の下にあり、解く前と解いた道筋を比べる試験の誤りが macOS の CI で 2 回続けて見つかった
-        （0.24.0、0.28.0 の前）。Linux の job でも、TMPDIR を symlink にした道筋で全試験を回す。見るのは、workflow に ln -s と、
+        """macOS の一時ディレクトリは symlink の下にあり、解く前と解いた道筋を比べる試験の誤りが、macOS の CI で何度か落ち（0.24.0 など）、
+        0.28.0 の前にも手元で同じ形を作って見つかった。Linux の job でも、TMPDIR を symlink にした道筋で全試験を回す。見るのは、workflow に ln -s と、
         その道筋を TMPDIR にして unittest を回す行があることだけ（その step が実際に動くか、どの job で動くかは見ない。コメントにした行、
-        if: false の step、ln -s の行き先が違う形でも通る）。"""
+        if: false の step、ln -s の行き先が違う形、unittest の引数が壊れた形でも通る）。"""
         text = "\n".join(p.read_text(encoding="utf-8") for p in sorted((ROOT / ".github" / "workflows").glob("*.y*ml")))
         link = re.search(r"ln -s \S+ (\S+)", text)
         self.assertTrue(link, "workflow に、一時の置き場の symlink を作る ln -s が無い")
