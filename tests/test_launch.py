@@ -3534,7 +3534,8 @@ class TestLaunch(unittest.TestCase):
         (proj / "current").symlink_to(".")  # 対象の中の相対の symlink
 
         (home / ".env.keys").write_text("k")
-        path = f"{home}/myssh/bin:{home}/bin/../.ssh:{home}/work/bin:{home}/work/..:{home}/.env.keys:{self.bin}:/usr/bin:/bin"  # work/.. はホームそのもの。PATH のファイル
+        (home / ".dotfiles" / "ssh" / "bin").mkdir()  # 実の綴りで、symlink の認証情報の置き場の実の道筋の中を指す PATH
+        path = f"{home}/myssh/bin:{home}/bin/../.ssh:{home}/work/bin:{home}/work/..:{home}/.env.keys:{home}/.dotfiles/ssh/bin:{self.bin}:/usr/bin:/bin"  # work/.. はホームそのもの。PATH のファイル
         rc, rec = self.run_launch("claude", path=path, cwd=proj, env_extra={"GIT_CONFIG_GLOBAL": str(home / ".gitconfig"), "BB_WRIT_STATE_DIR": str(home / "state-link")})
         self.assertEqual((rc, rec["status"]), (0, "ok"), rec)
         argv = json.loads(self.args_file.read_text())

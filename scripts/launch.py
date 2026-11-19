@@ -241,7 +241,7 @@ def claude_reads(cwd: Path, git_dir: Path | None, env: dict, audit: bool) -> dic
     secrets = read_only_secrets()
     real_secrets = {Path(os.path.realpath(p)) for p in secrets}
     git_xdg = home / ".config" / "git"
-    own = [o for o in (config_dir(), state_dir()) if os.path.lexists(o)]
+    own = [config_dir(), state_dir()]  # 設定の置き場は専用ログインの検査で、状態の置き場は launcher が先に作るので在る
     real_own = {Path(os.path.realpath(o)) for o in own}
 
     def safe(a: Path) -> bool:  # 戻してよい道具・設定の置き場か。道筋が symlink も .. も通らないものだけ
@@ -1519,12 +1519,15 @@ def main() -> int:
         sweep_leftovers(time.time(), swept)
     except Exception as e:  # 片付けの想定外の失敗も同じ（そこまでに消した場所は swept に残る）
         swept["problems"].append(f"一時の置き場の片付けが失敗した: {e!r}"[:300])
+    try:  # --out を渡しても、子の読みの規則（claude_reads）を組む前に作る（無い置き場は拒みに入らなかった）
+        state_dir().mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        ap.error(f"bb-writ の状態の置き場 {state_dir()} を作れない: {e}")
     out_dir = (a.out or state_dir() / "delegations" / stamp).resolve()
     try:
         out_dir.mkdir(parents=True, exist_ok=False)
     except FileExistsError:
         ap.error(f"--out がもうある（前の起動の記録を上書きしない）: {out_dir}")
-    state_dir().mkdir(parents=True, exist_ok=True)  # --out を渡しても、子の読みの規則（claude_reads）を組む前に作る（無い置き場は拒みに入らない）
     # 監査役（返す前の判定）が、記録の要約でなく、子に何を頼んだかを読めるように（依頼文の真偽は見ない）
     try:
         shutil.copyfile(a.prompt_file, out_dir / "prompt.md")
