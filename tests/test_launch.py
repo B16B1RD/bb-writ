@@ -3462,7 +3462,7 @@ class TestLaunch(unittest.TestCase):
                   ".config/gh/hosts.yml", ".ssh/git-include"):  # 認証情報の置き場の中を指す include は戻さない
             self.assertFalse(claude_readable(home / p, fs), p)  # 一覧に無いホーム直下のファイル・戻した中の認証情報・ほかのリポジトリ
         self.assertFalse(claude_readable(self.cfg, fs))  # 専用ログインの置き場（ホームの外に置いても）
-        self.assertTrue(all(os.path.lexists(d) and os.path.exists(d) for d in fs["denyRead"]), fs["denyRead"])  # 在る（壊れた symlink でない）ものだけ
+        self.assertEqual([d for d in fs["denyRead"] if not os.path.exists(d)], [])  # 在る（壊れた symlink でない）ものだけ
         self.assertFalse(any(p == str(home) for p in fs["allowRead"]))  # bin の親がホームなら bin だけ
 
     def test_claude_read_only_refuses_the_home_or_a_credential_place_as_target_and_denies_the_real_home(self):

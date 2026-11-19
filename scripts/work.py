@@ -199,7 +199,7 @@ def read_regular(f: Path) -> bytes:
 def reviews_of(commit: str, cwd=None, not_run: bool = False) -> tuple:
     """launcher の委任の記録（delegations.jsonl）のうち、その commit を対象に起動して ok で返った読み取り専用の子の記録の out と、
     そのうち --interrogate を付けて立てた審査役の out と、--audit を付けて立てた監査役（返す前の判定）の out と、読めないものの説明（無ければ空）。
-    行と、out の record.json の両方で head・status・write が合うものだけを数え、interrogate・audit も両方で真のものだけをその役に数える。
+    行と、out の record.json の両方で head・status・write が合い、status・execution が行と record.json で同じものだけを数え、interrogate・audit も両方で真のものだけをその役に数える。
     監査役は審査の記録（最初の値）に数えない（push ごとに立てるので、審査の代わりにも周の数にもしない）。
     head は launcher が、対象の作業ツリーが子の起動の前と終わりの両方で commit と同じとき（未 commit の変更が無いとき）だけ書く。
     審査の中身（子が十分に攻めたか、何人か、依頼文が interrogate の観点を持っていたか）は見ない。手で書き足した記録も見分けない（忘れて飛ばすのを止める）。
@@ -237,7 +237,7 @@ def reviews_of(commit: str, cwd=None, not_run: bool = False) -> tuple:
         except (OSError, ValueError, RecursionError):
             broken += 1
             continue
-        # 行と record.json で status・execution も同じものだけ（片方だけ not-run/no、片方は ok の組を、宣言で通さない）
+        # 行と record.json で status・execution も同じものだけ（launcher は同じ rec から両方を書くので、食い違うのは手で書き換えた記録）
         if match(rec) and rec["out"] == e["out"] and (rec.get("status"), rec.get("execution")) == (e.get("status"), e.get("execution")):
             if e.get("audit") is True or rec.get("audit") is True:  # 片側でも監査役と言う記録は審査役に数えない
                 if e.get("audit") is True and rec.get("audit") is True:

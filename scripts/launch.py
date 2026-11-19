@@ -220,8 +220,8 @@ def claude_reads(cwd: Path, git_dir: Path | None, env: dict, audit: bool) -> dic
       その場所で立てた子の out・bb-writ のスキル。対象と記録のほかは、道筋が symlink も .. も通らないもの（realpath と同じ綴り）だけを戻し、
       ホームそのもの・認証情報の置き場・その中は戻さない（symlink を通る道筋を行き先で判定して戻す形は、審査の周ごとに穴が出た。
       この機械で戻す置き場に、symlink を通るものは 0 個だった）
-    - 拒む: ホーム（symlink の道筋なら実の道筋も）、認証情報の置き場のうち戻した場所の中にあるもの（.local/share/keyrings・
-      .cargo/credentials.toml など）と、symlink を通る認証情報の置き場の起動の時点で在る行き先（親の symlink を通るものも、ホームの中でも外でも。
+    - 拒む: ホーム（symlink の道筋なら実の道筋も）、認証情報の置き場のうち戻した場所の中に起動の時点で在るもの（.local/share/keyrings・
+      .cargo/credentials.toml など。壊れた symlink の行き先が起動の後にできると読める）と、symlink を通る認証情報の置き場の起動の時点で在る行き先（親の symlink を通るものも、ホームの中でも外でも。
       行き先が /dev/null などシステムの道筋でも拒む。起動の後にできた行き先は拒まない）、bb-writ の設定と状態の置き場（ホーム直下のドットの
       ディレクトリに付け替えても戻さない。戻した対象・記録は、その中でも読める）
     認証情報の一覧だけを拒むと、一覧に無いホーム直下のファイル（.claude.json・.env.keys・.boto など）が読め、ファイル単位の拒否は、
@@ -316,7 +316,7 @@ def cli_place(p: Path) -> bool:
     空のファイルと、空の ~/.claude そのものは数える。symlink は home_entries がもともと見ず、~/.claude が symlink ならその下も見ない。
     HOME が空のときは、ここ（Python）はホームを / と読み、子の CLI と一致しない（Node は空と読む）。"""
     home = Path.home()
-    if not p.is_dir():  # symlink は home_entries がもともと数えず、~/.claude が symlink ならその下を見ない
+    if not p.is_dir():
         return False
     return p.parent == home / ".claude" or p == home / ".config" / "anthropic"
 
