@@ -1851,6 +1851,7 @@ class TestLaunch(unittest.TestCase):
                         self.assertIn("読んだだけ", rec["problems"][0])
 
     def test_claude_ok_and_read_only_uses_dont_ask(self):
+        self.home = self.home.resolve()  # 一時の置き場が symlink の下（macOS の /var）でも、ホームは symlink を通らない道筋で渡す
         for d in (".config/gh", ".config/git", ".ssh", ".claude", ".codex"):  # 守る置き場が実際にあるホーム
             (self.home / d).mkdir(parents=True)
             (self.home / d / "x").write_text("x")
@@ -3497,7 +3498,7 @@ class TestLaunch(unittest.TestCase):
         # 置き場の中を辿って拒む形は、対象や道具を読めなくし起動を止めたので外した（6 周目）
         home = self.home.resolve()
         self.home = home
-        outside = Path(self.tmp.name) / "aws-outside"
+        outside = Path(self.tmp.name).resolve() / "aws-outside"
         for d in (".dotfiles/config/gh", ".dotfiles/ssh", "bin", "work/bin"):
             (home / d).mkdir(parents=True)
         outside.mkdir()
@@ -3507,7 +3508,7 @@ class TestLaunch(unittest.TestCase):
         (home / ".kube").symlink_to(home / "gone")  # 行き先の無い置き場の symlink は、無い道筋を拒みに入れない
         (home / ".home-link").symlink_to(home)
         (home / ".gh-link").symlink_to(home / ".dotfiles" / "config" / "gh")  # 認証情報の置き場の中を指す
-        cargo = Path(self.tmp.name) / "cargo-elsewhere"  # 親の symlink を通る認証情報（~/.cargo を別のディスクへ）
+        cargo = Path(self.tmp.name).resolve() / "cargo-elsewhere"  # 親の symlink を通る認証情報（~/.cargo を別のディスクへ）
         cargo.mkdir()
         (cargo / "credentials.toml").write_text("t")
         (home / ".cargo").symlink_to(cargo)
