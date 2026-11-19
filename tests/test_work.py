@@ -1250,9 +1250,6 @@ class TestNotRunDeclaration(unittest.TestCase):
         self.review_record(self.head(), status="not-run", execution="not-needed")
         self.review_record(self.head(), status="failed", execution="no")  # not-run でない失敗は数えない
         self.review_record(self.head(), status="ok", execution="no", record={"status": "failed"})  # 片側が失敗
-        self.review_record(self.head(), status="not-run", execution="no", record={"status": "ok", "execution": "yes"})  # 行と record.json が食い違う
-        self.review_record(self.head(), status="not-run", execution="no", record={"status": "ok"})  # status だけが食い違う
-        self.review_record(self.head(), status="ok", execution="no", record={"execution": "yes"})  # execution だけが食い違う（行は ok でも数えない）
         self.could_not_run(self.head(), audit=True)
         rc, r = self.publish(tok, "push:feat@1", "--reviewed", self.head(), "--not-run", self.WHY)
         self.assertEqual(rc, 6, r)
@@ -1260,6 +1257,19 @@ class TestNotRunDeclaration(unittest.TestCase):
         self.review_record(self.head())  # ok の審査役は、宣言があっても今のとおり数える
         self.review_record(self.head(), audit=True, status="not-run", execution=...)
         self.assertEqual(self.publish(tok, "push:feat@1", "--reviewed", self.head(), "--not-run", self.WHY)[0], 0)
+
+    def test_records_whose_row_and_record_json_disagree_are_not_counted_with_the_declaration(self):
+        # 委任の記録の行と out の record.json で status・execution が食い違う記録は数えない（launcher は同じ rec から両方を書く。
+        # 行を not-run/no、record.json を ok/yes にすると、宣言で関門を通った。最後の周の審査）
+        tok = self.claim()
+        self.commit("src/page.js")
+        self.review_record(self.head(), status="not-run", execution="no", record={"status": "ok", "execution": "yes"})  # 両方が食い違う
+        self.review_record(self.head(), status="not-run", execution="no", record={"status": "ok"})  # status だけが食い違う
+        self.review_record(self.head(), status="ok", execution="no", record={"execution": "yes"})  # execution だけが食い違う（行は ok でも数えない）
+        self.could_not_run(self.head(), audit=True)
+        rc, r = self.publish(tok, "push:feat@1", "--reviewed", self.head(), "--not-run", self.WHY)
+        self.assertEqual(rc, 6, r)
+        self.assertIn("審査役の記録が無い", r["reason"])
 
     def test_an_empty_reason_or_a_declaration_outside_push_and_pr_is_refused(self):
         tok = self.claim()
