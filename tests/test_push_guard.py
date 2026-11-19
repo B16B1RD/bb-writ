@@ -31,7 +31,18 @@ BY_SLASH_IN_TEXT_BLOCK = {"type": "user", "message": {"role": "user", "content":
     {"type": "text", "text": "<command-name>/bb-writ:bb-writ</command-name>\n<command-args>直して</command-args>"}]}}
 OTHER_SKILL = {"type": "assistant", "message": {"role": "assistant", "content": [
     {"type": "tool_use", "id": "toolu_2", "name": "Skill", "input": {"skill": "bb-writ:playbook-docs-skill"}}]}}
+# fork する入口をスラッシュで呼んだときの記録（2026-11-20、Claude Code 2.1.328。本文の先頭が「/名前 引数」のままの行）
+BY_FORKED_SLASH = {"type": "user", "message": {"role": "user", "content": "/bb-writ:bb-writ 直して。push まで"}}
+BY_FORKED_SLASH_ALONE = {"type": "user", "message": {"role": "user", "content": "/bb-writ:bb-writ"}}
+BY_FORKED_SLASH_IN_TEXT_BLOCK = {"type": "user", "message": {"role": "user", "content": [
+    {"type": "text", "text": "/bb-writ:bb-writ\n直して"}]}}
 MENTION_ONLY = {"type": "user", "message": {"role": "user", "content": "bb-writ:bb-writ の使い方を教えて"}}
+# 入口の名前で始まらない行（別の名前の前方一致、文の途中の名前、書き手の本文）
+OTHER_NAME_WITH_THE_SAME_HEAD = {"type": "user", "message": {"role": "user", "content": "/bb-writ:bb-writer 直して"}}
+NAME_IN_THE_MIDDLE = {"type": "user", "message": {"role": "user", "content": "さっきの /bb-writ:bb-writ 直して の結果を見せて"}}
+NAME_HEADS_ASSISTANT_STRING = {"type": "assistant", "message": {"role": "assistant", "content": "/bb-writ:bb-writ 直して"}}
+NAME_HEADS_ASSISTANT_BLOCK = {"type": "assistant", "message": {"role": "assistant", "content": [
+    {"type": "text", "text": "/bb-writ:bb-writ 直して"}]}}
 # 入口の名前を持つが、入口を呼んだ印ではない行（ほかの道具の入力、道具の結果に写った文字列）
 NOT_SKILL_TOOL = {"type": "assistant", "message": {"role": "assistant", "content": [
     {"type": "tool_use", "id": "toolu_4", "name": "Read", "input": {"skill": "bb-writ:bb-writ"}}]}}
@@ -60,7 +71,9 @@ MARK_HEADS_ASSISTANT_BLOCK = {"type": "assistant", "message": {"role": "assistan
 SKILL_NAME_NOT_TOOL_USE = {"type": "assistant", "message": {"role": "assistant", "content": [
     {"type": "server_tool_use", "id": "srv_1", "name": "Skill", "input": {"skill": "bb-writ:bb-writ"}}]}}
 ENTRIES = {"スラッシュ（前後の空白）": SLASH_WITH_SPACES, "Skill ツール": BY_SKILL_TOOL, "Skill ツールの短い名前": BY_BARE_NAME, "スラッシュ": BY_SLASH,
-           "スラッシュ（text ブロック）": BY_SLASH_IN_TEXT_BLOCK}
+           "スラッシュ（text ブロック）": BY_SLASH_IN_TEXT_BLOCK,
+           "fork する入口のスラッシュ": BY_FORKED_SLASH, "fork する入口のスラッシュ（引数なし）": BY_FORKED_SLASH_ALONE,
+           "fork する入口のスラッシュ（text ブロック）": BY_FORKED_SLASH_IN_TEXT_BLOCK}
 
 OUTWARD = ["git push origin main", "GH_CONFIG_DIR=x git -C . push -q origin HEAD:main", "cd repo && git -c user.name=w push",
            "git status && git push", "env GIT_TERMINAL_PROMPT=0 git push", "gh pr create --fill", "gh pr merge 3 --squash",
@@ -204,7 +217,8 @@ class TestPushGuard(unittest.TestCase):
         for rows in ((), (OTHER_SKILL,), (MENTION_ONLY,), tuple(NULL_ROWS), (NOT_SKILL_TOOL,), (MARK_IN_TOOL_RESULT,),
                      (MARK_QUOTED_BY_ASSISTANT,), (MARK_IN_ASSISTANT_STRING,),
                      (MARK_INSIDE_USER_TEXT,), (MARK_INSIDE_USER_BLOCK,), (BROKEN_ROW,),
-                     (OTHER_SLASH_WITH_MARK,), (MARK_HEADS_ASSISTANT_BLOCK,), (SKILL_NAME_NOT_TOOL_USE,)):
+                     (OTHER_SLASH_WITH_MARK,), (MARK_HEADS_ASSISTANT_BLOCK,), (SKILL_NAME_NOT_TOOL_USE,),
+                     (OTHER_NAME_WITH_THE_SAME_HEAD,), (NAME_IN_THE_MIDDLE,), (NAME_HEADS_ASSISTANT_STRING,), (NAME_HEADS_ASSISTANT_BLOCK,)):
             t = self.transcript(*rows)
             with self.subTest(rows=[r.get("type") for r in rows], first=json.dumps(rows[:1], ensure_ascii=False)[:60]):
                 self.assertIsNone(self.run_guard("git push origin main", t))

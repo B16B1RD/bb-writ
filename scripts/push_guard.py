@@ -16,7 +16,9 @@ bash と同じに読む所までにする。それより珍しい書き方（別
 import json
 import sys
 
-# 入口を呼んだ印。Skill ツールの呼び出しと、利用者がスラッシュで呼んだときの記録（2026-11-18、Claude Code 2.1.327 で確かめた形）
+# 入口を呼んだ印。Skill ツールの呼び出しと、利用者がスラッシュで呼んだときの記録（2026-11-18、Claude Code 2.1.327 で確かめた形）。
+# 入口は fork するスキルで、スラッシュで呼ぶと、記録は <command-name> の形にならず、本文の先頭が「/名前 引数」のままの行になる
+# （2026-11-20、2.1.328。対話でも非対話でも）。指揮者（fork した子）の Bash でも、hook に届く会話記録は親のもの
 ENTRY_SKILLS = {"bb-writ:bb-writ", "bb-writ"}
 ENTRY_NAME = "/bb-writ:bb-writ"
 SLASH_HEADS = ("<command-message>", "<command-name>")
@@ -281,17 +283,23 @@ def slash_name(text: str):
     return text[start + len("<command-name>"):end].strip() if start != -1 and end != -1 else None
 
 
+def slash_line(text: str) -> bool:
+    """利用者の行の本文が、入口の名前そのもので始まるか（fork する入口をスラッシュで呼んだときの記録）。名前の直後は空白か終わり。"""
+    rest = text.lstrip()
+    return rest.startswith(ENTRY_NAME) and (len(rest) == len(ENTRY_NAME) or rest[len(ENTRY_NAME)].isspace())
+
+
 def entry_in(row: dict) -> bool:
     """1 行が入口を呼んだ印か。Skill ツールの呼び出しか、利用者の行の先頭のスラッシュの記録の名前が入口のもの（書き手の本文や
-    道具の結果、ほかのスラッシュの引数に写った印の文字列は数えない）。"""
+    道具の結果、ほかのスラッシュの引数に写った印の文字列、文の途中に書かれた名前は数えない）。"""
     message = row.get("message") or {}
     content, by_user = message.get("content"), message.get("role") == "user"
     if isinstance(content, str):
-        return by_user and slash_name(content) == ENTRY_NAME
+        return by_user and (slash_name(content) == ENTRY_NAME or slash_line(content))
     for b in content if isinstance(content, list) else []:
         if b.get("type") == "tool_use" and b.get("name") == "Skill" and (b.get("input") or {}).get("skill") in ENTRY_SKILLS:
             return True
-        if by_user and b.get("type") == "text" and slash_name(b.get("text") or "") == ENTRY_NAME:
+        if by_user and b.get("type") == "text" and (slash_name(b.get("text") or "") == ENTRY_NAME or slash_line(b.get("text") or "")):
             return True
     return False
 
