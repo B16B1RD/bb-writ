@@ -36,7 +36,12 @@ BY_FORKED_SLASH = {"type": "user", "message": {"role": "user", "content": "/bb-w
 BY_FORKED_SLASH_ALONE = {"type": "user", "message": {"role": "user", "content": "/bb-writ:bb-writ"}}
 BY_FORKED_SLASH_IN_TEXT_BLOCK = {"type": "user", "message": {"role": "user", "content": [
     {"type": "text", "text": "/bb-writ:bb-writ\n直して"}]}}
+# 非対話の実行で、指揮者の Bash の時点に在る行（入力を受け付けた行。利用者の行は、指揮者が終わるまで書かれない）
+BY_QUEUED_FORKED_SLASH = {"type": "queue-operation", "operation": "enqueue", "content": "/bb-writ:bb-writ 直して。push まで"}
 MENTION_ONLY = {"type": "user", "message": {"role": "user", "content": "bb-writ:bb-writ の使い方を教えて"}}
+QUEUED_NOTIFICATION = {"type": "queue-operation", "operation": "enqueue", "content": "<task-notification>\n/bb-writ:bb-writ 直して の子が終わった"}
+QUEUED_OTHER_NAME = {"type": "queue-operation", "operation": "enqueue", "content": "/bb-writ:bb-writer 直して"}
+NAME_HEADS_ANOTHER_KIND_OF_ROW = {"type": "system", "subtype": "local_command", "content": "/bb-writ:bb-writ 直して"}
 # 入口の名前で始まらない行（別の名前の前方一致、文の途中の名前、書き手の本文）
 OTHER_NAME_WITH_THE_SAME_HEAD = {"type": "user", "message": {"role": "user", "content": "/bb-writ:bb-writer 直して"}}
 NAME_IN_THE_MIDDLE = {"type": "user", "message": {"role": "user", "content": "さっきの /bb-writ:bb-writ 直して の結果を見せて"}}
@@ -73,7 +78,8 @@ SKILL_NAME_NOT_TOOL_USE = {"type": "assistant", "message": {"role": "assistant",
 ENTRIES = {"スラッシュ（前後の空白）": SLASH_WITH_SPACES, "Skill ツール": BY_SKILL_TOOL, "Skill ツールの短い名前": BY_BARE_NAME, "スラッシュ": BY_SLASH,
            "スラッシュ（text ブロック）": BY_SLASH_IN_TEXT_BLOCK,
            "fork する入口のスラッシュ": BY_FORKED_SLASH, "fork する入口のスラッシュ（引数なし）": BY_FORKED_SLASH_ALONE,
-           "fork する入口のスラッシュ（text ブロック）": BY_FORKED_SLASH_IN_TEXT_BLOCK}
+           "fork する入口のスラッシュ（text ブロック）": BY_FORKED_SLASH_IN_TEXT_BLOCK,
+           "fork する入口のスラッシュ（非対話。入力を受け付けた行）": BY_QUEUED_FORKED_SLASH}
 
 OUTWARD = ["git push origin main", "GH_CONFIG_DIR=x git -C . push -q origin HEAD:main", "cd repo && git -c user.name=w push",
            "git status && git push", "env GIT_TERMINAL_PROMPT=0 git push", "gh pr create --fill", "gh pr merge 3 --squash",
@@ -218,7 +224,8 @@ class TestPushGuard(unittest.TestCase):
                      (MARK_QUOTED_BY_ASSISTANT,), (MARK_IN_ASSISTANT_STRING,),
                      (MARK_INSIDE_USER_TEXT,), (MARK_INSIDE_USER_BLOCK,), (BROKEN_ROW,),
                      (OTHER_SLASH_WITH_MARK,), (MARK_HEADS_ASSISTANT_BLOCK,), (SKILL_NAME_NOT_TOOL_USE,),
-                     (OTHER_NAME_WITH_THE_SAME_HEAD,), (NAME_IN_THE_MIDDLE,), (NAME_HEADS_ASSISTANT_STRING,), (NAME_HEADS_ASSISTANT_BLOCK,)):
+                     (OTHER_NAME_WITH_THE_SAME_HEAD,), (NAME_IN_THE_MIDDLE,), (NAME_HEADS_ASSISTANT_STRING,), (NAME_HEADS_ASSISTANT_BLOCK,),
+                     (QUEUED_NOTIFICATION,), (QUEUED_OTHER_NAME,), (NAME_HEADS_ANOTHER_KIND_OF_ROW,)):
             t = self.transcript(*rows)
             with self.subTest(rows=[r.get("type") for r in rows], first=json.dumps(rows[:1], ensure_ascii=False)[:60]):
                 self.assertIsNone(self.run_guard("git push origin main", t))

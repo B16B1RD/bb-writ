@@ -18,7 +18,9 @@ import sys
 
 # 入口を呼んだ印。Skill ツールの呼び出しと、利用者がスラッシュで呼んだときの記録（2026-11-18、Claude Code 2.1.327 で確かめた形）。
 # 入口は fork するスキルで、スラッシュで呼ぶと、記録は <command-name> の形にならず、本文の先頭が「/名前 引数」のままの行になる
-# （2026-11-20、2.1.328。対話でも非対話でも）。指揮者（fork した子）の Bash でも、hook に届く会話記録は親のもの
+# （2026-11-20、2.1.328。対話でも非対話でも）。指揮者（fork した子）の Bash でも、hook に届く会話記録は親のもの。
+# 非対話の実行では、その利用者の行は指揮者が終わるまで書かれず、指揮者の Bash の時点で在るのは、入力を受け付けた行
+# （type が queue-operation、content が入力の文）だけだった（同日）。この行も印に数える
 ENTRY_SKILLS = {"bb-writ:bb-writ", "bb-writ"}
 ENTRY_NAME = "/bb-writ:bb-writ"
 SLASH_HEADS = ("<command-message>", "<command-name>")
@@ -290,8 +292,10 @@ def slash_line(text: str) -> bool:
 
 
 def entry_in(row: dict) -> bool:
-    """1 行が入口を呼んだ印か。Skill ツールの呼び出しか、利用者の行の先頭のスラッシュの記録の名前が入口のもの（書き手の本文や
-    道具の結果、ほかのスラッシュの引数に写った印の文字列、文の途中に書かれた名前は数えない）。"""
+    """1 行が入口を呼んだ印か。Skill ツールの呼び出しか、利用者の行の先頭のスラッシュの記録の名前が入口のものか、入力を受け付けた
+    行の文が入口の名前で始まるもの（書き手の本文や道具の結果、ほかのスラッシュの引数に写った印の文字列、文の途中に書かれた名前は数えない）。"""
+    if row.get("type") == "queue-operation":  # 入力を受け付けた行
+        return isinstance(row.get("content"), str) and slash_line(row["content"])
     message = row.get("message") or {}
     content, by_user = message.get("content"), message.get("role") == "user"
     if isinstance(content, str):
