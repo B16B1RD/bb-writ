@@ -453,6 +453,7 @@ def load_launch():
 
 def claude_readable(p, fs) -> bool:
     """読み取り専用の Claude Code の子の Bash が p を読めるか。denyRead・allowRead のうち p を含む最も深い規則で決まる
+    （同じ深さに両方あるときは拒否に倒すが、実物でどちらが勝つかは確かめていない。試験は、並べないことを別に見る）
     （allowRead は拒んだ中を戻し、その中の denyRead はまた拒む。2.1.327 の実物の子で、ホームの拒否・~/.local の戻し・その中の
     状態の置き場の拒否・その中の対象の戻しが、この順で効いた）。"""
     p = str(p)
@@ -3556,6 +3557,18 @@ class TestLaunch(unittest.TestCase):
             self.assertFalse(a == home or a in home.parents or any(a == q or q in a.parents for q in secrets), a)
         self.assertNotIn(str(home / ".config" / "git"), fs["allowRead"])  # ~/.config が symlink なら、Git の XDG の設定は戻さない
 
+    def test_the_state_place_is_denied_even_when_it_does_not_exist_before_the_launch(self):
+        # --out を渡すと、子の読みの規則を組む時点で状態の置き場がまだ無いことがあり、拒みに入らなかった（8 周目の審査）
+        home = self.home.resolve()
+        self.home = home
+        state = home / ".local" / "state" / "fresh"
+        (home / ".local").mkdir(parents=True)
+        rc, rec = self.run_launch("claude", extra=["--out", str(Path(self.tmp.name) / "out-fresh")], env_extra={"BB_WRIT_STATE_DIR": str(state)})
+        self.assertEqual((rc, rec["status"]), (0, "ok"), rec)
+        argv = json.loads(self.args_file.read_text())
+        fs = json.loads(argv[argv.index("--settings") + 1])["sandbox"]["filesystem"]
+        self.assertFalse(claude_readable(state / "delegations.jsonl", fs), fs)
+
     def test_home_dotfiles_judges_symlinks_by_the_real_home(self):
         # HOME が symlink の道筋でも、行き先がホームの中のドットのファイルの symlink は拒む（Codex・Grok の子）
         from unittest import mock
@@ -3577,13 +3590,16 @@ class TestLaunch(unittest.TestCase):
             d.mkdir(parents=True)
         (home / "conf" / "global").write_text("")  # GIT_CONFIG_GLOBAL で付け替えた全体の設定
         launch = load_launch()
-        (home / ".bb-writ").mkdir()  # 設定の置き場をホーム直下のドットのディレクトリに付け替える。戻すドットのディレクトリと同じ道筋にしない
+        (home / ".bbw").mkdir()  # 設定の置き場をホーム直下のドットのディレクトリに（symlink の道筋で）付け替える。戻すドットのディレクトリと同じ道筋にしない
+        (home / ".bbw" / "tools" / "bin").mkdir(parents=True)  # 置き場の中の PATH の道具も戻さない
+        (home / ".bb-writ").symlink_to(home / ".bbw")
         with mock.patch.dict(os.environ, {"HOME": str(home), "BB_WRIT_STATE_DIR": str(home / ".local" / "state" / "x"),
                                           "BB_WRIT_CONFIG_DIR": str(home / ".bb-writ"), "GIT_CONFIG_GLOBAL": str(home / "conf" / "global")}):
-            fs = launch.claude_reads(wt, common, {"PATH": "/usr/bin"}, False)
+            fs = launch.claude_reads(wt, common, {"PATH": f"{home / '.bbw' / 'tools' / 'bin'}:/usr/bin"}, False)
             audit = launch.claude_reads(wt, common, {"PATH": "/usr/bin"}, True)
         self.assertTrue(claude_readable(home / "conf" / "global", fs))
-        self.assertFalse(claude_readable(home / ".bb-writ", fs))
+        for p in (home / ".bb-writ", home / ".bbw", home / ".bbw" / "tools"):
+            self.assertFalse(claude_readable(p, fs), p)
         self.assertFalse(set(fs["allowRead"]) & set(fs["denyRead"]), fs)
         skills = str(ROOT / "skills")
         self.assertEqual((skills in fs["allowRead"], skills in audit["allowRead"]), (False, True))  # 監査役にだけ bb-writ のスキルを戻す

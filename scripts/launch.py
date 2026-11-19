@@ -1524,6 +1524,7 @@ def main() -> int:
         out_dir.mkdir(parents=True, exist_ok=False)
     except FileExistsError:
         ap.error(f"--out がもうある（前の起動の記録を上書きしない）: {out_dir}")
+    state_dir().mkdir(parents=True, exist_ok=True)  # --out を渡しても、子の読みの規則（claude_reads）を組む前に作る（無い置き場は拒みに入らない）
     # 監査役（返す前の判定）が、記録の要約でなく、子に何を頼んだかを読めるように（依頼文の真偽は見ない）
     try:
         shutil.copyfile(a.prompt_file, out_dir / "prompt.md")
@@ -1796,7 +1797,6 @@ def main() -> int:
     body = json.dumps(rec, ensure_ascii=False, indent=1)
     # 子の文字列には単独のサロゲートがありうる（JS の JSON.stringify が出す）。書き出しで落ちず、\udXXX の形で残す
     (out_dir / "record.json").write_text(body, encoding="utf-8", errors="backslashreplace")
-    state_dir().mkdir(parents=True, exist_ok=True)  # --out を渡すと、ここまでに作られていないことがある
     with open(state_dir() / "delegations.jsonl", "a", encoding="utf-8") as f:  # 1 行 1 件。U+2028 なども生で入れない
         f.write(json.dumps({k: v for k, v in rec.items() if k != "report"}) + "\n")
     sys.stdout.reconfigure(errors="backslashreplace")
