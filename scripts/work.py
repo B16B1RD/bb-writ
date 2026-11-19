@@ -237,7 +237,8 @@ def reviews_of(commit: str, cwd=None, not_run: bool = False) -> tuple:
         except (OSError, ValueError, RecursionError):
             broken += 1
             continue
-        if match(rec) and rec["out"] == e["out"]:
+        # 行と record.json で status・execution も同じものだけ（片方だけ not-run/no、片方は ok の組を、宣言で通さない）
+        if match(rec) and rec["out"] == e["out"] and (rec.get("status"), rec.get("execution")) == (e.get("status"), e.get("execution")):
             if e.get("audit") is True or rec.get("audit") is True:  # 片側でも監査役と言う記録は審査役に数えない
                 if e.get("audit") is True and rec.get("audit") is True:
                     audits.append(e["out"])

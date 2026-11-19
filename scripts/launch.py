@@ -11,7 +11,8 @@ timeout は、時間切れで止め、ほかの照合に当たらなかったも
 子には、最後に ```json {"conclusion": ..., "evidence": [{"what": ..., "where": ...}], "unknowns": [...], "execution": {...}} ``` を書かせる。
 --model・--effort を省くと、役割（--audit・--interrogate・読み取り専用・--write・--write --hardest）とホストから CHOICES の表で決める。
 JSON が返ったことを成功にしない: 結論が空、証拠が無い、証拠の where がファイルを指すのに存在しない、実行の欄の形が違う、は invalid-report。
-読み取り専用の子で、実行の欄が無いか、対象の試験・検査を実行できなかったと書いた報告は not-run（読んだだけの報告。起動して形の整った報告が返ったことと区別する）。
+読み取り専用の子で、実行の欄が無いか、対象の試験・検査を実行できなかったと書いた報告は not-run（起動して形の整った報告が返ったことと区別する）。
+実行の欄が無いものは読んだだけの報告で、実行できなかった（no）と書いたものは、work.py の --not-run の宣言があれば push・pr の関門に数える。
 書く子の実行の欄は記録するだけ（作業場所の試験は親が確かめる）。実行の欄の真偽（本当に動かしたか）は見ない。
 子の CLI が終わったら（時間切れを含む。出力を開いたままの子孫は待たない）、子のプロセスグループを止め、Linux では自分の下に残った子孫
 （新しいセッションに切り離したものも）を止めて stopped_after_exit に並べる。止めきれない・/proc を読めない・subreaper になれないなら failed。
@@ -261,7 +262,7 @@ def claude_reads(cwd: Path, git_dir: Path | None, env: dict, audit: bool) -> dic
     extra = [work_record(cwd), Path(__file__).resolve().parents[1] / "skills", *outs_of_place(cwd)] if audit else []
     links = [r for p in secrets if str(r := Path(os.path.realpath(p))) != str(p) and r.exists()]  # symlink を通る置き場の在る行き先
     allow = [*places, cwd, *([git_dir] if git_dir else []), *extra]  # 対象・共通ディレクトリ・記録（work.root が作る）・スキル・子の out は在る
-    inner = [p for p in secrets if any(a in p.parents for a in allow)]
+    inner = [p for p in secrets if p.exists() and any(a in p.parents for a in allow)]  # 壊れた symlink の無い行き先は渡さない
     deny = [home, *([real_home] if real_home != home else []), *inner, *links, *own, *(Path(os.path.realpath(o)) for o in own)]
     return {"denyRead": list(dict.fromkeys(str(p) for p in deny)), "allowRead": list(dict.fromkeys(str(p) for p in allow))}
 
@@ -315,9 +316,9 @@ def cli_place(p: Path) -> bool:
     空のファイルと、空の ~/.claude そのものは数える。symlink は home_entries がもともと見ず、~/.claude が symlink ならその下も見ない。
     HOME が空のときは、ここ（Python）はホームを / と読み、子の CLI と一致しない（Node は空と読む）。"""
     home = Path.home()
-    if p.is_symlink() or not p.is_dir():
+    if not p.is_dir():  # symlink は home_entries がもともと数えず、~/.claude が symlink ならその下を見ない
         return False
-    return (p.parent == home / ".claude" and not p.parent.is_symlink()) or p == home / ".config" / "anthropic"
+    return p.parent == home / ".claude" or p == home / ".config" / "anthropic"
 
 
 def cwd_residue(cwd: Path, before: set[str]) -> list[str]:

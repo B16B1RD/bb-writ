@@ -1250,6 +1250,7 @@ class TestNotRunDeclaration(unittest.TestCase):
         self.review_record(self.head(), status="not-run", execution="not-needed")
         self.review_record(self.head(), status="failed", execution="no")  # not-run でない失敗は数えない
         self.review_record(self.head(), status="ok", execution="no", record={"status": "failed"})  # 片側が失敗
+        self.review_record(self.head(), status="not-run", execution="no", record={"status": "ok", "execution": "yes"})  # 行と record.json が食い違う
         self.could_not_run(self.head(), audit=True)
         rc, r = self.publish(tok, "push:feat@1", "--reviewed", self.head(), "--not-run", self.WHY)
         self.assertEqual(rc, 6, r)

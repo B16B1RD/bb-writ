@@ -3442,6 +3442,7 @@ class TestLaunch(unittest.TestCase):
                   ".config/git/credentials"):
             (home / f).write_text("x")
         (home / ".nuget" / "NuGet" / "Other.Config").write_text("")
+        (home / ".cargo" / "credentials").symlink_to(home / "gone-credentials")  # 壊れた symlink の認証情報の置き場は、無い道筋を拒みに渡さない
         (home / ".tools-link").symlink_to(home / "elsewhere")  # symlink を通る道筋は、行き先がふつうの場所でも戻さない（行き先で判定すると穴が続いた）
         path = f"{home}/.nvm/versions/node/v1/bin:{home}/go-install/go/bin:{home}/bin:{self.bin}:/usr/bin:/bin"
         rc, rec = self.run_launch("claude", cwd=target, path=path,
@@ -3461,6 +3462,7 @@ class TestLaunch(unittest.TestCase):
                   ".config/gh/hosts.yml", ".ssh/git-include"):  # 認証情報の置き場の中を指す include は戻さない
             self.assertFalse(claude_readable(home / p, fs), p)  # 一覧に無いホーム直下のファイル・戻した中の認証情報・ほかのリポジトリ
         self.assertFalse(claude_readable(self.cfg, fs))  # 専用ログインの置き場（ホームの外に置いても）
+        self.assertTrue(all(os.path.lexists(d) and os.path.exists(d) for d in fs["denyRead"]), fs["denyRead"])  # 在る（壊れた symlink でない）ものだけ
         self.assertFalse(any(p == str(home) for p in fs["allowRead"]))  # bin の親がホームなら bin だけ
 
     def test_claude_read_only_refuses_the_home_or_a_credential_place_as_target_and_denies_the_real_home(self):
@@ -3729,6 +3731,11 @@ launch.claude_reads = claude_reads
             (home / f).write_text("x")
         (home / ".gitconfig").write_text("[include]\n\tpath = .gitconfig-extra\n")
         (home / ".ssh").mkdir()
+        (home / ".nuget" / "NuGet").mkdir(parents=True)  # 印のある XML の設定は拒む（印は大小を問わない）
+        (home / ".nuget" / "NuGet" / "NuGet.Config").write_text("<configuration><PackageSourceCredentials><x><add key='Username' value='u'/></x></PackageSourceCredentials></configuration>")
+        for f in (".cargo/credentials", ".local/share/com.vercel.cli/auth.json"):
+            (home / f).parent.mkdir(parents=True, exist_ok=True)
+            (home / f).write_text("x")
         (home / ".bash_history_link").symlink_to("/dev/null")  # 行き先がホームの外の symlink は拒まない（/dev/null を拒むことになる）
         (home / "notes.txt").write_text("x")  # ドットで始まらないホーム直下のファイルは拒まない
         hosts = Path(self.tmp.name) / "hosts"  # ホームの外の通常のファイル（/etc/hosts の形）も拒まない
@@ -3748,7 +3755,8 @@ launch.claude_reads = claude_reads
         rc, rec = self.run_launch("codex", cwd=proj, env_extra={"GIT_CONFIG_GLOBAL": str(home / ".gitconfig")})
         self.assertEqual((rc, rec["status"]), (0, "ok"), rec)
         rules = fs_rules(json.loads(self.args_file.read_text()))
-        for f in (".bash_history", ".env.keys", ".cargo/credentials.toml", ".gem/credentials", ".ssh"):
+        for f in (".bash_history", ".env.keys", ".cargo/credentials.toml", ".gem/credentials", ".ssh", ".nuget/NuGet/NuGet.Config",
+                  ".cargo/credentials", ".local/share/com.vercel.cli"):
             self.assertEqual(rules.get(str(home / f)), "deny", f)
         for f in (".gitconfig", ".gitconfig-extra", ".cargo"):  # Git の設定とその include、認証情報の入れ物そのものは読ませる
             self.assertNotIn(str(home / f), rules)
