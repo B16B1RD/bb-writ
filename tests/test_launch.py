@@ -3534,8 +3534,10 @@ class TestLaunch(unittest.TestCase):
         (proj / "current").symlink_to(".")  # 対象の中の相対の symlink
 
         (home / ".env.keys").write_text("k")
-        (home / ".dotfiles" / "ssh" / "bin").mkdir()  # 実の綴りで、symlink の認証情報の置き場の実の道筋の中を指す PATH
-        path = f"{home}/myssh/bin:{home}/bin/../.ssh:{home}/work/bin:{home}/work/..:{home}/.env.keys:{home}/.dotfiles/ssh/bin:{self.bin}:/usr/bin:/bin"  # work/.. はホームそのもの。PATH のファイル
+        (home / ".dotfiles" / "ssh" / "bin").mkdir()  # 実の綴りで、symlink の認証情報の置き場の実の道筋そのもの（bin の親）と、その中を指す PATH
+        (home / ".dotfiles" / "ssh" / "tools").mkdir()
+        path = (f"{home}/myssh/bin:{home}/bin/../.ssh:{home}/work/bin:{home}/work/..:{home}/.env.keys:{home}/.dotfiles/ssh/bin:"
+                f"{home}/.dotfiles/ssh/tools:{self.bin}:/usr/bin:/bin")  # work/.. はホームそのもの。PATH のファイル
         rc, rec = self.run_launch("claude", path=path, cwd=proj, env_extra={"GIT_CONFIG_GLOBAL": str(home / ".gitconfig"), "BB_WRIT_STATE_DIR": str(home / "state-link")})
         self.assertEqual((rc, rec["status"]), (0, "ok"), rec)
         argv = json.loads(self.args_file.read_text())
@@ -3569,6 +3571,28 @@ class TestLaunch(unittest.TestCase):
         argv = json.loads(self.args_file.read_text())
         fs = json.loads(argv[argv.index("--settings") + 1])["sandbox"]["filesystem"]
         self.assertFalse(claude_readable(state / "delegations.jsonl", fs), fs)
+
+    def test_the_state_place_exists_before_the_read_rules_and_a_bad_one_stops_the_launch(self):
+        # 子の読みの規則を組む時点で状態の置き場が在ること（無い道筋は sandbox がホームに空の場所を作りうる）と、作れなければ
+        # 子を起こさず引数の誤りで止まり、空の --out を残さないこと（収束後の審査）
+        state = Path(self.tmp.name) / "state-fresh"
+        patch = f"""
+_reads = launch.claude_reads
+def claude_reads(*a, **k):
+    open({str(Path(self.tmp.name) / 'seen')!r}, 'w').write(str(launch.state_dir().is_dir()))
+    return _reads(*a, **k)
+launch.claude_reads = claude_reads
+"""
+        rc, rec = self.launch_patched(patch, ["--host", "claude", "--cwd", str(self.cwd), "--out", str(Path(self.tmp.name) / "out-a")],
+                                      env_extra={"BB_WRIT_STATE_DIR": str(state)})
+        self.assertEqual((rc, rec["status"]), (0, "ok"), rec)
+        self.assertEqual((Path(self.tmp.name) / "seen").read_text(), "True")
+        bad = Path(self.tmp.name) / "state-file"
+        bad.write_text("")
+        p = self.run_launch("claude", extra=["--out", str(Path(self.tmp.name) / "out-b")], env_extra={"BB_WRIT_STATE_DIR": str(bad)}, raw=True)
+        self.assertEqual(p.returncode, 2, p.stderr)
+        self.assertIn("状態の置き場", p.stderr)
+        self.assertFalse((Path(self.tmp.name) / "out-b").exists())
 
     def test_home_dotfiles_judges_symlinks_by_the_real_home(self):
         # HOME が symlink の道筋でも、行き先がホームの中のドットのファイルの symlink は拒む（Codex・Grok の子）
