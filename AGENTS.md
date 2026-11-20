@@ -76,7 +76,7 @@ bb-writ は、CLI ハーネス（Claude Code・Codex。Grok Build も同じ SKIL
 
 - 通常は main に直接 commit する。並行開発ではタスク専用の worktree・ブランチで commit し、最新の main を取り込んで検証した版を、排他の下で main に統合する。Conventional Commits。
 - commit のメッセージは、件名も本文も日本語で書く（`feat`・`docs` などの type は英語のまま）。
-- 書く子が、このリポジトリの作業場所（`task start` の worktree）で commit できなかったと報告したら、指揮者が差分を確かめてから commit する。launcher の Claude Code の書く子は、`.git/worktrees/<タスク>/index.lock` を作れず「読み込み専用ファイルシステム」で commit できなかった（2026-11-20。commit を試みた 3 回とも）。ほかのリポジトリの作業場所では、同じ launcher の書く子が commit できた（同日、1 回）。原因は確かめていない。
+- 書く子が、このリポジトリの作業場所（`task start` の worktree）で commit できなかったと報告したら、指揮者が差分を確かめてから commit する。launcher の Claude Code の書く子は、`.git/worktrees/<タスク>/index.lock` を作れず「読み込み専用ファイルシステム」で commit できなかった（2026-11-20。commit を試みた 3 回とも）。ほかのリポジトリの作業場所では、同じ launcher の書く子が commit できた（同日、1 回）。原因は、launcher が自分の置き場（`scripts/launch.py` の 2 つ上）を `--plugin-dir` で Claude Code の子に渡し、Claude Code の sandbox が、対象が linked worktree のときに書けるようにした共有の `.git` の上から、プラグインの置き場を読み込み専用で被せること。対象の共有の `.git` がプラグインの置き場の中に在ると（手元の checkout から読み込んだ bb-writ の launcher で、その checkout 自身の作業場所を直すとき）、`.git` ごと読み込み専用になり、書く子は `index.lock` を作れない（2026-11-20、Claude Code 2.1.329、WSL2）。確かめ方: launcher の写し 1 つで、対象だけを替えた 2 人の書く子に、同じコマンドを 1 回ずつ実行させ、結果をファイルに書かせて読んだ。対象が launcher の写し自身の作業場所の子では、`git add` が 128（`index.lock` を作れない。「読み込み専用ファイルシステム」）で、子の中の mount の一覧に、共有の `.git` を書けるようにする行の後に、写しの置き場を読み込み専用にする行が在った。対象が別の写しの作業場所の子では、`git add`・`git commit` とも 0 で、mount の一覧に、その行は無かった。launcher は変えない（困るのは bb-writ 自身の開発だけで、指揮者が commit する道が本体に在る）。
 
 ## 守ること
 
