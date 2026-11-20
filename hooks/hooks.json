@@ -18,7 +18,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "command -v python3 >/dev/null 2>&1 || exit 0; f=\"${CLAUDE_PLUGIN_ROOT}/scripts/conductor_hint.py\"; [ -r \"$f\" ] || exit 0; exec python3 -B \"$f\"",
+            "command": "python3 -B \"${CLAUDE_PLUGIN_ROOT}/scripts/conductor_hint.py\" 2>/dev/null || exit 0",
             "timeout": 30
           }
         ]

@@ -1,4 +1,5 @@
-"""入口を呼んだセッションで、利用者の入力のたびに、指揮者への返事と続きを SendMessage で渡すよう案内する hook（scripts/conductor_hint.py）。
+"""入口を呼んだセッションで、hook が発火するたびに（利用者の入力のほか、指揮者の終わりの知らせ・子からの伝言でも）、指揮者への返事と
+続きを SendMessage で渡すよう案内する hook（scripts/conductor_hint.py）。
 
 見ないこと: 案内の文面（どの言い回しで親が従うかは、実物で数える）。additionalContext が空でない文であることだけを見る。
 会話記録の行の材料は tests/test_push_guard.py のものを使う（印の読み方は push_guard.py の entry_in と同じなので、写しを作らない）。"""
@@ -76,15 +77,18 @@ class TestConductorHint(unittest.TestCase):
         with self.subTest("agent_id が空"):  # 空は親の入力と見る
             self.assertTrue(self.hinted(BY_SKILL_TOOL, agent_id=""), "agent_id が空の親の入力に案内が付かなかった")
 
-    def test_a_slash_command_prompt_gets_no_hint(self):  # R3
-        # スラッシュのコマンドの形の入力には足さない（入口を短い名前の /bb-writ で呼んでも、prompt は打ったままで届く）
-        for prompt in ("/bb-writ:bb-writ 直して", "/bb-writ 直して", "/bb-writ:conduct 続きを", "/compact", "/other:skill x"):
+    def test_a_prompt_that_calls_the_entry_by_slash_gets_no_hint(self):  # R3
+        # 入口をスラッシュで呼ぶ入力は、これから指揮者を立てる入力（短い名前の /bb-writ でも、prompt は打ったままで届く）
+        for prompt in ("/bb-writ:bb-writ 直して", "/bb-writ:bb-writ", "/bb-writ:bb-writ\n続きを",
+                       "/bb-writ 直して", "/bb-writ", "/bb-writ\t直して", "/bb-writ\n直して", "/bb-writ\u3000直して"):
             with self.subTest(prompt=prompt):
-                self.assertFalse(self.hinted(BY_FORKED_SLASH, prompt=prompt), "スラッシュのコマンドの入力に案内が付いた")
-        # 最初の語に / が 2 つ（パス）、文の途中の名前、先頭に空白（Claude Code はスラッシュとして扱わない）には付ける
-        for prompt in ("/tmp/x に保存して", "さっきの /bb-writ:bb-writ の続き", " /bb-writ:bb-writ 直して"):
+                self.assertFalse(self.hinted(BY_FORKED_SLASH, prompt=prompt), "入口をスラッシュで呼ぶ入力に案内が付いた")
+        # 名前の前方一致、ほかのコマンド、/ で始まる普通の返事（パス・案の名前）、文の途中の名前、先頭に空白には付ける
+        for prompt in ("/bb-writer 直して", "/bb-writ:bb-writer 直して", "/bb-writ:conduct 続きを", "/compact",
+                       "/tmp に保存して", "/README.md を編集して", "/A で進めて", "/案A で", "/tmp/x に保存して", "/",
+                       "さっきの /bb-writ の続き", " /bb-writ 直して"):
             with self.subTest(prompt=prompt):
-                self.assertTrue(self.hinted(BY_FORKED_SLASH, prompt=prompt), "スラッシュのコマンドでない入力に案内が付かなかった")
+                self.assertTrue(self.hinted(BY_FORKED_SLASH, prompt=prompt), "入口をスラッシュで呼ぶ入力でないのに案内が付かなかった")
 
     def test_a_session_without_the_entry_gets_no_hint(self):  # R4
         for name, rows in (("空の会話記録", ()), ("ほかのスキル", (OTHER_SKILL,)), ("名前に触れただけ", (MENTION_ONLY,)),
@@ -135,7 +139,7 @@ class TestConductorHint(unittest.TestCase):
                           ("content が None の行だけ", self.stdin(self.transcript(*NULL_ROWS)))):
             with self.subTest(name):
                 self.assertIsNone(self.run_hint(raw), "判定できない入力に案内が付いた")
-        # prompt が文字列でない・無い入力は、スラッシュのコマンドでないと見る（印があれば案内を付ける。落ちて案内が消えない）
+        # prompt が文字列でない・無い入力は、入口をスラッシュで呼ぶ形でないと見る（印があれば案内を付ける。落ちて案内が消えない）
         t = self.transcript(BY_SKILL_TOOL)
         for name, raw in (("prompt が null", self.stdin(t, None)), ("prompt が配列", self.stdin(t, ["/bb-writ:bb-writ"])),
                           ("prompt が数", self.stdin(t, 1)),
@@ -227,16 +231,31 @@ class TestConductorHint(unittest.TestCase):
             with self.subTest(name):
                 p = subprocess.run(["sh", "-c", command], input=stdin, capture_output=True, text=True, timeout=30,
                                    env={**os.environ, "CLAUDE_PLUGIN_ROOT": str(root)})
-                # 2 で終わると、Claude Code は利用者の入力を止める（python3 が開けないと 2）。ほかの 0 以外は利用者に失敗が見える
+                # 2 で終わると、Claude Code は利用者の入力を止め、ほかの 0 以外は利用者に失敗が見える。案内だけの hook なので、
+                # スクリプトを読めない・途中で落ちるときも、何も出さずに 0 で終わる（失敗は案内が無いことと同じに扱う）
                 self.assertEqual(p.returncode, 0, p.stderr)
+                self.assertEqual(p.stderr, "")
                 self.assertEqual(json.loads(p.stdout)["hookSpecificOutput"]["hookEventName"] if p.stdout.strip() else None,
                                  "UserPromptSubmit" if hinted else None)
-        with self.subTest("python3 が PATH に無い"):  # 起動できなければ 127 と stderr になる。入力のたびに失敗を見せない
-            empty = Path(self.tmp.name) / "empty-bin"
-            empty.mkdir()
-            p = subprocess.run([shutil.which("sh"), "-c", command], input=stdin, capture_output=True, text=True, timeout=30,
-                               env={**os.environ, "PATH": str(empty), "CLAUDE_PLUGIN_ROOT": str(ROOT)})
-            self.assertEqual((p.returncode, p.stdout, p.stderr), (0, "", ""), "python3 の無い環境で、hook が 0 以外か出力で終わった")
+        # python3 を動かせない環境（無い、127 を返す shim、2 を返す実行体、実行権限の無いファイル）でも、何も出さずに 0 で終わる
+        bins = {}
+        for name, body, mode in (("無い", None, None), ("127 を返す shim", "#!/bin/sh\necho 'python3: not installed' >&2\nexit 127\n", 0o755),
+                                 ("2 を返す実行体", "#!/bin/sh\necho 'python3: broken' >&2\nexit 2\n", 0o755),
+                                 ("実行権限の無いファイル", "#!/bin/sh\nexit 0\n", 0o644)):
+            d = Path(self.tmp.name) / f"bin-{len(bins)}"
+            d.mkdir()
+            if body is not None:
+                (d / "python3").write_text(body, encoding="utf-8")
+                (d / "python3").chmod(mode)
+            bins[name] = d
+        shells = [s for s in (shutil.which("sh"), shutil.which("bash")) if s]
+        for shell in shells:
+            for name, d in bins.items():
+                with self.subTest(shell=shell, python3=name):
+                    p = subprocess.run([shell, "-c", command], input=stdin, capture_output=True, text=True, timeout=30,
+                                       env={**os.environ, "PATH": str(d), "CLAUDE_PLUGIN_ROOT": str(ROOT)})
+                    self.assertEqual((p.returncode, p.stdout, p.stderr), (0, "", ""),
+                                     "python3 を動かせない環境で、hook が 0 以外か出力で終わった")
 
     def test_the_hook_does_not_write_pycache_into_the_plugin(self):  # R13
         # conductor_hint.py は push_guard.py を import する。-B が無いと、プラグインの置き場に __pycache__ ができる
