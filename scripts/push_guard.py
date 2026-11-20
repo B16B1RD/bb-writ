@@ -297,7 +297,8 @@ def slash_line(text: str) -> bool:
 def entry_in(row: dict, skills=ENTRY_SKILLS, slashes=SLASH_NAMES) -> bool:
     """1 行が入口（か本体）を呼んだ印か。Skill ツールの呼び出しか、利用者の行の先頭のスラッシュの記録の名前が入口・本体のものか、
     利用者の行・入力を受け付けた行の文が入口の名前で始まるもの（書き手の本文や道具の結果、ほかのスラッシュの引数に写った印の文字列、文の途中に書かれた名前は数えない）。
-    skills・slashes は数える名前（既定は入口と本体。conductor_hint.py は入口だけを渡す）。"""
+    skills・slashes は数える名前（既定は入口と本体。conductor_hint.py は入口だけを渡す）。slashes は <command-name> の記録の名前にだけ
+    効き、行の先頭の素の名前（slash_line）は、いつも入口の名前で比べる。"""
     if row.get("type") == "queue-operation":  # 入力を受け付けた行
         return slash_line(row["content"])  # 文字列でない形は、呼び出し側が飛ばす
     message = row.get("message") or {}

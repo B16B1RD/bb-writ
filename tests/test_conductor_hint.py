@@ -14,6 +14,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent)); import process_limit  # noqa: E402,F401  試験に上限を掛ける（直に走らせても）
 from test_push_guard import (  # noqa: E402
     BODY_BARE_NAME, BODY_NAME_HEADS_A_QUEUED_ROW, BROKEN_ROW, BY_BARE_NAME, BY_BODY_SKILL_TOOL, BY_BODY_SLASH,
+    BY_BODY_SLASH_IN_TEXT_BLOCK,
     BY_FORKED_SLASH, BY_FORKED_SLASH_ALONE, BY_FORKED_SLASH_IN_TEXT_BLOCK, BY_QUEUED_FORKED_SLASH, BY_SKILL_TOOL, BY_SLASH,
     BY_SLASH_IN_TEXT_BLOCK, MARK_HEADS_ASSISTANT_BLOCK, MARK_IN_ASSISTANT_STRING, MARK_IN_TOOL_RESULT, MARK_INSIDE_USER_BLOCK,
     MARK_INSIDE_USER_TEXT, MARK_QUOTED_BY_ASSISTANT, MENTION_ONLY, NAME_AFTER_A_NEWLINE, NAME_AFTER_A_SPACE,
@@ -55,6 +56,7 @@ class TestConductorHint(unittest.TestCase):
     def test_a_session_that_called_only_the_body_gets_no_hint(self):  # R1
         # 本体を直に呼んだセッション（続きの引き受け・要約の後）には、入口が立てる指揮者（背景の子）がいない
         for name, rows in (("本体の Skill ツール", (BY_BODY_SKILL_TOOL,)), ("本体のスラッシュ", (BY_BODY_SLASH,)),
+                           ("本体のスラッシュ（text ブロック）", (BY_BODY_SLASH_IN_TEXT_BLOCK,)),
                            ("本体の名前で始まる入力を受け付けた行", (BODY_NAME_HEADS_A_QUEUED_ROW,)),
                            ("本体の短い名前", (BODY_BARE_NAME,)), ("ほかのプラグインの本体", (OTHER_PLUGIN_BODY_SLASH,)),
                            ("本体の印を全部", (BY_BODY_SKILL_TOOL, BY_BODY_SLASH, BODY_NAME_HEADS_A_QUEUED_ROW))):
@@ -67,17 +69,22 @@ class TestConductorHint(unittest.TestCase):
             with self.subTest(agent_id=agent_id):
                 self.assertFalse(self.hinted(BY_SKILL_TOOL, agent_id=agent_id, agent_type="general-purpose"),
                                  "子への入力に案内が付いた")
+        with self.subTest("agent_id だけ"):
+            self.assertFalse(self.hinted(BY_SKILL_TOOL, agent_id="a1b2c3"), "agent_id だけの子への入力に案内が付いた")
+        with self.subTest("agent_type だけ"):  # --agent で起こした親のセッション（agent_id は付かない）
+            self.assertTrue(self.hinted(BY_SKILL_TOOL, agent_type="reviewer"), "agent_type だけの親の入力に案内が付かなかった")
         with self.subTest("agent_id が空"):  # 空は親の入力と見る
             self.assertTrue(self.hinted(BY_SKILL_TOOL, agent_id=""), "agent_id が空の親の入力に案内が付かなかった")
 
-    def test_the_entry_slash_itself_gets_no_hint(self):  # R3
-        # 入口のスラッシュそのものは、これから指揮者を立てる入力（指揮者の依頼文に案内を混ぜない）
-        for prompt in ("/bb-writ:bb-writ 直して", "/bb-writ:bb-writ", "/bb-writ:bb-writ\n続きを"):
+    def test_a_slash_command_prompt_gets_no_hint(self):  # R3
+        # スラッシュのコマンドの形の入力には足さない（入口を短い名前の /bb-writ で呼んでも、prompt は打ったままで届く）
+        for prompt in ("/bb-writ:bb-writ 直して", "/bb-writ 直して", "/bb-writ:conduct 続きを", "/compact", "/other:skill x"):
             with self.subTest(prompt=prompt):
-                self.assertFalse(self.hinted(BY_FORKED_SLASH, prompt=prompt), "入口のスラッシュの入力に案内が付いた")
-        for prompt in ("/bb-writ:bb-writer 直して", "さっきの /bb-writ:bb-writ の続き", "/bb-writ:conduct 続きを"):
-            with self.subTest(prompt=prompt):  # 入口の名前そのもので始まらない入力には付ける
-                self.assertTrue(self.hinted(BY_FORKED_SLASH, prompt=prompt), "入口のスラッシュでない入力に案内が付かなかった")
+                self.assertFalse(self.hinted(BY_FORKED_SLASH, prompt=prompt), "スラッシュのコマンドの入力に案内が付いた")
+        # 最初の語に / が 2 つ（パス）、文の途中の名前、先頭に空白（Claude Code はスラッシュとして扱わない）には付ける
+        for prompt in ("/tmp/x に保存して", "さっきの /bb-writ:bb-writ の続き", " /bb-writ:bb-writ 直して"):
+            with self.subTest(prompt=prompt):
+                self.assertTrue(self.hinted(BY_FORKED_SLASH, prompt=prompt), "スラッシュのコマンドでない入力に案内が付かなかった")
 
     def test_a_session_without_the_entry_gets_no_hint(self):  # R4
         for name, rows in (("空の会話記録", ()), ("ほかのスキル", (OTHER_SKILL,)), ("名前に触れただけ", (MENTION_ONLY,)),
@@ -128,7 +135,7 @@ class TestConductorHint(unittest.TestCase):
                           ("content が None の行だけ", self.stdin(self.transcript(*NULL_ROWS)))):
             with self.subTest(name):
                 self.assertIsNone(self.run_hint(raw), "判定できない入力に案内が付いた")
-        # prompt が文字列でない・無い入力は、入口のスラッシュでないと見る（印があれば案内を付ける。落ちて案内が消えない）
+        # prompt が文字列でない・無い入力は、スラッシュのコマンドでないと見る（印があれば案内を付ける。落ちて案内が消えない）
         t = self.transcript(BY_SKILL_TOOL)
         for name, raw in (("prompt が null", self.stdin(t, None)), ("prompt が配列", self.stdin(t, ["/bb-writ:bb-writ"])),
                           ("prompt が数", self.stdin(t, 1)),
@@ -164,6 +171,29 @@ class TestConductorHint(unittest.TestCase):
                 self.assertIsNotNone(out, "案内が消えた")
                 self.assertEqual(out["hookSpecificOutput"]["hookEventName"], "UserPromptSubmit")
 
+    def test_the_hint_comes_with_a_safe_sys_path(self):
+        # PYTHONSAFEPATH では、スクリプトの置き場が sys.path に入らない。同じ置き場の push_guard を読めずに案内が消えない
+        out = self.run_hint(self.stdin(self.transcript(BY_SKILL_TOOL)), env={**os.environ, "PYTHONSAFEPATH": "1"})
+        self.assertIsNotNone(out, "PYTHONSAFEPATH で案内が消えた")
+
+    def test_the_mark_counts_in_any_shape_of_transcript(self):
+        mark = json.dumps(BY_SKILL_TOOL, ensure_ascii=False).encode("utf-8")
+        other = json.dumps(OTHER_SKILL, ensure_ascii=False).encode("utf-8") + b"\n"
+        for name, body in (("印の前に UTF-8 として不正なバイト列の行", b'{"x": "bb-writ \xff\xfe"}\n' + mark + b"\n"),
+                           ("印が最後の行で、改行で終わらない", other + mark),
+                           ("印の前に、印でない行が 5,000 行", other * 5000 + mark + b"\n")):
+            with self.subTest(name):
+                p = Path(self.tmp.name) / "raw.jsonl"
+                p.write_bytes(body)
+                self.assertIsNotNone(self.run_hint(self.stdin(str(p))), "会話記録の入口の印を数えなかった")
+
+    def test_the_hook_definition_has_only_the_known_fields(self):
+        # matcher・if などの欄を置かない（UserPromptSubmit は matcher を持たない。if は Grok Build が handler を飛ばす）
+        entries = json.loads(HOOKS.read_text(encoding="utf-8"))["hooks"]["UserPromptSubmit"]
+        self.assertEqual([sorted(e) for e in entries], [["hooks"]], "UserPromptSubmit の要素に hooks 以外の欄がある")
+        self.assertEqual([sorted(h) for h in entries[0]["hooks"]], [["command", "timeout", "type"]],
+                         "hook に type・command・timeout 以外の欄がある")
+
     def plugin_copy(self, name: str) -> Path:
         """hook が読むスクリプト（conductor_hint.py と、それが読む push_guard.py）を写したプラグインの置き場。"""
         root = Path(self.tmp.name) / name
@@ -197,10 +227,16 @@ class TestConductorHint(unittest.TestCase):
             with self.subTest(name):
                 p = subprocess.run(["sh", "-c", command], input=stdin, capture_output=True, text=True, timeout=30,
                                    env={**os.environ, "CLAUDE_PLUGIN_ROOT": str(root)})
-                # 0 以外（python3 が開けずに 2）で終わると、Claude Code は利用者の入力を止める
+                # 2 で終わると、Claude Code は利用者の入力を止める（python3 が開けないと 2）。ほかの 0 以外は利用者に失敗が見える
                 self.assertEqual(p.returncode, 0, p.stderr)
                 self.assertEqual(json.loads(p.stdout)["hookSpecificOutput"]["hookEventName"] if p.stdout.strip() else None,
                                  "UserPromptSubmit" if hinted else None)
+        with self.subTest("python3 が PATH に無い"):  # 起動できなければ 127 と stderr になる。入力のたびに失敗を見せない
+            empty = Path(self.tmp.name) / "empty-bin"
+            empty.mkdir()
+            p = subprocess.run([shutil.which("sh"), "-c", command], input=stdin, capture_output=True, text=True, timeout=30,
+                               env={**os.environ, "PATH": str(empty), "CLAUDE_PLUGIN_ROOT": str(ROOT)})
+            self.assertEqual((p.returncode, p.stdout, p.stderr), (0, "", ""), "python3 の無い環境で、hook が 0 以外か出力で終わった")
 
     def test_the_hook_does_not_write_pycache_into_the_plugin(self):  # R13
         # conductor_hint.py は push_guard.py を import する。-B が無いと、プラグインの置き場に __pycache__ ができる

@@ -36,6 +36,8 @@ BY_BODY_SKILL_TOOL = {"type": "assistant", "message": {"role": "assistant", "con
     {"type": "tool_use", "id": "toolu_8", "name": "Skill", "input": {"skill": "bb-writ:conduct"}}]}}
 BY_BODY_SLASH = {"type": "user", "message": {"role": "user", "content":
     "<command-message>bb-writ:conduct</command-message>\n<command-name>/bb-writ:conduct</command-name>\n<command-args>続きを</command-args>"}}
+BY_BODY_SLASH_IN_TEXT_BLOCK = {"type": "user", "message": {"role": "user", "content": [
+    {"type": "text", "text": "<command-name>/bb-writ:conduct</command-name>\n<command-args>続きを</command-args>"}]}}
 # 本体の短い名前は数えない（ほかのプラグインの同じ名前のスキルと区別できない）
 BODY_BARE_NAME = {"type": "assistant", "message": {"role": "assistant", "content": [
     {"type": "tool_use", "id": "toolu_9", "name": "Skill", "input": {"skill": "conduct", "args": "bb-writ の続き"}}]}}
@@ -97,7 +99,8 @@ ENTRIES = {"スラッシュ（前後の空白）": SLASH_WITH_SPACES, "Skill ツ
            "fork する入口のスラッシュ": BY_FORKED_SLASH, "fork する入口のスラッシュ（引数なし）": BY_FORKED_SLASH_ALONE,
            "fork する入口のスラッシュ（text ブロック）": BY_FORKED_SLASH_IN_TEXT_BLOCK,
            "fork する入口のスラッシュ（非対話。入力を受け付けた行）": BY_QUEUED_FORKED_SLASH,
-           "本体の Skill ツール": BY_BODY_SKILL_TOOL, "本体のスラッシュ": BY_BODY_SLASH}
+           "本体の Skill ツール": BY_BODY_SKILL_TOOL, "本体のスラッシュ": BY_BODY_SLASH,
+           "本体のスラッシュ（text ブロック）": BY_BODY_SLASH_IN_TEXT_BLOCK}
 
 OUTWARD = ["git push origin main", "GH_CONFIG_DIR=x git -C . push -q origin HEAD:main", "cd repo && git -c user.name=w push",
            "git status && git push", "env GIT_TERMINAL_PROMPT=0 git push", "gh pr create --fill", "gh pr merge 3 --squash",
