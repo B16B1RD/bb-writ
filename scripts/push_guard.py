@@ -20,11 +20,19 @@ import sys
 # 入口は fork するスキルで、スラッシュで呼ぶと、記録は <command-name> の形にならず、本文の先頭が「/名前 引数」のままの行になる
 # （2026-11-20、2.1.328。対話でも非対話でも）。指揮者（fork した子）の Bash でも、hook に届く会話記録は親のもの。
 # 非対話の実行では、その利用者の行は指揮者が終わるまで書かれず、指揮者の Bash の時点で在るのは、入力を受け付けた行
-# （type が queue-operation、content が入力の文）だけだった（同日）。この行も印に数える
+# （type が queue-operation、content が入力の文）だけだった（同日）。この行も印に数える。
+# 短い名前 /bb-writ で呼んでも入口は fork し、入力を受け付けた行の content は打ったままの「/bb-writ 引数」だった（2026-11-20、
+# 2.1.329、非対話）。指揮者が終わってから書かれる利用者の行は「/bb-writ:bb-writ 引数」に展開されていた。そこで、正式な名前と
+# 短い名前の両方を、利用者の行にも入力を受け付けた行にも同じ比べ方（slash_line）で数える（利用者の行に短い名前が打ったままで
+# 残る形は見ていないが、残っていれば数える）。先頭に空白・改行のある入力は、非対話では fork せず、普通の文として親のモデルに
+# 届いた。対話では Claude Code が先頭の空白を削って入口を呼び、行は /bb-writ:bb-writ で始まる（同日、2.1.329）。どちらでも、
+# 先頭に空白・改行のある行は数えない。
 # 本体 bb-writ:conduct も印に数える（続きの引き受けや要約の後に、入口を通らずに本体を直に呼んだセッションも、進め方の全文を持つ）。
-# 本体の短い名前 conduct は数えない（ほかのプラグインの同じ名前のスキルと区別できない）
+# 本体の短い名前 conduct は数えない（ほかのプラグインの同じ名前のスキルと区別できない）。本体の名前で始まる素の行も数えない
+# （本体は fork しないので、スラッシュで呼ぶと <command-name> の形の行が先に書かれる）
 ENTRY_SKILLS = {"bb-writ:bb-writ", "bb-writ", "bb-writ:conduct"}
 ENTRY_NAME = "/bb-writ:bb-writ"
+ENTRY_SLASHES = (ENTRY_NAME, "/bb-writ")  # 入口をスラッシュで呼ぶ名前（正式な名前と短い名前）。conductor_hint.py も使う
 SLASH_NAMES = {ENTRY_NAME, "/bb-writ:conduct"}
 SLASH_HEADS = ("<command-message>", "<command-name>")
 
@@ -290,15 +298,18 @@ def slash_name(text: str):
 
 
 def slash_line(text: str) -> bool:
-    """利用者の行の本文が、入口の名前そのもので始まるか（fork する入口をスラッシュで呼んだときの記録）。名前の直後は空白か終わり。"""
-    return text.startswith(ENTRY_NAME) and (len(text) == len(ENTRY_NAME) or text[len(ENTRY_NAME)].isspace())
+    """文が、入口をスラッシュで呼ぶ形か。入口の 2 つの名前（/bb-writ:bb-writ と短い名前 /bb-writ）のどちらかで始まり、名前の直後が
+    空白の類（空白・タブ・改行など）か文の終わり。先頭の空白・改行は削らずに比べる（先頭に空白のある入力は、非対話では入口を呼ばない）。
+    利用者の行・入力を受け付けた行の本文（push_guard）と、hook に届いた入力（conductor_hint.py）の両方に、この 1 つの比べ方を使う。"""
+    return any(text == name or text.startswith(name) and text[len(name)].isspace() for name in ENTRY_SLASHES)
 
 
 def entry_in(row: dict, skills=ENTRY_SKILLS, slashes=SLASH_NAMES) -> bool:
     """1 行が入口（か本体）を呼んだ印か。Skill ツールの呼び出しか、利用者の行の先頭のスラッシュの記録の名前が入口・本体のものか、
-    利用者の行・入力を受け付けた行の文が入口の名前で始まるもの（書き手の本文や道具の結果、ほかのスラッシュの引数に写った印の文字列、文の途中に書かれた名前は数えない）。
+    利用者の行・入力を受け付けた行の文が入口の名前（正式な名前か短い名前。slash_line）で始まるもの。書き手の本文や道具の結果、
+    ほかのスラッシュの引数に写った印の文字列、文の途中に書かれた名前、先頭に空白・改行のある行、本体の名前で始まる素の行は数えない。
     skills・slashes は数える名前（既定は入口と本体。conductor_hint.py は入口だけを渡す）。slashes は <command-name> の記録の名前にだけ
-    効き、行の先頭の素の名前（slash_line）は、いつも入口の名前で比べる。"""
+    効き、行の先頭の素の名前（slash_line）は、いつも入口の 2 つの名前で比べる。"""
     if row.get("type") == "queue-operation":  # 入力を受け付けた行
         return slash_line(row["content"])  # 文字列でない形は、呼び出し側が飛ばす
     message = row.get("message") or {}

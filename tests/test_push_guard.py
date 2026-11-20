@@ -43,7 +43,8 @@ BODY_BARE_NAME = {"type": "assistant", "message": {"role": "assistant", "content
     {"type": "tool_use", "id": "toolu_9", "name": "Skill", "input": {"skill": "conduct", "args": "bb-writ の続き"}}]}}
 OTHER_PLUGIN_BODY_SLASH = {"type": "user", "message": {"role": "user", "content":
     "<command-message>other:conduct</command-message>\n<command-name>/other:conduct</command-name>\n<command-args>bb-writ の続き</command-args>"}}
-# 先頭に空白・改行のある行は、Claude Code がスラッシュの呼び出しとして扱わない（2026-11-20、2.1.328。親のモデルに普通の文として届いた）
+# 先頭に空白・改行のある行は数えない。非対話では、Claude Code がスラッシュの呼び出しとして扱わず、親のモデルに普通の文として届いた
+# （2026-11-20、2.1.328 と 2.1.329）。対話では、2.1.329 は先頭の空白を削って入口を呼び、行は /bb-writ:bb-writ で始まる
 NAME_AFTER_A_SPACE = {"type": "user", "message": {"role": "user", "content": " /bb-writ:bb-writ 直して"}}
 NAME_AFTER_A_NEWLINE = {"type": "queue-operation", "operation": "enqueue", "content": "\n/bb-writ:bb-writ 直して"}
 # 本体の名前で始まる素の行は数えない（本体は fork しないので、スラッシュで呼ぶと <command-name> の形の行が先に書かれる）
@@ -55,6 +56,30 @@ BY_FORKED_SLASH_IN_TEXT_BLOCK = {"type": "user", "message": {"role": "user", "co
     {"type": "text", "text": "/bb-writ:bb-writ\n直して"}]}}
 # 非対話の実行で、指揮者の Bash の時点に在る行（入力を受け付けた行。利用者の行は、指揮者が終わるまで書かれない）
 BY_QUEUED_FORKED_SLASH = {"type": "queue-operation", "operation": "enqueue", "content": "/bb-writ:bb-writ 直して。push まで"}
+# 短い名前 /bb-writ で呼んだ入口（2026-11-20、2.1.329、非対話。指揮者が動いている間の入力を受け付けた行は、打ったままの短い名前）
+SHORT_NAME_HEADS = {"空白の後に引数": "/bb-writ 直して", "引数なし": "/bb-writ", "タブの後に引数": "/bb-writ\t直して",
+                    "改行の後に引数": "/bb-writ\n直して"}
+BY_QUEUED_SHORT_SLASH = {"type": "queue-operation", "operation": "enqueue", "content": "/bb-writ 直して"}
+# 利用者の行に短い名前が打ったままで残る形は、確かめた版では見ていない（残っていれば数える）
+BY_SHORT_SLASH = {"type": "user", "message": {"role": "user", "content": "/bb-writ 直して"}}
+BY_SHORT_SLASH_IN_TEXT_BLOCK = {"type": "user", "message": {"role": "user", "content": [{"type": "text", "text": "/bb-writ 直して"}]}}
+# 入口の名前で始まらない文（名前の前方一致、ほかのスキル、本体の名前でない別の名前、先頭の空白・改行、文の途中の名前）
+NOT_ENTRY_HEADS = ["/bb-writx 直して", "/bb-writer 直して", "/bb-writ-foo", "/bb-writ:other 直して", "/bb-writ:bb-writer 直して",
+                   " /bb-writ 直して", "\n/bb-writ 直して", "さっきの /bb-writ の続き"]
+
+
+def queued(text: str) -> dict:
+    return {"type": "queue-operation", "operation": "enqueue", "content": text}
+
+
+def user_string(text: str) -> dict:
+    return {"type": "user", "message": {"role": "user", "content": text}}
+
+
+def user_block(text: str) -> dict:
+    return {"type": "user", "message": {"role": "user", "content": [{"type": "text", "text": text}]}}
+
+
 MENTION_ONLY = {"type": "user", "message": {"role": "user", "content": "bb-writ:bb-writ の使い方を教えて"}}
 QUEUED_NOTIFICATION = {"type": "queue-operation", "operation": "enqueue", "content": "<task-notification>\n/bb-writ:bb-writ 直して の子が終わった"}
 QUEUED_OTHER_NAME = {"type": "queue-operation", "operation": "enqueue", "content": "/bb-writ:bb-writer 直して"}
@@ -253,6 +278,24 @@ class TestPushGuard(unittest.TestCase):
             with self.subTest(rows=[r.get("type") for r in rows], first=json.dumps(rows[:1], ensure_ascii=False)[:60]):
                 self.assertIsNone(self.run_guard("git push origin main", t))
 
+    def test_a_short_entry_name_at_the_head_counts(self):
+        # 短い名前 /bb-writ で呼んだ入口も印に数える（入力を受け付けた行と、利用者の行の文字列・text ブロック）
+        rows = {**{f"入力を受け付けた行（{k}）": queued(v) for k, v in SHORT_NAME_HEADS.items()},
+                "利用者の行（文字列）": BY_SHORT_SLASH, "利用者の行（text ブロック）": BY_SHORT_SLASH_IN_TEXT_BLOCK}
+        for name, row in rows.items():
+            with self.subTest(name):
+                self.assertIsNotNone(self.run_guard("git push origin main", self.transcript(OTHER_SKILL, BROKEN_ROW, *NULL_ROWS, row)),
+                                     "短い名前で呼んだ入口の印を数えなかった")
+
+    def test_texts_that_do_not_head_with_an_entry_name_are_not_counted(self):
+        # 入力を受け付けた行と利用者の行の両方で、入口の名前で始まらない文は数えない
+        for text in NOT_ENTRY_HEADS:
+            for kind, row in (("入力を受け付けた行", queued(text)), ("利用者の行（文字列）", user_string(text)),
+                              ("利用者の行（text ブロック）", user_block(text))):
+                with self.subTest(kind=kind, text=text):
+                    self.assertIsNone(self.run_guard("git push origin main", self.transcript(row)),
+                                      "入口の名前で始まらない文を、入口を呼んだ印に数えた")
+
     def test_the_denial_survives_an_output_encoding_without_japanese(self):
         # 拒否の文は日本語。出力の符号化が日本語を扱えない環境で、書き出しが落ちて拒否が消えない（落ちた hook は通す扱いになる）
         t = self.transcript(BY_SKILL_TOOL)
@@ -326,6 +369,18 @@ class TestPushGuard(unittest.TestCase):
                                  "deny" if denied else None)
         # -B: プラグインの置き場に __pycache__ を作らない（今は標準ライブラリしか読まないので、無くても作らない。文で固定する）
         self.assertIn("python3 -B", hooks[0]["command"])
+
+    def test_the_hook_denies_a_push_when_only_a_queued_short_entry_name_is_in_the_transcript(self):
+        # 非対話で短い名前で呼ぶと、指揮者が動いている間の会話記録は、打ったままの短い名前の入力を受け付けた行だけ。
+        # hooks.json のコマンドを Claude Code と同じく sh で動かし、指揮者の素の push を拒否する
+        hooks = json.loads(HOOKS.read_text(encoding="utf-8"))["hooks"]["PreToolUse"][0]["hooks"]
+        t = self.transcript(BY_QUEUED_SHORT_SLASH)
+        stdin = json.dumps({"tool_name": "Bash", "transcript_path": t, "tool_input": {"command": "git push origin main"}})
+        p = subprocess.run(["sh", "-c", hooks[0]["command"]], input=stdin, capture_output=True, text=True, timeout=30,
+                           env={**os.environ, "CLAUDE_PLUGIN_ROOT": str(ROOT)})
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertTrue(p.stdout.strip(), "短い名前の入力を受け付けた行だけの会話記録で、素の push が通った")
+        self.assertEqual(json.loads(p.stdout)["hookSpecificOutput"]["permissionDecision"], "deny")
 
 if __name__ == "__main__":
     unittest.main()

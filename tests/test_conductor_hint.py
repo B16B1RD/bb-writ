@@ -16,7 +16,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent)); import process_limit  
 from test_push_guard import (  # noqa: E402
     BODY_BARE_NAME, BODY_NAME_HEADS_A_QUEUED_ROW, BROKEN_ROW, BY_BARE_NAME, BY_BODY_SKILL_TOOL, BY_BODY_SLASH,
     BY_BODY_SLASH_IN_TEXT_BLOCK,
-    BY_FORKED_SLASH, BY_FORKED_SLASH_ALONE, BY_FORKED_SLASH_IN_TEXT_BLOCK, BY_QUEUED_FORKED_SLASH, BY_SKILL_TOOL, BY_SLASH,
+    BY_FORKED_SLASH, BY_FORKED_SLASH_ALONE, BY_FORKED_SLASH_IN_TEXT_BLOCK, BY_QUEUED_FORKED_SLASH, BY_QUEUED_SHORT_SLASH,
+    BY_SKILL_TOOL, BY_SLASH,
     BY_SLASH_IN_TEXT_BLOCK, MARK_HEADS_ASSISTANT_BLOCK, MARK_IN_ASSISTANT_STRING, MARK_IN_TOOL_RESULT, MARK_INSIDE_USER_BLOCK,
     MARK_INSIDE_USER_TEXT, MARK_QUOTED_BY_ASSISTANT, MENTION_ONLY, NAME_AFTER_A_NEWLINE, NAME_AFTER_A_SPACE,
     NAME_HEADS_ANOTHER_KIND_OF_ROW, NAME_HEADS_ASSISTANT_BLOCK, NAME_HEADS_ASSISTANT_STRING, NAME_IN_THE_MIDDLE, NOT_SKILL_TOOL,
@@ -112,6 +113,11 @@ class TestConductorHint(unittest.TestCase):
         # 非対話の実行で、指揮者が動いている間に在るのは、入力を受け付けた行（queue-operation）だけ
         self.assertTrue(self.hinted(OTHER_SKILL, BROKEN_ROW, *NULL_ROWS, BY_QUEUED_FORKED_SLASH),
                         "入力を受け付けた行の入口の印を数えなかった")
+
+    def test_a_queued_short_entry_slash_counts(self):
+        # 非対話で短い名前 /bb-writ で呼ぶと、指揮者が動いている間に在るのは、打ったままの短い名前の入力を受け付けた行だけ
+        self.assertTrue(self.hinted(OTHER_SKILL, BROKEN_ROW, *NULL_ROWS, BY_QUEUED_SHORT_SLASH),
+                        "短い名前の入力を受け付けた行の入口の印を数えなかった")
 
     def test_a_forked_entry_slash_at_the_head_of_a_user_row_counts(self):  # R7
         # fork する入口をスラッシュで呼ぶと、利用者の行の本文の先頭が「/bb-writ:bb-writ 引数」のままになる

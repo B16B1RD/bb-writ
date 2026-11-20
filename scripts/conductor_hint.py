@@ -9,11 +9,12 @@
 求める）。指揮者がいるか、入力が指揮者への返事かは、ここでは決めない（会話記録から確かめられない。親のモデルが案内の条件で決める）。
 
 数える印は入口だけ（Skill ツールの bb-writ:bb-writ と短い名前 bb-writ、利用者の行の先頭のスラッシュの記録の名前
-/bb-writ:bb-writ、利用者の行・入力を受け付けた行の文が /bb-writ:bb-writ で始まるもの）。読み方は push_guard.py の entry_in を、
+/bb-writ:bb-writ、利用者の行・入力を受け付けた行の文が /bb-writ:bb-writ か短い名前 /bb-writ で始まるもの）。読み方は push_guard.py の entry_in を、
 入口だけの名前で使う（判定を写して 2 つ持たない）。本体 bb-writ:conduct だけを呼んだセッションは数えない（入口を通らず、
 指揮者がいない）。
 足さない場合: 入力に agent_id がある（親でなく子への入力。指揮者の依頼文に混ざらないように）、入力が入口をスラッシュで呼ぶ形
-（/bb-writ:bb-writ と短い名前 /bb-writ の 2 つで、名前そのものか、名前の直後が空白の類（空白・タブ・改行など）。これから指揮者を立てる入力。
+（/bb-writ:bb-writ と短い名前 /bb-writ の 2 つで、名前そのものか、名前の直後が空白の類（空白・タブ・改行など）。比べ方は
+push_guard.py の slash_line で、会話記録の印と同じ。これから指揮者を立てる入力。
 入口を短い名前の /bb-writ で呼ぶと、会話記録の行は /bb-writ:bb-writ になるが、prompt は打ったままの /bb-writ で届く）、印が無い、
 判定できない入力（JSON でない、transcript_path が無い・読めない、行の形が違う）。prompt が文字列でないときは、入口をスラッシュで
 呼ぶ形ではないと見る。どれも何も出さずに 0 で終わる。python3 を動かせないとき・このスクリプトを読めないときは、hooks.json の
@@ -30,13 +31,6 @@ HINT = ("bb-writ: このセッションでは入口 bb-writ を呼んでいる�
         "指揮者にも渡さずに、同じ直接の返事のしかたを利用者に伝える（指揮者は、親を通した返事を、本人の選択と確かめられずに断ることがある）。"
         "別の用件のときと、指揮者がいないときは、そのまま自分で進める。")
 ENTRY_SKILLS = {"bb-writ:bb-writ", "bb-writ"}  # 入口だけ（本体 bb-writ:conduct は数えない）
-ENTRY_SLASHES = ("/bb-writ:bb-writ", "/bb-writ")  # 入口をスラッシュで呼ぶ名前（短い名前も。prompt は打ったままで届く）
-
-
-def calls_entry(prompt) -> bool:
-    """入力が、入口をスラッシュで呼ぶ形か（名前そのものか、名前の直後が空白の類。push_guard.slash_line と同じ比べ方）。文字列でなければ偽。"""
-    return isinstance(prompt, str) and any(
-        prompt == name or prompt.startswith(name) and prompt[len(name)].isspace() for name in ENTRY_SLASHES)
 
 
 def main() -> int:
@@ -45,7 +39,8 @@ def main() -> int:
         import push_guard
         d = json.load(sys.stdin)
         prompt = d.get("prompt")
-        if (d.get("agent_id") or calls_entry(prompt)
+        calls_entry = isinstance(prompt, str) and push_guard.slash_line(prompt)  # 入口をスラッシュで呼ぶ入力（比べ方は push_guard の 1 か所）
+        if (d.get("agent_id") or calls_entry
                 or not push_guard.used_entry(d["transcript_path"], ENTRY_SKILLS, {push_guard.ENTRY_NAME})):
             return 0
     except Exception:  # 判定できなければ何も足さない（入力を止めない）
