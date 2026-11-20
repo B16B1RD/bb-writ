@@ -69,6 +69,18 @@ NOT_ENTRY_HEADS = ["/bb-writx 直して", "/bb-writer 直して", "/bb-writ-foo"
                    " /bb-writ 直して", "\n/bb-writ 直して", "さっきの /bb-writ の続き"]
 
 
+# 入口の子（指揮者）の会話記録の先頭の行（2026-11-20、2.1.329 の形。content は入口のスキルの本文を読み込んだ文）
+ENTRY_BASE = ROOT / "skills" / "bb-writ"
+CONDUCTOR = "a1b2c3d4e5f607182"  # agent_id は 17 桁の 16 進の文字列だった
+CONTINUED = {"type": "user", "message": {"role": "user", "content": "続きの行"}}
+
+
+def entry_first_row(base=ENTRY_BASE, blocks=False) -> dict:
+    text = f"Base directory for this skill: {base}\n\n# bb-writ（入口）\n" + "本文" * 2000
+    return {"type": "user", "isMeta": True,
+            "message": {"role": "user", "content": [{"type": "text", "text": text}] if blocks else text}}
+
+
 def queued(text: str) -> dict:
     return {"type": "queue-operation", "operation": "enqueue", "content": text}
 
@@ -242,10 +254,10 @@ class TestPushGuard(unittest.TestCase):
         p.write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows) + '{"broken\n')
         return str(p)
 
-    def run_guard(self, command, transcript, tool="Bash", raw=None):
+    def run_guard(self, command, transcript, tool="Bash", raw=None, **extra):
         stdin = raw if raw is not None else json.dumps({"session_id": "s", "transcript_path": transcript, "cwd": self.tmp.name,
                                                         "hook_event_name": "PreToolUse", "tool_name": tool,
-                                                        "tool_input": {"command": command}})
+                                                        "tool_input": {"command": command}, **extra})
         p = subprocess.run([sys.executable, "-B", str(GUARD)], input=stdin, capture_output=True, text=True, timeout=30)
         self.assertEqual(p.returncode, 0, p.stderr)  # 拒否も JSON で返す。終了コードで止めない（ほかの失敗と区別する）
         return json.loads(p.stdout)["hookSpecificOutput"] if p.stdout.strip() else None
@@ -301,6 +313,134 @@ class TestPushGuard(unittest.TestCase):
                 with self.subTest(kind=kind, text=text):
                     self.assertIsNone(self.run_guard("git push origin main", self.transcript(row)),
                                       "入口の名前で始まらない文を、入口を呼んだ印に数えた")
+
+    # 入口の子（指揮者）とその子孫の Bash。親の会話記録に印が無くても、子の会話記録の先頭の行で見分ける
+    def parent(self, session="s1", rows=(OTHER_SKILL,)) -> str:
+        """親の会話記録 <一時>/proj/<セッション>.jsonl（既定は印の無い行だけ）を作り、その道筋を返す。"""
+        p = Path(self.tmp.name) / "proj" / f"{session}.jsonl"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows), encoding="utf-8")
+        return str(p)
+
+    def child(self, session, agent_id, *rows, parent_id=None, raw=None, name=None):
+        """子の会話記録 <一時>/proj/<セッション>/subagents/agent-<id>.jsonl と meta.json を作る（raw は行の代わりに書く文）。"""
+        d = Path(self.tmp.name) / "proj" / session / "subagents"
+        p = d / (name or f"agent-{agent_id}.jsonl")
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(raw if raw is not None else "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows), encoding="utf-8")
+        meta = {"agentType": "general-purpose", **({"parentAgentId": parent_id, "spawnDepth": 2} if parent_id else {})}
+        (d / f"agent-{agent_id}.meta.json").write_text(json.dumps(meta), encoding="utf-8")
+
+    def test_a_push_by_the_conductor_is_denied_by_its_first_row(self):
+        t = self.parent()
+        self.child("s1", CONDUCTOR, entry_first_row(), CONTINUED)
+        self.assertIsNotNone(self.run_guard("git push origin main", t, agent_id=CONDUCTOR), "指揮者の素の push が通った")
+
+    def test_a_push_by_the_conductor_after_clear_is_denied(self):
+        # /clear の後: hook に届く会話記録は新しいセッションのもの。そこの子の会話記録は続きの行だけで、入口の行は前のセッションに残る
+        self.parent("s1")
+        self.child("s1", CONDUCTOR, entry_first_row(), CONTINUED)
+        t = self.parent("s2")
+        self.child("s2", CONDUCTOR, CONTINUED)
+        self.assertIsNotNone(self.run_guard("git push origin main", t, agent_id=CONDUCTOR), "/clear の後の指揮者の素の push が通った")
+
+    def test_a_push_by_the_conductor_is_denied_when_the_parent_transcript_is_missing(self):
+        # hook の入力の会話記録のファイルがまだ無い（置き場は在る）ときも、親の印は無いものとして、子の会話記録で見分ける
+        self.parent("s1")
+        self.child("s1", CONDUCTOR, entry_first_row(), CONTINUED)
+        t = str(Path(self.tmp.name) / "proj" / "s2.jsonl")
+        self.assertFalse(Path(t).exists())
+        self.assertIsNotNone(self.run_guard("git push origin main", t, agent_id=CONDUCTOR),
+                             "親の会話記録が無いときに、指揮者の素の push が通った")
+
+    def test_a_push_by_a_descendant_of_the_conductor_is_denied(self):
+        t = self.parent()
+        self.child("s1", CONDUCTOR, entry_first_row())
+        self.child("s1", "b0000000000000001", CONTINUED, parent_id=CONDUCTOR)
+        self.child("s1", "c0000000000000002", CONTINUED, parent_id="b0000000000000001")
+        for name, aid in (("孫", "b0000000000000001"), ("ひ孫", "c0000000000000002")):
+            with self.subTest(name):
+                self.assertIsNotNone(self.run_guard("git push origin main", t, agent_id=aid), "指揮者の子孫の素の push が通った")
+
+    def test_an_entry_row_with_text_blocks_counts(self):
+        t = self.parent()
+        self.child("s1", CONDUCTOR, entry_first_row(blocks=True))
+        self.assertIsNotNone(self.run_guard("git push origin main", t, agent_id=CONDUCTOR), "text のブロックの入口の行を数えなかった")
+
+    def test_an_entry_path_through_a_symlink_counts(self):
+        link = Path(self.tmp.name) / "plugin-link"
+        link.symlink_to(ROOT, target_is_directory=True)
+        t = self.parent()
+        self.child("s1", CONDUCTOR, entry_first_row(link / "skills" / "bb-writ"))
+        self.assertIsNotNone(self.run_guard("git push origin main", t, agent_id=CONDUCTOR), "symlink 越しの入口の道筋を数えなかった")
+
+    def test_children_that_are_not_the_entry_are_not_touched(self):
+        other_copy = Path(self.tmp.name) / "other" / "skills" / "bb-writ"
+        other_copy.mkdir(parents=True)
+        t = self.parent()
+        self.child("s1", CONDUCTOR, entry_first_row())
+        self.child("s1", "d1", entry_first_row(ROOT / "skills" / "conduct"))
+        self.child("s1", "d2", entry_first_row(other_copy))
+        self.child("s1", "d3", raw="{not json\n")
+        self.child("s1", "d4", raw="")
+        self.child("s1", "d5", {"type": "user", "isMeta": True, "message": {"role": "user"}})
+        for name, extra in (("agent_id が無い", {}), ("置き場にファイルが無い", {"agent_id": "e0000000000000009"}),
+                            ("本体の置き場", {"agent_id": "d1"}), ("別の置き場の skills/bb-writ", {"agent_id": "d2"}),
+                            ("先頭の行が JSON でない", {"agent_id": "d3"}), ("空のファイル", {"agent_id": "d4"}),
+                            ("content が無い", {"agent_id": "d5"})):
+            with self.subTest(name):
+                self.assertIsNone(self.run_guard("git push origin main", t, **extra), "入口の子でない子の push を止めた")
+
+    def test_a_loop_of_parents_ends_without_denial(self):
+        t = self.parent()
+        self.child("s1", "aaaa", CONTINUED, parent_id="bbbb")
+        self.child("s1", "bbbb", CONTINUED, parent_id="aaaa")
+        self.assertIsNone(self.run_guard("git push origin main", t, agent_id="aaaa"), "parentAgentId の輪で止めた")
+
+    def test_malformed_agent_ids_are_not_used_in_the_search(self):
+        # どの id にも、形を確かめずに置き場の探し方に使えば当たる、入口の行のファイルを置く
+        t = self.parent()
+        self.child("s1", CONDUCTOR, entry_first_row())
+        long_id = "a" * 65
+        for aid in ("7", "", long_id):
+            self.child("s1", f"bait{len(aid)}", entry_first_row(), name=f"agent-{aid}.jsonl")
+        self.child("s1", "bait-dots", entry_first_row(), name="agent-../x.jsonl")
+        for name, aid in (("文字列でない", 7), ("空", ""), ("*", "*"), ("../x", "../x"), ("65 字", long_id)):
+            with self.subTest(name):
+                self.assertIsNone(self.run_guard("git push origin main", t, agent_id=aid), "形の違う agent_id で入口の行に当たった")
+
+    def test_a_wildcard_agent_id_does_not_match_another_child(self):
+        t = self.parent()
+        self.child("s1", CONDUCTOR, entry_first_row())
+        self.assertIsNone(self.run_guard("git push origin main", t, agent_id="*"), "agent_id の * が、ほかの子の入口の行に当たった")
+
+    def test_an_entry_row_after_the_first_row_does_not_count(self):
+        t = self.parent()
+        self.child("s1", CONDUCTOR, CONTINUED, entry_first_row())
+        self.assertIsNone(self.run_guard("git push origin main", t, agent_id=CONDUCTOR), "2 行目の入口の行を数えた")
+
+    def test_a_quiet_command_by_the_conductor_passes(self):
+        t = self.parent()
+        self.child("s1", CONDUCTOR, entry_first_row())
+        self.assertIsNone(self.run_guard("git status", t, agent_id=CONDUCTOR), "指揮者の外へ出さないコマンドを止めた")
+
+    def test_the_parent_mark_still_denies_with_an_agent_id(self):
+        t = self.parent(rows=(BY_SKILL_TOOL,))
+        self.assertIsNotNone(self.run_guard("git push origin main", t, agent_id=CONDUCTOR), "親の会話記録の印で止めなかった")
+
+    def test_the_child_search_is_quick_with_many_sessions(self):
+        # 外へ出すコマンドのたびに、全部のセッションの置き場を探す。300 個でも 5 秒以内（CI の遅い OS では、Python の起動だけで 1 秒に近づく）
+        for i in range(300):
+            self.parent(f"s{i:03}")
+            self.child(f"s{i:03}", f"f{i:016x}", CONTINUED)
+        self.child("s150", CONDUCTOR, entry_first_row())
+        t = str(Path(self.tmp.name) / "proj" / "s299.jsonl")
+        for name, aid, denied in (("指揮者", CONDUCTOR, True), ("置き場に無い子", "e0000000000000009", False)):
+            with self.subTest(name):
+                start = time.monotonic()
+                out = self.run_guard("git push origin main", t, agent_id=aid)
+                self.assertLess(time.monotonic() - start, 5)
+                self.assertEqual(out is not None, denied)
 
     def test_the_denial_survives_an_output_encoding_without_japanese(self):
         # 拒否の文は日本語。出力の符号化が日本語を扱えない環境で、書き出しが落ちて拒否が消えない（落ちた hook は通す扱いになる）
@@ -386,6 +526,19 @@ class TestPushGuard(unittest.TestCase):
                            env={**os.environ, "CLAUDE_PLUGIN_ROOT": str(ROOT)})
         self.assertEqual(p.returncode, 0, p.stderr)
         self.assertTrue(p.stdout.strip(), "短い名前の入力を受け付けた行だけの会話記録で、素の push が通った")
+        self.assertEqual(json.loads(p.stdout)["hookSpecificOutput"]["permissionDecision"], "deny")
+
+    def test_the_hook_denies_a_push_by_the_conductor(self):
+        # hooks.json のコマンドを Claude Code と同じく sh で動かし、親の会話記録に印の無い指揮者の素の push を拒否する
+        hooks = json.loads(HOOKS.read_text(encoding="utf-8"))["hooks"]["PreToolUse"][0]["hooks"]
+        t = self.parent()
+        self.child("s1", CONDUCTOR, entry_first_row())
+        stdin = json.dumps({"tool_name": "Bash", "transcript_path": t, "agent_id": CONDUCTOR, "agent_type": "general-purpose",
+                            "tool_input": {"command": "git push origin main"}})
+        p = subprocess.run(["sh", "-c", hooks[0]["command"]], input=stdin, capture_output=True, text=True, timeout=30,
+                           env={**os.environ, "CLAUDE_PLUGIN_ROOT": str(ROOT)})
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertTrue(p.stdout.strip(), "指揮者の素の push が通った")
         self.assertEqual(json.loads(p.stdout)["hookSpecificOutput"]["permissionDecision"], "deny")
 
 if __name__ == "__main__":

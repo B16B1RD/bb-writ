@@ -12,8 +12,19 @@ op run の中の git push は、op run が Bash を通さずに起こすので�
 コマンドの読み方は、普段の書き方（連結、複数行の引用符、"$(cat <<'EOF' …)" の中の heredoc、前置きの代入と包むコマンド）を
 bash と同じに読む所までにする。それより珍しい書き方（別の語に包む sh -c・eval・xargs、変数に入れたコマンド名、別名・関数）は
 読まない（AGENTS.md の規則の表に、守らない範囲として書く）。
+
+入口は別の子（指揮者）として動くので、親の会話記録の印だけでは、次の 2 つの場面で指揮者の素の push が通った（2026-11-20、
+Claude Code 2.1.329）。非対話で --input-format stream-json に本文をブロックの並びで渡して入口を呼ぶと、入力を受け付けた行に本文が
+無い。対話で、指揮者が動いている間に親で /clear を打つと、hook に届く transcript_path と session_id が新しいセッションのものになる。
+そこで、子の Bash の呼び出し（hook の入力に agent_id が在る。親の Bash には無い。agent_type は general-purpose で、入口の子と
+見分けられない）では、子の会話記録も見る（entry_child）。入口の子の会話記録の先頭の行は、入口のスキルの本文を読み込んだ行
+（content が「Base directory for this skill: <プラグインの置き場>/skills/bb-writ」で始まる）。孫（指揮者が Agent ツールで立てた子）は、
+同じ置き場の meta.json の parentAgentId でたどる。
 """
+import glob
 import json
+import os
+import re
 import sys
 
 # 入口を呼んだ印。Skill ツールの呼び出しと、利用者がスラッシュで呼んだときの記録（2026-11-18、Claude Code 2.1.327 で確かめた形）。
@@ -35,6 +46,18 @@ ENTRY_NAME = "/bb-writ:bb-writ"
 ENTRY_SLASHES = (ENTRY_NAME, "/bb-writ")  # 入口をスラッシュで呼ぶ名前（正式な名前と短い名前）。conductor_hint.py も使う
 SLASH_NAMES = {ENTRY_NAME, "/bb-writ:conduct"}
 SLASH_HEADS = ("<command-message>", "<command-name>")
+
+# 入口の子（指揮者）とその子孫の見分け方（2026-11-20、2.1.329。非対話の 7 つの呼び方と対話の 8 つの場面で、指揮者の Bash の入力を見た）。
+# 子の会話記録は <transcript_path の置き場>/<セッションの ID>/subagents/agent-<agent_id>.jsonl。入口の子の先頭の行は
+# {"type": "user", "isMeta": true, "message": {"role": "user", "content": "Base directory for this skill: <置き場>/skills/bb-writ\n\n…"}}。
+# /clear の後は、新しいセッションの置き場にも同じ名前のファイルができる（続きの行だけ）。前のセッションの置き場のものは残り、
+# 先頭は入口の行のままなので、全部のセッションの置き場から探す。孫の先頭の行は入口の行でなく、同じ置き場の
+# agent-<孫の id>.meta.json の parentAgentId が指揮者の agent_id（指揮者の meta.json に parentAgentId は無い）。
+AGENT_ID = re.compile(r"[A-Za-z0-9_-]{1,64}")  # 置き場の探し方にそのまま使うので、glob の記号や / を含む id は使わない
+FIRST_ROW_LIMIT = 262144  # 先頭の行を読む長さの上限（入口の行は 4,500 字ほど）
+BASE_HEAD = "Base directory for this skill: "
+ENTRY_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "skills", "bb-writ")  # このプラグインの入口
+ANCESTOR_LIMIT = 8  # parentAgentId をたどる段の数
 
 # 区切り（コマンドの境目）。( ) と ` と $( は文脈の出入りとして別に扱う
 SEPARATORS = set(";&|{}!\n")
@@ -324,11 +347,68 @@ def entry_in(row: dict, skills=ENTRY_SKILLS, slashes=SLASH_NAMES) -> bool:
     return False
 
 
+def first_row(path: str):
+    """ファイルの先頭の 1 行を JSON として読む（長さに上限を付ける）。"""
+    with open(path, encoding="utf-8", errors="replace") as f:
+        return json.loads(f.readline(FIRST_ROW_LIMIT))
+
+
+def entry_row(row) -> bool:
+    """行が、このプラグインの入口のスキルの本文を読み込んだ行か（content の文が Base directory … で始まり、その 1 行目の道筋が
+    このプラグインの skills/bb-writ と同じ場所。どちらも実体の道筋で比べる）。"""
+    content = row["message"]["content"]
+    texts = [content] if isinstance(content, str) else [b.get("text") for b in content if b.get("type") == "text"]
+    entry = os.path.realpath(ENTRY_DIR)
+    return any(isinstance(t, str) and t.startswith(BASE_HEAD)
+               and os.path.realpath(t[len(BASE_HEAD):].split("\n", 1)[0]) == entry for t in texts)
+
+
+def entry_child(transcript_path, agent_id) -> bool:
+    """hook の入力の agent_id の子が、このプラグインの入口の fork した子（指揮者）か、その子孫か。子の会話記録を、
+    transcript_path の置き場の全部のセッションの置き場から探し、先頭の行を見る。当たらなければ meta.json の parentAgentId を
+    ANCESTOR_LIMIT 段までたどる。読めないもの（ファイルが無い、JSON でない、形が違う、権限が無い）は当たらなかったものとして飛ばす。"""
+    try:
+        sessions = glob.escape(os.path.dirname(transcript_path))
+    except Exception:
+        return False
+    seen, current = set(), [agent_id]
+    for _ in range(ANCESTOR_LIMIT + 1):
+        parents = []
+        for aid in current:
+            if not isinstance(aid, str) or not AGENT_ID.fullmatch(aid) or aid in seen:
+                continue
+            seen.add(aid)
+            for path in glob.glob(os.path.join(sessions, "*", "subagents", f"agent-{aid}.jsonl")):
+                try:
+                    if entry_row(first_row(path)):
+                        return True
+                except Exception:
+                    continue
+            for path in glob.glob(os.path.join(sessions, "*", "subagents", f"agent-{aid}.meta.json")):
+                try:
+                    with open(path, encoding="utf-8", errors="replace") as f:
+                        parents.append(json.loads(f.read(FIRST_ROW_LIMIT))["parentAgentId"])
+                except Exception:
+                    continue
+        if not parents:
+            return False
+        current = parents
+    return False
+
+
 def main() -> int:
     try:
         d = json.load(sys.stdin)
         command = (d.get("tool_input") or {}).get("command") or ""
-        if d.get("tool_name") != "Bash" or not outward(command) or not used_entry(d["transcript_path"]):
+        if d.get("tool_name") != "Bash" or not outward(command):
+            return 0
+        path = d.get("transcript_path")
+        try:
+            marked = used_entry(path)
+        except Exception:  # 親の会話記録が無い・読めない（/clear の直後など）ときは、印が無いものとして、子の会話記録を見る
+            marked = False
+        # 子の会話記録は、外へ出すコマンドで、親の会話記録に印が無いときにだけ見る（ほかの Bash の呼び出しを遅くしない）
+        if not (marked or entry_child(path, d.get("agent_id"))):
             return 0
     except Exception:  # 判定できなければ通す（ほかの作業を止めない）
         return 0
