@@ -1,5 +1,5 @@
 {
-  "description": "bb-writ: PreToolUse は、入口か本体を呼んだセッションで、work.py op run を通さない git push・gh pr create・gh pr merge・gh release create を拒否する（判定は scripts/push_guard.py）。UserPromptSubmit は、入口を呼んだセッションで、発火のたびに（利用者の入力のほか、指揮者の終わりの知らせ・子からの伝言でも）、指揮者への返事と続きを SendMessage で渡すよう案内する（入力は止めない。判定は scripts/conductor_hint.py）",
+  "description": "bb-writ: PreToolUse は、入口か本体を呼んだセッションで、work.py op run を通さない git push・gh pr create・gh pr merge・gh release create を拒否する（判定は scripts/push_guard.py）。UserPromptSubmit は、入口を呼んだセッションで、発火のたびに（利用者の入力のほか、指揮者の終わりの知らせ・子からの伝言でも）、指揮者への返事と続きは、親が進めず・渡さずに、利用者が指揮者に直接打つよう案内する（入力は止めない。判定は scripts/conductor_hint.py）",
   "hooks": {
     "PreToolUse": [
       {
