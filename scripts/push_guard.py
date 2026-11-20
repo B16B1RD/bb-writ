@@ -266,13 +266,14 @@ REASON = ("bb-writ: 外に出す操作は、playbook-deliver のとおり work.p
           "work.py を実行できなければ、出さずにエラーを利用者に返す。利用者が自分で出すなら、利用者がターミナルで実行する。")
 
 
-def used_entry(path: str) -> bool:
+def used_entry(path: str, skills=ENTRY_SKILLS, slashes=SLASH_NAMES) -> bool:
+    """会話記録に、数える名前（skills は Skill ツールの名前、slashes はスラッシュの記録の名前）で呼んだ印があるか。"""
     with open(path, encoding="utf-8", errors="replace") as f:
         for line in f:
             if "bb-writ" not in line:
                 continue
             try:
-                if entry_in(json.loads(line)):
+                if entry_in(json.loads(line), skills, slashes):
                     return True
             except Exception:  # 形の違う行は飛ばし、後ろの行を読み続ける
                 continue
@@ -293,19 +294,20 @@ def slash_line(text: str) -> bool:
     return text.startswith(ENTRY_NAME) and (len(text) == len(ENTRY_NAME) or text[len(ENTRY_NAME)].isspace())
 
 
-def entry_in(row: dict) -> bool:
+def entry_in(row: dict, skills=ENTRY_SKILLS, slashes=SLASH_NAMES) -> bool:
     """1 行が入口（か本体）を呼んだ印か。Skill ツールの呼び出しか、利用者の行の先頭のスラッシュの記録の名前が入口・本体のものか、
-    利用者の行・入力を受け付けた行の文が入口の名前で始まるもの（書き手の本文や道具の結果、ほかのスラッシュの引数に写った印の文字列、文の途中に書かれた名前は数えない）。"""
+    利用者の行・入力を受け付けた行の文が入口の名前で始まるもの（書き手の本文や道具の結果、ほかのスラッシュの引数に写った印の文字列、文の途中に書かれた名前は数えない）。
+    skills・slashes は数える名前（既定は入口と本体。conductor_hint.py は入口だけを渡す）。"""
     if row.get("type") == "queue-operation":  # 入力を受け付けた行
         return slash_line(row["content"])  # 文字列でない形は、呼び出し側が飛ばす
     message = row.get("message") or {}
     content, by_user = message.get("content"), message.get("role") == "user"
     if isinstance(content, str):
-        return by_user and (slash_name(content) in SLASH_NAMES or slash_line(content))
+        return by_user and (slash_name(content) in slashes or slash_line(content))
     for b in content if isinstance(content, list) else []:
-        if b.get("type") == "tool_use" and b.get("name") == "Skill" and (b.get("input") or {}).get("skill") in ENTRY_SKILLS:
+        if b.get("type") == "tool_use" and b.get("name") == "Skill" and (b.get("input") or {}).get("skill") in skills:
             return True
-        if by_user and b.get("type") == "text" and (slash_name(b.get("text") or "") in SLASH_NAMES or slash_line(b.get("text") or "")):
+        if by_user and b.get("type") == "text" and (slash_name(b.get("text") or "") in slashes or slash_line(b.get("text") or "")):
             return True
     return False
 
