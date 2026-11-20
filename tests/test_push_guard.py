@@ -56,9 +56,10 @@ BY_FORKED_SLASH_IN_TEXT_BLOCK = {"type": "user", "message": {"role": "user", "co
     {"type": "text", "text": "/bb-writ:bb-writ\n直して"}]}}
 # 非対話の実行で、指揮者の Bash の時点に在る行（入力を受け付けた行。利用者の行は、指揮者が終わるまで書かれない）
 BY_QUEUED_FORKED_SLASH = {"type": "queue-operation", "operation": "enqueue", "content": "/bb-writ:bb-writ 直して。push まで"}
-# 短い名前 /bb-writ で呼んだ入口（2026-11-20、2.1.329、非対話。指揮者が動いている間の入力を受け付けた行は、打ったままの短い名前）
+# 短い名前 /bb-writ で呼んだ入口（2026-11-20、2.1.329、非対話、各 1 回）。名前の直後が半角の空白・タブ・改行・全角の空白の形と、
+# 引数なしの形は、どれも実物で入口が fork し、指揮者が動いている間の入力を受け付けた行は、打ったままだった
 SHORT_NAME_HEADS = {"空白の後に引数": "/bb-writ 直して", "引数なし": "/bb-writ", "タブの後に引数": "/bb-writ\t直して",
-                    "改行の後に引数": "/bb-writ\n直して"}
+                    "改行の後に引数": "/bb-writ\n直して", "全角の空白の後に引数": "/bb-writ\u3000直して"}
 BY_QUEUED_SHORT_SLASH = {"type": "queue-operation", "operation": "enqueue", "content": "/bb-writ 直して"}
 # 利用者の行に短い名前が打ったままで残る形は、確かめた版では見ていない（残っていれば数える）
 BY_SHORT_SLASH = {"type": "user", "message": {"role": "user", "content": "/bb-writ 直して"}}
@@ -286,6 +287,11 @@ class TestPushGuard(unittest.TestCase):
             with self.subTest(name):
                 self.assertIsNotNone(self.run_guard("git push origin main", self.transcript(OTHER_SKILL, BROKEN_ROW, *NULL_ROWS, row)),
                                      "短い名前で呼んだ入口の印を数えなかった")
+
+    def test_a_wide_space_after_the_full_entry_name_counts(self):
+        # 正式な名前の直後が全角の空白の入力も、入口は fork し、入力を受け付けた行は打ったままだった（2026-11-20、2.1.329、非対話、1 回）
+        self.assertIsNotNone(self.run_guard("git push origin main", self.transcript(queued("/bb-writ:bb-writ\u3000直して"))),
+                             "正式な名前の直後が全角の空白の入力を受け付けた行を、入口の印に数えなかった")
 
     def test_texts_that_do_not_head_with_an_entry_name_are_not_counted(self):
         # 入力を受け付けた行と利用者の行の両方で、入口の名前で始まらない文は数えない
