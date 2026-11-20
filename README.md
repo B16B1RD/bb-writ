@@ -16,6 +16,10 @@ https://github.com/user-attachments/assets/dd9c669e-0d1e-4645-a631-ea70809b345a
 - git：2.38 以上（`git --version`）。タスクの作業場所の一覧に 2.36、squash・rebase で統合した後の片付けの確認に 2.38 で入った機能を使う。macOS では、Command Line Tools に付く `git` がこれ以上なら足りる（macOS 15 の Command Line Tools は 2.39.5 と報告されているが、手元では確かめていない）。
 - GitHub CLI（`gh`、ログイン済み）：Issue・PR を名指しして頼むときと、push・PR などの外部操作の前にアカウントと書き込み権限を確かめるときに使う。gh が無いと、名指しした Issue・PR の本文とコメントを読めず、GitHub への外部操作はこの確かめで止まる。Issue・PR を名指しせずに、リポジトリを読む・手元で直すだけなら要らない。
 
+Claude Code で、入口が、モデルを選び直すよう求める文を返して進まないときは、入口の代わりに、本体を名前で呼ぶ（`/bb-writ:conduct <依頼>`）。本体は、別の子を立てずに、呼んだセッションの中で、そのセッションのモデルで進む（2026-11-20、2.1.329。確かめたのは、読むだけの依頼を、Sonnet のセッションで、対話と非対話（`claude -p`）で 1 回ずつ）。この形でも、bb-writ が立てる子のうち Fable で動かす役（Claude Code の `interrogate` の審査役と、push・PR の前の成果物の検証役）が、Fable を使えない専用ログインでどう動くかは確かめていない（モデルを解決できない名前にして launcher で立てた読み取り専用の子は、同じ文を理由に `failed` で返った。1 回）。
+
+Claude Code の設定の `availableModels`（使えるモデルの一覧）が Fable を外しているときは、入口は止まらず、指揮者は代わりのモデルで動く。確かめた場面（一覧が `["sonnet", "opus", "haiku"]`、Sonnet のセッション。2026-11-20、2.1.329）では、指揮者は、呼んだセッションのモデル（`claude-sonnet-5-5`）で動いた。対話では、画面に `bb-writ:bb-writ agent: Model "claude-fable-5-2" is restricted by your organization's settings. Using claude-sonnet-5-5 instead.` の 1 行が出た（1 回）。非対話（`claude -p --output-format json`）では、結果にその行は出なかった（2 回。うち 1 回は標準エラーも見て、空だった）。一覧が塞いだモデルを指定した、別の子として動くスキルを、失敗させずに代わりのモデルで動かすことと、代わりの選び方は、公式の文書の [Restrict model selection](https://code.claude.com/docs/en/model-config) と [When an allowlist blocks a subagent model](https://code.claude.com/docs/en/sub-agents) の節にある。claude.ai の管理画面でモデルを止める組織の制限（`availableModels` とは別の仕組み）での入口の動きは確かめていない。
+
 bb-writ 専用のログイン・dotenvx・もう一方の CLI は、push・PR まで頼むときと任意機能で使う（[任意機能の準備](#任意機能の準備)）。専用ログインが無いと、bb-writ は、実装を任せる書く子（Claude Code では変更を書く依頼のすべて、Codex では最も難しい種類の依頼。Grok Build の入口は、書く子を立てない）と、確かめ役・審査役・返す前の判定の子を立てられない。手元の作業は、入口が自分で書き、子が無いことを返答に書いて進むが、push・PR は、返す前の判定の子の記録が無いので拒否される。
 
 ## インストール
@@ -140,7 +144,7 @@ Claude Code は、普通の依頼文だけでは入口を使わない。入口�
 
 入口のスキル `bb-writ` が呼ばれると、進め方の本体 `conduct` を読み、依頼を言い直し、最初に手引きを呼び、リポジトリを読み、必要な原則だけを読んで進め、「何を実行し、どの結果を見て、依頼を満たすと判断したか」を返す。Claude Code では、変更を書く依頼では、入口（指揮者）は成果物を自分で書かず、別プロセスの書く子に書かせて、返った実物を確かめる。Codex では、最も難しい種類の依頼だけを書く子に任せ、ほかは入口が自分で書く。Grok Build では、最も難しい種類の依頼も、入口が自分で書く（書く子を立てない）。push・PR の前には、新しい文脈の検証役に成果物を検証させる。
 
-- 入口の本体：`conduct`（進め方の全文。入口が呼ぶ。自分で名前を打って呼ぶものではない）。
+- 入口の本体：`conduct`（進め方の全文。入口が呼ぶ。自分で名前を打って呼ぶのは、Claude Code で入口が進まないときだけ。[前提](#前提)）。
 
 - 手引き：`playbook-investigation`（読んで答える）・`playbook-bug`（不具合を直す）・`playbook-feature`（振る舞いを足す・変える）・`playbook-docs-skill`（文書・スキルを直す）・`playbook-verify`（確かめて返す。検証の条件の全文）・`playbook-deliver`（担当・記録・push や PR などの外部操作）・`playbook-parallel`（タスクごとの作業場所の確保・再開・統合・片付け）・`playbook-session-pickup`（続きを引き受ける）・`playbook-pause-safely`（安全に止める）・`playbook-eval`（スキルや設定の変種を同じ依頼で走らせ、目隠しで比べる）。
 - 委任と審査：`delegate`（別系統の CLI の起動）、`interrogate`（2 系統の審査役）。
