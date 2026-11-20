@@ -75,8 +75,8 @@ CONDUCTOR = "a1b2c3d4e5f607182"  # agent_id は 17 桁の 16 進の文字列だ�
 CONTINUED = {"type": "user", "message": {"role": "user", "content": "続きの行"}}
 
 
-def entry_first_row(base=ENTRY_BASE, blocks=False) -> dict:
-    text = f"Base directory for this skill: {base}\n\n# bb-writ（入口）\n" + "本文" * 2000
+def entry_first_row(base=ENTRY_BASE, blocks=False, request="直して") -> dict:
+    text = f"Base directory for this skill: {base}\n\n# bb-writ（入口）\n" + "本文" * 2000 + f"\n\nARGUMENTS: {request}"
     return {"type": "user", "isMeta": True,
             "message": {"role": "user", "content": [{"type": "text", "text": text}] if blocks else text}}
 
@@ -315,21 +315,22 @@ class TestPushGuard(unittest.TestCase):
                                       "入口の名前で始まらない文を、入口を呼んだ印に数えた")
 
     # 入口の子（指揮者）とその子孫の Bash。親の会話記録に印が無くても、子の会話記録の先頭の行で見分ける
-    def parent(self, session="s1", rows=(OTHER_SKILL,)) -> str:
-        """親の会話記録 <一時>/proj/<セッション>.jsonl（既定は印の無い行だけ）を作り、その道筋を返す。"""
-        p = Path(self.tmp.name) / "proj" / f"{session}.jsonl"
+    def parent(self, session="s1", rows=(OTHER_SKILL,), proj="proj") -> str:
+        """親の会話記録 <一時>/<proj>/<セッション>.jsonl（既定は印の無い行だけ）を作り、その道筋を返す。"""
+        p = Path(self.tmp.name) / proj / f"{session}.jsonl"
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows), encoding="utf-8")
         return str(p)
 
-    def child(self, session, agent_id, *rows, parent_id=None, raw=None, name=None):
-        """子の会話記録 <一時>/proj/<セッション>/subagents/agent-<id>.jsonl と meta.json を作る（raw は行の代わりに書く文）。"""
-        d = Path(self.tmp.name) / "proj" / session / "subagents"
+    def child(self, session, agent_id, *rows, parent_id=None, raw=None, name=None, meta=True, proj="proj"):
+        """子の会話記録 <一時>/<proj>/<セッション>/subagents/agent-<id>.jsonl と、meta が真なら meta.json を作る（raw は行の代わりに書く文）。"""
+        d = Path(self.tmp.name) / proj / session / "subagents"
         p = d / (name or f"agent-{agent_id}.jsonl")
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(raw if raw is not None else "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows), encoding="utf-8")
-        meta = {"agentType": "general-purpose", **({"parentAgentId": parent_id, "spawnDepth": 2} if parent_id else {})}
-        (d / f"agent-{agent_id}.meta.json").write_text(json.dumps(meta), encoding="utf-8")
+        if meta:
+            fields = {"agentType": "general-purpose", **({"parentAgentId": parent_id, "spawnDepth": 2} if parent_id else {})}
+            (d / f"agent-{agent_id}.meta.json").write_text(json.dumps(fields), encoding="utf-8")
 
     def test_a_push_by_the_conductor_is_denied_by_its_first_row(self):
         t = self.parent()
@@ -337,11 +338,12 @@ class TestPushGuard(unittest.TestCase):
         self.assertIsNotNone(self.run_guard("git push origin main", t, agent_id=CONDUCTOR), "指揮者の素の push が通った")
 
     def test_a_push_by_the_conductor_after_clear_is_denied(self):
-        # /clear の後: hook に届く会話記録は新しいセッションのもの。そこの子の会話記録は続きの行だけで、入口の行は前のセッションに残る
+        # /clear の後: hook に届く会話記録は新しいセッションのもの。そこの子の会話記録は続きの行だけ（meta.json は無い）で、
+        # 入口の行は前のセッションに残る
         self.parent("s1")
         self.child("s1", CONDUCTOR, entry_first_row(), CONTINUED)
         t = self.parent("s2")
-        self.child("s2", CONDUCTOR, CONTINUED)
+        self.child("s2", CONDUCTOR, CONTINUED, meta=False)
         self.assertIsNotNone(self.run_guard("git push origin main", t, agent_id=CONDUCTOR), "/clear の後の指揮者の素の push が通った")
 
     def test_a_push_by_the_conductor_is_denied_when_the_parent_transcript_is_missing(self):
@@ -361,6 +363,41 @@ class TestPushGuard(unittest.TestCase):
         for name, aid in (("孫", "b0000000000000001"), ("ひ孫", "c0000000000000002")):
             with self.subTest(name):
                 self.assertIsNotNone(self.run_guard("git push origin main", t, agent_id=aid), "指揮者の子孫の素の push が通った")
+
+    def test_a_push_by_a_grandchild_started_after_clear_is_denied(self):
+        # /clear の後に指揮者が立てた孫: 孫の会話記録と meta.json は新しいセッションの置き場に、指揮者の入口の行は前の置き場に在る
+        self.parent("s1")
+        self.child("s1", CONDUCTOR, entry_first_row(), CONTINUED)
+        t = self.parent("s2")
+        self.child("s2", CONDUCTOR, CONTINUED, meta=False)
+        self.child("s2", "b0000000000000001", CONTINUED, parent_id=CONDUCTOR)
+        self.assertIsNotNone(self.run_guard("git push origin main", t, agent_id="b0000000000000001"),
+                             "/clear の後に指揮者が立てた孫の素の push が通った")
+
+    def test_a_long_entry_row_counts(self):
+        # 入口の行は依頼文を含む。300,000 字の行でも読む
+        t = self.parent()
+        row = entry_first_row(request="依" * 300000)
+        self.assertGreater(len(json.dumps(row, ensure_ascii=False)), 300000)
+        self.child("s1", CONDUCTOR, row)
+        self.assertIsNotNone(self.run_guard("git push origin main", t, agent_id=CONDUCTOR), "長い依頼の指揮者の素の push が通った")
+
+    def test_a_session_folder_with_glob_characters_counts(self):
+        t = self.parent(proj="pr[o]j*")
+        self.child("s1", CONDUCTOR, entry_first_row(), proj="pr[o]j*")
+        self.assertIsNotNone(self.run_guard("git push origin main", t, agent_id=CONDUCTOR),
+                             "置き場の道筋に glob の記号があるときに、指揮者の素の push が通った")
+
+    def test_ancestors_are_followed_up_to_eight_levels(self):
+        t = self.parent()
+        self.child("s1", CONDUCTOR, entry_first_row())
+        chain = [CONDUCTOR] + [f"g{i}" for i in range(1, 10)]
+        for parent_id, aid in zip(chain, chain[1:]):
+            self.child("s1", aid, CONTINUED, parent_id=parent_id)
+        with self.subTest("8 段"):
+            self.assertIsNotNone(self.run_guard("git push origin main", t, agent_id="g8"), "8 段たどった先の指揮者で止めなかった")
+        with self.subTest("9 段"):
+            self.assertIsNone(self.run_guard("git push origin main", t, agent_id="g9"), "9 段たどった先の指揮者で止めた")
 
     def test_an_entry_row_with_text_blocks_counts(self):
         t = self.parent()
@@ -384,10 +421,13 @@ class TestPushGuard(unittest.TestCase):
         self.child("s1", "d3", raw="{not json\n")
         self.child("s1", "d4", raw="")
         self.child("s1", "d5", {"type": "user", "isMeta": True, "message": {"role": "user"}})
+        self.child("s1", "d6", entry_first_row(ROOT / "skills" / "bb-writ-x"))
+        self.child("s1", "d7", entry_first_row(ROOT / "skills" / "bb-writ" / "refs"))
         for name, extra in (("agent_id が無い", {}), ("置き場にファイルが無い", {"agent_id": "e0000000000000009"}),
                             ("本体の置き場", {"agent_id": "d1"}), ("別の置き場の skills/bb-writ", {"agent_id": "d2"}),
                             ("先頭の行が JSON でない", {"agent_id": "d3"}), ("空のファイル", {"agent_id": "d4"}),
-                            ("content が無い", {"agent_id": "d5"})):
+                            ("content が無い", {"agent_id": "d5"}), ("skills/bb-writ-x", {"agent_id": "d6"}),
+                            ("skills/bb-writ/refs", {"agent_id": "d7"})):
             with self.subTest(name):
                 self.assertIsNone(self.run_guard("git push origin main", t, **extra), "入口の子でない子の push を止めた")
 
@@ -409,11 +449,6 @@ class TestPushGuard(unittest.TestCase):
             with self.subTest(name):
                 self.assertIsNone(self.run_guard("git push origin main", t, agent_id=aid), "形の違う agent_id で入口の行に当たった")
 
-    def test_a_wildcard_agent_id_does_not_match_another_child(self):
-        t = self.parent()
-        self.child("s1", CONDUCTOR, entry_first_row())
-        self.assertIsNone(self.run_guard("git push origin main", t, agent_id="*"), "agent_id の * が、ほかの子の入口の行に当たった")
-
     def test_an_entry_row_after_the_first_row_does_not_count(self):
         t = self.parent()
         self.child("s1", CONDUCTOR, CONTINUED, entry_first_row())
@@ -429,7 +464,8 @@ class TestPushGuard(unittest.TestCase):
         self.assertIsNotNone(self.run_guard("git push origin main", t, agent_id=CONDUCTOR), "親の会話記録の印で止めなかった")
 
     def test_the_child_search_is_quick_with_many_sessions(self):
-        # 外へ出すコマンドのたびに、全部のセッションの置き場を探す。300 個でも 5 秒以内（CI の遅い OS では、Python の起動だけで 1 秒に近づく）
+        # セッションの置き場が 300 個でも、時間の上限（5 秒。CI の遅い OS では、Python の起動だけで 1 秒に近づく）の中で終わる。
+        # 全部の子の会話記録を読む実装との違いは、この試験では見分けない
         for i in range(300):
             self.parent(f"s{i:03}")
             self.child(f"s{i:03}", f"f{i:016x}", CONTINUED)

@@ -2,7 +2,8 @@
 """Claude Code の PreToolUse の hook（hooks/hooks.json）。入口 bb-writ か本体 conduct を呼んだセッションで、関門（work.py op run）を
 通さずに外へ出す Bash のコマンド（git push・gh pr create・gh pr merge・gh release create）を拒否する。
 
-入口も本体も呼ばないセッション（bb-writ を使っていない仕事）と、判定できない入力（会話記録が無い・読めない・形が違う）は通す。
+入口も本体も呼ばないセッション（bb-writ を使っていない仕事）と、判定できない入力は通す。親の会話記録が無い・読めないときも、
+子の Bash では子の会話記録を見る（entry_child）。親の会話記録の印でも子の会話記録でも決まらなければ通す。
 hooks.json は Bash のすべての呼び出しでこれを起こし、外へ出すコマンドかはここで見る（Claude Code の if の欄は使わない。Grok Build は
 if の欄のある handler を飛ばして読み込みのエラーを出す。Claude Code の文書も、if は $() などを含む呼び出しでは型によらず hook を
 起こすと書き、判定はここに残る。Grok Build の呼び出しは tool_name が run_terminal_command で、会話記録の形も違うので、ここでは通す）。
@@ -54,7 +55,9 @@ SLASH_HEADS = ("<command-message>", "<command-name>")
 # 先頭は入口の行のままなので、全部のセッションの置き場から探す。孫の先頭の行は入口の行でなく、同じ置き場の
 # agent-<孫の id>.meta.json の parentAgentId が指揮者の agent_id（指揮者の meta.json に parentAgentId は無い）。
 AGENT_ID = re.compile(r"[A-Za-z0-9_-]{1,64}")  # 置き場の探し方にそのまま使うので、glob の記号や / を含む id は使わない
-FIRST_ROW_LIMIT = 262144  # 先頭の行を読む長さの上限（入口の行は 4,500 字ほど）
+# 先頭の行を読む長さの上限。入口の行の content は、入口の本文の後ろに「ARGUMENTS: <依頼文>」を含むので、依頼が長いと行も長い
+# （約 26 万字を超える依頼で、262,144 字の上限では行が切れて読めなかった）。上限を超える行は、JSON として読めず、当たらなかったものとして通す
+FIRST_ROW_LIMIT = 16777216
 BASE_HEAD = "Base directory for this skill: "
 ENTRY_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "skills", "bb-writ")  # このプラグインの入口
 ANCESTOR_LIMIT = 8  # parentAgentId をたどる段の数
