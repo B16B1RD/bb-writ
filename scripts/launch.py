@@ -62,7 +62,7 @@ from work import root as work_record  # noqa: E402  作業場所ごとの記録�
 # 2 回ずつ審査させ、欠陥を挙げた数は 4・2・6、所要時間の中央値は 151・93・117 秒だった（2026-11-15。試験を回さない条件。揺れは測っていない）。
 # Opus medium は基準より見落としたので、監査役は Opus high のまま。
 # Claude の書く子（実装役）は Opus high: 入口の本体は、指揮者が成果物を書かず、書く子に書かせて実物を確かめる。その形で 2 題を
-# 1 回ずつ通した（2026-11-20。指揮者は fork した Fable 5.2。書く子の費用は全体の 2 割弱だった。揺れは測っていない）。
+# 1 回ずつ通した（2026-11-20。指揮者は fork した Fable 5.2。揺れは測っていない）。
 CHOICES = {
     "audit": {"claude": ("opus", "high"), "codex": ("gpt-6-sol", "medium"), "grok": ("grok-4.7", "medium")},
     "interrogate": {"claude": ("fable", "medium"), "codex": ("gpt-6-sol", "medium"), "grok": ("grok-4.7", "medium")},
