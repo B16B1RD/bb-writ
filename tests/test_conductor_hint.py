@@ -83,7 +83,8 @@ class TestConductorHint(unittest.TestCase):
                        "/bb-writ 直して", "/bb-writ", "/bb-writ\t直して", "/bb-writ\n直して", "/bb-writ\u3000直して"):
             with self.subTest(prompt=prompt):
                 self.assertFalse(self.hinted(BY_FORKED_SLASH, prompt=prompt), "入口をスラッシュで呼ぶ入力に案内が付いた")
-        # 名前の前方一致、ほかのコマンド、/ で始まる普通の返事（パス・案の名前）、文の途中の名前、先頭に空白には付ける
+        # 名前の前方一致、ほかのコマンド、/ で始まる普通の返事（パス・案の名前）、文の途中の名前には付ける。先頭に空白のある形は、
+        # 2.1.329 では Claude Code が先頭の空白を削った prompt を hook に渡すので届かない。届いたときは、入口の呼び出しと見ずに足す
         for prompt in ("/bb-writer 直して", "/bb-writ:bb-writer 直して", "/bb-writ:conduct 続きを", "/compact",
                        "/tmp に保存して", "/README.md を編集して", "/A で進めて", "/案A で", "/tmp/x に保存して", "/",
                        "さっきの /bb-writ の続き", " /bb-writ 直して"):
@@ -206,6 +207,14 @@ class TestConductorHint(unittest.TestCase):
             shutil.copy(ROOT / "scripts" / s, root / "scripts" / s)
         return root
 
+    def shell_env(self, **extra) -> dict:
+        """hook のコマンドをシェルで動かす環境。利用者のホームと設定に左右されないように、HOME を試験の一時の置き場にし、
+        BASH_ENV・ENV（非対話のシェルが読む起動の文）を渡さない（読めない .bashrc の診断が stderr に出て、確かめに当たった）。"""
+        home = Path(self.tmp.name) / "home"
+        home.mkdir(exist_ok=True)
+        env = {k: v for k, v in os.environ.items() if k not in ("BASH_ENV", "ENV")}
+        return {**env, "HOME": str(home), **extra}
+
     def hook_command(self) -> str:
         cfg = json.loads(HOOKS.read_text(encoding="utf-8"))
         self.assertIn("UserPromptSubmit", cfg["hooks"], "hooks.json に UserPromptSubmit の hook が無い")
@@ -230,9 +239,10 @@ class TestConductorHint(unittest.TestCase):
                                    *((("スクリプトが読めない", unreadable, False),) if os.geteuid() != 0 else ())):  # root は読めてしまう
             with self.subTest(name):
                 p = subprocess.run(["sh", "-c", command], input=stdin, capture_output=True, text=True, timeout=30,
-                                   env={**os.environ, "CLAUDE_PLUGIN_ROOT": str(root)})
+                                   env=self.shell_env(CLAUDE_PLUGIN_ROOT=str(root)))
                 # 2 で終わると、Claude Code は利用者の入力を止め、ほかの 0 以外は利用者に失敗が見える。案内だけの hook なので、
-                # スクリプトを読めない・途中で落ちるときも、何も出さずに 0 で終わる（失敗は案内が無いことと同じに扱う）
+                # python3 を動かせない・スクリプトを読めないときは、何も出さずに 0 で終わる（失敗は案内が無いことと同じに扱う。
+                # スクリプトが先に stdout へ出した分は残る）
                 self.assertEqual(p.returncode, 0, p.stderr)
                 self.assertEqual(p.stderr, "")
                 self.assertEqual(json.loads(p.stdout)["hookSpecificOutput"]["hookEventName"] if p.stdout.strip() else None,
@@ -253,16 +263,17 @@ class TestConductorHint(unittest.TestCase):
             for name, d in bins.items():
                 with self.subTest(shell=shell, python3=name):
                     p = subprocess.run([shell, "-c", command], input=stdin, capture_output=True, text=True, timeout=30,
-                                       env={**os.environ, "PATH": str(d), "CLAUDE_PLUGIN_ROOT": str(ROOT)})
+                                       env=self.shell_env(PATH=str(d), CLAUDE_PLUGIN_ROOT=str(ROOT)))
                     self.assertEqual((p.returncode, p.stdout, p.stderr), (0, "", ""),
                                      "python3 を動かせない環境で、hook が 0 以外か出力で終わった")
 
     def test_the_hook_does_not_write_pycache_into_the_plugin(self):  # R13
         # conductor_hint.py は push_guard.py を import する。-B が無いと、プラグインの置き場に __pycache__ ができる
         root = self.plugin_copy("plugin")
-        env = {k: v for k, v in os.environ.items() if k not in ("PYTHONDONTWRITEBYTECODE", "PYTHONPYCACHEPREFIX")}
+        env = {k: v for k, v in self.shell_env(CLAUDE_PLUGIN_ROOT=str(root)).items()
+               if k not in ("PYTHONDONTWRITEBYTECODE", "PYTHONPYCACHEPREFIX")}
         p = subprocess.run(["sh", "-c", self.hook_command()], input=self.stdin(self.transcript(BY_SKILL_TOOL)),
-                           capture_output=True, text=True, timeout=30, env={**env, "CLAUDE_PLUGIN_ROOT": str(root)})
+                           capture_output=True, text=True, timeout=30, env=env)
         self.assertEqual(p.returncode, 0, p.stderr)
         self.assertTrue(p.stdout.strip(), "hook が案内を出さなかった（試験の準備の誤り）")
         self.assertEqual(sorted(x.name for x in (root / "scripts").iterdir()), ["conductor_hint.py", "push_guard.py"],
