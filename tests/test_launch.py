@@ -2512,6 +2512,9 @@ class TestLaunch(unittest.TestCase):
                         resumed, first = argv, first[:-1]
                         i = resumed.index("-p")
                     self.assertEqual(resumed[:i + 1] + resumed[i + 2:], [again_flag if x == flag else x for x in first[:i + 1] + first[i + 2:]])
+                if host == "claude":  # Claude Code の子に渡す依頼文は、先頭に launcher の 1 行が付く（続きでも）
+                    self.assertFalse(prompt.lstrip().startswith("/"), prompt)
+                    prompt = prompt.split("\n\n", 1)[1]
                 self.assertTrue(prompt.startswith("時間切れで止められた。続けて"), prompt)
 
     def test_a_timeout_does_not_hide_other_failures(self):
@@ -3664,7 +3667,7 @@ launch.claude_reads = claude_reads
             self.run_launch("claude", cwd=wt, extra=[*extra, "--prompt-file", str(prompt)])
             argv = json.loads(self.args_file.read_text())
             given = argv[argv.index("-p") + 1]
-            self.assertFalse(given.startswith("/"), extra)
+            self.assertFalse(given.lstrip().startswith("/"), extra)  # 先頭の空白を除いても、スラッシュで始まらない
             self.assertIn("\n/bb-writ:bb-writ この場所を調べて\n", given, extra)
 
     def test_claude_read_only_in_worktree_denies_the_common_git_dir(self):

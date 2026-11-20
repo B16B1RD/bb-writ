@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Claude Code の PreToolUse の hook（hooks/hooks.json）。入口 bb-writ を呼んだセッションで、関門（work.py op run）を
+"""Claude Code の PreToolUse の hook（hooks/hooks.json）。入口 bb-writ か本体 conduct を呼んだセッションで、関門（work.py op run）を
 通さずに外へ出す Bash のコマンド（git push・gh pr create・gh pr merge・gh release create）を拒否する。
 
-入口を呼ばないセッション（bb-writ を使っていない仕事）と、判定できない入力（会話記録が無い・読めない・形が違う）は通す。
+入口も本体も呼ばないセッション（bb-writ を使っていない仕事）と、判定できない入力（会話記録が無い・読めない・形が違う）は通す。
 hooks.json は Bash のすべての呼び出しでこれを起こし、外へ出すコマンドかはここで見る（Claude Code の if の欄は使わない。Grok Build は
 if の欄のある handler を飛ばして読み込みのエラーを出す。Claude Code の文書も、if は $() などを含む呼び出しでは型によらず hook を
 起こすと書き、判定はここに残る。Grok Build の呼び出しは tool_name が run_terminal_command で、会話記録の形も違うので、ここでは通す）。

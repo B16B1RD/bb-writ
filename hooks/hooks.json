@@ -1,5 +1,5 @@
 {
-  "description": "bb-writ: 入口を呼んだセッションで、work.py op run を通さない git push・gh pr create・gh pr merge・gh release create を拒否する（判定は scripts/push_guard.py）",
+  "description": "bb-writ: 入口か本体を呼んだセッションで、work.py op run を通さない git push・gh pr create・gh pr merge・gh release create を拒否する（判定は scripts/push_guard.py）",
   "hooks": {
     "PreToolUse": [
       {

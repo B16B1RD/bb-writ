@@ -38,7 +38,14 @@ BY_BODY_SLASH = {"type": "user", "message": {"role": "user", "content":
     "<command-message>bb-writ:conduct</command-message>\n<command-name>/bb-writ:conduct</command-name>\n<command-args>続きを</command-args>"}}
 # 本体の短い名前は数えない（ほかのプラグインの同じ名前のスキルと区別できない）
 BODY_BARE_NAME = {"type": "assistant", "message": {"role": "assistant", "content": [
-    {"type": "tool_use", "id": "toolu_9", "name": "Skill", "input": {"skill": "conduct"}}]}}
+    {"type": "tool_use", "id": "toolu_9", "name": "Skill", "input": {"skill": "conduct", "args": "bb-writ の続き"}}]}}
+OTHER_PLUGIN_BODY_SLASH = {"type": "user", "message": {"role": "user", "content":
+    "<command-message>other:conduct</command-message>\n<command-name>/other:conduct</command-name>\n<command-args>bb-writ の続き</command-args>"}}
+# 先頭に空白・改行のある行は、Claude Code がスラッシュの呼び出しとして扱わない（2026-11-20、2.1.328。親のモデルに普通の文として届いた）
+NAME_AFTER_A_SPACE = {"type": "user", "message": {"role": "user", "content": " /bb-writ:bb-writ 直して"}}
+NAME_AFTER_A_NEWLINE = {"type": "queue-operation", "operation": "enqueue", "content": "\n/bb-writ:bb-writ 直して"}
+# 本体の名前で始まる素の行は数えない（本体は fork しないので、スラッシュで呼ぶと <command-name> の形の行が先に書かれる）
+BODY_NAME_HEADS_A_QUEUED_ROW = {"type": "queue-operation", "operation": "enqueue", "content": "/bb-writ:conduct 続きを"}
 # fork する入口をスラッシュで呼んだときの記録（2026-11-20、Claude Code 2.1.328。本文の先頭が「/名前 引数」のままの行）
 BY_FORKED_SLASH = {"type": "user", "message": {"role": "user", "content": "/bb-writ:bb-writ 直して。push まで"}}
 BY_FORKED_SLASH_ALONE = {"type": "user", "message": {"role": "user", "content": "/bb-writ:bb-writ"}}
@@ -71,6 +78,7 @@ MARK_INSIDE_USER_BLOCK = {"type": "user", "message": {"role": "user", "content":
     {"type": "text", "text": "記録の例: <command-name>/bb-writ:bb-writ</command-name>"}]}}
 # 入口の名前を含むが形の違う行（input が文字列の Skill）。この後ろの印まで読み続ける
 NULL_ROWS = [{"type": "assistant", "message": None, "x": "bb-writ"},
+             {"type": "queue-operation", "operation": "enqueue", "content": None, "x": "bb-writ"},
              {"type": "assistant", "message": {"role": "assistant", "content": [
                  {"type": "tool_use", "id": "toolu_7", "name": "Skill", "input": None}]}, "x": "bb-writ"}]
 SLASH_WITH_SPACES = {"type": "user", "message": {"role": "user", "content":
@@ -236,7 +244,8 @@ class TestPushGuard(unittest.TestCase):
                      (OTHER_SLASH_WITH_MARK,), (MARK_HEADS_ASSISTANT_BLOCK,), (SKILL_NAME_NOT_TOOL_USE,),
                      (OTHER_NAME_WITH_THE_SAME_HEAD,), (NAME_IN_THE_MIDDLE,), (NAME_HEADS_ASSISTANT_STRING,), (NAME_HEADS_ASSISTANT_BLOCK,),
                      (QUEUED_NOTIFICATION,), (QUEUED_OTHER_NAME,), (NAME_HEADS_ANOTHER_KIND_OF_ROW,),
-                     (OTHER_NAME_WITH_A_HYPHEN,), (BODY_BARE_NAME,)):
+                     (OTHER_NAME_WITH_A_HYPHEN,), (BODY_BARE_NAME,), (OTHER_PLUGIN_BODY_SLASH,),
+                     (NAME_AFTER_A_SPACE,), (NAME_AFTER_A_NEWLINE,), (BODY_NAME_HEADS_A_QUEUED_ROW,)):
             t = self.transcript(*rows)
             with self.subTest(rows=[r.get("type") for r in rows], first=json.dumps(rows[:1], ensure_ascii=False)[:60]):
                 self.assertIsNone(self.run_guard("git push origin main", t))
