@@ -222,7 +222,7 @@ CODEX_HOME=~/.config/bb-writ/codex-home codex login
 
 確かめるには `CODEX_HOME=~/.config/bb-writ/codex-home codex login status` を実行し、`Logged in` で始まる行が出ればよい。
 
-この専用ログインに bb-writ を入れるかは任意。入れると、子のスキルの一覧に bb-writ が出る。入れるときは、[インストール](#codex)の 2 つのコマンドの先頭に `CODEX_HOME=~/.config/bb-writ/codex-home` を付けて実行する。入れた写しは、bb-writ を更新しても、自分では新しくならない。写しが起動する側の bb-writ と中身で違うと、Codex の子は起動しない。手元のディレクトリを marketplace として登録していて、その置き場が、起動する側の bb-writ の置き場と同じなら、bb-writ が自分で入れ直してから起動する。そうでないとき（GitHub から入れたなど）は、起動せず、入れ直すコマンドを示す（`CODEX_HOME` を付けた `codex plugin add`。GitHub から入れた marketplace なら、その前に `codex plugin marketplace upgrade`）。
+この専用ログインに bb-writ を入れるかは任意。入れると、子のスキルの一覧に bb-writ が出る。入れるときは、[インストール](#codex)の 2 つのコマンドの先頭に `CODEX_HOME=~/.config/bb-writ/codex-home` を付けて実行する。入れた写しは、bb-writ を更新しても、自分では新しくならない。写しが起動する側の bb-writ と中身で違うと、Codex の子は起動しない。手元のディレクトリを marketplace として登録していて、その置き場が、起動する側の bb-writ の置き場と同じなら、bb-writ が自分で入れ直してから起動する。そうでないとき（GitHub から入れたなど）は、起動せず、入れ直すコマンドを示す（`codex plugin add`。GitHub から入れた marketplace なら、その前に `codex plugin marketplace upgrade`。どちらも `CODEX_HOME` を付ける。[Codex の更新](#codex-1)にある `remove` は、挟まなくてよい。Codex CLI 0.171.0 で確かめた）。
 
 ### Grok Build の専用ログイン
 
