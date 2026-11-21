@@ -88,6 +88,15 @@ op run のコマンドが終わっていないかも pid では見ず、操作�
 （ロックは監督役・コマンド・それが残したものが持ち、プロセスが死ねば OS が外す）。
 環境変数 BB_WRIT_SUPERVISE_GATE は試験だけが使う（op run と監督役の中の止まり所。設定されていても 60 秒で先へ進み、コマンドには渡さない）。
 claim は作業場所ごとの記録 note.md の雛形と証拠の置き場 evidence/ を作り、その場所と（書かれていれば）記録の中身を返す。後任は claim の出力だけで記録にたどり着く。
+claim・status・task start・task resume・task cleanup の note は、記録の本文を最後に書いた後（note.md の mtime より後。symlink なら行き先）に
+done になった操作（ops.jsonl の記録。種類を問わない）を ops_after_note に並べる（1 行は key・what・state・exit・at。exit は result が
+「exit <数>:」で始まるときのその数（op run の監督役が書く形）で、それ以外（照合で op done を手で閉じた操作など）は null。result の本文は
+写さない。at を有限の数として読めない done の記録は、比べられないので並べる）。並ぶ操作が無ければ欄ごと無い。並びの順は約束しない。
+欄があれば、本文の今の状態・次の一手は、並んだ操作が終わる前に書かれている（後任が済んだ操作を残件として報告したため。Issue #49）。
+守らない範囲: 本文を変えずに mtime だけが進んだ場合（touch・写し直し・別の欄だけの書き足し）は、古い今の状態が残っていても欄は出ない。
+時計を戻した場合。at と mtime が同じ値のときにどちらになるか。mtime の粒が粗いファイルシステムで、操作の直後に書き足した場合は、
+書き足した後も、次に書くまで並ぶことがある。renew の出力（note の path と empty だけ）には足さない。
+renew も記録（ops.jsonl）を読むので、行が読めないか形が違えば、期限を延ばす前に 1 で止まる。
 期限内に renew しない担当は止まったとみなし、別の担当が claim できる。claim のたびに token が変わるので、
 旧担当の renew・op は拒否される。出力はどれも 1 行の JSON。
 """
@@ -95,6 +104,7 @@ import argparse
 import fcntl
 import hashlib
 import json
+import math
 import os
 import re
 import secrets
@@ -402,6 +412,25 @@ def note_body(f: Path) -> str:
         raise RecordError(f"作業の記録 {f} を読めない: {e}") from None
 
 
+def ops_after_note(r: Path, f: Path) -> list:
+    """記録の本文（f。symlink なら行き先）を最後に書いた時刻（mtime）より後に done になった操作（種類を問わない）。並びは ops の順のまま。
+    at を有限の数として読めない done の記録は、比べられないので並べる（黙って落とさない）。mtime を読めなければ RecordError。"""
+    try:
+        written = f.stat().st_mtime
+    except OSError as e:
+        raise RecordError(f"作業の記録 {f} を読めない: {e}") from None
+    rows = []
+    for e in ops(r).values():
+        at = e.get("at")
+        comparable = (isinstance(at, int) and not isinstance(at, bool)) or (isinstance(at, float) and math.isfinite(at))
+        if e.get("state") != "done" or (comparable and at <= written):
+            continue
+        result = e.get("result")
+        m = re.match(r"exit ([0-9]{1,3}):", result) if isinstance(result, str) else None  # op_run の中の読み方と同じ形（監督役が書く形）
+        rows.append({"key": e["key"], "what": e.get("what"), "state": "done", "exit": int(m.group(1)) if m else None, "at": at})
+    return rows
+
+
 def note(r: Path) -> dict:
     f = r / "note.md"
     if not f.exists() and not f.is_symlink():
@@ -410,11 +439,12 @@ def note(r: Path) -> dict:
         except OSError as e:
             raise RecordError(f"作業の記録 {f} を作れない: {e}") from None
     body = note_body(f)
+    after = ops_after_note(r, f)
     ev = r / "evidence"
     ev.mkdir(exist_ok=True)
     gaps = note_gaps(body, False)
     return {"path": str(f), "filled": body.strip() != NOTE.strip(), "body": body if body.strip() != NOTE.strip() else None,
-            "evidence_dir": str(ev), **({"empty": gaps} if gaps else {})}
+            "evidence_dir": str(ev), **({"empty": gaps} if gaps else {}), **({"ops_after_note": after} if after else {})}
 
 
 EXTERNAL = {"push", "pr", "comment", "merge", "release", "issue"}  # GitHub に出る操作の種類（鍵の ":" の前）

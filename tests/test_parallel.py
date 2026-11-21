@@ -502,6 +502,53 @@ class TestParallel(unittest.TestCase):
         self.assertEqual(self.git(b['dir'], 'rev-parse', 'HEAD'), head)
         self.assertEqual((Path(b['dir']) / 'saved-on-branch').read_text(), 'saved-on-branch\n')
 
+    def op_after_note(self, task):
+        """タスクの記録の本文を書き（最終更新は今の 1,000 秒前）、その後に op run で操作を 1 つ終える。並ぶはずの 1 行を返す。"""
+        note = Path(task['note']['path'])
+        note.write_text('# 作業の記録\n\n- 今の状態（ブランチ・commit・PR）: 返信は未投稿\n', encoding='utf-8')
+        os.utime(note, (time.time() - 1000, time.time() - 1000))
+        self.w('op', 'run', '--dir', task['dir'], '--token', task['token'], '--key', 'local:demo', '--what', 'demo', '--', 'true')
+        rows = [json.loads(l) for l in (note.parent / 'ops.jsonl').read_text(encoding='utf-8').splitlines()]
+        at = [e for e in rows if e['key'] == 'local:demo' and e['state'] == 'done'][-1]['at']
+        return {'key': 'local:demo', 'what': 'demo', 'state': 'done', 'exit': 0, 'at': at}
+
+    def note_written_after(self, task, row):
+        """操作の後に記録を書き足す（最終更新は done の at の 10 秒後）。"""
+        note = Path(task['note']['path'])
+        with open(note, 'a', encoding='utf-8') as fh:
+            fh.write('- 次の一手: 片付ける\n')
+        os.utime(note, (row['at'] + 10, row['at'] + 10))
+
+    def test_resume_shows_the_ops_done_after_the_note(self):
+        """記録の本文を書いた後に終えた操作は、担当を返した後の task resume の note.ops_after_note に出る（Issue #49）。
+        本文を書き足した後は欄が無い。"""
+        a = self.start()
+        row = self.op_after_note(a)
+        self.w('release', '--dir', a['dir'], '--token', a['token'])
+        b = self.w('task', 'resume', '--dir', self.repo, '--task', a['task'], '--holder', 'Codex')
+        self.assertEqual(b['note'].get('ops_after_note'), [row])
+        self.note_written_after(a, row)
+        self.w('release', '--dir', b['dir'], '--token', b['token'])
+        c = self.w('task', 'resume', '--dir', self.repo, '--task', a['task'], '--holder', 'Codex')
+        self.assertNotIn('ops_after_note', c['note'])
+
+    def test_cleanup_shows_the_ops_done_after_the_note(self):
+        """片付けだけをするセッションも見るよう、task cleanup の note.ops_after_note にも、本文の後に終えた操作が出る。
+        本文を書き足した後に片付けると、欄が無い。"""
+        for rewritten in (False, True):
+            with self.subTest(rewritten=rewritten):
+                a = self.start()
+                self.integrate(a, self.git(self.repo, 'rev-parse', 'main'), self.change(a, f'a{rewritten}'))
+                row = self.op_after_note(a)
+                if rewritten:
+                    self.note_written_after(a, row)
+                done = self.w('task', 'cleanup', '--dir', a['dir'], '--token', a['token'], '--saved', 'main')
+                self.assertFalse(Path(a['dir']).exists())
+                if rewritten:
+                    self.assertNotIn('ops_after_note', done['note'])
+                else:
+                    self.assertEqual(done['note'].get('ops_after_note'), [row])
+
     def test_resume_with_a_broken_op_record_answers_with_the_line(self):
         a = self.start()
         ops = next(Path(self.env['BB_WRIT_STATE_DIR'], 'work').glob('*/lease.json')).parent / 'ops.jsonl'
