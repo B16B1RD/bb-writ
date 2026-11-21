@@ -177,6 +177,7 @@ class TestWork(unittest.TestCase):
     def test_claim_hands_the_note_to_the_next_holder(self):
         rc, a = self.w("claim", "--holder", "A")
         self.assertFalse(a["note"]["filled"])
+        self.assertIsNone(a["note"]["body"])  # 雛形のままの本文は返さない
         self.assertTrue(Path(a["note"]["evidence_dir"]).is_dir())  # 証拠の置き場（/tmp に置かせない）
         Path(a["note"]["path"]).write_text("# 作業の記録\n\n- 目的: digits を足す\n", encoding="utf-8")
         self.expire()
