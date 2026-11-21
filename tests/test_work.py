@@ -202,9 +202,13 @@ class TestWork(unittest.TestCase):
         self.written_before_ops(a)
         rc, r = self.w("op", "run", "--token", a["token"], "--key", "local:demo", "--what", "demo", "--", "true")
         self.assertEqual(rc, 0, r)
-        want = [{"key": "local:demo", "what": "demo", "state": "done", "exit": 0, "at": self.done_at(a, "local:demo")}]
+        want = [{"key": "local:demo", "what": "demo", "exit": 0, "at": self.done_at(a, "local:demo")}]
         rc, s = self.w("status")
         self.assertEqual(s["note"].get("ops_after_note"), want)
+        rc, n = self.w("renew", "--token", a["token"])  # renew の出力には足さない（欄が並ぶ状態でも）
+        self.assertEqual(rc, 0, n)
+        self.assertNotIn("ops_after_note", n)
+        self.assertNotIn("ops_after_note", n.get("note", {}))
         self.assertEqual(self.w("release", "--token", a["token"])[0], 0)
         rc, b = self.w("claim", "--holder", "B")
         self.assertEqual(rc, 0, b)
@@ -235,16 +239,20 @@ class TestWork(unittest.TestCase):
         self.assertNotIn("ops_after_note", s["note"])
 
     def test_the_exit_of_a_listed_op_comes_from_its_recorded_result(self):
-        """exit は、op run が記録した終了コード（0 でなければその数）。op done で手で閉じた操作は null。"""
+        """exit は、op run が記録した終了コード（0 でなければその数）。op done で手で閉じた操作は、結果の文が「exit 0:」で
+        始まっても null（終了コードを読むのは監督役が書いた記録だけ）。"""
         rc, a = self.w("claim", "--holder", "A")
         self.written_before_ops(a)
         self.assertEqual(self.w("op", "run", "--token", a["token"], "--key", "local:fail", "--what", "fail", "--", "false")[0], 1)
         self.assertEqual(self.w("op", "begin", "--token", a["token"], "--key", "local:hand", "--what", "hand")[0], 0)
         self.assertEqual(self.w("op", "done", "--token", a["token"], "--key", "local:hand", "--result", "既存の PR #3 を確認")[0], 0)
+        self.assertEqual(self.w("op", "begin", "--token", a["token"], "--key", "local:seen", "--what", "seen")[0], 0)
+        self.assertEqual(self.w("op", "done", "--token", a["token"], "--key", "local:seen", "--result", "exit 0: 既に在るのを見た")[0], 0)
         rc, s = self.w("status")
         self.assertEqual(sorted(s["note"].get("ops_after_note", []), key=lambda e: e["key"]),
-                         [{"key": "local:fail", "what": "fail", "state": "done", "exit": 1, "at": self.done_at(a, "local:fail")},
-                          {"key": "local:hand", "what": "hand", "state": "done", "exit": None, "at": self.done_at(a, "local:hand")}])
+                         [{"key": "local:fail", "what": "fail", "exit": 1, "at": self.done_at(a, "local:fail")},
+                          {"key": "local:hand", "what": "hand", "exit": None, "at": self.done_at(a, "local:hand")},
+                          {"key": "local:seen", "what": "seen", "exit": None, "at": self.done_at(a, "local:seen")}])
 
     def test_ops_of_every_kind_are_listed_after_the_note(self):
         """種類で絞らない。local の操作も、外に出る種類（ここでは手で足した comment の記録）の操作も並ぶ。"""
@@ -258,18 +266,17 @@ class TestWork(unittest.TestCase):
                                  "by": "supervise"}) + "\n")
         rc, s = self.w("status")
         self.assertEqual(sorted(s["note"].get("ops_after_note", []), key=lambda e: e["key"]),
-                         [{"key": "comment:pr-1", "what": "返信", "state": "done", "exit": 0, "at": now},
-                          {"key": "local:demo", "what": "demo", "state": "done", "exit": 0, "at": self.done_at(a, "local:demo")}])
+                         [{"key": "comment:pr-1", "what": "返信", "exit": 0, "at": now},
+                          {"key": "local:demo", "what": "demo", "exit": 0, "at": self.done_at(a, "local:demo")}])
 
     def test_a_done_record_whose_time_cannot_be_read_is_listed(self):
-        """at を有限の数として読めない done の記録（手で足した。文字列・null・真偽値・NaN）は、比べられないので並べる。
+        """at を数として読めない done の記録（手で足した。文字列・null・真偽値）は、比べられないので並べる。
         claim・status は止まらずに JSON を返す。at を読める記録のうち、本文より前に終わったものは並ばない。"""
         rc, a = self.w("claim", "--holder", "A")
         f = self.written_before_ops(a)
         later = time.time() + 1000  # 本文の最終更新を先に置き、読めない at が数として比べられたら並ばないようにする
         with open(f.parent / "ops.jsonl", "a", encoding="utf-8") as fh:
-            for key, at in (("local:text", "あした"), ("local:null", None), ("local:bool", True), ("local:nan", float("nan")),
-                            ("local:before", later - 1)):
+            for key, at in (("local:text", "あした"), ("local:null", None), ("local:bool", True), ("local:before", later - 1)):
                 fh.write(json.dumps({"key": key, "state": "done", "at": at, "holder": "A", "result": "確認した"}) + "\n")
         os.utime(f, (later, later))
         rc, s = self.w("status")
@@ -278,13 +285,19 @@ class TestWork(unittest.TestCase):
         rc, b = self.w("claim", "--holder", "B")
         self.assertEqual(rc, 0, b)
         for got in (s["note"].get("ops_after_note", []), b["note"].get("ops_after_note", [])):
-            nan = [e for e in got if e["key"] == "local:nan"]
-            self.assertEqual(len(nan), 1, got)
-            self.assertTrue(isinstance(nan[0]["at"], float) and nan[0]["at"] != nan[0]["at"], got)  # NaN のまま
-            self.assertEqual(sorted((e for e in got if e["key"] != "local:nan"), key=lambda e: e["key"]),
-                             [{"key": "local:bool", "what": None, "state": "done", "exit": None, "at": True},
-                              {"key": "local:null", "what": None, "state": "done", "exit": None, "at": None},
-                              {"key": "local:text", "what": None, "state": "done", "exit": None, "at": "あした"}])
+            self.assertEqual({e["key"] for e in got}, {"local:text", "local:null", "local:bool"})
+
+    def test_renew_extends_the_lease_even_when_the_op_record_is_broken(self):
+        """ops_after_note は知らせで、関門でない。行の読めない ops.jsonl があっても、renew は 0 で返り、担当の期限を延ばす
+        （renew は欄を出力に使わない。欄のために記録を読んで止めない）。"""
+        rc, a = self.w("claim", "--holder", "A")
+        with open(Path(a["note"]["path"]).parent / "ops.jsonl", "a", encoding="utf-8") as fh:
+            fh.write("{broken\n")
+        record = next((Path(self.tmp.name) / "state" / "work").glob("wt-*")) / "lease.json"
+        before = json.loads(record.read_text())["expires_at"]
+        rc, r = self.w("renew", "--token", a["token"], "--lease", "30")  # claim の 20 分より長く延ばす
+        self.assertEqual(rc, 0, r)
+        self.assertGreater(json.loads(record.read_text())["expires_at"], before)
 
     def test_release_frees_the_place(self):
         rc, a = self.w("claim", "--holder", "A")
@@ -3279,13 +3292,10 @@ class TestOpRun(unittest.TestCase):
         for bad in ('{"key": ["a"], "state": "begun"}', '{"key": 1}', "[1]", "{broken", '{"key": "push:\xff"}', "", "   "):
             with self.subTest(bad=bad):
                 f.write_bytes((json.dumps({"key": "push:ok", "state": "begun"}) + "\n" + bad + "\n").encode("latin-1"))
-                for args in (["op", "done", "--token", tok, "--key", "push:ok", "--result", "x"], ["op", "pending"], ["status"],
-                             ["renew", "--token", tok]):  # renew も note の ops_after_note のために記録を読む
-                    expires = json.loads(self.lease_file().read_text())["expires_at"]
+                for args in (["op", "done", "--token", tok, "--key", "push:ok", "--result", "x"], ["op", "pending"], ["status"]):
                     rc, r = self.w(*args[:1 + (args[0] == "op")], "--dir", str(self.wt), *args[1 + (args[0] == "op"):])
                     self.assertEqual(rc, 1, args)  # 黙って続けず、直す場所を返す（トレースバックでなく JSON）
                     self.assertIn("2 行目", r["reason"])
-                    self.assertEqual(json.loads(self.lease_file().read_text())["expires_at"], expires, args)  # 担当の期限は延ばさない
 
     def test_a_supervisor_lost_while_running_returns_the_begun_record(self):
         tok = self.claim()

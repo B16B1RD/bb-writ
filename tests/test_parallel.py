@@ -510,7 +510,7 @@ class TestParallel(unittest.TestCase):
         self.w('op', 'run', '--dir', task['dir'], '--token', task['token'], '--key', 'local:demo', '--what', 'demo', '--', 'true')
         rows = [json.loads(l) for l in (note.parent / 'ops.jsonl').read_text(encoding='utf-8').splitlines()]
         at = [e for e in rows if e['key'] == 'local:demo' and e['state'] == 'done'][-1]['at']
-        return {'key': 'local:demo', 'what': 'demo', 'state': 'done', 'exit': 0, 'at': at}
+        return {'key': 'local:demo', 'what': 'demo', 'exit': 0, 'at': at}
 
     def note_written_after(self, task, row):
         """操作の後に記録を書き足す（最終更新は done の at の 10 秒後）。"""
@@ -548,6 +548,30 @@ class TestParallel(unittest.TestCase):
                     self.assertNotIn('ops_after_note', done['note'])
                 else:
                     self.assertEqual(done['note'].get('ops_after_note'), [row])
+
+    def test_resume_that_finishes_a_stopped_cleanup_shows_the_ops_and_is_not_stopped_by_a_broken_record(self):
+        """片付けの途中（作業場所を消した後・タスクの記録を消す前）からの task resume は、片付けを終えた後に note を返す。
+        本文の後に終えた操作は、その note.ops_after_note に出る。行の読めない ops.jsonl があっても、欄を出さずに 0 で
+        completed を返す（欄は知らせで、関門でない。ここで止めると、片付けは済んだのに 1 で返り、やり直す道も無い）。"""
+        for broken in (False, True):
+            with self.subTest(broken=broken):
+                a = self.start()
+                head = self.change(a, f'a{broken}')
+                self.integrate(a, self.git(self.repo, 'rev-parse', 'main'), head)
+                row = self.op_after_note(a)
+                if broken:
+                    with open(Path(a['note']['path']).parent / 'ops.jsonl', 'a', encoding='utf-8') as fh:
+                        fh.write('{broken\n')
+                reg = next(Path(self.tmp.name, 'state').rglob(a['task'] + '.json'))
+                reg.write_text(json.dumps({**json.loads(reg.read_text()), 'cleanup': {'saved': 'refs/heads/main', 'commit': head}}))
+                self.git(self.repo, 'worktree', 'remove', a['dir'])
+                got = self.w('task', 'resume', '--dir', self.repo, '--task', a['task'], '--holder', 'x')
+                self.assertTrue(got['completed'], got)
+                self.assertFalse(Path(a['dir']).exists())
+                if broken:
+                    self.assertNotIn('ops_after_note', got['note'])
+                else:
+                    self.assertEqual(got['note'].get('ops_after_note'), [row])
 
     def test_resume_with_a_broken_op_record_answers_with_the_line(self):
         a = self.start()
