@@ -47,7 +47,8 @@ FAKE_CODEX = textwrap.dedent(r'''
             _list = os.environ.get("FAKE_LIST", "")
             if _list == "hang":
                 _wait()
-            if _list == "fail":  # 設定が壊れている・置き場に manifest が無い
+            if _list == "fail":  # 設定が壊れている・置き場に manifest が無い（標準出力の長い行の後に、標準エラーへ失敗の文）
+                print("progress " + "x" * 400)
                 print("Error: failed to load marketplace(s): fake manifest is missing", file=sys.stderr)
                 sys.exit(1)
             if _list.startswith("out:"):  # 試験が組んだ標準出力（JSON でないもの、形の違う JSON）
@@ -56,8 +57,10 @@ FAKE_CODEX = textwrap.dedent(r'''
             print("WARNING: fake warning", file=sys.stderr)  # 本物も標準エラーに出すことがある（標準出力には混ざらない）
             _items = [{"name": n, "root": json.loads(src), "marketplaceSource": {"sourceType": json.loads(kind), "source": json.loads(src)}}
                       for n, kind, src in re.findall(r'^\[marketplaces\.(\S+?)\]\nsource_type = (".*")\nsource = (".*")$', _config(), re.M)]
-            print(json.dumps({"marketplaces": _items}, indent=2))
-            sys.exit(0)
+            print(json.dumps({"marketplaces": _items}, indent=2), flush=True)
+            if _list == "answer-hang":  # 答えを出してから終わらない（上限で止められる）
+                _wait()
+            sys.exit(1 if _list == "answer-fail" else 0)  # answer-fail: 答えを出してから 1 で終わる
         _how = os.environ.get("FAKE_ADD", "replace")
         _mp = sys.argv[3].split("@", 1)[1] if len(sys.argv) > 3 and "@" in sys.argv[3] else ""
         _base = os.path.join(_home, "plugins", "cache", _mp)
@@ -87,6 +90,9 @@ FAKE_CODEX = textwrap.dedent(r'''
             os.rename(os.path.join(_base, "bb-writ"), os.path.join(_backup, "bb-writ"))
         if _how == "gap":  # 古い写しを退けた後、新しい写しを置く前（写しが無い瞬間）を、.go まで引き延ばす
             _wait(".gap")
+        if _how == "drop":  # 古い写しを退けて、新しい写しを置かずに 1 で終わる（写しの無い状態を残す）
+            shutil.rmtree(_build)
+            sys.exit(1)
         os.rename(os.path.join(_build, "bb-writ"), os.path.join(_base, "bb-writ"))
         shutil.rmtree(_build); shutil.rmtree(_backup)
         sys.exit(1 if _how == "replace-fail" else 0)
@@ -4275,6 +4281,9 @@ launch.claude_reads = claude_reads
         def listed(source):  # 古い写しの marketplace の項目の marketplaceSource を差し替えた答え
             return "out:" + json.dumps({"marketplaces": [{"name": "bb-writ", "root": str(ROOT), "marketplaceSource": source}]})
         unread = "登録を確かめられなかった"
+        loop = Path(self.tmp.name) / "loop-a"  # 互いを指す symlink（3.12 の resolve は例外を出さず、3.9・3.11 は RuntimeError を出す）
+        loop.symlink_to(Path(self.tmp.name) / "loop-b")
+        (Path(self.tmp.name) / "loop-b").symlink_to(loop)
         cases = [  # (場面, 専用ログインの config.toml, 試験のホームの .codex/config.toml, 偽の一覧の動き, 理由に在る句)
             ("config.toml が無い（一覧が空）", None, None, "", ["登録が無い"]),
             ("sourceType が git", self.local_marketplace(source_type="git"), None, "", ['sourceType = "git"', json.dumps(str(ROOT))]),
@@ -4283,12 +4292,16 @@ launch.claude_reads = claude_reads
             ("source が launcher の置き場の下", self.local_marketplace(source=ROOT / "skills"), None, "", []),
             ("source が相対パス", self.local_marketplace(source="."), None, "", []),  # launcher は launcher の置き場で起こす
             ("source が NUL を含む（解けない道筋）", self.local_marketplace(source=f"{ROOT}\0"), None, "", []),
+            ("source が symlink の輪", self.local_marketplace(source=loop), None, "", []),
             ("条件を満たすのは別の名前の項目", self.local_marketplace(source_type="git") + "\n" + self.local_marketplace("mine"), None, "", []),
             ("条件を満たすのは名前が前方一致する項目（bb-writ-dev）", self.local_marketplace("bb-writ-dev"), None, "", ["登録が無い"]),
             ("条件を満たすのは試験のホームの .codex/config.toml", None, ok, "", ["登録が無い"]),
             ("一覧が 1 で終わる", ok, None, "fail", [unread, "failed to load marketplace(s)"]),
+            ("一覧が条件を満たす答えを出してから 1 で終わる", ok, None, "answer-fail", [unread, "終了コード 1"]),
             ("一覧が JSON でない", ok, None, "out:not json", [unread]),
             ("marketplaces がオブジェクト", ok, None, "out:" + json.dumps({"marketplaces": {}}), [unread]),
+            ("marketplaces の鍵が無い", ok, None, "out:{}", [unread]),
+            ("項目に marketplaceSource の鍵が無い", ok, None, "out:" + json.dumps({"marketplaces": [{"name": "bb-writ", "root": str(ROOT)}]}), [unread]),
             ("項目が文字列", ok, None, "out:" + json.dumps({"marketplaces": ["bb-writ"]}), [unread]),
             ("marketplaceSource が null", ok, None, listed(None), [unread]),
             ("sourceType が数", ok, None, listed({"sourceType": 1, "source": str(ROOT)}), [unread]),
@@ -4433,26 +4446,51 @@ launch.claude_reads = claude_reads
         self.assertEqual(len(self.plugin_changes()), 2, "2 つ目の launcher が入れ直していない")
 
     def test_a_reinstall_that_does_not_finish_is_stopped_at_the_limit(self):
-        # 一覧も add も、終わらなければ上限で止める（試験では 1 秒）。launcher がそこで止まり続けない
-        for name, fake, recorded in (("add が終わらない", {"FAKE_ADD": "hang"}, {"marketplace": "bb-writ", "exit": None}),
-                                     ("一覧が終わらない", {"FAKE_LIST": "hang"}, None)):
+        # 一覧も add も、終わらなければ上限で止める（試験では 4 秒。上限は add の前の一覧にも掛かるので、偽の codex の起動が遅い機械でも
+        # 一覧が先に止まらない長さにする）。launcher がそこで止まり続けない。止めた一覧がそれまでに出した答えは使わない
+        unread = "登録を確かめられなかった"
+        for name, fake, recorded, said in (("add が終わらない", {"FAKE_ADD": "hang"}, {"marketplace": "bb-writ", "exit": None}, None),
+                                           ("一覧が終わらない", {"FAKE_LIST": "hang"}, None, unread),
+                                           ("一覧が条件を満たす答えを出してから終わらない", {"FAKE_LIST": "answer-hang"}, None, unread)):
             with self.subTest(name):
                 home = self.reset_codex_login()
                 self.stale_codex_copy()
                 (home / "config.toml").write_text(self.local_marketplace())
                 t0 = time.monotonic()
                 try:
-                    rc, rec = self.run_launch("codex", env_extra={**fake, "BB_WRIT_CODEX_PLUGIN_TIMEOUT": "1"})
+                    rc, rec = self.run_launch("codex", env_extra={**fake, "BB_WRIT_CODEX_PLUGIN_TIMEOUT": "4"})
                 finally:
                     self.release_fakes()
-                self.assertLess(time.monotonic() - t0, 20, "launcher が上限で止めなかった")
+                self.assertLess(time.monotonic() - t0, 25, "launcher が上限で止めなかった")  # 偽の codex plugin は .go が無ければ 30 秒待つ
                 self.assertEqual((rc, rec["status"]), (2, "unavailable"), rec)
                 self.assertFalse(self.args_file.exists(), "止めた後に codex exec が呼ばれた")
                 self.assertEqual(self.saved_record(rec).get("codex_plugin_add"), recorded, "record.json")
-                self.assertIn("1 秒で終わらなかった", rec["problems"][0])
-                if recorded is None:
+                self.assertIn("4 秒で終わらなかった", rec["problems"][0])
+                if said:
                     self.assertEqual(self.plugin_changes(), [], "一覧を止めたのに codex plugin add が呼ばれた")
-                    self.assertIn("登録を確かめられなかった", rec["problems"][0])
+                    self.assertIn(said, rec["problems"][0])
+
+    def test_no_start_when_the_reinstall_leaves_no_copy(self):
+        # add が古い写しを退けた後、新しい写しを置かずに終わると、写しの無い状態が残る（古い写しは plugin-backup-* に残り、手で add する
+        # まで後の起動も同じになる）。add を実行した後は、その marketplace の写しが在って違わないときだけ起動する。ほかの marketplace の
+        # 同じ中身の写しでは通さない
+        def other():
+            c = self.cfg / "codex-home" / "plugins" / "cache" / "other" / "bb-writ" / "9.9.9"
+            for d in ("skills", "scripts"):
+                shutil.copytree(ROOT / d, c / d, ignore=shutil.ignore_patterns("__pycache__"))
+        for name, prepare in (("写しが無いまま", lambda: None), ("別の marketplace に同じ中身の写しが在る", other)):
+            with self.subTest(name):
+                home = self.reset_codex_login()
+                self.stale_codex_copy()
+                prepare()
+                (home / "config.toml").write_text(self.local_marketplace())
+                rc, rec = self.run_launch("codex", env_extra={"FAKE_ADD": "drop"})
+                self.assertEqual((rc, rec["status"]), (2, "unavailable"), rec)
+                self.assertFalse(self.args_file.exists(), "入れ直しの後に写しが無いまま codex exec が呼ばれた")
+                self.assertEqual(self.saved_record(rec).get("codex_plugin_add"), {"marketplace": "bb-writ", "exit": 1}, "record.json")
+                why = rec["problems"][0]
+                for sub in ("写しが無い", "codex plugin add bb-writ@bb-writ", "終了コード 1"):
+                    self.assertIn(sub, why)
 
     def test_no_reinstall_when_the_codex_copy_matches_or_is_absent(self):
         def same():
