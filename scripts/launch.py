@@ -21,9 +21,9 @@ Linux の外では、プロセスグループを止めるだけ（stopped_after_
 push・pr でこれを求める）。依頼文の中身が審査だったかは見ない。
 --audit は、読み取り専用の子が返す前の判定（スキルの要求を守ったかの監査）の子だという宣言で、記録の audit に残す
 （work.py が、すべての push・pr で HEAD を対象にしたこの記録を求める）。依頼文の中身が監査だったかは見ない。
-Codex の子は専用ログインに入った bb-writ の写しを読むので、写しが launcher と中身で違えば起動しない（unavailable）。その marketplace が
-専用ログインの config.toml で手元のディレクトリ（source_type = "local"）として登録してあり、その置き場が launcher 自身の置き場なら、
-専用ログインのディレクトリの排他の下で codex plugin add だけを 1 回実行し、比べ直して一致すれば起動する（記録の codex_plugin_add。codex_refresh）。
+Codex の子は専用ログインに入った bb-writ の写しを読むので、写しが launcher と中身で違えば起動しない（unavailable）。launcher は
+専用ログインのディレクトリの排他の下で写しを比べ、違えば専用ログインの Codex に marketplace の登録を聞き、手元のディレクトリで登録してあり、
+その置き場が launcher 自身の置き場なら、codex plugin add だけを 1 回実行し、比べ直して一致すれば起動する（記録の codex_plugin_add。codex_refresh）。
 起動のたびに、自分が状態の置き場に作った一時の置き場（読み取り専用の Codex の子の一時ディレクトリ delegations/<名前>/tmp と、
 Grok の子の起動ごとの home grok-homes/<名前>）のうち、もう続きから起動されないものを消す（sweep_leftovers）。消すのは、最後に使われてから
 LEFTOVER_DAYS 日を過ぎたものと、それを指す記録の対象が、どれも、もう無いタスクの作業場所（task cleanup などで消えたもの）であるもの。
@@ -637,14 +637,14 @@ def codex_breach(turns: list, denies: list[str]) -> str | None:
     return None
 
 
-def codex_stale_copy(home: Path) -> tuple[str, str] | None:
-    """専用ログインの Codex に入った bb-writ の写しが、この launcher の skills/・scripts/ と中身で違えば (写しの marketplace, 理由)。
-    写しが無ければ None。
+def codex_stale_copy(home: Path) -> tuple[str, str, str] | None:
+    """専用ログインの Codex に入った bb-writ の写しが、この launcher の skills/・scripts/ と中身で違えば
+    (写しの marketplace, 違いの説明, 手で入れ直す案内)。写しが無ければ None。
     Claude Code の子には --plugin-dir でこの bb-writ を渡すが、Codex には起動ごとに置き場を渡す引数が無く（0.171.0 の --help）、子は写しのスキルと
     補助スクリプトを読む（読み取り専用の子は、スキルの一覧は写しから見えるが、写しの本文は launcher が専用ログインの置き場の読みを拒むので読めなかった（2026-11-11）。版を上げる前の変更は届かず、入れ直すまでの間に古い写しで 88 回中 8 回動いた。-c で plugins の enabled を
     切ってもスキルは見えたままだった。0.166.0）。版の番号でなく中身で比べる（版を上げていない変更を見逃すため）。
     写しにだけあるファイル（古い版の残りも）・写しの置き場がどれか 1 つでも違えば止める。違うときに launcher が自分で入れ直すかは
-    codex_refresh が決める（理由の文は、入れ直さないときに手で入れ直すコマンド）。守らない範囲: 読めないファイルは例外のまま
+    codex_refresh が決める（案内は、入れ直さないときに手で入れ直すコマンド）。守らない範囲: 読めないファイルは例外のまま
     failed になり、symlink の置き場の中は数えない（rglob がたどらない）。"""
     def tree(base: Path) -> dict:
         return {p.relative_to(base).as_posix(): p.read_bytes() for d in ("skills", "scripts") if (base / d).is_dir()
@@ -658,116 +658,126 @@ def codex_stale_copy(home: Path) -> tuple[str, str] | None:
         diff = sorted(k for k in mine.keys() | theirs.keys() if mine.get(k) != theirs.get(k))
         if diff:
             mp = copy.parent.parent.name
-            return mp, (f"専用ログインの Codex の bb-writ の写し {copy} が、この bb-writ（{root}）と違う（{', '.join(diff[:3])}"
-                        f"{' など' if len(diff) > 3 else ''}）。子は古い写しのスキルで動くので起動しない。入れ直す: "
-                        f"CODEX_HOME={home} codex plugin add bb-writ@{mp}"
-                        f"（GitHub から入れた marketplace なら、先に CODEX_HOME={home} codex plugin marketplace upgrade {mp}。"
-                        f"手元のディレクトリで登録した marketplace では upgrade は要らず、エラーになる）。launcher が自分で入れ直すのは、"
-                        f"{home / 'config.toml'} でその marketplace が手元のディレクトリで登録してあり（source_type = \"local\"）、"
-                        f"その置き場（source）がこの bb-writ のときだけ。写しは marketplace に登録した置き場から作られるので、"
-                        f"この bb-writ がその置き場と別の場所（作業場所など）にあれば、入れ直しても一致しない（統合してから入れ直す）")
+            return (mp, f"専用ログインの Codex の bb-writ の写し {copy} が、この bb-writ（{root}）と違う（{', '.join(diff[:3])}"
+                        f"{' など' if len(diff) > 3 else ''}）。子は古い写しのスキルで動くので起動しない",
+                    f"入れ直す: CODEX_HOME={home} codex plugin add bb-writ@{mp}"
+                    f"（GitHub から入れた marketplace なら、先に CODEX_HOME={home} codex plugin marketplace upgrade {mp}。"
+                    f"手元のディレクトリで登録した marketplace では upgrade は要らず、エラーになる）。launcher が自分で入れ直すのは、"
+                    f"専用ログインの Codex で、その marketplace が手元のディレクトリで登録してあり、その置き場がこの bb-writ のときだけ。"
+                    f"写しは marketplace に登録した置き場から作られるので、この bb-writ がその置き場と別の場所（作業場所など）にあれば、"
+                    f"入れ直しても一致しない（統合してから入れ直す）")
     return None
 
 
-CODEX_ADD_TIMEOUT = float(os.environ.get("BB_WRIT_CODEX_ADD_TIMEOUT") or 60)  # codex plugin add の上限（環境変数は試験だけが使う）
-CODEX_MARKETPLACE_HEAD = re.compile(r"\[marketplaces\.([A-Za-z0-9_-]+)\]")
-CODEX_STRING_VALUE = re.compile(r'\s*([A-Za-z0-9_-]+)\s*=\s*("(?:[^"\\]|\\.)*")\s*')
+CODEX_PLUGIN_TIMEOUT = float(os.environ.get("BB_WRIT_CODEX_PLUGIN_TIMEOUT") or 60)  # codex plugin …（一覧と add）の上限（環境変数は試験だけが使う）
 
 
-def codex_marketplace(home: Path, mp: str) -> dict:
-    """専用ログインの config.toml の [marketplaces.<mp>] の表の、基本文字列の値（鍵 → 値）。読めなければ空。
-    3.9 には TOML の読み手が無いので、Codex が書く形（0.171.0）だけを、版で分けずに読む: 見出しは行の全体が
-    [marketplaces.<素の鍵>] で、その次の行から、次に [ で始まる行の前までが表。値は行の全体が <鍵> = "<基本文字列>"
-    （前後の空白は許す）で、引用符の中を json.loads で読めるものだけ。引用符つきの名前の表・リテラル文字列・インラインの表・
-    ドットでつないだ鍵は読まない（条件を満たさないものとして扱い、入れ直さずに止める）。"""
+def codex_plugin(home: Path, *args: str) -> tuple[int | None, str, str, str]:
+    """CODEX_HOME=<専用ログイン> codex plugin <args> を 1 回実行する。(終了コード, 標準出力, 標準エラー, 結果の文)。
+    上限で止めた・起動できなかったときの終了コードは None。標準入力は閉じる。上限で止めるのは、起こした codex のプロセスだけ。"""
     try:
-        text = (home / "config.toml").read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError):
-        return {}
-    found, inside = {}, False
-    for line in text.splitlines():
-        if line.startswith("["):
-            m = CODEX_MARKETPLACE_HEAD.fullmatch(line)
-            inside = bool(m) and m.group(1) == mp
-        elif inside and (m := CODEX_STRING_VALUE.fullmatch(line)):
-            try:
-                value = json.loads(m.group(2))
-            except ValueError:
-                continue
-            if isinstance(value, str):
-                found[m.group(1)] = value
-    return found
+        p = subprocess.run(["codex", "plugin", *args], env={**os.environ, "CODEX_HOME": str(home)}, stdin=subprocess.DEVNULL,
+                           capture_output=True, timeout=CODEX_PLUGIN_TIMEOUT)
+        code, out, err, result = p.returncode, p.stdout, p.stderr, f"終了コード {p.returncode}"
+    except subprocess.TimeoutExpired as e:
+        code, out, err, result = None, e.stdout or b"", e.stderr or b"", f"{CODEX_PLUGIN_TIMEOUT:g} 秒で終わらなかったので止めた"
+    except OSError as e:
+        code, out, err, result = None, b"", b"", f"起動できなかった（{e!r}）"
+    return code, out.decode("utf-8", "replace"), err.decode("utf-8", "replace"), result
+
+
+def codex_registration(home: Path, mp: str) -> tuple[bool, str]:
+    """専用ログインの Codex に、marketplace mp の登録を聞く（codex plugin marketplace list --json。0.171.0 の形）。
+    (この launcher が入れ直してよいか, 理由に足す句)。入れ直してよいのは、marketplaces の中の name が mp と等しい項目の
+    marketplaceSource が、sourceType = "local" で、source が文字列で、絶対パスで、道筋を解くと launcher 自身の置き場と等しいとき
+    （親・子・前方一致は等しくない。symlink を通る綴りでも、解いて同じなら等しい）。答えを読めない（起動できない・上限で止めた・
+    標準出力が JSON でない・形が違う）ときは、終了コードによらず入れ直さない。"""
+    code, out, err, result = codex_plugin(home, "marketplace", "list", "--json")
+    try:
+        items = json.loads(out)["marketplaces"]
+        if not isinstance(items, list) or not all(isinstance(x, dict) for x in items):
+            raise TypeError("marketplaces")
+        entry = next((x for x in items if x.get("name") == mp), None)
+        if entry is not None:
+            source = entry["marketplaceSource"]
+            if not isinstance(source, dict) or not isinstance(source.get("sourceType"), str) or not isinstance(source.get("source"), str):
+                raise TypeError("marketplaceSource")
+    except (ValueError, KeyError, TypeError):
+        tail = (out + err).strip()[-300:]
+        return False, (f"launcher は marketplace の登録を確かめられなかったので、入れ直さない（CODEX_HOME={home} codex plugin marketplace "
+                       f"list --json が {result}。出力の末尾: {tail or 'なし'}）")
+    if entry is None:
+        return False, f"専用ログインの Codex の答えに、marketplace {mp} の登録が無い"
+    kind, where = source["sourceType"], source["source"]
+    try:
+        ours = kind == "local" and os.path.isabs(where) and Path(where).resolve() == Path(__file__).resolve().parents[1]
+    except (OSError, RuntimeError, ValueError):  # 解けない道筋（symlink の輪・NUL）
+        ours = False
+    return ours, f"専用ログインの Codex が答えた marketplace {mp} の登録は sourceType = {json.dumps(kind, ensure_ascii=False)}、source = {json.dumps(where, ensure_ascii=False)}"
 
 
 def codex_refresh(a, home: Path) -> str | None:
-    """写しが違えば、入れ直せるときは入れ直してから比べ直し、まだ違えば（入れ直せなければ）理由。同じ・写しが無ければ None。
-    入れ直すのは、古い写しの marketplace（plugins/cache/<marketplace>/bb-writ/<版> の <marketplace>）が、専用ログインの
-    config.toml で source_type = "local" で、source が絶対パスで、道筋を解くと launcher 自身の置き場と等しい（親・子は等しくない。
-    symlink を通る綴りでも、解いて同じなら等しい）ときだけ。専用ログインでない設定（~/.codex/config.toml）は読まない。
-    GitHub から入れた marketplace（git）の marketplace upgrade は実行しない。
-    順序: 専用ログインのディレクトリそのものの flock（待つ。設定・状態の置き場に新しいファイルを置かない）→ 排他の下で比べ直し、
-    もう同じなら（ほかの launcher が入れ直した）何もしない → まだ違えば CODEX_HOME=<専用ログイン> codex plugin add bb-writ@<marketplace>
-    を 1 回（remove は実行しない。remove は写しと config.toml の [plugins."bb-writ@<marketplace>"] を消し、入れ直すまでプラグインが
-    無い状態になる。add だけで写しは新しい中身に置き換わり、古い写しに足した行・写しにだけあるファイル・古い版のディレクトリは残らなかった。
-    2026-11-20・21、0.171.0）→ 比べ直す → 排他を放す（子を起動する前）。成否は add の終了コードでなく、この比べ直しで決める。
-    排他を待つ間に、古い写しが別の marketplace のものに替わっていたら、その marketplace の条件を見直す（この見直しと、add の標準入力を
-    閉じることは、試験で見ない）。入れ直しは 1 回の起動で 1 回だけ。add を実行したら a.codex_plugin_add に marketplace と終了コード（上限で止めた・起動できなかったら
-    None）を載せる（記録の codex_plugin_add）。排他は、同時に 2 つの add を流すと、20 回中 4 回、片方が「failed to back up plugin cache
+    """写しを比べ、違えば、入れ直せるときは入れ直してから比べ直す。同じ・写しが無ければ（入れ直して一致すれば）None、
+    違えば理由（起動しない）。
+    順序（1 本の道筋）: 専用ログインのディレクトリそのものを開いて flock を取る（待つ。設定・状態の置き場に新しいファイルを置かない。
+    開けない・取れないなら、排他なしで進む）→ 比べる（同じ・写しが無ければ起動へ）→ 違えば、排他を取れていなければ入れ直さない →
+    専用ログインの Codex に登録を聞き（codex_registration）、その marketplace が手元のディレクトリで、その置き場が launcher 自身の置き場で
+    なければ入れ直さない → CODEX_HOME=<専用ログイン> codex plugin add bb-writ@<marketplace> を 1 回（remove は実行しない。remove は
+    写しと config.toml の [plugins."bb-writ@<marketplace>"] を消し、入れ直すまでプラグインが無い状態になる。add だけで写しは新しい中身に
+    置き換わり、古い写しに足した行・写しにだけあるファイル・古い版のディレクトリは残らなかった。2026-11-20・21、0.171.0。GitHub から
+    入れた marketplace の marketplace upgrade は実行しない）→ もう一度比べる → 排他を放す（どの道筋でも、子を起動する前）。
+    比べから入れ直しまでを 1 つの排他の下に置くのは、ほかの launcher の add が写しを改名で置き換えている最中に木を読むと、
+    読み損ねて failed になるため。排他そのものは、同時に 2 つの add を流すと、20 回中 4 回、片方が「failed to back up plugin cache
     entry」で 0 以外で終わったため（Codex 自身は flock を取らない）。
-    守らない範囲: add は、別の場所に全部を組み、古い写しを改名で退け、新しいものを改名で置く。改名 2 回の間（約 0.0001 秒）に写しを
-    読んだ、動いている Codex の子と、その間に比べた別の launcher は、写しが無いものとして扱う（写しが無ければ、bb-writ 無しの子として
-    起動する）。動いている Codex の子がいても、launcher は入れ直す。排他は launcher どうしだけで、launcher を通さない手の
-    codex plugin add・remove と同時の入れ直しは守らない。専用ログインのディレクトリの排他を取れない環境では入れ直さない
-    （unavailable で止め、手のコマンドを出す）。add が失敗して写しが元のまま残れば unavailable。"""
-    stale = codex_stale_copy(home)
-    if stale is None:
-        return None
-    root = Path(__file__).resolve().parents[1]
-
-    def ours(mp: str) -> bool:
-        table = codex_marketplace(home, mp)
-        source = table.get("source")
-        try:
-            return table.get("source_type") == "local" and bool(source) and os.path.isabs(source) and Path(source).resolve() == root
-        except (OSError, RuntimeError, ValueError):  # 解けない道筋（symlink の輪・NUL）
-            return False
-
-    if not ours(stale[0]):
-        return stale[1]
-    try:
+    add を実行したら a.codex_plugin_add に marketplace と終了コード（上限で止めた・起動できなかったら None）を載せる（記録の
+    codex_plugin_add）。入れ直しても違うときの理由には、手で入れ直す案内を付けない（失敗したのと同じコマンドを勧めない）。
+    守らない範囲:
+    - 動いている Codex の子は、入れ直しの改名 2 回の間（約 0.0001 秒）に写しを読むと、写しが無いものとして動く。動いている Codex の子が
+      いても、launcher は入れ直す（launcher どうしは、排他の下で比べるので、途中の写しを読まない）。
+    - 排他は launcher どうしだけ。launcher を通さない手の codex plugin add・remove・登録の書き換えと同時の比べ・入れ直しは守らない。
+      flock が排他にならないファイルシステムは見分けない。
+    - 専用ログインのディレクトリの排他を取れない環境では、launcher は入れ直さない（比べは排他なしで行い、違えば unavailable で止めて、
+      手のコマンドを出す）。
+    - 比べた後に写しが替わること（ほかの launcher の入れ直し、手の操作）は見ない（launcher は、起動の前に比べるだけ）。
+    - 条件は、Codex の答え（codex plugin marketplace list --json の marketplaces の name・marketplaceSource の sourceType・source。
+      0.171.0）で決める。この形で答えない版と、一覧が失敗する状態（登録した marketplace のどれかの置き場に manifest が無いと、一覧は
+      終了コード 1 で、何も並べなかった）では、launcher は入れ直さない。
+    - 入れ直しの間（と、排他を待つ間）に launcher を止めると、子を起動する前に受けたシグナルと同じく、記録は残らない。動いている
+      codex plugin add は止めない。
+    - 上限で止めるのは、launcher が起こした codex のプロセスだけ（codex が本体を別のプロセスで起こす入れ方では、本体が残りうる。
+      確かめたのは、1 つの実行ファイルの codex だけ）。
+    - 排他の待ちに上限は無い（ほかの launcher の入れ直しが上限まで掛かれば、その分待つ）。
+    - macOS では、偽の CLI の試験のほかは確かめていない。
+    - add の成否は終了コードで決めない（比べ直しで決める）。
+    一覧と add の標準入力を閉じることは、試験で見ない。"""
+    fd, lost = None, None
+    try:  # 開く・取るの失敗は 1 つの枝（どちらでも、排他なしで比べる）
         fd = os.open(home, os.O_RDONLY | os.O_DIRECTORY)
+        fcntl.flock(fd, fcntl.LOCK_EX)
     except OSError as e:
-        return f"{stale[1]}。専用ログインの置き場 {home} の排他を取れない（{e!r}）ので、launcher は入れ直さない"
+        lost = e
     try:
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX)
-        except OSError as e:
-            return f"{stale[1]}。専用ログインの置き場 {home} の排他を取れない（{e!r}）ので、launcher は入れ直さない"
-        stale = codex_stale_copy(home)  # 待つ間に、ほかの launcher が入れ直したかもしれない
-        if stale is None:
-            return None
-        mp, why = stale
-        if not ours(mp):
-            return why
-        a.codex_plugin_add = {"marketplace": mp, "exit": None}
-        cmd = ["codex", "plugin", "add", f"bb-writ@{mp}"]
-        try:
-            p = subprocess.run(cmd, env={**os.environ, "CODEX_HOME": str(home)}, stdin=subprocess.DEVNULL, capture_output=True,
-                               timeout=CODEX_ADD_TIMEOUT)
-            a.codex_plugin_add["exit"] = p.returncode
-            result, output = f"終了コード {p.returncode}", p.stderr + p.stdout
-        except subprocess.TimeoutExpired as e:
-            result, output = f"{CODEX_ADD_TIMEOUT:g} 秒で終わらなかったので止めた", (e.stderr or b"") + (e.stdout or b"")
-        except OSError as e:
-            result, output = f"起動できなかった（{e!r}）", b""
         stale = codex_stale_copy(home)
         if stale is None:
             return None
-        tail = output.decode("utf-8", "replace").strip()[-300:]
-        return (f"{stale[1]}。launcher は CODEX_HOME={home} {' '.join(cmd)} を実行したが（{result}）、写しはまだ違う"
+        mp, about, manual = stale
+        if lost is not None:
+            return f"{about}。{manual}。専用ログインの置き場 {home} の排他を取れないので、launcher は入れ直さない（{lost!r}）"
+        ours, said = codex_registration(home, mp)
+        if not ours:
+            return f"{about}。{manual}。{said}"
+        a.codex_plugin_add = {"marketplace": mp, "exit": None}
+        code, out, err, result = codex_plugin(home, "add", f"bb-writ@{mp}")
+        a.codex_plugin_add["exit"] = code
+        stale = codex_stale_copy(home)
+        if stale is None:
+            return None
+        tail = (out + err).strip()[-300:]  # 失敗の文は標準エラーに出るので、後につなぐ（末尾に残る）
+        return (f"{stale[1]}。launcher は CODEX_HOME={home} codex plugin add bb-writ@{mp} を実行したが（{result}）、写しはまだ違う"
                 f"（add の出力の末尾: {tail or 'なし'}）")
     finally:
-        os.close(fd)  # 排他を放す（子が動いている間は持たない）
+        if fd is not None:
+            os.close(fd)  # 排他を放す（子が動いている間は持たない）
 
 
 def command(a, prompt: str, scratch: Path) -> tuple[list[str], dict, str | None]:

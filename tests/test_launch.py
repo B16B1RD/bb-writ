@@ -29,25 +29,50 @@ FAKE_CODEX = textwrap.dedent(r'''
         os.write(_fd, (json.dumps({"argv": sys.argv[1:], "CODEX_HOME": os.environ.get("CODEX_HOME")}) + "\n").encode())  # 1 回の write
         os.close(_fd)
         import re, shutil, tempfile, time
-        _home, _how = os.environ["CODEX_HOME"], os.environ.get("FAKE_ADD", "replace")
+        _home = os.environ.get("CODEX_HOME") or os.path.join(os.environ["HOME"], ".codex")  # 本物と同じく、無ければ ~/.codex
+
+        def _wait(mark=None):  # 試験が FAKE_ARGS.go を置くまで待つ（上限つき。試験は落ちた道でも .go を置く）
+            if mark:
+                open(os.environ["FAKE_ARGS"] + mark, "w").close()
+            _end = time.time() + 30
+            while not os.path.exists(os.environ["FAKE_ARGS"] + ".go") and time.time() < _end:
+                time.sleep(0.02)
+
+        def _config():
+            try:
+                return open(os.path.join(_home, "config.toml"), encoding="utf-8").read()
+            except FileNotFoundError:
+                return ""
+        if sys.argv[2:4] == ["marketplace", "list"]:  # 0.171.0 の --json の形。動きは FAKE_LIST で選ぶ
+            _list = os.environ.get("FAKE_LIST", "")
+            if _list == "hang":
+                _wait()
+            if _list == "fail":  # 設定が壊れている・置き場に manifest が無い
+                print("Error: failed to load marketplace(s): fake manifest is missing", file=sys.stderr)
+                sys.exit(1)
+            if _list.startswith("out:"):  # 試験が組んだ標準出力（JSON でないもの、形の違う JSON）
+                sys.stdout.write(_list[4:])
+                sys.exit(0)
+            print("WARNING: fake warning", file=sys.stderr)  # 本物も標準エラーに出すことがある（標準出力には混ざらない）
+            _items = [{"name": n, "root": json.loads(src), "marketplaceSource": {"sourceType": json.loads(kind), "source": json.loads(src)}}
+                      for n, kind, src in re.findall(r'^\[marketplaces\.(\S+?)\]\nsource_type = (".*")\nsource = (".*")$', _config(), re.M)]
+            print(json.dumps({"marketplaces": _items}, indent=2))
+            sys.exit(0)
+        _how = os.environ.get("FAKE_ADD", "replace")
         _mp = sys.argv[3].split("@", 1)[1] if len(sys.argv) > 3 and "@" in sys.argv[3] else ""
         _base = os.path.join(_home, "plugins", "cache", _mp)
         if sys.argv[2:3] == ["remove"]:  # 本物は写しを消す
             shutil.rmtree(os.path.join(_base, "bb-writ"), ignore_errors=True)
             sys.exit(0)
-        if _how == "hang":  # 終わらない（試験の上限より長く）
-            time.sleep(30)
-        if _how == "wait":  # 置き換える前に、試験が FAKE_ARGS.go を置くまで待つ（上限つき）
-            _end = time.time() + 30
-            while not os.path.exists(os.environ["FAKE_ARGS"] + ".go") and time.time() < _end:
-                time.sleep(0.02)
+        if _how in ("hang", "wait"):  # 終わらない／置き換える前に待つ（どちらも .go まで）
+            _wait(".adding")
         if _how == "noop":
             sys.exit(0)
-        if _how == "fail":
+        if _how == "fail":  # 標準出力の長い行の後に、標準エラーへ失敗の文（理由に残すのは、つないだものの末尾）
+            print("progress " + "x" * 400)
             print("Error: failed to back up plugin cache entry: No such file or directory", file=sys.stderr)
             sys.exit(1)
-        _m = re.search(r"^\[marketplaces\." + re.escape(_mp) + r"\]\n(?:[^\[\n].*\n|\n)*?source = (\".*\")$",
-                       open(os.path.join(_home, "config.toml"), encoding="utf-8").read(), re.M)
+        _m = re.search(r"^\[marketplaces\." + re.escape(_mp) + r"\]\n(?:[^\[\n].*\n|\n)*?source = (\".*\")$", _config(), re.M)
         if not _m:
             print(f"Error: plugin `bb-writ` was not found in marketplace `{_mp}`", file=sys.stderr)
             sys.exit(1)
@@ -60,6 +85,8 @@ FAKE_CODEX = textwrap.dedent(r'''
         _backup = tempfile.mkdtemp(prefix="plugin-backup-", dir=_base)
         if os.path.exists(os.path.join(_base, "bb-writ")):
             os.rename(os.path.join(_base, "bb-writ"), os.path.join(_backup, "bb-writ"))
+        if _how == "gap":  # 古い写しを退けた後、新しい写しを置く前（写しが無い瞬間）を、.go まで引き延ばす
+            _wait(".gap")
         os.rename(os.path.join(_build, "bb-writ"), os.path.join(_base, "bb-writ"))
         shutil.rmtree(_build); shutil.rmtree(_backup)
         sys.exit(1 if _how == "replace-fail" else 0)
@@ -4135,7 +4162,10 @@ launch.claude_reads = claude_reads
                 self.assertNotIn(f"codex plugin remove bb-writ@{mp}", rec["problems"][0])  # remove は写しと設定を消す。add だけで置き換わる
 
     # 専用ログインの Codex の写しを、launcher が入れ直す（codex plugin add）。写しは bb-writ を commit するたびに古くなり、
-    # 利用者が毎回手で入れ直していた。入れ直すのは、その marketplace が手元のディレクトリで、その置き場がこの launcher のときだけ
+    # 利用者が毎回手で入れ直していた。入れ直すのは、専用ログインの Codex が答えた登録で、その marketplace が手元のディレクトリで、
+    # その置き場がこの launcher のときだけ
+    LIST = ["plugin", "marketplace", "list", "--json"]
+
     def stale_codex_copy(self, mp="bb-writ"):
         """専用ログインに、この bb-writ と 1 行だけ違う写し（古い版）を置く。"""
         c = self.cfg / "codex-home" / "plugins" / "cache" / mp / "bb-writ" / "9.9.8"
@@ -4146,7 +4176,7 @@ launch.claude_reads = claude_reads
         return c
 
     def local_marketplace(self, mp="bb-writ", source=None, source_type="local"):
-        """Codex CLI 0.171.0 が、marketplace を登録して bb-writ を入れたときに config.toml に書く形。"""
+        """Codex CLI 0.171.0 が、marketplace を登録して bb-writ を入れたときに config.toml に書く形（偽の codex がこれを読んで一覧に答える）。"""
         return (f'[marketplaces.{mp}]\nsource_type = "{source_type}"\nsource = {json.dumps(str(ROOT if source is None else source))}\n\n'
                 f'[plugins."bb-writ@{mp}"]\nenabled = true\n')
 
@@ -4155,14 +4185,18 @@ launch.claude_reads = claude_reads
         shutil.rmtree(home / "plugins", ignore_errors=True)
         (home / "config.toml").unlink(missing_ok=True)
         shutil.rmtree(self.home / ".codex", ignore_errors=True)
-        for f in (self.args_file, Path(str(self.args_file) + ".plugin"), Path(str(self.args_file) + ".go")):
-            f.unlink(missing_ok=True)
+        for f in ("", ".plugin", ".go", ".gap", ".adding"):
+            Path(str(self.args_file) + f).unlink(missing_ok=True)
         return home
 
     def plugin_calls(self) -> list:
         """偽の codex plugin が受けた呼び出し（引数と CODEX_HOME）。"""
         f = Path(str(self.args_file) + ".plugin")
         return [json.loads(x) for x in f.read_text().splitlines()] if f.exists() else []
+
+    def plugin_changes(self) -> list:
+        """偽の codex plugin が受けた add・remove の引数（一覧は除く）。"""
+        return [c["argv"] for c in self.plugin_calls() if c["argv"][1:2] in (["add"], ["remove"])]
 
     def saved_record(self, rec) -> dict:
         return json.loads((Path(rec["out"]) / "record.json").read_text())
@@ -4175,88 +4209,137 @@ launch.claude_reads = claude_reads
             time.sleep(0.02)
 
     def start_codex_launcher(self, name, env, extra=()):
-        p = subprocess.Popen([sys.executable, str(LAUNCH), "--host", "codex", "--cwd", str(self.cwd), "--prompt-file", str(self.prompt),
-                              "--out", str(self.state / name), *extra], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        """launcher を裏で起こす。試験は try/finally で release_fakes に渡す（片付けの前に止める）。"""
+        return subprocess.Popen([sys.executable, str(LAUNCH), "--host", "codex", "--cwd", str(self.cwd), "--prompt-file", str(self.prompt),
+                                 "--out", str(self.state / name), *extra], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
 
-        def stop():  # 落ちたときも残さない。TERM なら launcher が子に伝えて片付ける
+    def release_fakes(self, *procs):
+        """待たせた偽の codex plugin を .go で終わらせ、起こした launcher を止める（試験が落ちた道でも、一時の置き場を消す前に）。
+        add・一覧を待つ段の launcher は TERM でそのまま止まり、偽の codex plugin には伝わらないので、先に .go を置く。
+        子を待つ段の launcher は、TERM を子に伝えて片付ける。"""
+        Path(str(self.args_file) + ".go").touch()
+        for p in procs:
+            if p is None:
+                continue
             if p.poll() is None:
                 p.terminate()
             try:
                 p.communicate(timeout=30)
-            except (subprocess.TimeoutExpired, ValueError):
+            except subprocess.TimeoutExpired:
                 p.kill()
-                p.wait()
-        self.addCleanup(stop)
-        return p
+                p.communicate()
+            except ValueError:  # 試験が読み終えた
+                pass
 
     def test_a_stale_codex_copy_from_this_launchers_local_marketplace_is_reinstalled_with_add_only(self):
-        # remove は写しと設定を消し、入れ直すまでプラグインが無い状態を作る。add だけで写しは置き換わる
-        for mp in ("bb-writ", "mine"):
-            with self.subTest(marketplace=mp):
+        # remove は写しと設定を消し、入れ直すまでプラグインが無い状態を作る。add だけで写しは置き換わる。
+        # 一覧も add も、親の環境の CODEX_HOME でなく、専用ログインに向ける
+        for mp, parent in (("bb-writ", None), ("mine", None), ("bb-writ", "試験のホームの .codex")):
+            with self.subTest(marketplace=mp, parent_codex_home=parent):
                 home = self.reset_codex_login()
                 self.stale_codex_copy(mp)
                 (home / "config.toml").write_text(self.local_marketplace(mp))
-                rc, rec = self.run_launch("codex")
+                rc, rec = self.run_launch("codex", env_extra={"CODEX_HOME": str(self.home / ".codex")} if parent else None)
                 self.assertEqual((rc, rec["status"]), (0, "ok"), rec)
                 calls = self.plugin_calls()
-                self.assertEqual([c["argv"] for c in calls], [["plugin", "add", f"bb-writ@{mp}"]], "入れ直しは codex plugin add を 1 回だけ")
-                self.assertEqual(Path(calls[0]["CODEX_HOME"] or "/").resolve(), home.resolve(), "add の CODEX_HOME が専用ログインでない")
+                self.assertEqual([c["argv"] for c in calls], [self.LIST, ["plugin", "add", f"bb-writ@{mp}"]],
+                                 "登録を 1 回聞き、codex plugin add を 1 回だけ")
+                for c in calls:
+                    self.assertEqual(Path(c["CODEX_HOME"] or "/").resolve(), home.resolve(), " ".join(c["argv"]) + " の CODEX_HOME が専用ログインでない")
                 self.assertTrue(self.args_file.exists(), "入れ直した後に codex exec が呼ばれていない")
                 self.assertEqual(self.saved_record(rec).get("codex_plugin_add"), {"marketplace": mp, "exit": 0}, "record.json")
                 last = json.loads((self.state / "delegations.jsonl").read_text().splitlines()[-1])
                 self.assertEqual(last.get("codex_plugin_add"), {"marketplace": mp, "exit": 0}, "delegations.jsonl の行")
 
     def test_a_reinstall_accepts_a_source_spelled_through_a_symlink(self):
-        # 綴りが違っても、symlink を解いて launcher の置き場と同じなら、条件を満たす
+        # 綴りが違っても、symlink を解いて同じ置き場なら、条件を満たす（Codex が答えた source の側も、launcher の置き場の側も）
         link = Path(self.tmp.name) / "bb-writ-link"
         link.symlink_to(ROOT, target_is_directory=True)
-        home = self.reset_codex_login()
-        self.stale_codex_copy()
-        (home / "config.toml").write_text(self.local_marketplace(source=link))
-        rc, rec = self.run_launch("codex")
-        self.assertEqual((rc, rec["status"]), (0, "ok"), rec)
-        self.assertEqual([c["argv"] for c in self.plugin_calls()], [["plugin", "add", "bb-writ@bb-writ"]], "symlink を通る source で入れ直さない")
-
-    def test_a_stale_codex_copy_is_not_reinstalled_unless_its_marketplace_is_this_launchers_local_directory(self):
-        # 入れ直しても launcher と一致しない（GitHub から入れた、作業場所の launcher）か、設定を読み切れないときは、入れ直さずに止め、
-        # 手で入れ直すコマンド（add だけ）を示す。専用ログインでない設定は見ない
-        ok = self.local_marketplace()
-        cases = [  # (場面, 専用ログインの config.toml, 試験のホームの .codex/config.toml)
-            ("config.toml が無い", None, None),
-            ("source_type が git", self.local_marketplace(source_type="git"), None),
-            ("source が別のディレクトリ", self.local_marketplace(source=self.cwd), None),
-            ("source が launcher の置き場の親", self.local_marketplace(source=ROOT.parent), None),
-            ("source が launcher の置き場の下", self.local_marketplace(source=ROOT / "skills"), None),
-            ("source が相対パス", self.local_marketplace(source="."), None),  # launcher は launcher の置き場で起こす
-            ("条件を満たすのは別の marketplace の表", self.local_marketplace(source_type="git") + "\n" + self.local_marketplace("mine"), None),
-            ("条件を満たすのは試験のホームの .codex/config.toml", None, ok),
-            ("UTF-8 として読めない", b"# \xff\n" + ok.encode(), None),
-            ("見出しが引用符つき", ok.replace("[marketplaces.bb-writ]", '[marketplaces."bb-writ"]'), None),
-            ("値がリテラル文字列", ok.replace(f"source = {json.dumps(str(ROOT))}", f"source = '{ROOT}'"), None),
-        ]
-        for name, config, user_config in cases:
+        for name, source, launcher in (("source が symlink を通る綴り", link, LAUNCH),
+                                       ("launcher を symlink を通る綴りで起こす", ROOT, link / "scripts" / "launch.py")):
             with self.subTest(name):
                 home = self.reset_codex_login()
                 self.stale_codex_copy()
-                if isinstance(config, bytes):
-                    (home / "config.toml").write_bytes(config)
-                elif config is not None:
+                (home / "config.toml").write_text(self.local_marketplace(source=source))
+                p = subprocess.run([sys.executable, str(launcher), "--host", "codex", "--cwd", str(self.cwd), "--prompt-file", str(self.prompt)],
+                                   env=self.launch_env(), capture_output=True, text=True, timeout=120)
+                rec = json.loads(p.stdout)
+                self.assertEqual((p.returncode, rec["status"]), (0, "ok"), rec)
+                self.assertEqual(self.plugin_changes(), [["plugin", "add", "bb-writ@bb-writ"]], "同じ置き場なのに入れ直さない")
+
+    def test_a_stale_codex_copy_is_not_reinstalled_unless_its_marketplace_is_this_launchers_local_directory(self):
+        # 入れ直しても launcher と一致しない（GitHub から入れた、作業場所の launcher）か、Codex の答えを読めないときは、入れ直さずに止め、
+        # 手で入れ直すコマンド（add だけ）を示す。どの条件が外れたか（Codex が答えた登録、読めなかった訳）も示す
+        ok = self.local_marketplace()
+
+        def listed(source):  # 古い写しの marketplace の項目の marketplaceSource を差し替えた答え
+            return "out:" + json.dumps({"marketplaces": [{"name": "bb-writ", "root": str(ROOT), "marketplaceSource": source}]})
+        unread = "登録を確かめられなかった"
+        cases = [  # (場面, 専用ログインの config.toml, 試験のホームの .codex/config.toml, 偽の一覧の動き, 理由に在る句)
+            ("config.toml が無い（一覧が空）", None, None, "", ["登録が無い"]),
+            ("sourceType が git", self.local_marketplace(source_type="git"), None, "", ['sourceType = "git"', json.dumps(str(ROOT))]),
+            ("source が別のディレクトリ", self.local_marketplace(source=self.cwd), None, "", ['sourceType = "local"', json.dumps(str(self.cwd))]),
+            ("source が launcher の置き場の親", self.local_marketplace(source=ROOT.parent), None, "", []),
+            ("source が launcher の置き場の下", self.local_marketplace(source=ROOT / "skills"), None, "", []),
+            ("source が相対パス", self.local_marketplace(source="."), None, "", []),  # launcher は launcher の置き場で起こす
+            ("source が NUL を含む（解けない道筋）", self.local_marketplace(source=f"{ROOT}\0"), None, "", []),
+            ("条件を満たすのは別の名前の項目", self.local_marketplace(source_type="git") + "\n" + self.local_marketplace("mine"), None, "", []),
+            ("条件を満たすのは名前が前方一致する項目（bb-writ-dev）", self.local_marketplace("bb-writ-dev"), None, "", ["登録が無い"]),
+            ("条件を満たすのは試験のホームの .codex/config.toml", None, ok, "", ["登録が無い"]),
+            ("一覧が 1 で終わる", ok, None, "fail", [unread, "failed to load marketplace(s)"]),
+            ("一覧が JSON でない", ok, None, "out:not json", [unread]),
+            ("marketplaces がオブジェクト", ok, None, "out:" + json.dumps({"marketplaces": {}}), [unread]),
+            ("項目が文字列", ok, None, "out:" + json.dumps({"marketplaces": ["bb-writ"]}), [unread]),
+            ("marketplaceSource が null", ok, None, listed(None), [unread]),
+            ("sourceType が数", ok, None, listed({"sourceType": 1, "source": str(ROOT)}), [unread]),
+            ("sourceType が null", ok, None, listed({"sourceType": None, "source": str(ROOT)}), [unread]),
+            ("sourceType が配列", ok, None, listed({"sourceType": ["local"], "source": str(ROOT)}), [unread]),
+            ("source が数", ok, None, listed({"sourceType": "local", "source": 1}), [unread]),
+            ("source が null", ok, None, listed({"sourceType": "local", "source": None}), [unread]),
+            ("source が配列", ok, None, listed({"sourceType": "local", "source": [str(ROOT)]}), [unread]),
+        ]
+        for name, config, user_config, answer, said in cases:
+            with self.subTest(name):
+                home = self.reset_codex_login()
+                self.stale_codex_copy()
+                if config is not None:
                     (home / "config.toml").write_text(config)
                 if user_config is not None:
                     (self.home / ".codex").mkdir()
                     (self.home / ".codex" / "config.toml").write_text(user_config)
-                rc, rec = self.run_launch("codex", proc_cwd=str(ROOT))
+                rc, rec = self.run_launch("codex", proc_cwd=str(ROOT), env_extra={"FAKE_LIST": answer})
                 self.assertEqual((rc, rec["status"]), (2, "unavailable"), rec)
-                self.assertEqual(self.plugin_calls(), [], "条件を満たさないのに codex plugin が呼ばれた")
+                self.assertEqual(self.plugin_changes(), [], "条件を満たさないのに codex plugin add・remove が呼ばれた")
+                for c in self.plugin_calls():
+                    self.assertEqual(Path(c["CODEX_HOME"] or "/").resolve(), home.resolve(), " ".join(c["argv"]) + " の CODEX_HOME が専用ログインでない")
                 self.assertFalse(self.args_file.exists(), "古い写しのまま codex exec が呼ばれた")
                 self.assertNotIn("codex_plugin_add", self.saved_record(rec))
                 why = rec["problems"][0]
-                for sub in ("codex plugin add bb-writ@bb-writ", "codex plugin marketplace upgrade bb-writ", "統合してから入れ直す"):
+                for sub in ["codex plugin add bb-writ@bb-writ", "codex plugin marketplace upgrade bb-writ", "統合してから入れ直す", *said]:
                     self.assertIn(sub, why)
                 self.assertNotIn("codex plugin remove", why)
 
+    def test_no_reinstall_when_codex_cannot_start(self):
+        # codex を起動できない（OSError）ときも、failed でなく unavailable で、登録を確かめられなかった訳を示す
+        home = self.reset_codex_login()
+        self.stale_codex_copy()
+        (home / "config.toml").write_text(self.local_marketplace())
+        fake = self.bin / "codex"
+        body = fake.read_bytes()
+        fake.write_text("#!/nonexistent/interpreter\n")  # 実行できるが、起動できない
+        try:
+            rc, rec = self.run_launch("codex")
+        finally:
+            fake.write_bytes(body)
+            fake.chmod(0o755)
+        self.assertEqual((rc, rec["status"]), (2, "unavailable"), rec)
+        self.assertNotIn("codex_plugin_add", self.saved_record(rec))
+        self.assertIn("登録を確かめられなかった", rec["problems"][0])
+        self.assertIn("起動できなかった", rec["problems"][0])
+
     def test_a_reinstall_that_leaves_the_copy_stale_stops_with_the_add_result(self):
-        # 成否は add の終了コードでなく、比べ直しで決める。まだ違えば起動せず、add の終了コードと出力を理由に残す
+        # 成否は add の終了コードでなく、比べ直しで決める。まだ違えば起動せず、どの写しがどのファイルで違うかと、実行した add・
+        # その終了コード・出力（標準出力の後に標準エラーをつないだ末尾）を理由に残す。失敗したのと同じコマンドを「入れ直す」とは勧めない
         for how, code, said in (("fail", 1, "failed to back up plugin cache entry"), ("noop", 0, None)):
             with self.subTest(add=how):
                 home = self.reset_codex_login()
@@ -4265,13 +4348,12 @@ launch.claude_reads = claude_reads
                 rc, rec = self.run_launch("codex", env_extra={"FAKE_ADD": how})
                 self.assertEqual((rc, rec["status"]), (2, "unavailable"), rec)
                 self.assertFalse(self.args_file.exists(), "入れ直しても古い写しのまま codex exec が呼ばれた")
-                self.assertEqual(len(self.plugin_calls()), 1, "入れ直しは 1 回の起動で 1 回だけ")
+                self.assertEqual(len(self.plugin_changes()), 1, "入れ直しは 1 回の起動で 1 回だけ")
                 self.assertEqual(self.saved_record(rec).get("codex_plugin_add"), {"marketplace": "bb-writ", "exit": code}, "record.json")
                 why = rec["problems"][0]
-                self.assertIn(f"終了コード {code}", why)
-                self.assertIn("codex plugin add bb-writ@bb-writ", why)
-                if said:
-                    self.assertIn(said, why)
+                for sub in ["skills/interrogate/SKILL.md", f"終了コード {code}", "codex plugin add bb-writ@bb-writ", *([said] if said else [])]:
+                    self.assertIn(sub, why)
+                self.assertNotIn("入れ直す: ", why)
 
     def test_a_reinstall_is_judged_by_comparing_again_not_by_the_add_exit_code(self):
         # add が 0 以外で終わっても、写しが置き換わっていれば起動する
@@ -4285,34 +4367,41 @@ launch.claude_reads = claude_reads
 
     def test_concurrent_launchers_reinstall_the_codex_copy_once(self):
         # 同時に 2 つの codex plugin add を流すと、片方が「failed to back up plugin cache entry」で落ちた（20 回中 4 回）。
-        # launcher は専用ログインの排他の下で比べ直し、待つ間にほかの launcher が入れ直していれば、もう add しない
+        # launcher は比べから入れ直しまでを専用ログインの排他の下で行う。ほかの launcher の add が写しを置き換えている最中
+        # （古い写しを退け、新しい写しを置く前）に比べると、写しが無いと見て bb-writ 無しの子を起動するか、読み損ねて failed になる
         home = self.reset_codex_login()
         self.stale_codex_copy()
         (home / "config.toml").write_text(self.local_marketplace())
-        env = self.launch_env(env_extra={"FAKE_ADD": "wait"})  # 偽の add は、試験が .go を置くまで置き換えない
-        first = self.start_codex_launcher("first", env)
-        self.wait_until(lambda: len(self.plugin_calls()) >= 1, "1 つ目の launcher が add を始めない")
-        second = self.start_codex_launcher("second", env)
-        ino = os.stat(home).st_ino
+        env = self.launch_env(env_extra={"FAKE_ADD": "gap"})  # 偽の add は、写しが無い瞬間を、試験が .go を置くまで引き延ばす
+        first = second = None
+        try:
+            first = self.start_codex_launcher("first", env)
+            self.wait_until(Path(str(self.args_file) + ".gap").exists, "1 つ目の launcher の add が、古い写しを退けたところまで進まない")
+            second = self.start_codex_launcher("second", env)
+            ino, second_record = os.stat(home).st_ino, self.state / "second" / "record.json"
 
-        def second_waits():  # 2 つ目が専用ログインの排他を待っている（Linux の /proc/locks の待ち手の行）
-            try:
-                rows = [x.split() for x in Path("/proc/locks").read_text().splitlines()]
-            except OSError:
-                return False
-            return any(len(r) > 6 and r[1] == "->" and r[5] == str(second.pid) and r[6].endswith(f":{ino}") for r in rows)
-        # 2 つ目が古い写しを見て排他を待つか、排他なしで add するまで待つ。待ち手が見えない環境では上限まで待つ（正しい launcher は、
-        # どの順でも add を 1 回にするので、待ち方は後退を見つける力にだけ効く）
-        end = time.monotonic() + 5
-        while not (second_waits() or len(self.plugin_calls()) >= 2 or second.poll() is not None) and time.monotonic() < end:
-            time.sleep(0.02)
-        Path(str(self.args_file) + ".go").touch()
-        recs = []
-        for name, p in (("1 つ目", first), ("2 つ目", second)):
-            out, err = p.communicate(timeout=60)
-            self.assertTrue(out.strip(), f"{name}の launcher が結果を出さない: " + err)
-            recs.append(json.loads(out))
-        self.assertEqual([c["argv"] for c in self.plugin_calls()], [["plugin", "add", "bb-writ@bb-writ"]], "add は合わせて 1 回だけ")
+            def second_waits():  # 2 つ目が専用ログインの排他を待っている（Linux の /proc/locks の待ち手の行）
+                try:
+                    rows = [x.split() for x in Path("/proc/locks").read_text().splitlines()]
+                except OSError:
+                    return False
+                return any(len(r) > 6 and r[1] == "->" and r[5] == str(second.pid) and r[6].endswith(f":{ino}") for r in rows)
+            # 2 つ目が排他を待つか、排他の外で比べて起動するまで待つ。待ち手が見えない環境では上限まで待つ（正しい launcher は、
+            # どの順でも 2 つ目を .go の前に起動しないので、待ち方は後退を見つける力にだけ効く）
+            end = time.monotonic() + 5
+            while not (second_waits() or second_record.exists() or second.poll() is not None) and time.monotonic() < end:
+                time.sleep(0.02)
+            self.assertFalse(second_record.exists(), "2 つ目の launcher が、入れ直しの途中（写しが無い間）に比べて結果を出した")
+            self.assertFalse(self.args_file.exists(), "入れ直しの途中に codex exec が呼ばれた")
+            Path(str(self.args_file) + ".go").touch()
+            recs = []
+            for name, p in (("1 つ目", first), ("2 つ目", second)):
+                out, err = p.communicate(timeout=60)
+                self.assertTrue(out.strip(), f"{name}の launcher が結果を出さない: " + err)
+                recs.append(json.loads(out))
+        finally:
+            self.release_fakes(first, second)
+        self.assertEqual(self.plugin_changes(), [["plugin", "add", "bb-writ@bb-writ"]], "add は合わせて 1 回だけ")
         for name, rec in zip(("1 つ目", "2 つ目"), recs):
             self.assertEqual((rec["status"], rec.get("exit_code")), ("ok", 0), name + "の launcher の codex exec")
         self.assertEqual(sum("codex_plugin_add" in self.saved_record(r) for r in recs), 1, "入れ直した記録は片方だけ")
@@ -4322,34 +4411,48 @@ launch.claude_reads = claude_reads
         home = self.reset_codex_login()
         self.stale_codex_copy()
         (home / "config.toml").write_text(self.local_marketplace())
-        first = self.start_codex_launcher("first", self.launch_env(env_extra={"FAKE_HANG": "1"}), ["--timeout", "60"])
-        self.wait_until(self.args_file.exists, "入れ直した後に 1 つ目の codex exec が呼ばれない")
-        self.assertEqual(len(self.plugin_calls()), 1, "1 つ目の launcher が入れ直していない")
-        placed = next((home / "plugins" / "cache" / "bb-writ" / "bb-writ").iterdir())  # add が置いた版の写しを、もう一度古くする
-        target = placed / "skills" / "interrogate" / "SKILL.md"
-        target.write_text(target.read_text(encoding="utf-8") + "\n古い文\n", encoding="utf-8")
+        first = None
         try:
-            p = subprocess.run([sys.executable, str(LAUNCH), "--host", "codex", "--cwd", str(self.cwd), "--prompt-file", str(self.prompt)],
-                               env=self.launch_env(), capture_output=True, text=True, timeout=20)
-        except subprocess.TimeoutExpired:
-            self.fail("2 つ目の launcher が、1 つ目の子が動いている間、排他を待ち続けた")
-        self.assertIsNone(first.poll(), "1 つ目の子が、2 つ目の launcher より先に終わった（順序を確かめられない）")
+            first = self.start_codex_launcher("first", self.launch_env(env_extra={"FAKE_HANG": "1"}), ["--timeout", "60"])
+            self.wait_until(self.args_file.exists, "入れ直した後に 1 つ目の codex exec が呼ばれない")
+            self.assertEqual(len(self.plugin_changes()), 1, "1 つ目の launcher が入れ直していない")
+            placed = next((home / "plugins" / "cache" / "bb-writ" / "bb-writ").iterdir())  # add が置いた版の写しを、もう一度古くする
+            target = placed / "skills" / "interrogate" / "SKILL.md"
+            target.write_text(target.read_text(encoding="utf-8") + "\n古い文\n", encoding="utf-8")
+            try:
+                p = subprocess.run([sys.executable, str(LAUNCH), "--host", "codex", "--cwd", str(self.cwd), "--prompt-file", str(self.prompt)],
+                                   env=self.launch_env(), capture_output=True, text=True, timeout=20)
+            except subprocess.TimeoutExpired:
+                self.fail("2 つ目の launcher が、1 つ目の子が動いている間、排他を待ち続けた")
+            self.assertIsNone(first.poll(), "1 つ目の子が、2 つ目の launcher より先に終わった（順序を確かめられない）")
+        finally:
+            self.release_fakes(first)
         rec = json.loads(p.stdout)
         self.assertEqual(rec["status"], "ok", rec)
         self.assertEqual(self.saved_record(rec).get("codex_plugin_add"), {"marketplace": "bb-writ", "exit": 0}, "2 つ目の record.json")
-        self.assertEqual(len(self.plugin_calls()), 2, "2 つ目の launcher が入れ直していない")
+        self.assertEqual(len(self.plugin_changes()), 2, "2 つ目の launcher が入れ直していない")
 
     def test_a_reinstall_that_does_not_finish_is_stopped_at_the_limit(self):
-        home = self.reset_codex_login()
-        self.stale_codex_copy()
-        (home / "config.toml").write_text(self.local_marketplace())
-        t0 = time.monotonic()
-        rc, rec = self.run_launch("codex", env_extra={"FAKE_ADD": "hang", "BB_WRIT_CODEX_ADD_TIMEOUT": "1"})
-        self.assertLess(time.monotonic() - t0, 20, "launcher が add の上限で止めなかった")
-        self.assertEqual((rc, rec["status"]), (2, "unavailable"), rec)
-        self.assertFalse(self.args_file.exists(), "止めた add の後に codex exec が呼ばれた")
-        self.assertEqual(self.saved_record(rec).get("codex_plugin_add"), {"marketplace": "bb-writ", "exit": None}, "record.json")
-        self.assertIn("1 秒で終わらなかった", rec["problems"][0])
+        # 一覧も add も、終わらなければ上限で止める（試験では 1 秒）。launcher がそこで止まり続けない
+        for name, fake, recorded in (("add が終わらない", {"FAKE_ADD": "hang"}, {"marketplace": "bb-writ", "exit": None}),
+                                     ("一覧が終わらない", {"FAKE_LIST": "hang"}, None)):
+            with self.subTest(name):
+                home = self.reset_codex_login()
+                self.stale_codex_copy()
+                (home / "config.toml").write_text(self.local_marketplace())
+                t0 = time.monotonic()
+                try:
+                    rc, rec = self.run_launch("codex", env_extra={**fake, "BB_WRIT_CODEX_PLUGIN_TIMEOUT": "1"})
+                finally:
+                    self.release_fakes()
+                self.assertLess(time.monotonic() - t0, 20, "launcher が上限で止めなかった")
+                self.assertEqual((rc, rec["status"]), (2, "unavailable"), rec)
+                self.assertFalse(self.args_file.exists(), "止めた後に codex exec が呼ばれた")
+                self.assertEqual(self.saved_record(rec).get("codex_plugin_add"), recorded, "record.json")
+                self.assertIn("1 秒で終わらなかった", rec["problems"][0])
+                if recorded is None:
+                    self.assertEqual(self.plugin_changes(), [], "一覧を止めたのに codex plugin add が呼ばれた")
+                    self.assertIn("登録を確かめられなかった", rec["problems"][0])
 
     def test_no_reinstall_when_the_codex_copy_matches_or_is_absent(self):
         def same():
@@ -4367,28 +4470,40 @@ launch.claude_reads = claude_reads
                 self.assertNotIn("codex_plugin_add", self.saved_record(rec))
 
     def test_no_reinstall_without_the_lock_on_the_codex_login(self):
-        # 専用ログインのディレクトリの排他を取れない環境では、排他なしで入れ直さず、手のコマンドを出して止める
-        home = self.reset_codex_login()
-        self.stale_codex_copy()
-        (home / "config.toml").write_text(self.local_marketplace())
-        home.chmod(0o300)  # 中の名前はたどれるが、ディレクトリそのものは開けない
-        try:
-            try:
-                os.close(os.open(home, os.O_RDONLY | os.O_DIRECTORY))
-                opened = True
-            except PermissionError:
-                opened = False
-            if not opened:
-                rc, rec = self.run_launch("codex")
-        finally:
-            home.chmod(0o700)  # 一時の置き場を消せるように（落ちたときも）
-        if opened:
-            self.skipTest("この環境では、読めない権限のディレクトリも開ける（root など）")
-        self.assertEqual((rc, rec["status"]), (2, "unavailable"), rec)
-        self.assertEqual(self.plugin_calls(), [], "排他を取れないのに codex plugin が呼ばれた")
-        self.assertFalse(self.args_file.exists(), "古い写しのまま codex exec が呼ばれた")
-        self.assertIn("排他を取れない", rec["problems"][0])
-        self.assertIn("codex plugin add bb-writ@bb-writ", rec["problems"][0])
+        # 専用ログインのディレクトリの排他を取れない環境では、排他なしで比べる。違えば入れ直さずに、手のコマンドを出して止め、
+        # 同じなら子を起動する（開けないときも flock が失敗するときも、同じ 1 つの枝。試験が作れるのは開けないときだけ）
+        for name, stale in (("写しが古い", True), ("写しが同じ", False)):
+            with self.subTest(name):
+                home = self.reset_codex_login()
+                if stale:
+                    self.stale_codex_copy()
+                else:
+                    c = home / "plugins" / "cache" / "bb-writ" / "bb-writ" / "9.9.9"
+                    for d in ("skills", "scripts"):
+                        shutil.copytree(ROOT / d, c / d, ignore=shutil.ignore_patterns("__pycache__"))
+                (home / "config.toml").write_text(self.local_marketplace())
+                home.chmod(0o300)  # 中の名前はたどれるが、ディレクトリそのものは開けない
+                try:
+                    try:
+                        os.close(os.open(home, os.O_RDONLY | os.O_DIRECTORY))
+                        opened = True
+                    except PermissionError:
+                        opened = False
+                    if not opened:
+                        rc, rec = self.run_launch("codex")
+                finally:
+                    home.chmod(0o700)  # 一時の置き場を消せるように（落ちたときも）
+                if opened:
+                    self.skipTest("この環境では、読めない権限のディレクトリも開ける（root など）")
+                self.assertEqual(self.plugin_calls(), [], "排他を取れないのに codex plugin が呼ばれた")
+                if not stale:
+                    self.assertEqual((rc, rec["status"]), (0, "ok"), rec)
+                    self.assertTrue(self.args_file.exists(), "写しが同じなのに codex exec が呼ばれていない")
+                    continue
+                self.assertEqual((rc, rec["status"]), (2, "unavailable"), rec)
+                self.assertFalse(self.args_file.exists(), "古い写しのまま codex exec が呼ばれた")
+                self.assertIn("排他を取れない", rec["problems"][0])
+                self.assertIn("codex plugin add bb-writ@bb-writ", rec["problems"][0])
 
     def test_multiple_launches_keep_separate_evidence(self):
         _, a = self.run_launch('codex')
