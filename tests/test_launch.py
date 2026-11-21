@@ -1779,6 +1779,37 @@ class TestLaunch(unittest.TestCase):
                 self.assertIn('"execution"', prompt)
                 self.assertNotIn("写して", prompt)
 
+    def test_only_claude_write_children_are_told_about_the_sandbox_marks(self):
+        # Claude Code の書く子の中では、sandbox が書き込みを拒むために置く印（作業場所の直下の、子が作っていないドットの項目）が
+        # git status に出て、git add -A が 128 で落ちた。launcher は Claude Code の書く子にだけ（続きでも）、印に触らず報告に数えないことと、
+        # 名前を挙げて足すことを約束に足す。句は定数を通さずに書く（定数と比べると、文面を空にしても通る）
+        phrases = ("Claude Code の sandbox が書き込みを拒むために置く印", "触らず、報告に数えない",
+                   "`git add -A`・`git add .` を使わず、変えたファイルの名前を挙げる")
+
+        def given(host):  # 偽の CLI に渡った依頼文（Codex は最後の引数、Claude Code・Grok Build は -p の次）
+            argv = json.loads(self.args_file.read_text())
+            return argv[-1] if host == "codex" else argv[argv.index("-p") + 1]
+
+        # 書く子は試験が作る作業場所で起動する。時間切れにして、続きの依頼文も見る
+        rc, rec = self.run_launch("claude", extra=["--write", "--timeout", "2"], cwd=self.worktree("marks")[1], env_extra={"FAKE_HANG": "1"})
+        self.assertEqual((rc, rec["status"]), (2, "timeout"), rec)
+        first = given("claude")
+        self.prompt.write_text("時間切れで止められた。続けて")
+        rc, again = self.run_launch(None, extra=["--resume", rec["out"]])
+        self.assertEqual((rc, again["status"], again["write"]), (0, "ok", True), again)
+        for launch, prompt in (("最初の起動", first), ("続き（--resume）", given("claude"))):
+            for phrase in phrases:
+                with self.subTest(child="Claude Code の書く子", launch=launch, phrase=phrase):
+                    self.assertIn(phrase, prompt)
+        self.prompt.write_text("x を確かめて")
+        for host, extra, child in (("claude", [], "読み取り専用の Claude Code の子"), ("codex", ["--write"], "Codex の書く子"),
+                                   ("grok", ["--write"], "Grok Build の書く子")):
+            with self.subTest(child=child):
+                self.args_file.unlink(missing_ok=True)
+                rc, rec = self.run_launch(host, extra=extra, cwd=self.worktree(host)[1] if extra else None)
+                self.assertEqual((rc, rec["status"]), (0, "ok"), rec)
+                self.assertNotIn("sandbox が書き込みを拒むために置く印", given(host), child)
+
     def test_codex_read_only_review_survives_the_parent_moving_git(self):
         # 審査の間に親や並行するタスクが ref・設定を動かしても、読み取り専用の子の報告は使える（前後比較で誤って failed にしない）
         repo, wt = self.worktree("parent-moves")

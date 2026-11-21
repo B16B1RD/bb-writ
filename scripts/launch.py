@@ -96,6 +96,16 @@ AUDIT_CONTRACT = ("返す前の判定（bb-writ の監査役の約束）: 上の
                   "差分に限ってよいのは、節がそう書く項目だけ。文の照合は毎回、変えた文書の全体）。子が sandbox のせいで対象の試験を"
                   "実行できず、作業者が --not-run で届けるときは、親がその commit で実行した試験の証拠（コマンド・終了コード・出力）が"
                   "作業の記録にあり、子が実行できなかったことの代わりになるか（写し方を教えれば子が動いた場面でないか）も判定する。\n")
+# Claude Code の書く子にだけ足す（続きでも）。子の中では、作業場所の直下に、子が作っていないドットの項目が git status に出て、
+# git add -A が印の 1 つ目で「can only add regular files…」になり、終了コード 128 で何も足されなかった。名前を挙げた git add と
+# git commit は 0 で、commit に入ったのは足したファイルだけ（2026-11-20、2.1.329、WSL2）。印は、sandbox が必ず書き込みを拒む場所の
+# うち実在しないものに置く読み込み専用のもので（公式の文書の sandboxing: Linux・WSL2 では、まだ無いファイルへの拒否を、空の
+# 読み込み専用の置き場で持つ）、子が終わった後の作業場所には残らなかった。名前は並べない（対象で数が変わる。.claude/ の無い
+# リポジトリで 12 行、在るリポジトリで 21 行）
+CLAUDE_WRITE_CONTRACT = ("作業場所の直下に、自分が作っていないドットの項目（`.bashrc`・`.gitconfig`・`.claude/` の下など。読み込み専用で"
+                         "中身は空）が見えることがある。Claude Code の sandbox が書き込みを拒むために置く印で、子が終わると消える。"
+                         "触らず、報告に数えない。変更を足すときは `git add -A`・`git add .` を使わず、変えたファイルの名前を挙げる"
+                         "（印は Git に足せないので、`git add -A` は落ちる）。\n")
 
 
 def config_dir() -> Path:
@@ -1561,7 +1571,7 @@ def main() -> int:
                 snapshot = (own, common, git_snapshot(own, common, a.cwd))
         if not why:
             cmd, env, why = command(a, a.prompt_file.read_text(encoding="utf-8") + CONTRACT + ("" if a.write else READ_ONLY_CONTRACT)
-                                    + (AUDIT_CONTRACT if a.audit else ""),
+                                    + (AUDIT_CONTRACT if a.audit else "") + (CLAUDE_WRITE_CONTRACT if a.host == "claude" and a.write else ""),
                                     scratch)
         if a.host == "codex" and not a.write and not why:
             rec["scratch"] = str(scratch)
