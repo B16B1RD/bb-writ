@@ -4508,7 +4508,13 @@ launch.claude_reads = claude_reads
                 self.assertIn("codex plugin add bb-writ@bb-writ を実行したが（終了コード 1）", why)  # 実行したことの句
                 self.assertIn("写しが無い", why)
                 self.assertIn("手で入れ直す: ", why)  # 手の案内（実行したことの句とは別に、もう 1 回コマンドが在る）
-                self.assertIn("codex plugin add bb-writ@bb-writ", why.split("手で入れ直す: ", 1)[-1])
+                # 手のコマンドは専用ログインに向ける（CODEX_HOME が無いと、利用者の既定のログインに入れてしまう）。一時の置き場が symlink の
+                # 下でも、launcher が書く道筋と試験の home の綴りは違いうるので、解いて比べる
+                manual = why.split("手で入れ直す: ", 1)[-1]
+                self.assertTrue(manual.startswith("CODEX_HOME="), "手で入れ直すコマンドに CODEX_HOME が無い: " + manual)
+                given, command = manual[len("CODEX_HOME="):].split(" ", 1)
+                self.assertEqual(Path(given).resolve(), home.resolve(), "手で入れ直すコマンドの CODEX_HOME が専用ログインでない")
+                self.assertTrue(command.startswith("codex plugin add bb-writ@bb-writ"), "手で入れ直すコマンドの形が違う: " + manual)
                 self.assertIn("add の出力の末尾: ", why)  # 標準出力の後につないだ標準エラーの失敗の文が、末尾に残る
                 self.assertIn("failed to activate updated plugin cache entry", why)
 
