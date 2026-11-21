@@ -47,7 +47,9 @@ FAKE_CODEX = textwrap.dedent(r'''
             _list = os.environ.get("FAKE_LIST", "")
             if _list == "hang":
                 _wait()
-            if _list == "fail":  # 設定が壊れている・置き場に manifest が無い（標準出力の長い行の後に、標準エラーへ失敗の文）
+            # 設定が壊れている・置き場に manifest が無い。本物（0.171.0）は、失敗のとき標準出力に何も出さない。偽物が標準出力に長い行を
+            # 先に出すのは、訳の出力に末尾を使うこと（標準エラーの失敗の文が残ること）を見るため
+            if _list == "fail":
                 print("progress " + "x" * 400)
                 print("Error: failed to load marketplace(s): fake manifest is missing", file=sys.stderr)
                 sys.exit(1)
@@ -4281,7 +4283,9 @@ launch.claude_reads = claude_reads
         def listed(source):  # 古い写しの marketplace の項目の marketplaceSource を差し替えた答え
             return "out:" + json.dumps({"marketplaces": [{"name": "bb-writ", "root": str(ROOT), "marketplaceSource": source}]})
         unread = "登録を確かめられなかった"
-        loop = Path(self.tmp.name) / "loop-a"  # 互いを指す symlink（3.12 の resolve は例外を出さず、3.9・3.11 は RuntimeError を出す）
+        # 互いを指す symlink。resolve() は、3.9・3.11・3.12 では RuntimeError（Symlink loop）を出し、3.13 では例外を出さない
+        # （3.9.25・3.11.14・3.12.12・3.13.11 で確かめた）。どちらでも、同じ結果（unavailable、add なし）になる
+        loop = Path(self.tmp.name) / "loop-a"
         loop.symlink_to(Path(self.tmp.name) / "loop-b")
         (Path(self.tmp.name) / "loop-b").symlink_to(loop)
         cases = [  # (場面, 専用ログインの config.toml, 試験のホームの .codex/config.toml, 偽の一覧の動き, 理由に在る句)
@@ -4473,7 +4477,8 @@ launch.claude_reads = claude_reads
     def test_no_start_when_the_reinstall_leaves_no_copy(self):
         # add が古い写しを退けた後、新しい写しを置かずに終わると、写しの無い状態が残る（古い写しは plugin-backup-* に残り、手で add する
         # まで後の起動も同じになる）。add を実行した後は、その marketplace の写しが在って違わないときだけ起動する。ほかの marketplace の
-        # 同じ中身の写しでは通さない
+        # 同じ中身の写しでは通さない。理由に手で入れ直すコマンドを付けるのは、写しが無いままだと、次の起動からは、最初の比べで写しが
+        # 無いものとして、bb-writ 無しの子が起動するため
         def other():
             c = self.cfg / "codex-home" / "plugins" / "cache" / "other" / "bb-writ" / "9.9.9"
             for d in ("skills", "scripts"):
@@ -4489,8 +4494,10 @@ launch.claude_reads = claude_reads
                 self.assertFalse(self.args_file.exists(), "入れ直しの後に写しが無いまま codex exec が呼ばれた")
                 self.assertEqual(self.saved_record(rec).get("codex_plugin_add"), {"marketplace": "bb-writ", "exit": 1}, "record.json")
                 why = rec["problems"][0]
-                for sub in ("写しが無い", "codex plugin add bb-writ@bb-writ", "終了コード 1"):
-                    self.assertIn(sub, why)
+                self.assertIn("codex plugin add bb-writ@bb-writ を実行したが（終了コード 1）", why)  # 実行したことの句
+                self.assertIn("写しが無い", why)
+                self.assertIn("手で入れ直す: ", why)  # 手の案内（実行したことの句とは別に、もう 1 回コマンドが在る）
+                self.assertIn("codex plugin add bb-writ@bb-writ", why.split("手で入れ直す: ", 1)[-1])
 
     def test_no_reinstall_when_the_codex_copy_matches_or_is_absent(self):
         def same():

@@ -23,7 +23,7 @@ push・pr でこれを求める）。依頼文の中身が審査だったかは�
 （work.py が、すべての push・pr で HEAD を対象にしたこの記録を求める）。依頼文の中身が監査だったかは見ない。
 Codex の子は専用ログインに入った bb-writ の写しを読むので、写しが launcher と中身で違えば起動しない（unavailable）。launcher は
 専用ログインのディレクトリの排他の下で写しを比べ、違えば専用ログインの Codex に marketplace の登録を聞き、手元のディレクトリで登録してあり、
-その置き場が launcher 自身の置き場なら、codex plugin add だけを 1 回実行し、比べ直して一致すれば起動する（記録の codex_plugin_add。codex_refresh）。
+その置き場が launcher 自身の置き場なら、codex plugin add だけを 1 回実行し、その marketplace の写しが在って違わなければ起動する（記録の codex_plugin_add。codex_refresh）。
 起動のたびに、自分が状態の置き場に作った一時の置き場（読み取り専用の Codex の子の一時ディレクトリ delegations/<名前>/tmp と、
 Grok の子の起動ごとの home grok-homes/<名前>）のうち、もう続きから起動されないものを消す（sweep_leftovers）。消すのは、最後に使われてから
 LEFTOVER_DAYS 日を過ぎたものと、それを指す記録の対象が、どれも、もう無いタスクの作業場所（task cleanup などで消えたもの）であるもの。
@@ -736,6 +736,8 @@ def codex_refresh(a, home: Path) -> str | None:
     entry」で 0 以外で終わったため（Codex 自身は flock を取らない）。
     add を実行したら a.codex_plugin_add に marketplace と終了コード（上限で止めた・起動できなかったら None）を載せる（記録の
     codex_plugin_add）。入れ直しても違うときの理由には、手で入れ直す案内を付けない（失敗したのと同じコマンドを勧めない）。
+    入れ直しの後に写しが無いときの理由には、手で入れ直すコマンドを付ける（写しが無いままだと、次の起動からは、最初の比べで写しが
+    無いものとして、bb-writ 無しの子が起動するため）。
     守らない範囲:
     - 動いている Codex の子は、入れ直しの改名 2 回の間（約 0.0001 秒）に写しを読むと、写しが無いものとして動く。動いている Codex の子が
       いても、launcher は入れ直す（launcher どうしは、排他の下で比べるので、途中の写しを読まない）。
@@ -750,8 +752,11 @@ def codex_refresh(a, home: Path) -> str | None:
       終了コード 1 で、何も並べなかった）では、launcher は入れ直さない。Codex の答えは、launcher を起こした作業ディレクトリにも拠る
       （専用ログインで信頼したプロジェクトの .codex/config.toml の marketplace も並んだ。同じ名前の項目が 2 つ並ぶこともあり、launcher は
       最初の 1 つで決める。add も同じ作業ディレクトリで実行する。0.171.0）。
-    - 入れ直しは、1 回の起動で 1 つの marketplace に 1 回だけ（古い写しが 2 つの marketplace に在れば、2 つ目は unavailable で、次の起動で
-      入れ直す）。
+    - 入れ直しは、1 回の起動で 1 つの marketplace に 1 回だけ（古い写しが 2 つの marketplace に在れば、2 つ目は unavailable で、その
+      marketplace も条件を満たせば、次の起動で入れ直す）。
+    - 入れ直しの後に写しが無いと止めるのは、add を実行した、その起動だけ。写しが無いままだと、排他を待っていた launcher と、その後の
+      起動は、最初の比べで写しが無いものとして、bb-writ 無しの子を起動する（add も実行せず、記録にも残らない）。本物の add が、
+      古い写しを退けた後の失敗・停止で、この状態を残すかは、確かめていない。
     - 入れ直しの間（と、排他を待つ間）に launcher を止めると、子を起動する前に受けたシグナルと同じく、記録は残らない。動いている
       codex plugin add は止めない。排他は launcher と一緒に放れるので、続いている add の途中の写しを、次の launcher が読みうる。
     - 上限で止めるのは、launcher が起こした codex のプロセスだけ（codex が本体を別のプロセスで起こす入れ方では、本体が残りうる。
@@ -759,7 +764,9 @@ def codex_refresh(a, home: Path) -> str | None:
     - 排他の待ちに上限は無い（ほかの launcher の入れ直しが上限まで掛かれば、その分待つ）。
     - macOS では、偽の CLI の試験のほかは確かめていない。
     - add の成否は終了コードで決めない（比べ直しで決める）。
-    一覧と add の標準入力を閉じることと、深い入れ子の答え（RecursionError）で failed になることは、試験で見ない。"""
+    一覧と add の標準入力を閉じること、深い入れ子の答え（RecursionError）で failed になること、同じ名前の項目が 2 つ並ぶときに最初の
+    1 つで決めること、add の後の判定で写しと数える形（skills のディレクトリが在る版の置き場）、写しが無いときの理由の add の出力の
+    末尾、解けない道筋の例外のうち OSError（resolve() が OSError を出す入力を作れなかった）は、試験で見ない。"""
     fd, lost = None, None
     try:  # 開く・取るの失敗は 1 つの枝（どちらでも、排他なしで比べる）
         fd = os.open(home, os.O_RDONLY | os.O_DIRECTORY)
