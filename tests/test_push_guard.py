@@ -628,6 +628,22 @@ class TestPushGuard(unittest.TestCase):
             with self.subTest(name):
                 self.assertEqual(self.hook_decision(root, t, aid), "deny", "symlink 越しの前の版の置き場の指揮者の素の push が通った")
 
+    def test_the_hook_denies_a_conductor_when_the_entry_folder_itself_is_a_symlink(self):
+        # 置き場の skills/bb-writ 自体が別の場所への symlink: 実体の道筋は skills/bb-writ で終わらないが、同じ場所の指揮者は止める
+        tmp = Path(self.tmp.name)
+        hook_root = self.cached_plugin("0.29.1")
+        target = tmp / "elsewhere" / "entry-body"
+        target.mkdir(parents=True)
+        (hook_root / "skills").mkdir()
+        (hook_root / "skills" / "bb-writ").symlink_to(target, target_is_directory=True)
+        t = self.parent()
+        self.child("s1", "y1", entry_first_row(hook_root / "skills" / "bb-writ"))
+        self.child("s1", "y2", entry_first_row(target))
+        for name, aid in (("先頭の行が置き場の skills/bb-writ（symlink の道筋）", "y1"), ("先頭の行が symlink の行き先の道筋", "y2")):
+            with self.subTest(name):
+                self.assertEqual(self.hook_decision(hook_root, t, aid), "deny",
+                                 "入口の skills/bb-writ が symlink の置き場で、指揮者の素の push が通った")
+
     def test_the_hook_denies_a_descendant_of_a_conductor_started_from_another_version(self):
         hook_root = self.cached_plugin("0.29.1")
         t = self.parent()

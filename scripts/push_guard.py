@@ -360,8 +360,9 @@ def first_row(path: str):
 def same_entry(base: str, entry: str) -> bool:
     """先頭の行の道筋 base が、hook の置き場の入口 entry（<親>/<名前>/skills/bb-writ）と同じ入口か。同じ場所か、同じ親の下の別の
     置き場（版の兄弟）の skills/bb-writ（<親>/<別の名前>/skills/bb-writ）なら同じ入口と数える。どちらも実体の道筋に直し、道筋の部品で
-    比べる（違ってよいのは <名前> の 1 段だけ。同じ場所もこれに含まれる。文字列の前方一致では比べない）。置き場が在るかと、名前の形
-    （版の文字列か）は見ない。
+    比べる（違ってよいのは <名前> の 1 段だけ。文字列の前方一致では比べない）。同じ場所は、先に実体の道筋の一致で見る（入口の
+    skills/bb-writ 自体が symlink の置き場では、実体の道筋が skills/bb-writ で終わらないので、兄弟の比べには当たらない）。置き場が
+    在るかと、名前の形（版の文字列か）は見ない。
 
     理由: cache に写すプラグインの置き場は cache/<marketplace>/<plugin>/<版>/ で、更新のたびに変わる（公式の文書 plugins/loading）。
     前の版の置き場で始まった指揮者の先頭の行は、前の版の置き場を指したまま続く。
@@ -369,8 +370,11 @@ def same_entry(base: str, entry: str) -> bool:
     では、別の版の置き場。置き場からそのまま読む形（--plugin-dir・手元のディレクトリの marketplace）では、置き場の隣のディレクトリ
     （例: 置き場がホームの直下なら、ホームの .claude/skills/bb-writ）。
     確かめた結果は AGENTS.md の規則の表の、入口を呼んだセッションの素の push の行に書く。"""
-    b, e = os.path.realpath(base).split(os.sep), os.path.realpath(entry).split(os.sep)  # realpath の後は絶対で正規化済み
-    return b[-2:] == e[-2:] == ["skills", "bb-writ"] and b[:-3] == e[:-3]
+    base, entry = os.path.realpath(base), os.path.realpath(entry)
+    if base == entry:
+        return True
+    b, e = base.split(os.sep), entry.split(os.sep)  # realpath の後の道筋は絶対で正規化済み（区切りは os.sep だけ）
+    return len(b) == len(e) >= 4 and b[-2:] == e[-2:] == ["skills", "bb-writ"] and b[:-3] == e[:-3]
 
 
 def entry_row(row) -> bool:
