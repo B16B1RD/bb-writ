@@ -288,16 +288,28 @@ class TestWork(unittest.TestCase):
             self.assertEqual({e["key"] for e in got}, {"local:text", "local:null", "local:bool"})
 
     def test_renew_extends_the_lease_even_when_the_op_record_is_broken(self):
-        """ops_after_note は知らせで、関門でない。行の読めない ops.jsonl があっても、renew は 0 で返り、担当の期限を延ばす
-        （renew は欄を出力に使わない。欄のために記録を読んで止めない）。"""
+        """ops_after_note は知らせで、関門でない。行の読めない ops.jsonl でも、権限で読めない ops.jsonl でも、renew は 0 で返り、
+        担当の期限を延ばす（renew は欄を出力に使わない。欄のために記録を読んで止めない）。"""
         rc, a = self.w("claim", "--holder", "A")
-        with open(Path(a["note"]["path"]).parent / "ops.jsonl", "a", encoding="utf-8") as fh:
-            fh.write("{broken\n")
+        ops_file = Path(a["note"]["path"]).parent / "ops.jsonl"
         record = next((Path(self.tmp.name) / "state" / "work").glob("wt-*")) / "lease.json"
-        before = json.loads(record.read_text())["expires_at"]
-        rc, r = self.w("renew", "--token", a["token"], "--lease", "30")  # claim の 20 分より長く延ばす
-        self.assertEqual(rc, 0, r)
-        self.assertGreater(json.loads(record.read_text())["expires_at"], before)
+        for name, lease in (("行が読めない", "30"), ("権限で読めない", "40")):  # 前の段より長く延ばす（claim は 20 分）
+            with self.subTest(name):
+                if name == "権限で読めない" and os.geteuid() == 0:
+                    continue  # root は権限で読めなくならない
+                if name == "行が読めない":
+                    ops_file.write_text("{broken\n", encoding="utf-8")
+                else:
+                    ops_file.write_text(json.dumps({"key": "local:x", "state": "done", "at": time.time(), "result": "x"}) + "\n",
+                                        encoding="utf-8")
+                    ops_file.chmod(0)
+                try:
+                    before = json.loads(record.read_text())["expires_at"]
+                    rc, r = self.w("renew", "--token", a["token"], "--lease", lease)
+                    self.assertEqual(rc, 0, r)
+                    self.assertGreater(json.loads(record.read_text())["expires_at"], before)
+                finally:
+                    ops_file.chmod(0o644)  # 一時の置き場を消せるように戻す
 
     def test_release_frees_the_place(self):
         rc, a = self.w("claim", "--holder", "A")

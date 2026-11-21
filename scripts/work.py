@@ -93,12 +93,14 @@ done になった操作（ops.jsonl の記録。種類を問わない）を ops_
 supervise）の result が「exit <数>:」で始まるときのその数で、それ以外（照合で op done を手で閉じた操作など）は null。result の本文は
 写さない。at を数として読めない done の記録（文字列・null・真偽値）は、比べられないので並べる）。並ぶ操作が無ければ欄ごと無い。並びの順は約束しない。
 欄があれば、本文の今の状態・次の一手は、並んだ操作が終わる前に書かれている（後任が済んだ操作を残件として報告したため。Issue #49）。
-記録（ops.jsonl）か note.md の時刻を読めなければ、欄を出さずに進む（欄は知らせで、関門でない。記録が読めないことは、記録を読む操作
-（claim・status の pending、op、task cleanup の pending）が前から 1 で止めて知らせる。renew と、片付けを終えた後の note を、この欄のために止めない）。
+記録（ops.jsonl）か note.md の時刻を読めなければ、欄を出さずに進む（欄は知らせで、関門でない。renew と、片付けを終えた後の note を、
+この欄のために止めない。記録が読めないことは、claim・status・op・task cleanup が、これまでどおり 1 で止めて知らせる。片付けの途中からの
+task resume は、その記録をほかに読まないので、欄が無いまま返る）。
 守らない範囲: 本文を変えずに mtime だけが進んだ場合（touch・写し直し・別の欄だけの書き足し。引き受けた後に token を書き足す場合も。比べるのは
 記録を書いた時刻だけ）は、古い今の状態が残っていても欄は出ない。時計を戻した場合。at と mtime が同じ値のときにどちらになるか。
-mtime の粒が粗いファイルシステムで、操作の直後に書き足した場合は、書き足した後も、次に書くまで並ぶことがある。監督役の印（by）があるのに
-result が「exit <数>:」で始まらない記録（手で書き換えたもの）の exit。renew の出力（note の path と empty だけ）には足さない。
+mtime の粒が粗いファイルシステムで、操作の直後に書き足した場合は、書き足した後も、次に書くまで並ぶことがある。監督役の印（by）がある記録を
+手で書き換えたときの exit（「exit <数>:」で始まらない形、255 を超える数など）。at が NaN・無限大の記録（並ぶかどうかと、出力の at が
+JSON の規格に無い値になること）。renew の出力（note の path と empty だけ）には足さない。
 期限内に renew しない担当は止まったとみなし、別の担当が claim できる。claim のたびに token が変わるので、
 旧担当の renew・op は拒否される。出力はどれも 1 行の JSON。
 """
@@ -424,7 +426,7 @@ def ops_after_note(r: Path, f: Path) -> list:
         if e.get("state") != "done" or (comparable and at <= written):
             continue
         result = e.get("result")
-        # op_run と同じ見分け方: 監督役が書いた記録（by が supervise）だけから終了コードを読む（手で閉じた記録の文は終了コードでない）
+        # 監督役が書いた記録（by が supervise）だけから終了コードを読む（手で閉じた記録の文は終了コードでない）
         m = re.match(r"exit ([0-9]{1,3}):", result) if isinstance(result, str) and e.get("by") == "supervise" else None
         rows.append({"key": e["key"], "what": e.get("what"), "exit": int(m.group(1)) if m else None, "at": at})
     return rows
@@ -441,8 +443,8 @@ def note(r: Path) -> dict:
     try:
         after = ops_after_note(r, f)
     except (RecordError, OSError):
-        # この欄は知らせで、関門でない。記録（ops.jsonl）が読めないことは、記録を読む操作（claim・status の pending、op、
-        # task cleanup の pending）が前から 1 で止めて知らせる。renew と、片付けを終えた後の note を、この欄のために止めない
+        # この欄は知らせで、関門でない。renew と、片付けを終えた後の note を、この欄のために止めない。記録（ops.jsonl）が読めないことは、
+        # claim・status・op・task cleanup が、これまでどおり 1 で止めて知らせる。片付けの途中からの task resume は、欄が無いまま返る
         after = []
     ev = r / "evidence"
     ev.mkdir(exist_ok=True)
