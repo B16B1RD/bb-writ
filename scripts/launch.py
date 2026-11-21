@@ -23,7 +23,7 @@ push・pr でこれを求める）。依頼文の中身が審査だったかは�
 （work.py が、すべての push・pr で HEAD を対象にしたこの記録を求める）。依頼文の中身が監査だったかは見ない。
 Codex の子は専用ログインに入った bb-writ の写しを読むので、写しが launcher と中身で違えば起動しない（unavailable）。launcher は
 専用ログインのディレクトリの排他の下で写しを比べ、違えば専用ログインの Codex に marketplace の登録を聞き、手元のディレクトリで登録してあり、
-その置き場が launcher 自身の置き場なら、codex plugin add だけを 1 回実行し、その marketplace の写しが在って違わなければ起動する（記録の codex_plugin_add。codex_refresh）。
+その置き場が launcher 自身の置き場なら、codex plugin add だけを 1 回実行し、どの写しも違わず、その marketplace の写しが在れば起動する（記録の codex_plugin_add。codex_refresh）。
 起動のたびに、自分が状態の置き場に作った一時の置き場（読み取り専用の Codex の子の一時ディレクトリ delegations/<名前>/tmp と、
 Grok の子の起動ごとの home grok-homes/<名前>）のうち、もう続きから起動されないものを消す（sweep_leftovers）。消すのは、最後に使われてから
 LEFTOVER_DAYS 日を過ぎたものと、それを指す記録の対象が、どれも、もう無いタスクの作業場所（task cleanup などで消えたもの）であるもの。
@@ -729,7 +729,7 @@ def codex_refresh(a, home: Path) -> str | None:
     なければ入れ直さない → CODEX_HOME=<専用ログイン> codex plugin add bb-writ@<marketplace> を 1 回（remove は実行しない。remove は
     写しと config.toml の [plugins."bb-writ@<marketplace>"] を消し、入れ直すまでプラグインが無い状態になる。add だけで写しは新しい中身に
     置き換わり、古い写しに足した行・写しにだけあるファイル・古い版のディレクトリは残らなかった。2026-11-20・21、0.171.0。GitHub から
-    入れた marketplace の marketplace upgrade は実行しない）→ もう一度比べ、その marketplace の写しが在って違わないときだけ起動する
+    入れた marketplace の marketplace upgrade は実行しない）→ もう一度比べ、どの写しも違わず、その marketplace の写しが在るときだけ起動する
     （写しが無ければ unavailable）→ 排他を放す（どの道筋でも、子を起動する前）。
     比べから入れ直しまでを 1 つの排他の下に置くのは、ほかの launcher の add が写しを改名で置き換えている最中に木を読むと、
     読み損ねて failed になるため。排他そのものは、同時に 2 つの add を流すと、20 回中 4 回、片方が「failed to back up plugin cache

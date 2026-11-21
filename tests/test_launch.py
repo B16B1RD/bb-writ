@@ -4475,8 +4475,9 @@ launch.claude_reads = claude_reads
                     self.assertIn(said, rec["problems"][0])
 
     def test_no_start_when_the_reinstall_leaves_no_copy(self):
-        # add が古い写しを退けた後、新しい写しを置かずに終わると、写しの無い状態が残る（古い写しは plugin-backup-* に残り、手で add する
-        # まで後の起動も同じになる）。add を実行した後は、その marketplace の写しが在って違わないときだけ起動する。ほかの marketplace の
+        # add が古い写しを退けた後、新しい写しを置かずに終わると、写しの無い状態が残る（古い写しは plugin-backup-* に残る。手で add する
+        # まで、後の起動は、写しが無いものとして bb-writ 無しの子を起動する）。add を実行した後は、どの写しも違わず、その marketplace の
+        # 写しが在るときだけ起動する。ほかの marketplace の
         # 同じ中身の写しでは通さない。理由に手で入れ直すコマンドを付けるのは、写しが無いままだと、次の起動からは、最初の比べで写しが
         # 無いものとして、bb-writ 無しの子が起動するため
         def other():
