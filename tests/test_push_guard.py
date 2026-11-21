@@ -577,5 +577,88 @@ class TestPushGuard(unittest.TestCase):
         self.assertTrue(p.stdout.strip(), "指揮者の素の push が通った")
         self.assertEqual(json.loads(p.stdout)["hookSpecificOutput"]["permissionDecision"], "deny")
 
+    # プラグインの更新の後: cache に写したプラグインの置き場は版ごとに変わる（cache/<marketplace>/<plugin>/<版>/）。hook は新しい版の
+    # 置き場から動き、前の版の置き場で始まった指揮者の先頭の行は前の版の置き場を指す（2026-11-22、Claude Code 2.1.330 の実物で、
+    # 親の会話記録に印の無い場面で素の push が通った）。親の会話記録に印は置かず、子の会話記録だけで決まる場面にする
+    def cached_plugin(self, version) -> Path:
+        """<一時>/cache/m/bb-writ/<版> に、push_guard.py の写しを置いたプラグインの置き場を作り、その道筋を返す。"""
+        place = Path(self.tmp.name) / "cache" / "m" / "bb-writ" / version
+        (place / "scripts").mkdir(parents=True, exist_ok=True)
+        (place / "scripts" / "push_guard.py").write_text(GUARD.read_text(encoding="utf-8"), encoding="utf-8")
+        return place
+
+    def hook_decision(self, plugin_root, transcript, agent_id):
+        """hooks.json のコマンドを Claude Code と同じく sh で動かし（置き場は CLAUDE_PLUGIN_ROOT）、子の素の push の判定を返す。"""
+        hooks = json.loads(HOOKS.read_text(encoding="utf-8"))["hooks"]["PreToolUse"][0]["hooks"]
+        stdin = json.dumps({"tool_name": "Bash", "transcript_path": transcript, "agent_id": agent_id, "agent_type": "general-purpose",
+                            "tool_input": {"command": "git push origin main"}})
+        p = subprocess.run(["sh", "-c", hooks[0]["command"]], input=stdin, capture_output=True, text=True, timeout=30,
+                           env={**os.environ, "CLAUDE_PLUGIN_ROOT": str(plugin_root)})
+        self.assertEqual(p.returncode, 0, p.stderr)
+        return json.loads(p.stdout)["hookSpecificOutput"]["permissionDecision"] if p.stdout.strip() else None
+
+    def test_the_hook_denies_a_conductor_started_from_another_version_of_the_plugin(self):
+        hook_root = self.cached_plugin("0.29.1")
+        versions = Path(self.tmp.name) / "cache" / "m" / "bb-writ"
+        t = self.parent()
+        self.child("s1", "v1", entry_first_row(versions / "0.29.0" / "skills" / "bb-writ"), CONTINUED)
+        self.child("s1", "v2", entry_first_row(versions / "1a2b3c4d5e6f" / "skills" / "bb-writ"), CONTINUED)
+        self.child("s1", "v3", entry_first_row(versions / "0.29.0" / "skills" / "bb-writ", blocks=True), CONTINUED)
+        message = "前の版の置き場で始まった指揮者の素の push が通った"
+        with self.subTest("前の版の置き場がもう無い（14 日後に消えた後）"):
+            self.assertFalse((versions / "0.29.0").exists())
+            self.assertEqual(self.hook_decision(hook_root, t, "v1"), "deny", message)
+        with self.subTest("版の形でない名前の置き場（commit の SHA の 12 桁）"):
+            self.assertEqual(self.hook_decision(hook_root, t, "v2"), "deny", message)
+        with self.subTest("先頭の行が text のブロック"):
+            self.assertEqual(self.hook_decision(hook_root, t, "v3"), "deny", message)
+        (self.cached_plugin("0.29.0") / "skills" / "bb-writ").mkdir(parents=True)
+        with self.subTest("前の版の置き場が在る"):
+            self.assertEqual(self.hook_decision(hook_root, t, "v1"), "deny", message)
+
+    def test_the_hook_compares_another_version_by_real_paths(self):
+        tmp = Path(self.tmp.name)
+        hook_root = self.cached_plugin("0.29.1")
+        (tmp / "link").symlink_to(tmp / "cache", target_is_directory=True)
+        t = self.parent()
+        self.child("s1", "l1", entry_first_row(tmp / "link" / "m" / "bb-writ" / "0.29.0" / "skills" / "bb-writ"))
+        self.child("s1", "l2", entry_first_row(tmp / "cache" / "m" / "bb-writ" / "0.29.0" / "skills" / "bb-writ"))
+        for name, root, aid in (("先頭の行の道筋が symlink 越し", hook_root, "l1"),
+                                ("hook の置き場が symlink 越し", tmp / "link" / "m" / "bb-writ" / "0.29.1", "l2")):
+            with self.subTest(name):
+                self.assertEqual(self.hook_decision(root, t, aid), "deny", "symlink 越しの前の版の置き場の指揮者の素の push が通った")
+
+    def test_the_hook_denies_a_descendant_of_a_conductor_started_from_another_version(self):
+        hook_root = self.cached_plugin("0.29.1")
+        t = self.parent()
+        self.child("s1", CONDUCTOR, entry_first_row(Path(self.tmp.name) / "cache" / "m" / "bb-writ" / "0.29.0" / "skills" / "bb-writ"))
+        self.child("s1", "b0000000000000001", CONTINUED, parent_id=CONDUCTOR)
+        self.assertEqual(self.hook_decision(hook_root, t, "b0000000000000001"), "deny",
+                         "前の版の置き場で始まった指揮者が立てた孫の素の push が通った")
+
+    def test_the_hook_passes_children_of_places_that_are_not_another_version_of_the_plugin(self):
+        cache = Path(self.tmp.name) / "cache"
+        hook_root = self.cached_plugin("0.29.1")
+        earlier = cache / "m" / "bb-writ" / "0.29.0"
+        t = self.parent()
+        cases = (("別の marketplace の下", cache / "m2" / "bb-writ" / "0.29.0" / "skills" / "bb-writ"),
+                 ("別のプラグインの名前の下", cache / "m" / "other" / "0.29.0" / "skills" / "bb-writ"),
+                 ("前の版の本体の置き場（skills/conduct）", earlier / "skills" / "conduct"),
+                 ("前の版の skills/bb-writ-x", earlier / "skills" / "bb-writ-x"),
+                 ("前の版の skills/bb-writ/refs", earlier / "skills" / "bb-writ" / "refs"),
+                 ("前の版の skills の外の bb-writ", earlier / "bb-writ"),
+                 ("1 段深い置き場", earlier / "x" / "skills" / "bb-writ"),
+                 ("版の親の skills/bb-writ", cache / "m" / "bb-writ" / "skills" / "bb-writ"),
+                 ("親の名前に続きのある隣", cache / "m" / "bb-writ-x" / "0.29.0" / "skills" / "bb-writ"))
+        for i, (name, base) in enumerate(cases):
+            self.child("s1", f"n{i}", entry_first_row(base), CONTINUED)
+            with self.subTest(name):
+                self.assertIsNone(self.hook_decision(hook_root, t, f"n{i}"), "入口の版の兄弟でない置き場の子の push を止めた")
+        # 対照: 同じ hook の置き場で、その置き場の skills/bb-writ で始まった指揮者は止める（hook が動いて比べている）
+        self.child("s1", CONDUCTOR, entry_first_row(hook_root / "skills" / "bb-writ"))
+        with self.subTest("対照: hook の置き場の skills/bb-writ"):
+            self.assertEqual(self.hook_decision(hook_root, t, CONDUCTOR), "deny", "hook の置き場の指揮者の素の push が通った")
+
+
 if __name__ == "__main__":
     unittest.main()

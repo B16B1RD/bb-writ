@@ -20,7 +20,10 @@ Claude Code 2.1.329）。非対話で --input-format stream-json に本文をブ
 そこで、子の Bash の呼び出し（hook の入力に agent_id が在る。親の Bash には無い。agent_type は general-purpose で、入口の子と
 見分けられない）では、子の会話記録も見る（entry_child）。入口の子の会話記録の先頭の行は、入口のスキルの本文を読み込んだ行
 （content が「Base directory for this skill: <プラグインの置き場>/skills/bb-writ」で始まる）。孫（指揮者が Agent ツールで立てた子）は、
-同じ置き場の meta.json の parentAgentId でたどる。
+同じ置き場の meta.json の parentAgentId でたどる。cache に写すプラグインの置き場は版ごとに変わり（公式の文書）、更新の後に、前の版の
+置き場で始まった指揮者の素の push が、親の会話記録に印の無い場面で通った（2026-11-22、Claude Code 2.1.330、1 回。同じ入力を
+前の版の置き場の push_guard.py に流すと拒否した）ので、先頭の行の置き場は、hook の置き場と同じ場所か、同じ親の下の別の置き場
+（版の兄弟）なら同じ入口と数える（same_entry）。
 """
 import glob
 import json
@@ -59,7 +62,7 @@ AGENT_ID = re.compile(r"[A-Za-z0-9_-]{1,64}")  # 置き場の探し方にその�
 # （約 26 万字を超える依頼で、262,144 字の上限では行が切れて読めなかった）。上限を超える行は、JSON として読めず、当たらなかったものとして通す
 FIRST_ROW_LIMIT = 16777216
 BASE_HEAD = "Base directory for this skill: "
-ENTRY_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "skills", "bb-writ")  # このプラグインの入口
+ENTRY_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "skills", "bb-writ")  # この置き場の入口（same_entry）
 ANCESTOR_LIMIT = 8  # parentAgentId をたどる段の数
 
 # 区切り（コマンドの境目）。( ) と ` と $( は文脈の出入りとして別に扱う
@@ -356,14 +359,35 @@ def first_row(path: str):
         return json.loads(f.readline(FIRST_ROW_LIMIT))
 
 
+def same_entry(base: str, entry: str) -> bool:
+    """先頭の行の道筋 base が、hook の置き場の入口 entry（<親>/<名前>/skills/bb-writ）と同じ入口か。同じ場所か、同じ親の下の別の
+    置き場（版の兄弟）の skills/bb-writ（<親>/<別の名前>/skills/bb-writ）なら同じ入口と数える。どちらも実体の道筋に直し、道筋の部品で
+    比べる（違ってよいのは <名前> の 1 段だけ。文字列の前方一致では比べない）。兄弟の置き場が在るかと、名前の形（版の文字列か）は見ない。
+
+    公式の文書（plugins/loading の「Find plugins on disk」「Cleanup of previous versions」）は、cache に写すプラグインの置き場が版ごとに
+    変わり（cache/<marketplace>/<plugin>/<版>/）、更新すると前の版の置き場に .orphaned_at を置いて、14 日後の片付けで消すと書く。
+    2026-11-22、Claude Code 2.1.330、1 回: Git の URL の marketplace から入れた 0.29.0 で指揮者を終わらせ、0.29.1 に claude plugin update で
+    上げると、前の版の置き場に .orphaned_at が置かれた（消えることは見ていない）。再開して、前の指揮者に素の push を頼み、待っている間に
+    親で /clear を打つと、push が通った。push の時点で入れてあるプラグインの置き場（installed_plugins.json の installPath）は 0.29.1 の
+    もので、親の会話記録に入口の印は無く、指揮者の先頭の行の置き場は 0.29.0 の置き場だった。同じ入力を 0.29.1 の置き場の
+    push_guard.py に流すと通し、0.29.0 の置き場のものに流すと拒否した。手元のディレクトリの marketplace から入れた形では、
+    claude plugin list の Read from: と指揮者の先頭の行の置き場が marketplace の置き場で、版を上げて claude plugin update した後も
+    Read from: は同じ置き場だった（同日、1 回。その後に指揮者を立てて先頭の行を見ることはしていない）。
+    誤って数える形: hook の置き場の隣に置いた別の置き場（版でない写しなど）の skills/bb-writ を読み込んだ子も、同じ入口と数える。"""
+    base, entry = os.path.realpath(base), os.path.realpath(entry)
+    if base == entry:
+        return True
+    b, e = base.split(os.sep), entry.split(os.sep)  # realpath の後の道筋は絶対で正規化済み（区切りは os.sep だけ）
+    return len(b) == len(e) >= 4 and b[-2:] == e[-2:] == ["skills", "bb-writ"] and b[:-3] == e[:-3]
+
+
 def entry_row(row) -> bool:
     """行が、このプラグインの入口のスキルの本文を読み込んだ行か（content の文が Base directory … で始まり、その 1 行目の道筋が
-    このプラグインの skills/bb-writ と同じ場所。どちらも実体の道筋で比べる）。"""
+    このプラグインの skills/bb-writ と同じ入口。比べ方は same_entry）。"""
     content = row["message"]["content"]
     texts = [content] if isinstance(content, str) else [b.get("text") for b in content if b.get("type") == "text"]
-    entry = os.path.realpath(ENTRY_DIR)
     return any(isinstance(t, str) and t.startswith(BASE_HEAD)
-               and os.path.realpath(t[len(BASE_HEAD):].split("\n", 1)[0]) == entry for t in texts)
+               and same_entry(t[len(BASE_HEAD):].split("\n", 1)[0], ENTRY_DIR) for t in texts)
 
 
 def entry_child(transcript_path, agent_id) -> bool:
