@@ -1821,9 +1821,12 @@ class TestLaunch(unittest.TestCase):
     def test_only_claude_write_children_are_told_about_the_sandbox_marks(self):
         # Claude Code の書く子の中では、sandbox が書き込みを拒むために置く印（作業場所の直下の、子が作っていないドットの項目）が
         # git status に出て、git add -A が 128 で落ちた。launcher は Claude Code の書く子にだけ（続きでも）、印に触らず報告に数えないことと、
-        # 名前を挙げて足すことを約束に足す。句は定数を通さずに書く（定数と比べると、文面を空にしても通る）
-        phrases = ("Claude Code の sandbox が書き込みを拒むために置く印", "触らず、報告に数えない",
-                   "`git add -A`・`git add .` を使わず、変えたファイルの名前を挙げる")
+        # 名前を挙げて足すことを約束に足す。全文を定数を通さずに書き、依頼文がその全文で終わることを見る（定数と比べると、文面を空にしても
+        # 通る。文面は実物の子で測ってあるので、変えるなら、実物の子で測り直してからここも変える）
+        contract = ("Linux・WSL2 では、作業場所の直下に、自分が作っていないドットの項目（`.bashrc`・`.gitconfig`・`.claude/` の下など。"
+                    "`ls -l` の先頭が `c` で、開けない）が見えることがある。Claude Code の sandbox が書き込みを拒むために置く印で、"
+                    "sandbox が後で片付ける。触らず、報告に数えない。変更を足すときは `git add -A`・`git add .` を使わず、"
+                    "変えたファイルの名前を挙げる（印は Git に足せないので、どちらも落ちる）。\n")
 
         def given(host):  # 偽の CLI に渡った依頼文（Codex は最後の引数、Claude Code・Grok Build は -p の次）
             argv = json.loads(self.args_file.read_text())
@@ -1837,9 +1840,9 @@ class TestLaunch(unittest.TestCase):
         rc, again = self.run_launch(None, extra=["--resume", rec["out"]])
         self.assertEqual((rc, again["status"], again["write"]), (0, "ok", True), again)
         for launch, prompt in (("最初の起動", first), ("続き（--resume）", given("claude"))):
-            for phrase in phrases:
-                with self.subTest(child="Claude Code の書く子", launch=launch, phrase=phrase):
-                    self.assertIn(phrase, prompt)
+            with self.subTest(child="Claude Code の書く子", launch=launch):
+                self.assertTrue(prompt.endswith(contract), "依頼文が約束の文の全文で終わらない: " + prompt[-400:])
+        # ほかの子には、決まった句が無いことだけを見る（別の文面で同じ約束が足されることは見ない）
         self.prompt.write_text("x を確かめて")
         for host, extra, child in (("claude", [], "読み取り専用の Claude Code の子"), ("codex", ["--write"], "Codex の書く子"),
                                    ("grok", ["--write"], "Grok Build の書く子")):
