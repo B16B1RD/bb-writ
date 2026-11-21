@@ -20,10 +20,8 @@ Claude Code 2.1.329）。非対話で --input-format stream-json に本文をブ
 そこで、子の Bash の呼び出し（hook の入力に agent_id が在る。親の Bash には無い。agent_type は general-purpose で、入口の子と
 見分けられない）では、子の会話記録も見る（entry_child）。入口の子の会話記録の先頭の行は、入口のスキルの本文を読み込んだ行
 （content が「Base directory for this skill: <プラグインの置き場>/skills/bb-writ」で始まる）。孫（指揮者が Agent ツールで立てた子）は、
-同じ置き場の meta.json の parentAgentId でたどる。cache に写すプラグインの置き場は版ごとに変わり（公式の文書）、更新の後に、前の版の
-置き場で始まった指揮者の素の push が、親の会話記録に印の無い場面で通った（2026-11-22、Claude Code 2.1.330、1 回。同じ入力を
-前の版の置き場の push_guard.py に流すと拒否した）ので、先頭の行の置き場は、hook の置き場と同じ場所か、同じ親の下の別の置き場
-（版の兄弟）なら同じ入口と数える（same_entry）。
+同じ置き場の meta.json の parentAgentId でたどる。cache に写すプラグインの置き場は更新のたびに変わるので、先頭の行の置き場は、
+hook の置き場と同じ場所か、同じ親の下の別の置き場（版の兄弟）なら同じ入口と数える（same_entry）。
 """
 import glob
 import json
@@ -362,23 +360,17 @@ def first_row(path: str):
 def same_entry(base: str, entry: str) -> bool:
     """先頭の行の道筋 base が、hook の置き場の入口 entry（<親>/<名前>/skills/bb-writ）と同じ入口か。同じ場所か、同じ親の下の別の
     置き場（版の兄弟）の skills/bb-writ（<親>/<別の名前>/skills/bb-writ）なら同じ入口と数える。どちらも実体の道筋に直し、道筋の部品で
-    比べる（違ってよいのは <名前> の 1 段だけ。文字列の前方一致では比べない）。兄弟の置き場が在るかと、名前の形（版の文字列か）は見ない。
+    比べる（違ってよいのは <名前> の 1 段だけ。同じ場所もこれに含まれる。文字列の前方一致では比べない）。置き場が在るかと、名前の形
+    （版の文字列か）は見ない。
 
-    公式の文書（plugins/loading の「Find plugins on disk」「Cleanup of previous versions」）は、cache に写すプラグインの置き場が版ごとに
-    変わり（cache/<marketplace>/<plugin>/<版>/）、更新すると前の版の置き場に .orphaned_at を置いて、14 日後の片付けで消すと書く。
-    2026-11-22、Claude Code 2.1.330、1 回: Git の URL の marketplace から入れた 0.29.0 で指揮者を終わらせ、0.29.1 に claude plugin update で
-    上げると、前の版の置き場に .orphaned_at が置かれた（消えることは見ていない）。再開して、前の指揮者に素の push を頼み、待っている間に
-    親で /clear を打つと、push が通った。push の時点で入れてあるプラグインの置き場（installed_plugins.json の installPath）は 0.29.1 の
-    もので、親の会話記録に入口の印は無く、指揮者の先頭の行の置き場は 0.29.0 の置き場だった。同じ入力を 0.29.1 の置き場の
-    push_guard.py に流すと通し、0.29.0 の置き場のものに流すと拒否した。手元のディレクトリの marketplace から入れた形では、
-    claude plugin list の Read from: と指揮者の先頭の行の置き場が marketplace の置き場で、版を上げて claude plugin update した後も
-    Read from: は同じ置き場だった（同日、1 回。その後に指揮者を立てて先頭の行を見ることはしていない）。
-    誤って数える形: hook の置き場の隣に置いた別の置き場（版でない写しなど）の skills/bb-writ を読み込んだ子も、同じ入口と数える。"""
-    base, entry = os.path.realpath(base), os.path.realpath(entry)
-    if base == entry:
-        return True
-    b, e = base.split(os.sep), entry.split(os.sep)  # realpath の後の道筋は絶対で正規化済み（区切りは os.sep だけ）
-    return len(b) == len(e) >= 4 and b[-2:] == e[-2:] == ["skills", "bb-writ"] and b[:-3] == e[:-3]
+    理由: cache に写すプラグインの置き場は cache/<marketplace>/<plugin>/<版>/ で、更新のたびに変わる（公式の文書 plugins/loading）。
+    前の版の置き場で始まった指揮者の先頭の行は、前の版の置き場を指したまま続く。
+    誤って数える形: hook の置き場と同じ親の下の、別のディレクトリの skills/bb-writ を読み込んだ子も、同じ入口と数える。cache に写す形
+    では、別の版の置き場。置き場からそのまま読む形（--plugin-dir・手元のディレクトリの marketplace）では、置き場の隣のディレクトリ
+    （例: 置き場がホームの直下なら、ホームの .claude/skills/bb-writ）。
+    確かめた結果は AGENTS.md の規則の表の、入口を呼んだセッションの素の push の行に書く。"""
+    b, e = os.path.realpath(base).split(os.sep), os.path.realpath(entry).split(os.sep)  # realpath の後は絶対で正規化済み
+    return b[-2:] == e[-2:] == ["skills", "bb-writ"] and b[:-3] == e[:-3]
 
 
 def entry_row(row) -> bool:

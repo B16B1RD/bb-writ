@@ -578,8 +578,8 @@ class TestPushGuard(unittest.TestCase):
         self.assertEqual(json.loads(p.stdout)["hookSpecificOutput"]["permissionDecision"], "deny")
 
     # プラグインの更新の後: cache に写したプラグインの置き場は版ごとに変わる（cache/<marketplace>/<plugin>/<版>/）。hook は新しい版の
-    # 置き場から動き、前の版の置き場で始まった指揮者の先頭の行は前の版の置き場を指す（2026-11-22、Claude Code 2.1.330 の実物で、
-    # 親の会話記録に印の無い場面で素の push が通った）。親の会話記録に印は置かず、子の会話記録だけで決まる場面にする
+    # 置き場から動き、前の版の置き場で始まった指揮者の先頭の行は前の版の置き場を指す。
+    # 親の会話記録に印は置かず、子の会話記録だけで決まる場面にする
     def cached_plugin(self, version) -> Path:
         """<一時>/cache/m/bb-writ/<版> に、push_guard.py の写しを置いたプラグインの置き場を作り、その道筋を返す。"""
         place = Path(self.tmp.name) / "cache" / "m" / "bb-writ" / version
@@ -647,9 +647,11 @@ class TestPushGuard(unittest.TestCase):
                  ("前の版の skills/bb-writ-x", earlier / "skills" / "bb-writ-x"),
                  ("前の版の skills/bb-writ/refs", earlier / "skills" / "bb-writ" / "refs"),
                  ("前の版の skills の外の bb-writ", earlier / "bb-writ"),
+                 ("前の版の skills でない段の下の bb-writ", earlier / "other" / "bb-writ"),
                  ("1 段深い置き場", earlier / "x" / "skills" / "bb-writ"),
                  ("版の親の skills/bb-writ", cache / "m" / "bb-writ" / "skills" / "bb-writ"),
-                 ("親の名前に続きのある隣", cache / "m" / "bb-writ-x" / "0.29.0" / "skills" / "bb-writ"))
+                 ("親の名前に続きのある隣", cache / "m" / "bb-writ-x" / "0.29.0" / "skills" / "bb-writ"),
+                 ("同じ marketplace とプラグインの名前の、別の根の下の置き場", Path(self.tmp.name) / "cache2" / "m" / "bb-writ" / "0.29.0" / "skills" / "bb-writ"))
         for i, (name, base) in enumerate(cases):
             self.child("s1", f"n{i}", entry_first_row(base), CONTINUED)
             with self.subTest(name):
