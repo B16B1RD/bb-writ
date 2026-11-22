@@ -186,7 +186,7 @@ def readme_headings(text):
 
 
 class TestRulesTable(unittest.TestCase):
-    """AGENTS.md の「規則と強制するもの」の行は、規則の 1 文（経緯は短い括弧 1 つ）と強制するものの名前だけにする。見るのは長さと名前の実在だけ。"""
+    """AGENTS.md の「規則と強制するもの」の行は、短い規則（経緯は括弧で短く）と強制するものの名前だけにする。見るのは行の長さと、名指しした試験の名前の実在だけ。"""
 
     def rows(self):
         text = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
