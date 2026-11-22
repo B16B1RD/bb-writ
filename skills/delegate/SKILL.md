@@ -57,7 +57,7 @@ python3 <launch.py> --resume <前の記録の out> --prompt-file <続きの依�
 
 ### 報告と記録
 
-- 子に、最後に結論・証拠・不明点・実行（`execution`: 対象の試験・検査を最後まで実行できたか `yes`・`no`・`not-needed` と、実行したコマンドと終了コード）の JSON を書かせる。launcher が約束の文を依頼文に足す（読み取り専用の子には、対象に書く試験は `$TMPDIR` に写して動かすこと。監査役には `playbook-verify` の「返す前の判定」の項目をすべて判定すること。Claude Code の書く子には、sandbox の印に触らず、`git add -A`・`git add .` を使わず、変えたファイルの名前を挙げて足すこと）。
+- 子に、最後に結論・証拠・不明点・実行（`execution`: 対象の試験・検査を最後まで実行できたか `yes`・`no`・`not-needed` と、実行したコマンドと終了コード）の JSON を書かせる。launcher が約束の文を依頼文に足す（読み取り専用の子には、対象に書く試験は `mktemp -d` で新しく作ったディレクトリ（`$TMPDIR` の下）に写して動かすこと。監査役には `playbook-verify` の「返す前の判定」の項目をすべて判定すること。Claude Code の書く子には、sandbox の印に触らず、`git add -A`・`git add .` を使わず、変えたファイルの名前を挙げて足すこと）。
 - 報告を使うのは、標準出力の 1 行の JSON の `status` が `ok` のときと、`not-run`（読み取り専用の子で、実行の欄が無いか `no`）を読んだだけの報告として使うときだけ（実行が要る審査での数え方は `interrogate` の 3。`no` と書いた子の記録は、`work.py` の `--not-run` の宣言があれば push・pr の関門に数えられ、記録の `next` がそれを示す）。書く子の実行の欄は記録に残るだけで、`status` を変えない。`invalid-report`・`timeout`・`failed`・`quota`・`unavailable` は理由（`problems`）を記録して扱う。JSON が返ったことを成功にしない。
 - `home_residue`・`cwd_residue` で `failed` になったら、並んだ場所を確かめてから消す（launcher は消さない。0 バイトのファイルは `git add -A` で commit に入りうる）。
 - Claude Code の子の記録の `claude_login` に `note` が在れば（専用ログインのトークンが、launcher を呼んだ環境のログインと別の組織のときと、組織を読む問い合わせが終了コード 0 で終わったのに読めなかったとき。理由 `why` だけの `unknown` には付かない）、子の `status` によらず、同じ仕事の返答に 1 回、利用者に伝える（子を立てるたびに繰り返さない。子が `quota` で返ったときは、当たった枠はトークンのアカウントのもの）。`note` が無ければ伝えない。launcher はどの結果でも起動を止めない。
