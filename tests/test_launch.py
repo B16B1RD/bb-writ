@@ -1424,7 +1424,7 @@ class TestLaunch(unittest.TestCase):
                          "（試験が退行を見つけて落ちたのも yes）。no は実行できなかったか途中で止まった。試験が環境・権限で止まった（一時ディレクトリを作れない、"
                          "Read-only file system、Permission denied、コマンドが無い）なら、試験のコマンドの終了コードに関わらず no。not-needed はこの依頼に"
                          "実行が要らない。commands には実行したコマンドと終了コードを書く（yes なら 1 つ以上）。\n",
-                         "対象に書く試験・検査は、書ける一時ディレクトリ（$TMPDIR。無ければ /tmp）に対象を写して（cp -r など）、そこで動かす。"):
+                         "対象に書く試験・検査は、`mktemp -d` で新しく作ったディレクトリ（$TMPDIR の下。無ければ /tmp の下）に対象を写して（cp -r など）、そこで動かす。決まった名前や pid だけの名前の場所に写さない（並行する子と $TMPDIR も pid も同じことがある）。"):
             self.assertIn(sentence, argv[-1])
         # 権限を変える設定は、この 3 つだけ（sandbox_mode・-s を足すと profile より優先され、別の書ける場所を足すと広がる）
         conf = [argv[i + 1] for i, x in enumerate(argv) if x in ("-c", "--config") and not argv[i + 1].startswith("model_reasoning_effort")]
