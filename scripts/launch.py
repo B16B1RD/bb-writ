@@ -857,8 +857,8 @@ def claude_login(cfg: Path) -> dict:
     専用ログインの利用者設定の hook・プラグインを読ませない）、ANTHROPIC_LOG=debug で出る SDK の debug の記録から、ヘッダ
     anthropic-organization-id の値を読む。値が 1 種類なら、それを組織として覚える。終了コードが 0 でなくても、1 種類読めれば使う。
     0 種類・2 種類以上は unknown で覚えない（次の起動でまた問い合わせる）。そのうち、問い合わせが終了コード 0 で終わったのに読めない
-    とき（終わり方は終了コードだけで決め、結果の JSON の is_error は見ない）だけ、確かめが働いていないことを note で案内する。覚えは、モード 0600 で作って直に書く（一時ファイルは作らない。前から在るファイルの
-    モードは変えない。途中で切れた書き込みと、同時の書き込みが混ざったものは、壊れた覚えとして次の起動で問い合わせ直す）。
+    とき（終わり方は終了コードだけで決め、結果の JSON の is_error は見ない）だけ、確かめが働いていないことを note で案内する。覚えは、モード 0600 で作って直に書く（一時ファイルは作らない。
+    途中で切れた書き込みと、同時の書き込みが混ざったものは、壊れた覚えとして次の起動で問い合わせ直す）。
     記録・ファイルに、組織の ID・問い合わせの出力を書かない。
     守らない範囲: 比べるのは組織で、同じ組織の中の別の人のトークンは見分けない。書式は Claude Code 2.1.330 で確かめたもので
     （SDK の文書は、debug の記録の書式は版で変わりうるとする）、読めなければ unknown。別アカウントのトークンで、ヘッダの値が実際に
@@ -910,7 +910,7 @@ def claude_login(cfg: Path) -> dict:
                 return {"org": "unknown", "why": f"専用ログインの問い合わせの出力に、組織のヘッダ anthropic-organization-id の値が {len(found)} 種類（{result}）",
                         **({"note": CLAUDE_LOGIN_UNREAD_NOTE} if code == 0 else {})}
             token_org = digest(found.pop().encode())
-            try:  # モード 0600 で作る（前から在るファイルのモードは変わらない）
+            try:  # モード 0600 で作る
                 with os.fdopen(os.open(cache, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w", encoding="utf-8") as f:
                     json.dump({"env": env_sum, "org": token_org}, f)
             except OSError as e:  # 覚えられなくても、結果は使う（次の起動でまた問い合わせる）

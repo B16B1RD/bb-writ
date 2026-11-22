@@ -980,7 +980,7 @@ class TestLaunch(unittest.TestCase):
                 self.assertEqual(rec["stopped_by_signal"], int(sig), rec)
                 self.assertTrue(rec["resumable"], rec)
                 # 子に TERM が届いて止まった（終了コードは、TERM が届いた時機で変わる）。伝えなければ、偽の子は 60 秒眠ってから終了コード 0 で終わる
-                self.assertNotEqual(rec["exit_code"], 0, rec)
+                self.assertNotEqual(rec["exit_code"], 0, f"子にシグナルが伝わらず、偽の子が最後まで眠って終了コード 0 で終わった: {rec}")
                 self.assertLess(time.monotonic() - t0, 30, rec)
 
     @unittest.skipUnless(sys.platform.startswith("linux"), "子を刈らずに待つのは Linux だけ")
@@ -4418,7 +4418,7 @@ launch.claude_reads = claude_reads
             launch.run_bounded = boom
             """
         rc, rec = self.launch_patched(patch, ["--host", "claude", "--cwd", str(self.cwd)])
-        self.assertEqual((rc, rec["status"], rec["claude_login"]["org"]), (0, "ok", "unknown"), rec)
+        self.assertEqual((rc, rec["status"], rec.get("claude_login", {}).get("org")), (0, "ok", "unknown"), rec)  # 例外を受けないと、起動の前の準備の失敗になり、欄も無い
         self.assertIn("FileNotFoundError", rec["claude_login"]["why"])
         self.assertNotIn("Leakmarkerzq", json.dumps(rec, ensure_ascii=False))
         self.assertTrue(self.args_file.exists())
