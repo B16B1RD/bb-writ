@@ -55,7 +55,7 @@ from work import root as work_record  # noqa: E402  作業場所ごとの記録�
 
 # 親が --model・--effort を省いたときの、役割ごとのモデルと effort（親が渡せば、それが勝つ）。表に無い組み合わせは --model と --effort を渡す。
 # 最も難しい依頼（設計、大きな移行・リファクタリング、長い無人実行）を任せる書く子（--hardest）は最上段。
-# Haiku は報告の形を守れないことが多いので入れない。Claude の審査役は Fable medium（欠陥のある変更で比べ、Opus high より多くを挙げた）。
+# Haiku は報告の形を守れないことが多いので入れない。Claude の審査役は Fable medium（欠陥のある変更 3 つを各 2 回審査させ、Opus high より多くを挙げた。揺れは測っていない）。
 # 監査役は Opus high（Opus medium は見落とした）。Claude の書く子は Opus high（指揮者は fork した Fable で、成果物は書く子が書く）。
 CHOICES = {
     "audit": {"claude": ("opus", "high"), "codex": ("gpt-6-sol", "medium"), "grok": ("grok-4.7", "medium")},
@@ -1565,10 +1565,11 @@ def sweep_leftovers(now: float, out: dict) -> None:
     記録を読み直して決め直してから消す。記録の行を書き換えると、使っていない置き場を早く消させることはできる（報告と記録は残る）。
     守る相手は、記録の値、子が自分の置き場の中に残すもの、片付けの前からある状態の置き場の形（symlink の置き場など）。
     守らない範囲: 片付けや起動と同時に、sandbox の外の同じ利用者のプロセスが状態の置き場の中の名前を付け替える場合（付け替えた先を
-    消しうる。読み取り専用の Codex・Grok の子からは付け替えられない）。状態の置き場を、子の sandbox が書ける場所（/tmp など）の下に
+    消しうる。読み取り専用の Codex・Grok の子は、置き場の改名と、親・親の親の中への作成に失敗した。親そのものの改名は確かめていない）。状態の置き場を、子の sandbox が書ける場所（/tmp など）の下に
     置いた場合。タイムゾーンの変更と夏時間の戻りによる、名前の日時のずれ。
     途中で止まって半分になった置き場は、記録が launcher の書いたものだけで、時計が戻らず、作業場所が同じ道筋に作り直されない間は
-    対象のままで、その記録からの続きは拒否される（順序と途中の kill は tests/test_sweep_model.py が、この範囲で全部たどる）。
+    対象のままで、その記録からの続きは拒否される（順序と途中の kill は tests/test_sweep_model.py が、この範囲で全部たどる）。その外（偽の行・
+    時計の巻き戻し・作業場所の作り直し）では、半分の置き場が対象でなくなり、続きの子が写しの一部を失ったまま始まることがある。
     報告と記録（out の record.json・report.md、delegations.jsonl）は消さない。作っていない置き場（resuming/ の空のファイルなど）にも触れない。
     """
     base = state_dir()

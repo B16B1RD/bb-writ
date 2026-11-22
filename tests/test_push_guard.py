@@ -4,7 +4,7 @@
 git push の試すだけの指定は完全一致で比べる（短い引数をまとめた -nq・-nv の dry-run は、試すだけと読まずに止める。
 誤って止める所）。
 語に続く << の前で語を切ることは、崩れた入力でしか差が出ないので例を置かない。
-誤って止める書き方は、OUTWARD の注釈に「誤って止める」と書いた例。"""
+守らない範囲（通す書き方・誤って止める書き方）は scripts/push_guard.py の module の docstring。"""
 import json
 import os
 import subprocess

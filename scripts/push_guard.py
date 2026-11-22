@@ -12,7 +12,7 @@ op run の中の git push は、op run が Bash を通さずに起こすので�
 
 コマンドの読み方は、普段の書き方（連結、複数行の引用符、"$(cat <<'EOF' …)" の中の heredoc、前置きの代入と包むコマンド）を
 bash と同じに読む所までにする。それより珍しい書き方（別の語に包む sh -c・eval・xargs、変数に入れたコマンド名、別名・関数）は
-読まない（AGENTS.md の規則の表に、守らない範囲として書く）。
+読まない（下の「守らない範囲」）。
 
 入口は別の子（指揮者）として動くので、親の会話記録の印だけでは、次の 2 つの場面で指揮者の素の push が通った（2026-11-20、
 Claude Code 2.1.329）。非対話で --input-format stream-json に本文をブロックの並びで渡して入口を呼ぶと、入力を受け付けた行に本文が
@@ -22,6 +22,25 @@ Claude Code 2.1.329）。非対話で --input-format stream-json に本文をブ
 （content が「Base directory for this skill: <プラグインの置き場>/skills/bb-writ」で始まる）。孫（指揮者が Agent ツールで立てた子）は、
 同じ置き場の meta.json の parentAgentId でたどる。cache に写すプラグインの置き場は更新のたびに変わるので、先頭の行の置き場は、
 hook の置き場と同じ場所か、同じ親の下の別の置き場（版の兄弟）なら同じ入口と数える（same_entry）。
+
+守らない範囲（守るのは、上の読み方と前置きで書いた普段の書き方だけ。判定できなければ通し、このスクリプトを読めなければ hook も 0 で終わる）:
+- 通す書き方: 別の語に包む（sh -c '…'・eval・xargs・trap・coproc・find -exec・| sh・env -S "git push"）、前置きの一覧に無い包むコマンド
+  （flock・ionice・パスで書いた /usr/bin/env）、置き換えや変数で作ったコマンド名（$(echo git) push・x=git; $x push）、別名・関数・
+  スクリプト・git -c alias.…・{git,push}・git.exe、gh の組み込みの別名（gh pr new）、外へ出すほかの道具（gh api・git subtree・
+  git lfs の push・gh repo create --push）、まれな bash の構文（heredoc の終わりの EOF)"、語に続けた <<<、$'…'、((… << …))、git と
+  副コマンドの間の &>、二重引用符の中の $( ) の case の分岐、heredoc の本文や ${…}・$((…)) の中の展開）、Python の再帰の上限を超える
+  置き換えの入れ子。
+- 誤って止める書き方: 配列の代入（a=(git push)）、関数の定義（f() { git push; }）、env -S x git push、git --version push・
+  git --exec-path /x push・git --super-prefix p push・command -v git push、gh pr create -h、副コマンドの前の gh --help、まとめた
+  短い引数の dry-run（git push -nq）。
+- 指揮者を見分けずに通す形: プラグインの置き場の道筋に改行が在る、子の会話記録の名前のものが FIFO（hook が時間の上限で終わる）、
+  孫の meta.json が無い、hook の置き場と親の違う置き場で始まった指揮者（marketplace や入れ方を替えた後）、入口の skills/bb-writ 自体が
+  symlink の置き場で、別の版の置き場で始まった指揮者、前の版の hook を使い続けるセッションで、その版の置き場が片付けで消えた後。
+- 指揮者と誤って数える形: 入口と関係のない子の先頭の行が、このプラグインの入口の置き場の文で始まる、過去の指揮者と同じ agent_id が
+  関係のない子に付く、hook の置き場と同じ親の下の別のディレクトリの skills/bb-writ を読み込んだ子（same_entry）、先頭の行の道筋が
+  空か相対で、hook の作業ディレクトリから解くと入口の置き場か、その隣の skills/bb-writ になる。
+- 入口を呼ばないセッションは止めない。書き手の本文や道具の結果、ほかのスラッシュの引数に写った印は、入口を呼んだ印と数えない。
+  Codex と Grok Build では止めない（入口の文だけ）。macOS の実物は確かめていない。
 """
 import glob
 import json
@@ -369,7 +388,7 @@ def same_entry(base: str, entry: str) -> bool:
     誤って数える形: hook の置き場と同じ親の下の、別のディレクトリの skills/bb-writ を読み込んだ子も、同じ入口と数える。cache に写す形
     では、別の版の置き場。置き場からそのまま読む形（--plugin-dir・手元のディレクトリの marketplace）では、置き場の隣のディレクトリ
     （例: 置き場がホームの直下なら、ホームの .claude/skills/bb-writ）。
-    確かめた結果は AGENTS.md の規則の表の、入口を呼んだセッションの素の push の行に書く。"""
+    守らない範囲は module の docstring。"""
     base, entry = os.path.realpath(base), os.path.realpath(entry)
     if base == entry:
         return True

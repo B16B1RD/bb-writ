@@ -30,9 +30,9 @@ python3 <launch.py> --resume <前の記録の out> --prompt-file <続きの依�
 
 - 既定は読み取り専用。変更を任せるときだけ `--write`。`interrogate` の審査役には `--interrogate` を付ける（記録の `interrogate` が真になり、危険度が中・高の push・pr でこの記録が要る。`playbook-deliver`）。入口の条件 (5) の子と、返す前の判定の子には付けない。返す前の判定の子（遵守の監査役、`playbook-verify`）には `--audit` を付ける（すべての push・pr で、HEAD を対象に `ok` で返ったこの記録が要る。`--not-run` の宣言があれば、実行の欄に `no` と書いた `not-run` も数える）。監査役は審査役に数えない。
 - 依頼文は out の `prompt.md` に伏せ字なしで残るので、認証情報を書かない。Claude Code の監査役は、その場所の作業の記録・その場所を `--cwd` にした子の out・bb-writ のスキルを読める。ほかの読み取り専用の子と、Codex・Grok の監査役は読めない（確かめていない）ので、要るものは中身を依頼文に写す。
-- 読み取り専用の子は、ホームの認証情報の置き場を読めない（Claude Code はホームを丸ごと拒んで道具の置き場と対象を戻し、Codex・Grok は一覧で拒む）。書ける場所は、Codex は起動ごとの一時ディレクトリ（`$TMPDIR`、記録の `scratch`）、Grok は `/tmp` などと自分の home だけ。ネットワークは止まる（Codex・Claude Code）。道具が拒んだ置き場の下や symlink の先にあると、子の試験は動かず `not-run` になる。対象がホームそのもの・ホームを含む場所・認証情報の置き場なら、起動しない（`unavailable`）。状態の置き場が対象の下か Git の管理ディレクトリの中なら、引数の誤りで止まる（終了コード 2。ホームを Git で管理しているなら、`BB_WRIT_STATE_DIR` を対象の外に移す）。守らない範囲（一覧に無い認証情報、WSL2 の Windows 側のホーム、PATH の `bin` の親にある別のリポジトリ、書く子、macOS）は `claude_reads`・`read_only_secrets` の docstring。実機の確認は `python3 -B tests/verify_sandbox_live.py --out <新しい証拠ディレクトリ>`（Codex だけなら `--only codex-read-only`）。
+- 読み取り専用の子は、ホームの認証情報の置き場を読めない（Claude Code はホームを丸ごと拒んで道具の置き場と対象を戻し、Codex・Grok は一覧で拒む）。書ける場所は、Codex は起動ごとの一時ディレクトリ（`$TMPDIR`、記録の `scratch`）、Grok は `/tmp` などと自分の home だけ。ネットワークは止まる（Codex・Claude Code）。道具が拒んだ置き場の下や symlink の先にあると、子の試験は動かず `not-run` になる。Claude Code の子は、対象がホームそのもの・ホームを含む場所・認証情報の置き場なら起動しない（`unavailable`）。状態の置き場が対象の下か Git の管理ディレクトリの中なら、引数の誤りで止まる（終了コード 2。ホームを Git で管理しているなら、`BB_WRIT_STATE_DIR` を対象の外に移す）。守らない範囲（一覧に無い認証情報、WSL2 の Windows 側のホーム、PATH の `bin` の親にある別のリポジトリなど）は `claude_reads`・`read_only_secrets` の docstring。書く子（Codex・Grok）にはこの拒否を渡しておらず、macOS では確かめていない。実機の確認は `python3 -B tests/verify_sandbox_live.py --out <新しい証拠ディレクトリ>`（Codex だけなら `--only codex-read-only`）。
 - 書く委任で子に渡すのは、対象（作業場所）と、その作業場所の記録（`work.py` の `claim`・`status` が返す `note.path` の置き場）だけ。タスクの一覧・統合の記録・ほかの worktree は親だけが書く。元の checkout とその下では、書く子を起動しない（`unavailable`）。launcher は書く子の前後で、自分のブランチ以外の ref と Git の設定・hooks などを比べ、変わっていれば `failed` にする。`failed` の作業場所では、問題に出た場所を確かめるまで git を動かさない（偽の設定が sandbox の外で動きうる）。動いた ref には前後の値と戻すコマンドが出る。launcher は自動では戻さない。
-- launcher の子にブラウザを動かさせない（sandbox で Chrome が動かない。sandbox を広げて通さない）。ブラウザの確かめは親が動かし、画像・DOM・操作のログを `note.evidence_dir` の下の新しいディレクトリに置く。子には、そのディレクトリを `--cwd` にして読み取り専用で起動し、判定だけを頼む。この起動は `head` が `null` なので `--reviewed` に数えない。審査役の報告とは別に、親が動かしたことと、その子の判定を返答の 3 に書く。
+- launcher の子にブラウザを動かさせない（sandbox で Chrome が動かない。sandbox を広げて通さない）。ブラウザの確かめは親が動かし、画像・DOM・操作のログを `note.evidence_dir` の下の新しいディレクトリに置く。子には、そのディレクトリを `--cwd` にして読み取り専用で起動し、判定だけを頼む。この起動は `head` が `null` なので `--reviewed` に数えない。審査役の報告とは別に、親が動かしたことと、その子の判定を返答の 3 に書く。追加の操作が要れば、子に手順を報告させ、親が読んで依頼の範囲に収まるものだけを動かして、結果を渡す。
 
 ### 待ち方と止め方
 
@@ -44,13 +44,14 @@ python3 <launch.py> --resume <前の記録の out> --prompt-file <続きの依�
 ### 時間切れと続き
 
 - 時間切れ（`--timeout` 秒。既定 1800、`--hardest` の書く子は 3600）の子には、TERM を送って片付けを 30 秒まで待ち、終わらなければ KILL する。`status` は `timeout` になり、記録に `session` が残る。
-- `--timeout` は、launcher を呼ぶコマンドの時間の上限より 2 分以上短くする（片付けと照合に数十秒かかる。Codex の写しの入れ直しと、Claude Code の専用ログインの確かめは、起動の前にそれぞれ最大 2 分かかることがあり、`--timeout` に数えないので、その分も空ける）。上限のあるコマンドで起動するときは `--out <まだ無いディレクトリ>` で記録の置き場を先に決める。
+- `--timeout` は、launcher を呼ぶコマンドの時間の上限より 2 分以上短くする（片付けと照合に数十秒かかる。Codex の写しの入れ直しと、Claude Code の専用ログインの確かめは、起動の前にそれぞれ最大 2 分かかることがあり、`--timeout` に数えないので、その分も空ける。Codex では、ほかの launcher の入れ直しを待つ時間も加わり、その待ちに上限は無い）。上限のあるコマンドで起動するときは `--out <まだ無いディレクトリ>` で記録の置き場を先に決める。
 - 最初から起動し直さず、`--resume <その記録の out>` で続ける（止めた時点の作業は子の会話記録に残っている）。続きの依頼文は「時間切れで止められた。止められたコマンドだけをやり直し、続けて報告を書く」の形にする。host・cwd・model・effort・役割は前の記録から取るので、一緒に渡さない（渡すと引数の誤り）。
 - 続けられるのは、記録の `resumable` が真の起動だけ。launcher が続きを断ったら、理由に従う。
   - 空の残り（`home_residue`・`cwd_residue`）があるとき: 並んだものを確かめて片付けてから、同じく続ける。
   - 同じ session の続きが動いている・ほかの launcher が置き場を片付けている: 少し待って、同じ `--resume` をもう一度実行する。
-  - Git の管理情報の変化・止めきれないプロセス・権限の照合に当たった・別の session が返った: どの記録からも続けず、確かめてから最初から起動し直す。
+  - Grok の警告・Git の管理情報の変化・止めきれないプロセス・権限の照合に当たった・別の session が返った: どの記録からも続けず、確かめてから最初から起動し直す。
   - 一時の置き場が片付けの対象になった: 新しく起動する。
+  - 続きの起動が、読み取り専用の Codex の続きが turn を書かずに返った・止まった、続きの session を確かめられなかった、想定外の例外だけで止まった: その前の続けられる記録から続ける。
 - 続きの `head` は、その session が見た commit がすべて同じときだけ書かれる（違えば `null` と `head_lost`。その `ok` は新しい commit の審査に数えない）。
 - 2 回続けて時間切れになったら、続ける前に、子の会話記録のメタデータで道具ごとの時間を見て、何に使ったかを確かめる（本文は引用しない）。記録の `load`（CPU 数と負荷）も見る。試験を回す子を同時に複数立てるときは、依頼文に 1 人あたりの同時実行数（CPU 数を子の数で割った数まで）を書く。
 
@@ -59,7 +60,7 @@ python3 <launch.py> --resume <前の記録の out> --prompt-file <続きの依�
 - 子に、最後に結論・証拠・不明点・実行（`execution`: 対象の試験・検査を最後まで実行できたか `yes`・`no`・`not-needed` と、実行したコマンドと終了コード）の JSON を書かせる。launcher が約束の文を依頼文に足す（読み取り専用の子には、対象に書く試験は `$TMPDIR` に写して動かすこと。監査役には `playbook-verify` の「返す前の判定」の項目をすべて判定すること。Claude Code の書く子には、sandbox の印に触らず、`git add -A`・`git add .` を使わず、変えたファイルの名前を挙げて足すこと）。
 - 報告を使うのは、標準出力の 1 行の JSON の `status` が `ok` のときと、`not-run`（読み取り専用の子で、実行の欄が無いか `no`）を読んだだけの報告として使うときだけ（実行が要る審査での数え方は `interrogate` の 3。`no` と書いた子の記録は、`work.py` の `--not-run` の宣言があれば push・pr の関門に数えられ、記録の `next` がそれを示す）。書く子の実行の欄は記録に残るだけで、`status` を変えない。`invalid-report`・`timeout`・`failed`・`quota`・`unavailable` は理由（`problems`）を記録して扱う。JSON が返ったことを成功にしない。
 - `home_residue`・`cwd_residue` で `failed` になったら、並んだ場所を確かめてから消す（launcher は消さない。0 バイトのファイルは `git add -A` で commit に入りうる）。
-- Claude Code の子の記録の `claude_login` に `note` が在れば（専用ログインのトークンが、launcher を呼んだ環境のログインと別の組織のとき、または組織を読めなかったとき）、子の `status` によらず、同じ仕事の返答に 1 回、利用者に伝える（子を立てるたびに繰り返さない。子が `quota` で返ったときは、当たった枠はトークンのアカウントのもの）。`note` が無ければ伝えない。launcher はどの結果でも起動を止めない。
+- Claude Code の子の記録の `claude_login` に `note` が在れば（専用ログインのトークンが、launcher を呼んだ環境のログインと別の組織のときと、組織を読む問い合わせが終了コード 0 で終わったのに読めなかったとき。理由 `why` だけの `unknown` には付かない）、子の `status` によらず、同じ仕事の返答に 1 回、利用者に伝える（子を立てるたびに繰り返さない。子が `quota` で返ったときは、当たった枠はトークンのアカウントのもの）。`note` が無ければ伝えない。launcher はどの結果でも起動を止めない。
 - 記録は `~/.local/state/bb-writ/delegations/` と `delegations.jsonl`。実効のモデル・effort は `model_effective`（Grok Build の effort は「不明」）。`--cwd` が Git の作業ツリーで、子の起動の前と終わりで HEAD が同じで未 commit の変更が無ければ、その HEAD が `head` に入る（ほかは `null`。終わりに変わっていたら `head_lost`）。`work.py` の `--reviewed` は、この `head` と `status`（`ok` だけ）・`write`（偽だけ）を、行と `out` の `record.json` の両方で照らす（危険度が中・高なら `interrogate` も）。
 - launcher は、自分が状態の置き場に作った一時の置き場（Codex の子の一時ディレクトリ、Grok Build の子の home）を、7 日使われないか、指すタスクの作業場所が無くなったら消す（記録の `swept`）。手で消さず、`delegations/`・`grok-homes/` の下の名前を付け替えない。7 日より長く要るもの（子が一時ディレクトリに残した証拠など）は、主審が `note.evidence_dir` に写す（Grok の home は丸ごと写さず、`auth.json` は写さない）。
 
@@ -80,7 +81,7 @@ python3 <launch.py> --resume <前の記録の out> --prompt-file <続きの依�
 
 ## Codex
 
-- **入口:** 入口の frontmatter の `context`・`model` は使われず、入口は呼んだセッションの中で読まれ、続けて本体の SKILL.md を読む。
+- **入口:** 入口の frontmatter の `context`・`model` は使われず、入口は呼んだセッションの中で読まれ、続けて本体の SKILL.md を読む（題材のリポジトリの `.agents/skills/` に置いた写しで確かめた。プラグインとして入れた形では確かめていない）。
 - **同じ系統の委任:** 新しい文脈が要るときは `codex exec` を別プロセスで起動する。Codex 自身のサブエージェント機能は版と設定で有効・無効が変わるので、使えるかはその場で確かめ、使えなければそう書く。
 - **launcher の書く子:** `--add-dir` で渡すのは、作業場所の記録と、Git の共通ディレクトリのうち commit に要る `objects`・自分のブランチの ref と reflog・その worktree の管理ディレクトリだけ（共通の `config`・`hooks`・`main` には書けない）。
 - **非対話実行:** `codex exec --json -m <model> -c model_reasoning_effort="<effort>" [-s read-only|workspace-write|danger-full-access] [-C <dir>] [--add-dir <dir>] "<依頼>" < /dev/null`。stdin を閉じないと「Reading additional input from stdin...」で待ち続ける。承認を Codex 自身の自動レビューに任せるなら `--approve-for-me`（workspace-write を含むので `-s` と併用できない）。sandbox の中でネットワークが要るなら `-c sandbox_workspace_write.network_access=true`、作業領域の外に書く場所は `--add-dir`。構造化した結果が要るなら `--output-schema <file>`。利用者の設定と AGENTS を切るなら `--ignore-user-config`・`--ignore-rules`。Git 管理外で動かすなら `--skip-git-repo-check`。launcher の読み取り専用の子は `-s` でなく権限の profile で起動するので、`-s`（`sandbox_mode`）を一緒に渡さない（対象の `.codex/config.toml` の `sandbox_mode` も profile を変えうる）。
