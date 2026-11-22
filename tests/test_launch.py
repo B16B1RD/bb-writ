@@ -450,8 +450,10 @@ FAKE_CLAUDE = textwrap.dedent(r'''
         result = result.replace('"deliver": "yes", ', '')
     if mode == "deliver-upper":  # 判定の値の形が違う
         result = result.replace('"deliver": "yes"', '"deliver": "YES"')
-    if mode == "deliver-not-run":  # 試験を実行できなかった監査役（判定は書いた）
+    if mode in ("deliver-not-run", "deliver-no-not-run"):  # 試験を実行できなかった監査役（判定は書いた）
         result = result.replace('"completed": "yes"', '"completed": "no"')
+        if mode == "deliver-no-not-run":
+            result = result.replace('"deliver": "yes"', '"deliver": "no"')
     if mode == "unwritable-report":  # 試験の sitecustomize が書き出しを失敗させる印
         result = result.replace('"conclusion": "', '"__unwritable__": 1, "conclusion": "')
     if mode == "deep":  # 読めるが、記録（indent 付き）には書けない深さの報告
@@ -1057,6 +1059,10 @@ class TestLaunch(unittest.TestCase):
         self.assertEqual((rc, "指摘の扱い" in rec["next"], "前の監査" in rec["next"], "HEAD を動かさない" in rec["next"]), (0, True, True, False), rec)
         rc, rec = self.run_launch("claude", extra=["--audit"])
         self.assertEqual((rc, "立て直さない" in rec["next"], "前の監査" in rec["next"]), (0, True, False), rec)
+        # 試験を実行できなかった監査役（not-run）の案内は、差し戻したときだけ差し戻しを先に言う。判定は記録に残る（work.py が照らす）
+        for mode, deliver, sent_back in (("deliver-no-not-run", "no", True), ("deliver-not-run", "yes", False)):
+            rc, rec = self.run_launch("claude", mode=mode, extra=["--audit"])
+            self.assertEqual((rec["status"], rec["deliver"], "差し戻し" in rec["next"]), ("not-run", deliver, sent_back), rec)
         no_untracked = Path(self.tmp.name) / "gitconfig"
         no_untracked.write_text("[status]\n\tshowUntrackedFiles = no\n")
         clean = Path(self.tmp.name) / "clean"

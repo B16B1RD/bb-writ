@@ -215,7 +215,7 @@ def reviews_of(commit: str, cwd=None, not_run: bool = False) -> tuple:
     行と、out の record.json の両方で head・status・write が合い、status・execution が行と record.json で同じものだけを数え、interrogate・audit も両方で真のものだけをその役に数える。
     監査役は審査の記録（最初の値）に数えない（push ごとに立てるので、審査の代わりにも周の数にもしない）。監査役の記録は、
     判定の deliver が行と record.json の両方で yes のものだけを数える（本文で差し戻した監査を、status の ok で通さない）。
-    同じ commit に yes の記録が 1 件でもあれば、その後の no の記録では止めない（守らない。差し戻しの後は直して commit が変わる）。
+    同じ commit に yes の記録が 1 件でもあれば、その後の no の記録では止めない（守らない）。
     head は launcher が、対象の作業ツリーが子の起動の前と終わりの両方で commit と同じとき（未 commit の変更が無いとき）だけ書く。
     審査の中身（子が十分に攻めたか、何人か、依頼文が interrogate の観点を持っていたか）は見ない。手で書き足した記録も見分けない（忘れて飛ばすのを止める）。
     cwd を渡すと、その場所を --cwd にして立てた記録だけを数える（--delta の祖先の審査を、ほかの作業場所の審査で代えないため）。
@@ -227,7 +227,7 @@ def reviews_of(commit: str, cwd=None, not_run: bool = False) -> tuple:
                        and isinstance(e.get("out"), str) and os.path.isabs(e["out"])  # launcher は絶対パスを書く
                        and (here is None or (isinstance(e.get("cwd"), str) and os.path.isabs(e["cwd"]) and str(Path(e["cwd"]).resolve()) == here)))
     f = state_dir() / "delegations.jsonl"
-    found, judges, audits, broken, held = [], [], [], 0, 0
+    found, judges, audits, broken = [], [], [], 0
     try:
         rows = read_regular(f).split(b"\n")
     except FileNotFoundError:
@@ -256,19 +256,14 @@ def reviews_of(commit: str, cwd=None, not_run: bool = False) -> tuple:
         if match(rec) and rec["out"] == e["out"] and (rec.get("status"), rec.get("execution")) == (e.get("status"), e.get("execution")):
             if e.get("audit") is True or rec.get("audit") is True:  # 片側でも監査役と言う記録は審査役に数えない
                 # 監査役が届けてよいと判定した（deliver: yes）記録だけ。差し戻した（no）記録は status が ok でも数えない
-                if e.get("audit") is True and rec.get("audit") is True:
-                    if e.get("deliver") == rec.get("deliver") == "yes":
-                        audits.append(e["out"])
-                    else:  # 差し戻し（no）か、deliver の無い更新前の launcher の記録。数えないが、断る理由で知らせる
-                        held += 1
+                # 監査役が届けてよいと判定した（deliver: yes）記録だけ。差し戻した（no）記録と、deliver の無い更新前の記録は数えない
+                if e.get("audit") is True and rec.get("audit") is True and e.get("deliver") == rec.get("deliver") == "yes":
+                    audits.append(e["out"])
                 continue
             found.append(e["out"])
             if e.get("interrogate") is True and rec.get("interrogate") is True:
                 judges.append(e["out"])
-    notes = ([f"委任の記録 {f} に、読めない行か、out の record.json を読めない行が {broken} 行ある"] if broken else []) + (
-        [f"この commit を対象に ok で返った監査役の記録が {held} 件あるが、どれも届けてよい（deliver: yes）と判定していない"
-         "（差し戻しの deliver: no か、deliver の無い更新前の launcher の記録）。差し戻しなら挙がった項目を閉じ、--audit で立て直す"] if held else [])
-    return found, judges, audits, "。".join(notes)
+    return found, judges, audits, (f"委任の記録 {f} に、読めない行か、out の record.json を読めない行が {broken} 行ある" if broken else "")
 
 
 def not_run_hint(commit: str, cwd=None, role: int = 0) -> str:
@@ -1156,7 +1151,8 @@ def op_step(a, r: Path, live, now: float, action: str):
             return ({"ok": False, "reason": f"作業場所の HEAD {head} を対象にした監査役（返す前の判定）の記録が無い。--reviewed none: でも要る"
                         "（none: は interrogate を省く宣言で、子を省く宣言でない）。launcher（launch.py）に --audit を付け、この commit を "
                         "checkout した未 commit の変更が無い場所を --cwd にして、`playbook-verify` の「返す前の判定」の依頼文で立て、"
-                        "status が ok で返った記録が要る。指摘は、作業の記録の指摘の扱いの欄に書いてから出す。"
+                        "status が ok で返り、届けてよい（deliver: yes）と判定した記録が要る（差し戻しの deliver: no の記録と、deliver の無い"
+                        "更新前の launcher の記録は数えない。差し戻しなら挙がった項目を閉じてから立て直す）。指摘は、作業の記録の指摘の扱いの欄に書いてから出す。"
                         "launcher が unavailable で返るなら（専用ログインが無いなど）、その problems の理由に従い、"
                         "bb-writ の README の「任意機能の準備」で専用ログインを用意する"
                         + not_run_hint(head, role=2)
