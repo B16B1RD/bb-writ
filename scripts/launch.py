@@ -34,8 +34,8 @@ sweep_leftovers の説明）。片付けの対象の置き場を指す記録か�
 Claude Code の子を起動する前に、専用ログインのトークンの組織と、launcher を呼んだ環境の Claude Code のログインの組織
 （claude auth status --json の orgId）を比べ、記録の claude_login に same・different（案内の note）・unknown（理由の why。問い合わせが終了コード 0 で終わったのに読めないときは note も）を書く。
 違っても、確かめられなくても、起動は止めない。トークンの組織は、.env の中身が変わった後の最初の起動で 1 回だけ（同時に起こした
-launcher は、それぞれ問い合わせる）、専用ログインで Haiku に短い問い合わせをして、応答のヘッダ anthropic-organization-id から読み、その SHA-256 を状態の置き場の claude-login.json に
-覚える（claude_login）。組織の ID と問い合わせの出力は、記録にもファイルにも書かない。
+launcher は、それぞれ問い合わせる）、専用ログインで Haiku に短い問い合わせをして、その debug の出力からヘッダ anthropic-organization-id の値を探して読み、
+.env の中身と組織の ID の SHA-256 を状態の置き場の claude-login.json に覚える（claude_login）。組織の ID と問い合わせの出力は、記録にもファイルにも書かない。
 トークンは画面にもログにも出さない（Claude Code は dotenvx run で子の環境にだけ渡す）。
 """
 from __future__ import annotations  # macOS の Command Line Tools の python3（3.9）でも型注釈で落ちないように
