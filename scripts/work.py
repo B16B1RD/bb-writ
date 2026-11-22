@@ -52,7 +52,7 @@ commit を書いたときは、launcher の委任の記録（delegations.jsonl�
 短い往復で審査を忘れたまま、または書き手が自分の確かめを審査の代わりにして出すのを止める。
 push・pr は、--reviewed（none: を含む）に関わらず、作業場所の HEAD を対象に launcher に --audit を付けて起動し ok で返った
 読み取り専用の監査役（返す前の判定）の記録が無ければ拒否する（6）。監査役の記録は審査の記録にも周の数にも数えない。
-監査の中身（何を挙げたか、届けてよいと書いたか）は見ない。
+監査役の記録は、判定の deliver が行と record.json の両方で yes（届けてよい）のものだけを数える。何を挙げたかは見ない。
 push・pr に --not-run <理由>（子が sandbox のせいで対象の試験・検査を実行できなかった理由）を付けると、その commit を対象に
 not-run で返り、子が実行の欄に実行できなかった（execution が no）と書いた記録も、審査役・--interrogate の審査役・監査役と審査の周に数える
 （ブラウザの試験など、子を何回立てても ok の記録ができず、作業者が関門の外で出したため）。実行の欄の無い報告（launcher が読んだだけとして
@@ -215,6 +215,7 @@ def reviews_of(commit: str, cwd=None, not_run: bool = False) -> tuple:
     行と、out の record.json の両方で head・status・write が合い、status・execution が行と record.json で同じものだけを数え、interrogate・audit も両方で真のものだけをその役に数える。
     監査役は審査の記録（最初の値）に数えない（push ごとに立てるので、審査の代わりにも周の数にもしない）。監査役の記録は、
     判定の deliver が行と record.json の両方で yes のものだけを数える（本文で差し戻した監査を、status の ok で通さない）。
+    同じ commit に yes の記録が 1 件でもあれば、その後の no の記録では止めない（守らない。差し戻しの後は直して commit が変わる）。
     head は launcher が、対象の作業ツリーが子の起動の前と終わりの両方で commit と同じとき（未 commit の変更が無いとき）だけ書く。
     審査の中身（子が十分に攻めたか、何人か、依頼文が interrogate の観点を持っていたか）は見ない。手で書き足した記録も見分けない（忘れて飛ばすのを止める）。
     cwd を渡すと、その場所を --cwd にして立てた記録だけを数える（--delta の祖先の審査を、ほかの作業場所の審査で代えないため）。
@@ -226,7 +227,7 @@ def reviews_of(commit: str, cwd=None, not_run: bool = False) -> tuple:
                        and isinstance(e.get("out"), str) and os.path.isabs(e["out"])  # launcher は絶対パスを書く
                        and (here is None or (isinstance(e.get("cwd"), str) and os.path.isabs(e["cwd"]) and str(Path(e["cwd"]).resolve()) == here)))
     f = state_dir() / "delegations.jsonl"
-    found, judges, audits, broken = [], [], [], 0
+    found, judges, audits, broken, held = [], [], [], 0, 0
     try:
         rows = read_regular(f).split(b"\n")
     except FileNotFoundError:
@@ -255,13 +256,19 @@ def reviews_of(commit: str, cwd=None, not_run: bool = False) -> tuple:
         if match(rec) and rec["out"] == e["out"] and (rec.get("status"), rec.get("execution")) == (e.get("status"), e.get("execution")):
             if e.get("audit") is True or rec.get("audit") is True:  # 片側でも監査役と言う記録は審査役に数えない
                 # 監査役が届けてよいと判定した（deliver: yes）記録だけ。差し戻した（no）記録は status が ok でも数えない
-                if e.get("audit") is True and rec.get("audit") is True and e.get("deliver") == rec.get("deliver") == "yes":
-                    audits.append(e["out"])
+                if e.get("audit") is True and rec.get("audit") is True:
+                    if e.get("deliver") == rec.get("deliver") == "yes":
+                        audits.append(e["out"])
+                    else:  # 差し戻し（no）か、deliver の無い更新前の launcher の記録。数えないが、断る理由で知らせる
+                        held += 1
                 continue
             found.append(e["out"])
             if e.get("interrogate") is True and rec.get("interrogate") is True:
                 judges.append(e["out"])
-    return found, judges, audits, (f"委任の記録 {f} に、読めない行か、out の record.json を読めない行が {broken} 行ある" if broken else "")
+    notes = ([f"委任の記録 {f} に、読めない行か、out の record.json を読めない行が {broken} 行ある"] if broken else []) + (
+        [f"この commit を対象に ok で返った監査役の記録が {held} 件あるが、どれも届けてよい（deliver: yes）と判定していない"
+         "（差し戻しの deliver: no か、deliver の無い更新前の launcher の記録）。差し戻しなら挙がった項目を閉じ、--audit で立て直す"] if held else [])
+    return found, judges, audits, "。".join(notes)
 
 
 def not_run_hint(commit: str, cwd=None, role: int = 0) -> str:
@@ -1599,7 +1606,7 @@ def main() -> int:
     o.add_argument("--result", default="")
     o.add_argument("--from", dest="frm", type=Path, help="外部操作を実行する場所（push・pr・comment・merge・release・issue で必須）")
     o.add_argument("--verified", help="検証した commit（push・pr・merge・release で必須。作業場所の HEAD と一致させる）")
-    o.add_argument("--reviewed", help="届ける前の審査を通した commit か none:<理由>（push・pr で必須。commit は作業場所の HEAD と一致させるか、HEAD の祖先にして --delta を付け、その commit を対象に launcher で ok で返った読み取り専用の子（審査役・確かめ役など。監査役は除く）の記録が要る。--risk が中・高なら --interrogate を付けた審査役の記録。どちらでも、HEAD を対象に --audit を付けた監査役の記録も要る）")
+    o.add_argument("--reviewed", help="届ける前の審査を通した commit か none:<理由>（push・pr で必須。commit は作業場所の HEAD と一致させるか、HEAD の祖先にして --delta を付け、その commit を対象に launcher で ok で返った読み取り専用の子（審査役・確かめ役など。監査役は除く）の記録が要る。--risk が中・高なら --interrogate を付けた審査役の記録。どちらでも、HEAD を対象に --audit を付けて立て、届けてよい（deliver: yes）と判定した監査役の記録も要る）")
     o.add_argument("--delta", help="審査を通した commit（--reviewed）から HEAD までの差分の危険度と理由 低:<理由>（push・pr で、--reviewed の commit が HEAD の祖先のときだけ。中・高なら HEAD で審査を通す）")
     o.add_argument("--not-run", dest="not_run", help="子が sandbox のせいで対象の試験・検査を実行できなかった理由（push・pr だけ。付けると、"
                    "その commit を対象に not-run で返り、実行の欄に実行できなかった（no）と書いた子の記録も、審査役・--interrogate の審査役・監査役と審査の周に数える。"

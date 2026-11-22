@@ -972,6 +972,7 @@ class TestReviewedCommit(unittest.TestCase):
         rc, r = self.publish(tok, "push:feat@1", "--reviewed", "none:文書だけ")
         self.assertEqual(rc, 6, r)
         self.assertIn("監査役", r["reason"])
+        self.assertIn("deliver: yes", r["reason"])  # 手元の ok の記録がなぜ数えられないかを、断る理由で知らせる
         self.review_record(self.head(), audit=True)
         self.assertEqual(self.publish(tok, "push:feat@1", "--reviewed", "none:文書だけ")[0], 0)
 

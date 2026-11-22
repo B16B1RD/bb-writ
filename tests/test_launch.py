@@ -448,6 +448,10 @@ FAKE_CLAUDE = textwrap.dedent(r'''
         result = result.replace('"deliver": "yes"', '"deliver": "no"')
     if mode == "deliver-missing":  # 監査役が判定を書かなかった
         result = result.replace('"deliver": "yes", ', '')
+    if mode == "deliver-upper":  # 判定の値の形が違う
+        result = result.replace('"deliver": "yes"', '"deliver": "YES"')
+    if mode == "deliver-not-run":  # 試験を実行できなかった監査役（判定は書いた）
+        result = result.replace('"completed": "yes"', '"completed": "no"')
     if mode == "unwritable-report":  # 試験の sitecustomize が書き出しを失敗させる印
         result = result.replace('"conclusion": "', '"__unwritable__": 1, "conclusion": "')
     if mode == "deep":  # 読めるが、記録（indent 付き）には書けない深さの報告
@@ -2959,14 +2963,22 @@ class TestLaunch(unittest.TestCase):
                     self.assertNotIn(mark, prompt())
 
     def test_an_auditor_must_say_whether_to_deliver_and_the_record_keeps_it(self):
-        """監査役の報告は deliver（yes か no）を持つ。無ければ invalid-report。no も ok の報告として記録に残す（work.py が関門に
-        数えないのは test_work の側で見る）。監査役でない子には deliver を求めない。"""
+        """監査役の報告は deliver（yes か no）を持つ。無いか値が違えば invalid-report（続きの起動でも）。no も、試験を実行できなかった
+        not-run も、判定を記録（委任の記録の行と record.json の両方。work.py は両方を照らす）に残す（work.py が関門に数えないのは
+        test_work の側で見る）。監査役でない子には deliver を求めない。"""
         recorded = lambda rec: json.loads((Path(rec["out"]) / "record.json").read_text())
-        for mode, status, deliver in (("good", "ok", "yes"), ("deliver-no", "ok", "no"), ("deliver-missing", "invalid-report", None)):
+        line = lambda rec: next(json.loads(x) for x in (self.state / "delegations.jsonl").read_text().splitlines() if json.loads(x)["out"] == rec["out"])
+        for mode, status, deliver in (("good", "ok", "yes"), ("deliver-no", "ok", "no"), ("deliver-not-run", "not-run", "yes"),
+                                      ("deliver-missing", "invalid-report", None), ("deliver-upper", "invalid-report", None)):
             with self.subTest(mode=mode):
                 rc, rec = self.run_launch("claude", mode=mode, extra=["--audit"])
-                self.assertEqual((rec["status"], rec.get("deliver"), recorded(rec).get("deliver")), (status, deliver, deliver), rec)
-        self.assertIn("deliver が yes / no のどちらでもない（監査役の判定）", rec["problems"])
+                self.assertEqual((rec["status"], rec.get("deliver"), recorded(rec).get("deliver"), line(rec).get("deliver")),
+                                 (status, deliver, deliver, deliver), rec)
+                if status == "invalid-report":
+                    self.assertTrue(any("deliver" in x for x in rec["problems"]), rec)
+        rc, first = self.run_launch("claude", extra=["--audit"])
+        rc, again = self.run_launch(None, mode="deliver-missing", extra=["--resume", first["out"]])  # 続きの監査役も判定を求める
+        self.assertEqual((again["audit"], again["status"], again.get("deliver")), (True, "invalid-report", None), again)
         rc, rec = self.run_launch("claude", mode="deliver-missing")
         self.assertEqual((rec["status"], "deliver" in rec), ("ok", False), rec)
 
