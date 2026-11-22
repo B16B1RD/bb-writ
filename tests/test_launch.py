@@ -2061,7 +2061,8 @@ class TestLaunch(unittest.TestCase):
                     prompt = {"codex": lambda: prompt[-1], "claude": lambda: prompt[prompt.index("-p") + 1],
                               "grok": lambda: prompt[prompt.index("-p") + 1]}[host]()
                     # 読み取り専用の子には、どのホストでも、子ごとに新しく作った場所へ写して動かす約束を渡す（#46。並行する
-                    # Claude Code の子は $TMPDIR も pid も同じだった）
+                    # Claude Code の子は $TMPDIR も pid も同じだった）。試験が見るのは子に渡す約束の文だけで、子が約束に従うかと、
+                    # interrogate・playbook-verify の依頼文の雛形の文と、not-run の案内の写し方の文は見ない（守らない）
                     self.assertIn(load_launch().READ_ONLY_CONTRACT.strip(), prompt)
                     self.assertIn("`mktemp -d` で新しく作ったディレクトリ", prompt)
                     if status == "not-run":
