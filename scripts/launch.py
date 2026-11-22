@@ -31,6 +31,11 @@ LEFTOVER_DAYS 日を過ぎたものと、それを指す記録の対象が、ど
 その排他を取れた置き場だけを消しにいく（片付けと同時に、sandbox の外のプロセスが状態の置き場の中の名前を付け替える場合は守らない。
 sweep_leftovers の説明）。片付けの対象の置き場を指す記録からは、まだ消えていなくても --resume できない（理由を出して拒む）。
 報告と記録（out の中、delegations.jsonl）は消さない。
+Claude Code の子を起動する前に、専用ログインのトークンの組織と、launcher を呼んだ環境の Claude Code のログインの組織
+（claude auth status --json の orgId）を比べ、記録の claude_login に same・different（案内の note）・unknown（理由の why）を書く。
+違っても、確かめられなくても、起動は止めない。トークンの組織は、.env の中身が変わった後の最初の起動で 1 回だけ、専用ログインで
+Haiku に短い問い合わせをして、応答のヘッダ anthropic-organization-id から読み、その SHA-256 を状態の置き場の claude-login.json に
+覚える（claude_login）。組織の ID と問い合わせの出力は、記録にもファイルにも書かない。
 トークンは画面にもログにも出さない（Claude Code は dotenvx run で子の環境にだけ渡す）。
 """
 from __future__ import annotations  # macOS の Command Line Tools の python3（3.9）でも型注釈で落ちないように
@@ -800,6 +805,107 @@ def codex_refresh(a, home: Path) -> str | None:
     finally:
         if fd is not None:
             os.close(fd)  # 排他を放す（子が動いている間は持たない）
+
+
+LOGIN_CHECK_TIMEOUT = float(os.environ.get("BB_WRIT_LOGIN_CHECK_TIMEOUT") or 60)  # 専用ログインの組織の確かめ（claude auth status と問い合わせ）の 1 回ごとの上限（環境変数は試験だけが使う）
+LOGIN_CHECK_PROMPT = "ok とだけ返して"
+# SDK の debug の記録の、応答のヘッダの行（Claude Code 2.1.330 の形: "anthropic-organization-id": "<uuid>",）
+LOGIN_ORG_HEADER = re.compile(r'"anthropic-organization-id"\s*:\s*"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})"', re.I)
+CLAUDE_LOGIN_NOTE = ("専用ログインのトークン（CLAUDE_CODE_OAUTH_TOKEN）は、launcher を呼んだ環境の Claude Code のログインとは別の組織のもの。"
+                     "子は、そのトークンのアカウントの利用枠で動く。Claude のアカウントを切り替えたのなら、`claude setup-token` から"
+                     "トークンを作り直す（README の「任意機能の準備」の「Claude Code の専用ログイン」）。わざと別のアカウントにしているなら、そのままでよい。")
+
+
+def run_bounded(cmd: list[str], env: dict, cwd: Path) -> tuple[int | None, bytes, bytes, str]:
+    """cmd を新しいセッションで 1 回実行し、標準出力と標準エラーをメモリの中だけで読む。(終了コード, 標準出力, 標準エラー, 結果の文)。
+    標準入力は閉じる。LOGIN_CHECK_TIMEOUT 秒で終わらなければ、プロセスグループごと KILL する（dotenvx だけを止めると、下の claude が
+    出力を開いたまま残り、読み終わらない）。上限で止めた・起動できなかったときは、終了コードは None で、出力は捨てる。結果の文に出力を入れない。"""
+    try:
+        p = subprocess.Popen(cmd, env=env, cwd=cwd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                             start_new_session=True)
+    except OSError as e:
+        return None, b"", b"", f"起動できなかった（{type(e).__name__}）"
+    try:
+        out, err = p.communicate(timeout=LOGIN_CHECK_TIMEOUT)
+        return p.returncode, out, err, f"終了コード {p.returncode}"
+    except subprocess.TimeoutExpired:
+        return None, b"", b"", f"{LOGIN_CHECK_TIMEOUT:g} 秒で終わらなかったので止めた"
+    finally:
+        if p.returncode is None:  # 上限で止めた（想定外の例外も）。まだ刈っていないので、グループの番号は別のプロセスに使い回されていない
+            try:
+                os.killpg(p.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            p.wait()
+        p.stdout.close()
+        p.stderr.close()
+
+
+def claude_login(cfg: Path) -> dict:
+    """専用ログインのトークンの組織と、launcher を呼んだ環境の Claude Code のログインの組織を比べる。結果は記録の claude_login:
+    {"org": "same"}・{"org": "different", "note": 案内}・{"org": "unknown", "why": 確かめられなかった理由}（覚えられなかったときは
+    "cache" も）。どの結果でも、子の起動は止めない（想定外の例外も unknown にして、例外の型の名前だけを残す。例外の文には問い合わせの
+    出力が入りうる）。ログインの側: claude auth status --json を launcher の環境のまま実行し、標準出力の orgId（終了コードは見ない）。
+    無ければ unknown で、問い合わせをしない。トークンの側: 状態の置き場の claude-login.json に、.env の中身の SHA-256 と、組織の ID を
+    小文字にした文字列の SHA-256 を覚え、.env の中身が同じなら問い合わせない。違えば、専用ログインで Haiku に短い問い合わせをし、
+    ANTHROPIC_LOG=debug で標準出力に出る SDK の debug の記録から（標準エラーに出たものも読む）、応答のヘッダ
+    anthropic-organization-id を読む（1 種類のときだけ組織とし、覚える）。記録・ファイルに、組織の ID・問い合わせの出力を書かない。
+    守らない範囲: 比べるのは組織で、同じ組織の中の別の人のトークンは見分けない。書式は Claude Code 2.1.330 で確かめたもので
+    （SDK の文書は、debug の記録の書式は版で変わりうるとする）、読めなければ unknown。別アカウントのトークンで、ヘッダの値が実際に
+    違って出ることは、実物では確かめていない（偽の CLI の試験だけ）。確かめの間に launcher が TERM・HUP で止められると、記録は残らず
+    （子を起動する前に受けたシグナルと同じ）、問い合わせのプロセス（dotenvx とその下の claude）は、自分で終わるまで残る（launcher が
+    上限で止めるのは、自分が動いている間だけ。偽の CLI の終わらない問い合わせで 1 回ずつ確かめた）。"""
+    digest = lambda b: hashlib.sha256(b).hexdigest()
+    try:
+        _, out, _, result = run_bounded(["claude", "auth", "status", "--json"], dict(os.environ), state_dir())
+        try:
+            status = json.loads(out)
+        except ValueError:
+            return {"org": "unknown", "why": f"claude auth status --json の出力を JSON として読めない（{result}）"}
+        org = status.get("orgId") if isinstance(status, dict) else None
+        if not (isinstance(org, str) and org):
+            method = status.get("authMethod") if isinstance(status, dict) else None
+            shown = f"authMethod は {method}" if isinstance(method, str) and re.fullmatch(r"[a-z_.]{1,32}", method) else "authMethod は読めない形"
+            return {"org": "unknown", "why": f"launcher を呼んだ環境の Claude Code のログインに組織（orgId）が無い（{shown}、{result}）"}
+        env_file, cache = cfg / ".env", state_dir() / "claude-login.json"
+        env_sum = digest(env_file.read_bytes())
+        try:
+            known = json.loads(cache.read_text(encoding="utf-8"))
+        except (OSError, ValueError):  # 無い・読めない・JSON でないものは、無いものとして問い合わせ、書き直す
+            known = None
+        extra = {}
+        if (isinstance(known, dict) and known.get("env") == env_sum and isinstance(known.get("org"), str)
+                and re.fullmatch(r"[0-9a-f]{64}", known["org"])):
+            token_org = known["org"]
+        else:
+            env = {k: v for k, v in os.environ.items() if not k.startswith(("CLAUDE", "ANTHROPIC_"))}
+            env.update(CLAUDE_CONFIG_DIR=str(cfg / "claude-home"), ANTHROPIC_LOG="debug", CLAUDE_CODE_DISABLE_BACKGROUND_TASKS="1")
+            code, out, err, result = run_bounded(
+                ["dotenvx", "run", "-q", "-f", str(env_file), "-fk", str(cfg / ".env.keys"), "--", "claude", "-p", LOGIN_CHECK_PROMPT,
+                 "--model", "haiku", "--output-format", "json", "--no-session-persistence", "--tools", ""], env, state_dir())
+            found = {m.lower() for m in LOGIN_ORG_HEADER.findall((out + b"\n" + err).decode("utf-8", "replace"))}
+            del out, err
+            if code is None:
+                return {"org": "unknown", "why": f"専用ログインの問い合わせ（{result}）"}
+            if len(found) != 1:
+                return {"org": "unknown", "why": f"専用ログインの問い合わせの出力に、組織のヘッダ anthropic-organization-id の値が {len(found)} 種類（{result}）"}
+            token_org = digest(found.pop().encode())
+            try:
+                fd, tmp = tempfile.mkstemp(dir=state_dir(), prefix=".claude-login.", suffix=".tmp")  # モードは 0600
+                try:
+                    with os.fdopen(fd, "w", encoding="utf-8") as f:
+                        json.dump({"env": env_sum, "org": token_org}, f)
+                    os.replace(tmp, cache)
+                except BaseException:
+                    Path(tmp).unlink(missing_ok=True)
+                    raise
+            except OSError as e:  # 覚えられなくても、結果は使う（次の起動でまた問い合わせる）
+                extra = {"cache": f"claude-login.json に覚えられなかった（{type(e).__name__}）。次の起動でまた問い合わせる"}
+        if token_org == digest(org.lower().encode()):
+            return {"org": "same", **extra}
+        return {"org": "different", "note": CLAUDE_LOGIN_NOTE, **extra}
+    except Exception as e:
+        return {"org": "unknown", "why": f"確かめの途中で想定外の失敗（{type(e).__name__}）"}
 
 
 def command(a, prompt: str, scratch: Path) -> tuple[list[str], dict, str | None]:
@@ -1706,7 +1812,7 @@ def main() -> int:
     blocked = []  # 続きから起動させない理由（権限が分からない、プロセスを止めきれない、Git の管理情報が変わった、照合できない）
     rec["head"] = rec["saw"] = clean_head(a.cwd)  # 子を起こす前に（子が見る作業ツリー）。saw は、後で head を外しても残す
 
-    snapshot, why, prep = None, None, None
+    snapshot, why, prep, login = None, None, None, None
     try:  # 起動の前の準備も、前の子が残したもの（FIFO・権限・壊れた HEAD）に当たりうる。止まらず落ちずに記録して返す
         if a.write:
             own, common, why = worktree_dirs(a.cwd)
@@ -1737,6 +1843,9 @@ def main() -> int:
                 git_dir, _ = grok_git_dir(a.cwd)
                 for top in {a.cwd, *([git_dir.parent] if git_dir and git_dir.name == ".git" else [])}:
                     made += [d for d in (top / ".claude", top / ".claude" / ".cc-writes") if not d.exists()]
+                # 専用ログインのトークンの組織を確かめる。ホームの前後の比較の「前」を取る前に済ませる（確かめのプロセスがホームに
+                # 残したものを、子の残りとして数えない）。記録に書くのは、子を起動するときだけ
+                login = claude_login(config_dir())
             # 子の前後でホームを比べ、新しくできて空のままの場所を残りとして報告する。黙って消さない（同じ時刻に別の道具が作ったものかもしれない）
             skip = [config_dir(), state_dir(), out_dir, a.cwd, Path.home() / ".cache"]
             home_before, _, unreadable_before = home_entries(skip)
@@ -1753,6 +1862,8 @@ def main() -> int:
     elif why:
         rec.update(status="unavailable", problems=[why])
     else:
+        if login is not None:
+            rec["claude_login"] = login
         child, left, timed_out, exit_lost = None, [], False, False
         try:
             # 子を待つ間に止められたら（中断・呼び出し側の時間の上限）、直下の子に TERM を伝え、子が片付けて終わるのを待ってから、
