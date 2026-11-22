@@ -513,7 +513,7 @@ class TestParallel(unittest.TestCase):
         return {'key': 'local:demo', 'what': 'demo', 'exit': 0, 'at': at}
 
     def note_written_after(self, task, row):
-        """操作の後に記録を書き足す（最終更新は done の at の 10 秒後）。"""
+        """操作の後に次の一手の欄を書き足す（最終更新は done の at の 10 秒後。欄は、比べる今の状態・次の一手の中身が変わって消える）。"""
         note = Path(task['note']['path'])
         with open(note, 'a', encoding='utf-8') as fh:
             fh.write('- 次の一手: 片付ける\n')
@@ -531,6 +531,20 @@ class TestParallel(unittest.TestCase):
         self.w('release', '--dir', b['dir'], '--token', b['token'])
         c = self.w('task', 'resume', '--dir', self.repo, '--task', a['task'], '--holder', 'Codex')
         self.assertNotIn('ops_after_note', c['note'])
+
+    def test_a_token_written_after_resume_keeps_the_ops_listed(self):
+        """Issue #59 の再現手順: 引き受けた担当が「ホストと session ID」の欄に token を書き足しても（最終更新が done の後）、
+        その後の status の note.ops_after_note にも操作が出る（task cleanup も同じ note を返す）。"""
+        a = self.start()
+        row = self.op_after_note(a)
+        self.w('release', '--dir', a['dir'], '--token', a['token'])
+        b = self.w('task', 'resume', '--dir', self.repo, '--task', a['task'], '--holder', 'Codex')
+        self.assertEqual(b['note'].get('ops_after_note'), [row])
+        note = Path(b['note']['path'])
+        with open(note, 'a', encoding='utf-8') as fh:
+            fh.write('- ホストと session ID: Codex ' + b['token'] + '\n')
+        os.utime(note, (row['at'] + 10, row['at'] + 10))
+        self.assertEqual(self.w('status', '--dir', b['dir'])['note'].get('ops_after_note'), [row])
 
     def test_cleanup_shows_the_ops_done_after_the_note(self):
         """片付けだけをするセッションも見るよう、task cleanup の note.ops_after_note にも、本文の後に終えた操作が出る。

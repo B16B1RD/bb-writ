@@ -97,8 +97,8 @@ supervise）の result が「exit <数>:」で始まるときのその数で、�
 この欄のために止めない。記録が読めないことは、claim・status・op・task cleanup が、これまでどおり 0 でない終了コードで止めて知らせる
 （行が読めなければ 1）。片付けの途中からの task resume は、その記録をほかに読まないので、欄が無いまま返る）。
 done の行は、終えた時点の今の状態・次の一手の欄の中身のハッシュ（note_state）を持ち、今の欄と同じ間だけ並ぶ（ほかの欄の書き足し・touch では
-消えない。#59）。守らない範囲: 終える前に「済み」と書いた操作も、書き直すまで並ぶ。今の状態・次の一手の欄の行を書き換えた記録（「* 次の一手:」など）は
-欄と見なさない（note_gaps と同じ）。note_state の無い done の行（この変更より前の記録、終えた時点の記録を読めなかった行）は、記録を最後に書いた時刻
+消えない。#59）。守らない範囲: 終える前に「済み」と書いた操作も、書き直すまで並ぶ。今の状態・次の一手の欄の行を書き換えた記録（「* 今の状態:」など）は
+欄と見なさず、その中身は前の欄に数える（note_gaps と同じ）。間に操作を終えずに今の状態を書き直し、前と同じ文に戻した場合は、また並ぶ。note_state の無い done の行（この変更より前の記録、終えた時点の記録を読めなかった行）は、記録を最後に書いた時刻
 （mtime）と比べる: 本文を変えずに mtime だけが進んだ場合は、古い今の状態が残っていても欄は出ない。時計を戻した場合。at と mtime が同じ値のときに
 どちらになるか。mtime の粒が粗いファイルシステムで、操作の直後に書き足した場合は、書き足した後も、次に書くまで並ぶことがある。監督役の印（by）がある記録を
 手で書き換えたときの exit（「exit <数>:」で始まらない形、255 を超える数など）。at が NaN・無限大の記録（並ぶかどうかと、出力の at が
@@ -393,19 +393,26 @@ def note_gaps(body: str, publish: bool, rounds: int = 0) -> list:
     同じ欄が 2 回あれば最初だけを見る。push・pr の前（publish）は指摘の扱いの欄も、審査の周が PREMISE_ROUNDS に達した commit では仕組みの要否の欄も。"""
     lines, gaps = body.splitlines(), []
     for name in REQUIRED + ([TRIAGE] if publish else []) + ([PREMISE] if publish and rounds >= PREMISE_ROUNDS else []):
-        pat = field_line(name)
-        at, m = next(((i, m) for i, l in enumerate(lines) if (m := pat.match(l))), (None, None))
-        if at is None:
-            gaps.append(name)
-            continue
-        text = [lines[at][m.end():]]
-        for l in lines[at + 1:]:
-            if HEADING.match(l) or any(p.match(l) for p in FIELD_LINES):
-                break
-            text.append(l)
-        if not "".join(text).strip():
+        found = field_texts(lines, name)
+        if not found or not found[0].strip():
             gaps.append(name)
     return gaps
+
+
+def field_texts(lines: list, name: str) -> list:
+    """欄の中身を、出てくる順にすべて。中身は、名前の行の ":" の後から、次の雛形の欄か見出しの行の前まで。"""
+    pat, found = field_line(name), []
+    for at, l in enumerate(lines):
+        m = pat.match(l)
+        if not m:
+            continue
+        text = [l[m.end():]]
+        for nxt in lines[at + 1:]:
+            if HEADING.match(nxt) or any(p.match(nxt) for p in FIELD_LINES):
+                break
+            text.append(nxt)
+        found.append("\n".join(text))
+    return found
 
 
 STATE_FIELDS = [f for f in FIELDS if f.startswith(("今の状態", "次の一手"))]  # 操作の後に書き直すべき欄（ops_after_note が見る）
@@ -414,19 +421,8 @@ STATE_FIELDS = [f for f in FIELDS if f.startswith(("今の状態", "次の一手
 def note_state(body: str) -> str:
     """今の状態・次の一手の欄の中身（出てくるものすべて。欄の範囲は note_gaps と同じ）の SHA-256 の先頭 16 桁。
     done の行に残し、今の記録と比べる（ほかの欄の書き足し・touch では変わらない。#59）。"""
-    lines, parts = body.splitlines(), []
-    for name in STATE_FIELDS:
-        pat = field_line(name)
-        for at, l in enumerate(lines):
-            m = pat.match(l)
-            if not m:
-                continue
-            text = [l[m.end():]]
-            for nxt in lines[at + 1:]:
-                if HEADING.match(nxt) or any(p.match(nxt) for p in FIELD_LINES):
-                    break
-                text.append(nxt)
-            parts.append(name + "\n" + "\n".join(text).strip())
+    lines = body.splitlines()
+    parts = [name + "\n" + text.strip() for name in STATE_FIELDS for text in field_texts(lines, name)]
     return hashlib.sha256("\n\0".join(parts).encode("utf-8")).hexdigest()[:16]
 
 
@@ -450,19 +446,26 @@ def note_body(f: Path) -> str:
         raise RecordError(f"作業の記録 {f} を読めない: {e}") from None
 
 
-def ops_after_note(r: Path, f: Path) -> list:
+def ops_after_note(r: Path, f: Path, body: str) -> list:
     """done の操作（種類を問わない）のうち、終えた後に記録の今の状態・次の一手の欄を書き直していないもの。並びは ops の順のまま。
     done の行に note_state（終えた時点の欄の中身のハッシュ）があれば、今の欄と同じときだけ並べる（ほかの欄の書き足しでは消えない。#59）。
-    無い行（この変更より前の記録、終えた時点の記録を読めなかった行）は、記録を最後に書いた時刻（mtime）より後に done になったものを並べ、
-    at を数として読めない行は比べられないので並べる（黙って落とさない）。mtime を読めなければ OSError、記録が読めなければ RecordError。"""
-    written, now = f.stat().st_mtime, note_state(note_body(f))
+    ただし、今と違う note_state を持つ done が後にあれば、それより前に終えた操作は並べない（その間に欄を書き直した。今の状態が
+    前と同じ文に戻ったとき、済んだ操作をまた並べないため）。無い行（この変更より前の記録、終えた時点の記録を読めなかった行）は、
+    記録を最後に書いた時刻（mtime）より後に done になったものを並べ、at を数として読めない行は比べられないので並べる（黙って落とさない）。
+    mtime を読めなければ OSError、記録が読めなければ RecordError。"""
+    written, now = f.stat().st_mtime, note_state(body)
+    num = lambda at: isinstance(at, (int, float)) and not isinstance(at, bool)
+    done = [e for e in ops(r).values() if e.get("state") == "done"]
+    rewritten = max((e["at"] for e in done if isinstance(e.get("note_state"), str) and e["note_state"] != now and num(e.get("at"))),
+                    default=None)
     rows = []
-    for e in ops(r).values():
-        if e.get("state") != "done":
-            continue
+    for e in done:
         at, state = e.get("at"), e.get("note_state")
-        comparable = isinstance(at, (int, float)) and not isinstance(at, bool)
-        if (state != now) if isinstance(state, str) else (comparable and at <= written):
+        comparable = num(at)
+        if isinstance(state, str):
+            if state != now or (comparable and rewritten is not None and at <= rewritten):
+                continue
+        elif comparable and at <= written:
             continue
         result = e.get("result")
         # 監督役が書いた記録（by が supervise）だけから終了コードを読む（手で閉じた記録の文は終了コードでない）
@@ -480,7 +483,7 @@ def note(r: Path) -> dict:
             raise RecordError(f"作業の記録 {f} を作れない: {e}") from None
     body = note_body(f)
     try:
-        after = ops_after_note(r, f)
+        after = ops_after_note(r, f, body)
     except (RecordError, OSError):
         # この欄は知らせで、関門でない。renew と、片付けを終えた後の note を、この欄のために止めない。記録（ops.jsonl）が読めないことは、
         # claim・status・op・task cleanup が、これまでどおり 0 でない終了コードで止めて知らせる。片付けの途中からの task resume は、欄が無いまま返る

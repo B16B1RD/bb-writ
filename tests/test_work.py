@@ -216,7 +216,7 @@ class TestWork(unittest.TestCase):
         self.assertEqual(b["note"].get("ops_after_note"), want)
 
     def test_writing_the_note_after_the_op_removes_it_from_the_list(self):
-        """操作の後に記録を書き足すと（最終更新が done の at より後）、status と claim の note に ops_after_note の欄が無い。"""
+        """操作の後に次の一手の欄を書き足すと、status と claim の note に ops_after_note の欄が無い（比べるのは今の状態・次の一手の欄の中身）。"""
         rc, a = self.w("claim", "--holder", "A")
         f = self.written_before_ops(a)
         self.assertEqual(self.w("op", "run", "--token", a["token"], "--key", "local:demo", "--what", "demo", "--", "true")[0], 0)
@@ -244,6 +244,44 @@ class TestWork(unittest.TestCase):
         f.write_text(f.read_text(encoding="utf-8").replace("返信は未投稿", "返信した"), encoding="utf-8")
         rc, s = self.w("status")
         self.assertNotIn("ops_after_note", s["note"])
+
+    def test_a_state_written_back_to_an_earlier_text_does_not_list_ops_done_before_a_later_one(self):
+        """今の状態を X で操作 1、Y で操作 2 を終えて X に戻しても、操作 1 は並ばない（その後に欄を書き直した。#59 の審査）。"""
+        rc, a = self.w("claim", "--holder", "A")
+        f = self.written_before_ops(a, "# 作業の記録\n\n- 今の状態（ブランチ・commit・PR）: CI 待ち\n- 次の一手: CI を見る\n")
+        self.assertEqual(self.w("op", "run", "--token", a["token"], "--key", "local:one", "--what", "one", "--", "true")[0], 0)
+        f.write_text(f.read_text(encoding="utf-8").replace("CI 待ち", "直した"), encoding="utf-8")
+        self.assertEqual(self.w("op", "run", "--token", a["token"], "--key", "local:two", "--what", "two", "--", "true")[0], 0)
+        f.write_text(f.read_text(encoding="utf-8").replace("直した", "CI 待ち"), encoding="utf-8")
+        rc, s = self.w("status")
+        self.assertNotIn("ops_after_note", s["note"])
+
+    def test_the_state_compares_every_section_and_ignores_trailing_blanks(self):
+        """今の状態の欄は、前の仕事の節のものも含めて比べる（2 つ目の節を書き直すと消える）。行末の空白と空行だけの違いでは消えない。"""
+        rc, a = self.w("claim", "--holder", "A")
+        f = self.written_before_ops(a, "# 作業の記録\n\n- 今の状態（ブランチ・commit・PR）: 今の仕事\n\n## 前の仕事\n\n- 今の状態（ブランチ・commit・PR）: 前の仕事\n")
+        self.assertEqual(self.w("op", "run", "--token", a["token"], "--key", "local:demo", "--what", "demo", "--", "true")[0], 0)
+        f.write_text(f.read_text(encoding="utf-8").replace("今の仕事\n", "今の仕事   \n\n"), encoding="utf-8")
+        self.assertEqual([o["key"] for o in self.w("status")[1]["note"].get("ops_after_note", [])], ["local:demo"])
+        f.write_text(f.read_text(encoding="utf-8").replace(": 前の仕事", ": 前の仕事（済み）"), encoding="utf-8")
+        self.assertNotIn("ops_after_note", self.w("status")[1]["note"])
+
+    def test_an_op_ends_even_when_the_note_cannot_be_read(self):
+        """操作を終えた時点で記録を読めなくても、done は書く（note_state だけが無い。#59 の審査）。"""
+        if not PERMISSIONS_BIND:
+            self.skipTest("この環境では権限が効かない")
+        rc, a = self.w("claim", "--holder", "A")
+        f = self.written_before_ops(a)
+        f.chmod(0)
+        try:
+            rc, r = self.w("op", "run", "--token", a["token"], "--key", "local:demo", "--what", "demo", "--", "true")
+        finally:
+            f.chmod(0o600)
+        self.assertEqual(rc, 0, r)
+        rows = [json.loads(l) for l in (f.parent / "ops.jsonl").read_text(encoding="utf-8").splitlines()]
+        done = [e for e in rows if e["key"] == "local:demo" and e["state"] == "done"]
+        self.assertEqual(len(done), 1, rows)
+        self.assertNotIn("note_state", done[0])
 
     def test_an_op_still_begun_is_not_listed_after_the_note(self):
         """op begin だけで終わりの記録が無い操作は、ops_after_note に並ばない（pending_ops に出る）。"""
