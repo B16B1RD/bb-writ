@@ -255,7 +255,6 @@ def reviews_of(commit: str, cwd=None, not_run: bool = False) -> tuple:
         # 行と record.json で status・execution も同じものだけ（launcher は同じ rec から両方を書くので、食い違うのは手で書き換えた記録）
         if match(rec) and rec["out"] == e["out"] and (rec.get("status"), rec.get("execution")) == (e.get("status"), e.get("execution")):
             if e.get("audit") is True or rec.get("audit") is True:  # 片側でも監査役と言う記録は審査役に数えない
-                # 監査役が届けてよいと判定した（deliver: yes）記録だけ。差し戻した（no）記録は status が ok でも数えない
                 # 監査役が届けてよいと判定した（deliver: yes）記録だけ。差し戻した（no）記録と、deliver の無い更新前の記録は数えない
                 if e.get("audit") is True and rec.get("audit") is True and e.get("deliver") == rec.get("deliver") == "yes":
                     audits.append(e["out"])

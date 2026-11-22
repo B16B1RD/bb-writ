@@ -1063,6 +1063,8 @@ class TestLaunch(unittest.TestCase):
         for mode, deliver, sent_back in (("deliver-no-not-run", "no", True), ("deliver-not-run", "yes", False)):
             rc, rec = self.run_launch("claude", mode=mode, extra=["--audit"])
             self.assertEqual((rec["status"], rec["deliver"], "差し戻し" in rec["next"]), ("not-run", deliver, sent_back), rec)
+        rc, rec = self.run_launch("claude", mode="deliver-no-not-run")  # 監査役でない子には、報告の deliver に関わらず差し戻しと言わない
+        self.assertEqual((rec["status"], "deliver" in rec, "差し戻し" in rec["next"]), ("not-run", False, False), rec)
         no_untracked = Path(self.tmp.name) / "gitconfig"
         no_untracked.write_text("[status]\n\tshowUntrackedFiles = no\n")
         clean = Path(self.tmp.name) / "clean"

@@ -972,7 +972,7 @@ class TestReviewedCommit(unittest.TestCase):
         rc, r = self.publish(tok, "push:feat@1", "--reviewed", "none:文書だけ")
         self.assertEqual(rc, 6, r)
         self.assertIn("監査役", r["reason"])
-        self.assertIn("deliver: yes", r["reason"])  # 手元の ok の記録がなぜ数えられないかを、断る理由で知らせる
+        self.assertIn("deliver: yes", r["reason"])  # 断る理由に、deliver: yes の記録が要ることを書く
         self.review_record(self.head(), audit=True)
         self.assertEqual(self.publish(tok, "push:feat@1", "--reviewed", "none:文書だけ")[0], 0)
 
@@ -984,9 +984,12 @@ class TestReviewedCommit(unittest.TestCase):
         self.review_record(self.head(), audit=True)
         self.review_record(self.head(), record={"audit": False}, audit=True)  # 片側だけが監査役と言う記録も、審査役に数えない
         self.review_record(self.head(), record={"audit": True}, audit=False)
+        self.review_record(self.head(), audit=True, deliver="no")
         rc, r = self.publish(tok, "push:feat@1", "--reviewed", self.head())
         self.assertEqual(rc, 6, r)
         self.assertIn("審査役の記録が無い", r["reason"])
+        # 審査役の関門の理由に、監査役の判定の案内を混ぜない（混ぜると、審査を通した祖先で監査を立て直せと誤って導く）
+        self.assertNotIn("deliver", r["reason"])
         self.review_record(self.head())
         self.assertEqual(self.publish(tok, "push:feat@1", "--reviewed", self.head())[0], 0)
 
