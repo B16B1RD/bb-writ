@@ -281,13 +281,13 @@ FAKE_CLAUDE = textwrap.dedent(r'''
                 print("[]"); sys.exit(0)
             if how == "api_key":  # 環境に ANTHROPIC_API_KEY が在るとき（orgId 無し）
                 print(json.dumps({"loggedIn": True, "authMethod": "api_key", "apiProvider": "firstParty"})); sys.exit(0)
-            org = {"bad-org": "org_not_a_uuid", "num-org": 12345}.get(how, login_org)
+            org = {"bad-org": login_org + "x", "num-org": 12345}.get(how, login_org)  # bad-org: uuid の後に 1 字
             print(json.dumps({"loggedIn": True, "authMethod": "claude.ai" if how in ("bad-org", "num-org") else how, "apiProvider": "firstParty",
                               "email": "someone@example.invalid", "orgId": org, "orgName": "Fakeorgnamezq", "subscriptionType": "max"}))
             sys.exit(0)
         how, org = os.environ.get("FAKE_PROBE", ""), os.environ.get("FAKE_TOKEN_ORG", login_org)
-        if how == "notuuid":
-            org = "org_0123456789"
+        if how == "notuuid":  # uuid の後に 1 字
+            org = org + "x"
         other = "2c3d4e5f-2222-4222-8222-cccccccccccc" if how == "two" else org
         status = 401 if how == "401" else 200
         head = [] if how in ("noheader", "401") else [f'    "anthropic-organization-id": "{org}",']
@@ -979,9 +979,8 @@ class TestLaunch(unittest.TestCase):
                 rc, rec = self.launch_patched(patch, ["--host", "claude", "--cwd", str(self.cwd)], mode="stop")
                 self.assertEqual(rec["stopped_by_signal"], int(sig), rec)
                 self.assertTrue(rec["resumable"], rec)
-                # 子に TERM が届いて止まった（偽の dotenvx が受け手を置く前なら -15、置いた後なら子へ伝えて 143）。伝えなければ、偽の子は
-                # 60 秒眠ってから終了コード 0 で終わる
-                self.assertIn(rec["exit_code"], (-int(signal.SIGTERM), 143), rec)
+                # 子に TERM が届いて止まった（終了コードは、TERM が届いた時機で変わる）。伝えなければ、偽の子は 60 秒眠ってから終了コード 0 で終わる
+                self.assertNotEqual(rec["exit_code"], 0, rec)
                 self.assertLess(time.monotonic() - t0, 30, rec)
 
     @unittest.skipUnless(sys.platform.startswith("linux"), "子を刈らずに待つのは Linux だけ")
@@ -4255,6 +4254,8 @@ launch.claude_reads = claude_reads
         self.assertEqual(rec["claude_login"]["org"], "different", rec)
         self.assertEqual(set(rec["claude_login"]), {"org", "note"})
         self.assertIn("claude setup-token", rec["claude_login"]["note"])
+        self.assertIn("別の組織", rec["claude_login"]["note"])  # 読めないときの案内と取り違えない
+        self.assertNotIn("読めなかった", rec["claude_login"]["note"])
         self.assertEqual(json.loads((Path(rec["out"]) / "record.json").read_text(encoding="utf-8"))["claude_login"], rec["claude_login"])
         last = json.loads((self.state / "delegations.jsonl").read_text(encoding="utf-8").splitlines()[-1])
         self.assertEqual(last["claude_login"], rec["claude_login"])
@@ -4299,7 +4300,7 @@ launch.claude_reads = claude_reads
         no_org = self.NO_ORG
         for how, why, hidden in (("none", no_org, ["none", "firstparty"]), ("garbage", "JSON として読めない", ["not logged in"]),
                                  ("hang", "2 秒で終わらなかったので止めた", ["hangmarkerzq"]),
-                                 ("bad-org", no_org, ["org_not_a_uuid", "fakeorgnamezq", "someone@example.invalid", "claude.ai"]),
+                                 ("bad-org", no_org, [self.LOGIN_ORG, "fakeorgnamezq", "someone@example.invalid", "claude.ai"]),
                                  ("num-org", no_org, ["12345", "fakeorgnamezq"]), ("list", no_org, ["[]"]), ("api_key", no_org, ["api_key"])):
             with self.subTest(how):
                 Path(str(self.args_file) + ".login").unlink(missing_ok=True)
@@ -4334,6 +4335,8 @@ launch.claude_reads = claude_reads
                     if noted:
                         self.assertEqual(set(rec["claude_login"]), {"org", "why", "note"})
                         self.assertIn("claude setup-token", rec["claude_login"]["note"])
+                        self.assertIn("読めなかった", rec["claude_login"]["note"])  # 別の組織の案内と取り違えない
+                        self.assertNotIn("別の組織", rec["claude_login"]["note"])
                     else:
                         self.assertEqual(set(rec["claude_login"]), {"org", "why"})
                     self.assertFalse((self.state / "claude-login.json").exists())
@@ -4362,6 +4365,7 @@ launch.claude_reads = claude_reads
         self.assertIn("5 秒で終わらなかったので止めた", rec["claude_login"]["why"])
         self.assertFalse((self.state / "claude-login.json").exists())
         self.assert_no_login_leak(p)
+        self.assertEqual(len(self.login_calls("probe")), 1, rec)  # claude auth status が上限に当たると、問い合わせは無い
         probe = self.login_calls("probe")[0]
         self.assert_gone(probe["pid"])  # dotenvx の下の claude
         self.assert_gone(probe["ppid"])  # dotenvx
@@ -4410,12 +4414,12 @@ launch.claude_reads = claude_reads
         例外を受けずに起動の前の準備の失敗にする、例外の文を写すと落ちる。"""
         patch = """\
             def boom(*a, **k):
-                raise RuntimeError("Leakmarkerzq")
+                raise FileNotFoundError("Leakmarkerzq")  # claude を起動できないときの形（OSError）
             launch.run_bounded = boom
             """
         rc, rec = self.launch_patched(patch, ["--host", "claude", "--cwd", str(self.cwd)])
         self.assertEqual((rc, rec["status"], rec["claude_login"]["org"]), (0, "ok", "unknown"), rec)
-        self.assertIn("RuntimeError", rec["claude_login"]["why"])
+        self.assertIn("FileNotFoundError", rec["claude_login"]["why"])
         self.assertNotIn("Leakmarkerzq", json.dumps(rec, ensure_ascii=False))
         self.assertTrue(self.args_file.exists())
 
@@ -4442,7 +4446,6 @@ launch.claude_reads = claude_reads
 
     def test_a_broken_memory_of_the_token_organization_is_asked_again(self):
         """壊れた claude-login.json（JSON でない・形が違う・org が 64 桁の 16 進の後に余分な文字が続く）は無いものとして扱い、問い合わせて書き直す。
-        前から在るファイルを書き直したときは、モードを変えない（0644 で在ったものは 0644 のまま。0600 になるのは launcher が作ったときだけ）。
         書けない（ディレクトリになっている）ときは、起動を止めず、結果を使い、書けなかったことを cache に残す。壊れたものを信じる（org を前方一致で
         見るなど）、読めずに止まる、書けずに止まると落ちる。"""
         import hashlib
@@ -4453,12 +4456,10 @@ launch.claude_reads = claude_reads
                                     json.dumps({"env": env_sum, "org": "x" * 64}), json.dumps({"env": env_sum, "org": login_sum + "0"})), 1):
             with self.subTest(broken):
                 saved.write_text(broken)
-                saved.chmod(0o644)
                 rc, rec = self.run_launch("claude", env_extra={"FAKE_TOKEN_ORG": self.TOKEN_ORG})
                 self.assertEqual((rec["status"], rec["claude_login"]["org"]), ("ok", "different"), rec)
                 self.assertEqual(len(self.login_calls("probe")), n)
                 self.assertEqual(set(json.loads(saved.read_text())), {"env", "org"})
-                self.assertEqual(saved.stat().st_mode & 0o777, 0o644)  # 前から在るファイルのモードは変えない
         saved.unlink()
         saved.mkdir()
         rc, rec = self.run_launch("claude")

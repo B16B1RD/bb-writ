@@ -32,7 +32,7 @@ LEFTOVER_DAYS 日を過ぎたものと、それを指す記録の対象が、ど
 sweep_leftovers の説明）。片付けの対象の置き場を指す記録からは、まだ消えていなくても --resume できない（理由を出して拒む）。
 報告と記録（out の中、delegations.jsonl）は消さない。
 Claude Code の子を起動する前に、専用ログインのトークンの組織と、launcher を呼んだ環境の Claude Code のログインの組織
-（claude auth status --json の orgId）を比べ、記録の claude_login に same・different（案内の note）・unknown（理由の why）を書く。
+（claude auth status --json の orgId）を比べ、記録の claude_login に same・different（案内の note）・unknown（理由の why。問い合わせが終了コード 0 で終わったのに読めないときは note も）を書く。
 違っても、確かめられなくても、起動は止めない。トークンの組織は、.env の中身が変わった後の最初の起動で 1 回だけ（同時に起こした
 launcher は、それぞれ問い合わせる）、専用ログインで Haiku に短い問い合わせをして、応答のヘッダ anthropic-organization-id から読み、その SHA-256 を状態の置き場の claude-login.json に
 覚える（claude_login）。組織の ID と問い合わせの出力は、記録にもファイルにも書かない。
@@ -810,13 +810,13 @@ def codex_refresh(a, home: Path) -> str | None:
 LOGIN_CHECK_TIMEOUT = float(os.environ.get("BB_WRIT_LOGIN_CHECK_TIMEOUT") or 60)  # 専用ログインの組織の確かめ（claude auth status と問い合わせ）の 1 回ごとの上限（環境変数は試験だけが使う）
 LOGIN_CHECK_PROMPT = "ok とだけ返して"
 UUID = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"  # 組織の ID の形（大文字・小文字は問わない）
-# SDK の debug の記録の、応答のヘッダの行（Claude Code 2.1.330 の形: "anthropic-organization-id": "<uuid>",）
+# SDK の debug の記録の、ヘッダの行（Claude Code 2.1.330 の形: "anthropic-organization-id": "<uuid>",）。名前は後ろで合わせ、anthropic-organization-id" で終わる名前の行の値を読む
 LOGIN_ORG_HEADER = re.compile(rf'anthropic-organization-id"\s*:\s*"({UUID})"', re.I)
 CLAUDE_LOGIN_NOTE = ("専用ログインのトークン（CLAUDE_CODE_OAUTH_TOKEN）は、launcher を呼んだ環境の Claude Code のログインとは別の組織のもの。"
                      "子は、そのトークンのアカウントの利用枠で動く。Claude のアカウントを切り替えたのなら、`claude setup-token` から"
                      "トークンを作り直す（README の「任意機能の準備」の「Claude Code の専用ログイン」）。わざと別のアカウントにしているなら、そのままでよい。")
-# 問い合わせは通った（終了コード 0）のに、ヘッダの値を 1 種類読めなかったときの案内（読み方は SDK の debug の出力の書式に頼り、版で変わりうる）
-CLAUDE_LOGIN_UNREAD_NOTE = ("専用ログインのトークンの組織を、問い合わせの出力から読めなかった（問い合わせは通った）。Claude Code の版が変わって、"
+# 問い合わせは終了コード 0 で終わったのに、ヘッダの値を 1 種類読めなかったときの案内（読み方は SDK の debug の出力の書式に頼り、版で変わりうる）
+CLAUDE_LOGIN_UNREAD_NOTE = ("専用ログインのトークンの組織を、問い合わせの出力から読めなかった（問い合わせは終了コード 0 で終わった）。Claude Code の版が変わって、"
                             "launcher の読み方が合わなくなった見込みがある。この確かめ（トークンとログインの組織の比べ）は、いま働いていない。"
                             "Claude のアカウントを切り替えたときは、`claude setup-token` からトークンを作り直す（README の「任意機能の準備」の"
                             "「Claude Code の専用ログイン」）。")
@@ -824,8 +824,8 @@ CLAUDE_LOGIN_UNREAD_NOTE = ("専用ログインのトークンの組織を、問
 
 def run_bounded(cmd: list[str], env: dict, cwd: Path) -> tuple[int | None, bytes, bytes, str]:
     """cmd を新しいセッションで 1 回実行し、標準出力と標準エラーをメモリの中だけで読む。(終了コード, 標準出力, 標準エラー, 結果の文)。
-    標準入力は閉じる。LOGIN_CHECK_TIMEOUT 秒で終わらなければ、それ以上は読まずに出力を閉じ、プロセスグループごと KILL する（dotenvx
-    だけを止めると、下の claude が残る）。上限で止めたときは、終了コードは None で、それまでの出力は捨てる。結果の文に出力を入れない。
+    標準入力は閉じる。LOGIN_CHECK_TIMEOUT 秒で終わらなければ、プロセスグループごと KILL し（dotenvx だけを止めると、下の claude が残る）、
+    刈ってから、出力を閉じる。上限で止めたときは、終了コードは None で、それまでの出力は読まずに捨てる。結果の文に出力を入れない。
     起動できない（OSError）ときは、例外のまま返す（呼ぶ側の claude_login が受ける）。出力の大きさに上限は無い。"""
     p = subprocess.Popen(cmd, env=env, cwd=cwd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                          start_new_session=True)
@@ -856,8 +856,8 @@ def claude_login(cfg: Path) -> dict:
     中身が同じなら問い合わせない。違えば（覚えが無い・読めない・形が違うときも）、専用ログインで Haiku に短い問い合わせをし（--restricted で、
     専用ログインの利用者設定の hook・プラグインを読ませない）、ANTHROPIC_LOG=debug で出る SDK の debug の記録から、ヘッダ
     anthropic-organization-id の値を読む。値が 1 種類なら、それを組織として覚える。終了コードが 0 でなくても、1 種類読めれば使う。
-    0 種類・2 種類以上は unknown で覚えない（次の起動でまた問い合わせる）。そのうち終了コードが 0 のとき（問い合わせは通ったのに読めない）
-    だけ、確かめが働いていないことを note で案内する。覚えは、モード 0600 で作って直に書く（一時ファイルは作らない。前から在るファイルの
+    0 種類・2 種類以上は unknown で覚えない（次の起動でまた問い合わせる）。そのうち、問い合わせが終了コード 0 で終わったのに読めない
+    とき（終わり方は終了コードだけで決め、結果の JSON の is_error は見ない）だけ、確かめが働いていないことを note で案内する。覚えは、モード 0600 で作って直に書く（一時ファイルは作らない。前から在るファイルの
     モードは変えない。途中で切れた書き込みと、同時の書き込みが混ざったものは、壊れた覚えとして次の起動で問い合わせ直す）。
     記録・ファイルに、組織の ID・問い合わせの出力を書かない。
     守らない範囲: 比べるのは組織で、同じ組織の中の別の人のトークンは見分けない。書式は Claude Code 2.1.330 で確かめたもので
@@ -865,11 +865,15 @@ def claude_login(cfg: Path) -> dict:
     違って出ることは、実物では確かめていない（偽の CLI の試験だけ）。ログインの orgId とヘッダの値が同じだったのを見たのは、1 つの
     アカウントだけ。確かめたのは WSL2 で、macOS の実物では確かめていない。同時に起こした launcher は、それぞれ問い合わせる（3 つ同時で
     3 回。排他は無い）。問い合わせの間に .env が置き換わると、新しいトークンの組織を、前の中身の SHA-256 で覚える（.env が同じ中身に
-    戻らない限り、使われない）。ヘッダは出力の全体から探す（応答の部分に限らない）。429 などの応答にヘッダが付くかは、確かめていない。
+    戻らない限り、使われない）。ヘッダは出力の全体から探す（応答の部分に限らない）。ヘッダの名前は後ろで合わせる（anthropic-organization-id" で終わる、もっと長い名前の行の値も読む）。429 などの応答にヘッダが付くかは、確かめていない。
     上限で止めるのはプロセスグループで、新しいセッションへ切り離したプロセスと、問い合わせが普通に終わった後に残したプロセスは、止めも
     数えもしない。確かめのプロセスがホームに残したものは、子の残りに数えず、報告もしない（実物の問い合わせの前後で、ホームの 2 段に
     新しいものは無かった）。起動の前の準備がこの後で失敗すると、確かめは済んでいるが、記録に欄は出ない。出力の大きさに上限は無い。
-    claude-login.json が通常のファイルでない（FIFO など）と、読むところで止まり続ける（状態の置き場の直下は、子の sandbox から書けない）。
+    claude-login.json が通常のファイルでない（FIFO など）と、読むところで止まり続け、symlink なら、指す先を書き換える（状態の置き場の
+    直下は、子の sandbox から書けない）。専用ログインに登録した MCP サーバーは、問い合わせの形では起きなかった（実物。2.1.330）。
+    管理設定（managed settings）は --restricted でも効く（claude --help）。launcher はトークンを読まない（復号は dotenvx。launcher が
+    読むのは暗号化された .env の中身で、SHA-256 にだけ使う）。API がエラーを返したのに claude -p が終了コード 0 で終わると、読めない
+    ときの案内が出る（実物の 429 の終了コードは確かめていない）。
     覚えの中身が正しいかは確かめない（手で書き換えた覚えは、.env の中身が同じ間、そのまま使う）。
     確かめの間に launcher が TERM・HUP で止められると、記録は残らず（子を起動する前に受けたシグナルと同じ）、問い合わせのプロセス
     （dotenvx とその下の claude）は、自分で終わるまで残る（launcher が上限で止めるのは、自分が動いている間だけ。偽の CLI の終わらない
