@@ -185,6 +185,32 @@ def readme_headings(text):
     return found
 
 
+class TestRulesTable(unittest.TestCase):
+    """AGENTS.md の「規則と強制するもの」の行は、規則の 1 文と強制するものの名前だけにする（経緯・実測は置かない）。"""
+
+    def rows(self):
+        text = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
+        section = text[text.index("## 規則と強制するもの"):text.index("## commit")]
+        rows = [line for line in section.splitlines() if line.startswith("| ") and not line.startswith("| 規則 |")]
+        self.assertTrue(rows, "規則の表が見つからない")
+        return rows
+
+    def test_rules_table_rows_stay_short(self):
+        for row in self.rows():
+            rule, enforce = (cell.strip() for cell in row.split(" | ", 1))
+            self.assertLessEqual(len(rule), 260, f"規則の文が長い: {rule[:40]}")
+            self.assertLessEqual(len(enforce), 360, f"強制するものの文が長い: {rule[:40]}")
+
+    def test_tests_named_in_the_rules_table_exist(self):
+        """表が名指しする試験の名前（test_…・Test…）は、tests/ に在る（名前を変えたら表も直す）。"""
+        defined = set()
+        for path in (ROOT / "tests").glob("*.py"):
+            defined |= set(re.findall(r"(?:def|class)\s+((?:test_|Test)\w+)", path.read_text(encoding="utf-8")))
+        named = set(re.findall(r"`((?:test_|Test)\w+)`", "\n".join(self.rows())))
+        self.assertTrue(named)
+        self.assertEqual(named - defined, set())
+
+
 class TestReadmeSections(unittest.TestCase):
     def test_sections_the_scripts_point_users_to_exist_in_the_readme(self):
         # launcher と work.py は、専用ログインが無いときに README の節の名前を示す。見出しを変えて文だけが古くならないように。

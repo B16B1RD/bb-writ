@@ -2,9 +2,9 @@
 
 見ないこと: 会話記録の符号化の指定（encoding・errors="replace"）。不正なバイトのある記録で入口の印を読めるかは試験で固定しない。
 git push の試すだけの指定は完全一致で比べる（短い引数をまとめた -nq・-nv の dry-run は、試すだけと読まずに止める。
-AGENTS.md の誤って止める所）。
+誤って止める所）。
 語に続く << の前で語を切ることは、崩れた入力でしか差が出ないので例を置かない。
-読み違えを守らない書き方は、AGENTS.md の規則の表の行にある。"""
+誤って止める書き方は、OUTWARD の注釈に「誤って止める」と書いた例。"""
 import json
 import os
 import subprocess
@@ -183,7 +183,7 @@ OUTWARD = ["git push origin main", "GH_CONFIG_DIR=x git -C . push -q origin HEAD
            "time -o f git push", "time --output f git push", "timeout -s KILL 60 git push",
            "git --namespace n push", "git --config-env a=B push",
            # git 2.43.0 では push しない（--exec-path は = の無い形だと置き場を表示して終わり、--super-prefix は未知の引数）が、
-           # 値を取る引数として読み飛ばして止める。誤って止める側（AGENTS.md の規則の表の誤って止める例）
+           # 値を取る引数として読み飛ばして止める。誤って止める側（守らない）
            "git --exec-path /x push", "git --super-prefix p push",
            # 向け直しの演算子だけの語は、次の語が行き先
            "< in.txt git push", ">> log.txt git push", ">& log.txt git push", "<& 0 git push", ">| f git push",
@@ -203,11 +203,11 @@ OUTWARD = ["git push origin main", "GH_CONFIG_DIR=x git -C . push -q origin HEAD
            # 試すだけの指定でない git push の引数、タブの区切り、語に続く <<
            "git push --no-verify origin main", "git\tpush", "x<<E\nE\ngit push",
            # env -S・--split-string は値を 1 語として読み飛ばす（本物の env はその値を命令にするので、これは誤って止める側。
-           # AGENTS.md の規則の表の誤って止める例）
+           # 守らない）
            "env -S x git push", "env --split-string x git push",
            # 終わりの語に引用符や \ を付けた heredoc の、終わりの後
            'cat <<"EOF"\nx\nEOF\ngit push', "cat <<\\EOF\nx\nEOF\ngit push",
-           # 誤って止める所（守らない。AGENTS.md の規則の表）: gh の -h と、副コマンドの前の --help
+           # 誤って止める所（守らない）: gh の -h と、副コマンドの前の --help
            "gh pr create -h", "gh --help pr create"]
 NOT_OUTWARD = ["python3 /p/scripts/work.py op run --dir . --key push:origin/main@abc -- git push origin main",
                'git commit -m "docs: git push の説明を直す"', 'git commit -m "x; git push"', "git commit -m 'a && git push'",
