@@ -979,8 +979,11 @@ class TestLaunch(unittest.TestCase):
                 rc, rec = self.launch_patched(patch, ["--host", "claude", "--cwd", str(self.cwd)], mode="stop")
                 self.assertEqual(rec["stopped_by_signal"], int(sig), rec)
                 self.assertTrue(rec["resumable"], rec)
-                # 子に TERM が届いて止まった（終了コードは、TERM が届いた時機で変わる）。伝えなければ、偽の子は 60 秒眠ってから終了コード 0 で終わる
-                self.assertNotEqual(rec["exit_code"], 0, f"子にシグナルが伝わらず、偽の子が最後まで眠って終了コード 0 で終わった: {rec}")
+                # 子に TERM が届いて止まった（終了コードは、TERM が届いた時機で変わる: 偽の dotenvx が受け手を置く前に受ければ -15、子へ伝えて
+                # 子が片付けて終われば 143、偽の子が受け手を置く前に受ければ 241）。伝えなければ、偽の子は 60 秒眠ってから終了コード 0 で終わる。
+                # TERM でなく KILL で止めると -9
+                self.assertNotIn(rec["exit_code"], (0, -int(signal.SIGKILL)),
+                                 f"子にシグナルが伝わらず、偽の子が最後まで眠って終了コード 0 で終わったか、子を TERM でなく KILL で止めた: {rec}")
                 self.assertLess(time.monotonic() - t0, 30, rec)
 
     @unittest.skipUnless(sys.platform.startswith("linux"), "子を刈らずに待つのは Linux だけ")
@@ -4254,8 +4257,9 @@ launch.claude_reads = claude_reads
         self.assertEqual(rec["claude_login"]["org"], "different", rec)
         self.assertEqual(set(rec["claude_login"]), {"org", "note"})
         self.assertIn("claude setup-token", rec["claude_login"]["note"])
-        self.assertIn("別の組織", rec["claude_login"]["note"])  # 読めないときの案内と取り違えない
-        self.assertNotIn("読めなかった", rec["claude_login"]["note"])
+        launch = load_launch()
+        self.assertNotEqual(launch.CLAUDE_LOGIN_NOTE, launch.CLAUDE_LOGIN_UNREAD_NOTE)
+        self.assertEqual(rec["claude_login"]["note"], launch.CLAUDE_LOGIN_NOTE)  # 読めないときの案内と取り違えない
         self.assertEqual(json.loads((Path(rec["out"]) / "record.json").read_text(encoding="utf-8"))["claude_login"], rec["claude_login"])
         last = json.loads((self.state / "delegations.jsonl").read_text(encoding="utf-8").splitlines()[-1])
         self.assertEqual(last["claude_login"], rec["claude_login"])
@@ -4323,6 +4327,7 @@ launch.claude_reads = claude_reads
         確かめが働いていないことの案内（note。claude setup-token を含む）が付く。組織の ID・問い合わせの出力の目印は、どこにも出ない。
         読めないものを same・different にする、unknown を覚える、uuid の形を見ない、通ったのに読めないときの案内を落とす、失敗した問い合わせにも
         案内を付ける、出力を写すと落ちる。"""
+        unread_note = load_launch().CLAUDE_LOGIN_UNREAD_NOTE
         for how, why, noted in (("noheader", "0 種類（終了コード 0）", True), ("401", "0 種類（終了コード 1）", False),
                                 ("two", "2 種類（終了コード 0）", True), ("notuuid", "0 種類（終了コード 0）", True)):
             with self.subTest(how):
@@ -4335,8 +4340,7 @@ launch.claude_reads = claude_reads
                     if noted:
                         self.assertEqual(set(rec["claude_login"]), {"org", "why", "note"})
                         self.assertIn("claude setup-token", rec["claude_login"]["note"])
-                        self.assertIn("読めなかった", rec["claude_login"]["note"])  # 別の組織の案内と取り違えない
-                        self.assertNotIn("別の組織", rec["claude_login"]["note"])
+                        self.assertEqual(rec["claude_login"]["note"], unread_note)  # 別の組織の案内と取り違えない
                     else:
                         self.assertEqual(set(rec["claude_login"]), {"org", "why"})
                     self.assertFalse((self.state / "claude-login.json").exists())
@@ -4365,7 +4369,7 @@ launch.claude_reads = claude_reads
         self.assertIn("5 秒で終わらなかったので止めた", rec["claude_login"]["why"])
         self.assertFalse((self.state / "claude-login.json").exists())
         self.assert_no_login_leak(p)
-        self.assertEqual(len(self.login_calls("probe")), 1, rec)  # claude auth status が上限に当たると、問い合わせは無い
+        self.assertEqual(len(self.login_calls("probe")), 1, rec)  # 0 件は、claude auth status か、偽の CLI の起動が上限に当たったとき（問い合わせが無いか、偽の claude が呼び出しを残す前に止めた）
         probe = self.login_calls("probe")[0]
         self.assert_gone(probe["pid"])  # dotenvx の下の claude
         self.assert_gone(probe["ppid"])  # dotenvx
@@ -4410,18 +4414,21 @@ launch.claude_reads = claude_reads
         self.assertEqual((rc, rec["status"], rec["claude_login"]["org"]), (0, "ok", "different"), rec)
 
     def test_an_unexpected_failure_in_the_check_does_not_stop_the_child(self):
-        """確かめの中の想定外の例外は、unknown にして例外の型の名前だけを残し（例外の文は写さない）、子は起動して ok で返る。
-        例外を受けずに起動の前の準備の失敗にする、例外の文を写すと落ちる。"""
-        patch = """\
-            def boom(*a, **k):
-                raise FileNotFoundError("Leakmarkerzq")  # claude を起動できないときの形（OSError）
-            launch.run_bounded = boom
-            """
-        rc, rec = self.launch_patched(patch, ["--host", "claude", "--cwd", str(self.cwd)])
-        self.assertEqual((rc, rec["status"], rec.get("claude_login", {}).get("org")), (0, "ok", "unknown"), rec)  # 例外を受けないと、起動の前の準備の失敗になり、欄も無い
-        self.assertIn("FileNotFoundError", rec["claude_login"]["why"])
-        self.assertNotIn("Leakmarkerzq", json.dumps(rec, ensure_ascii=False))
-        self.assertTrue(self.args_file.exists())
+        """確かめの中の想定外の例外は、OSError でもそうでない型でも、unknown にして例外の型の名前だけを残し（例外の文は写さない）、
+        子は起動して ok で返る。例外を受けずに起動の前の準備の失敗にする、受ける型を OSError か RuntimeError に狭める、例外の文を写すと落ちる。"""
+        for exc in ("FileNotFoundError", "RuntimeError"):  # claude を起動できないときの形（OSError）と、OSError でない型
+            with self.subTest(exc):
+                self.args_file.unlink(missing_ok=True)
+                patch = f"""\
+                    def boom(*a, **k):
+                        raise {exc}("Leakmarkerzq")
+                    launch.run_bounded = boom
+                    """
+                rc, rec = self.launch_patched(patch, ["--host", "claude", "--cwd", str(self.cwd)])
+                self.assertEqual((rc, rec["status"], rec.get("claude_login", {}).get("org")), (0, "ok", "unknown"), rec)  # 例外を受けないと、起動の前の準備の失敗になり、欄も無い
+                self.assertIn(exc, rec["claude_login"]["why"])
+                self.assertNotIn("Leakmarkerzq", json.dumps(rec, ensure_ascii=False))
+                self.assertTrue(self.args_file.exists())
 
     def test_what_the_check_leaves_in_home_is_not_the_child_residue(self):
         """確かめ（問い合わせ）がホームに残したものは、子の残り（home_residue）に数えない。確かめを、ホームの前後の比較の「前」を取った後へ動かすと、

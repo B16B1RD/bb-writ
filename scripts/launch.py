@@ -825,7 +825,7 @@ CLAUDE_LOGIN_UNREAD_NOTE = ("専用ログインのトークンの組織を、問
 def run_bounded(cmd: list[str], env: dict, cwd: Path) -> tuple[int | None, bytes, bytes, str]:
     """cmd を新しいセッションで 1 回実行し、標準出力と標準エラーをメモリの中だけで読む。(終了コード, 標準出力, 標準エラー, 結果の文)。
     標準入力は閉じる。LOGIN_CHECK_TIMEOUT 秒で終わらなければ、プロセスグループごと KILL し（dotenvx だけを止めると、下の claude が残る）、
-    刈ってから、出力を閉じる。上限で止めたときは、終了コードは None で、それまでの出力は読まずに捨てる。結果の文に出力を入れない。
+    刈ってから、出力を閉じる。上限で止めたときは、終了コードは None で、上限までに読んだ出力も、返さずに捨てる。結果の文に出力を入れない。
     起動できない（OSError）ときは、例外のまま返す（呼ぶ側の claude_login が受ける）。出力の大きさに上限は無い。"""
     p = subprocess.Popen(cmd, env=env, cwd=cwd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                          start_new_session=True)
@@ -869,10 +869,12 @@ def claude_login(cfg: Path) -> dict:
     上限で止めるのはプロセスグループで、新しいセッションへ切り離したプロセスと、問い合わせが普通に終わった後に残したプロセスは、止めも
     数えもしない。確かめのプロセスがホームに残したものは、子の残りに数えず、報告もしない（実物の問い合わせの前後で、ホームの 2 段に
     新しいものは無かった）。起動の前の準備がこの後で失敗すると、確かめは済んでいるが、記録に欄は出ない。出力の大きさに上限は無い。
-    claude-login.json が通常のファイルでない（FIFO など）と、読むところで止まり続け、symlink なら、指す先を書き換える（状態の置き場の
+    claude-login.json が FIFO だと、読むところで止まり続け、symlink だと、覚えを書き直すときに、指す先を書き換える（状態の置き場の
     直下は、子の sandbox から書けない）。専用ログインに登録した MCP サーバーは、問い合わせの形では起きなかった（実物。2.1.330）。
-    管理設定（managed settings）は --restricted でも効く（claude --help）。launcher はトークンを読まない（復号は dotenvx。launcher が
-    読むのは暗号化された .env の中身で、SHA-256 にだけ使う）。API がエラーを返したのに claude -p が終了コード 0 で終わると、読めない
+    管理設定（managed settings）は --restricted でも効く（claude --help）。launcher は .env の中身を SHA-256 にだけ使い、どこにも
+    書かない。README の手順で置いた .env は暗号化されていて、復号は dotenvx がする（.env を平文で置けば、launcher は平文をメモリに
+    読む）。環境変数 BB_WRIT_LOGIN_CHECK_TIMEOUT（試験だけが使う）に数でない値が在ると、launcher は読み込みのところで落ち、どのホストの
+    子も起動しない（前からの BB_WRIT_GIT_TIMEOUT・BB_WRIT_CODEX_PLUGIN_TIMEOUT と同じ）。API がエラーを返したのに claude -p が終了コード 0 で終わると、読めない
     ときの案内が出る（実物の 429 の終了コードは確かめていない）。
     覚えの中身が正しいかは確かめない（手で書き換えた覚えは、.env の中身が同じ間、そのまま使う）。
     確かめの間に launcher が TERM・HUP で止められると、記録は残らず（子を起動する前に受けたシグナルと同じ）、問い合わせのプロセス
