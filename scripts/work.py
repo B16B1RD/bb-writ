@@ -88,17 +88,19 @@ op run のコマンドが終わっていないかも pid では見ず、操作�
 （ロックは監督役・コマンド・それが残したものが持ち、プロセスが死ねば OS が外す）。
 環境変数 BB_WRIT_SUPERVISE_GATE は試験だけが使う（op run と監督役の中の止まり所。設定されていても 60 秒で先へ進み、コマンドには渡さない）。
 claim は作業場所ごとの記録 note.md の雛形と証拠の置き場 evidence/ を作り、その場所と（書かれていれば）記録の中身を返す。後任は claim の出力だけで記録にたどり着く。
-claim・status・task resume・task cleanup の note は、記録の本文を最後に書いた後（note.md の mtime より後）に
-done になった操作（ops.jsonl の記録。種類を問わない）を ops_after_note に並べる（1 行は key・what・exit・at。exit は監督役が書いた記録（by が
+claim・status・task resume・task cleanup の note は、終えた後に今の状態・次の一手の欄を書き直していない
+done の操作（ops.jsonl の記録。種類を問わない）を ops_after_note に並べる（1 行は key・what・exit・at。exit は監督役が書いた記録（by が
 supervise）の result が「exit <数>:」で始まるときのその数で、それ以外（照合で op done を手で閉じた操作など）は null。result の本文は
 写さない。at を数として読めない done の記録（文字列・null・真偽値）は、比べられないので並べる）。並ぶ操作が無ければ欄ごと無い。並びの順は約束しない。
 欄があれば、本文の今の状態・次の一手は、並んだ操作が終わる前に書かれている（後任が済んだ操作を残件として報告したため。Issue #49）。
 記録（ops.jsonl）か note.md の時刻を読めなければ、欄を出さずに進む（欄は知らせで、関門でない。renew と、片付けを終えた後の note を、
 この欄のために止めない。記録が読めないことは、claim・status・op・task cleanup が、これまでどおり 0 でない終了コードで止めて知らせる
 （行が読めなければ 1）。片付けの途中からの task resume は、その記録をほかに読まないので、欄が無いまま返る）。
-守らない範囲: 本文を変えずに mtime だけが進んだ場合（touch・写し直し・別の欄だけの書き足し。引き受けた後に token を書き足す場合も。比べるのは
-記録を書いた時刻だけ）は、古い今の状態が残っていても欄は出ない。時計を戻した場合。at と mtime が同じ値のときにどちらになるか。
-mtime の粒が粗いファイルシステムで、操作の直後に書き足した場合は、書き足した後も、次に書くまで並ぶことがある。監督役の印（by）がある記録を
+done の行は、終えた時点の今の状態・次の一手の欄の中身のハッシュ（note_state）を持ち、今の欄と同じ間だけ並ぶ（ほかの欄の書き足し・touch では
+消えない。#59）。守らない範囲: 終える前に「済み」と書いた操作も、書き直すまで並ぶ。今の状態・次の一手の欄の行を書き換えた記録（「* 次の一手:」など）は
+欄と見なさない（note_gaps と同じ）。note_state の無い done の行（この変更より前の記録、終えた時点の記録を読めなかった行）は、記録を最後に書いた時刻
+（mtime）と比べる: 本文を変えずに mtime だけが進んだ場合は、古い今の状態が残っていても欄は出ない。時計を戻した場合。at と mtime が同じ値のときに
+どちらになるか。mtime の粒が粗いファイルシステムで、操作の直後に書き足した場合は、書き足した後も、次に書くまで並ぶことがある。監督役の印（by）がある記録を
 手で書き換えたときの exit（「exit <数>:」で始まらない形、255 を超える数など）。at が NaN・無限大の記録（並ぶかどうかと、出力の at が
 JSON の規格に無い値になること）。renew の出力（note の path と empty だけ）には足さない。
 期限内に renew しない担当は止まったとみなし、別の担当が claim できる。claim のたびに token が変わるので、
@@ -406,6 +408,36 @@ def note_gaps(body: str, publish: bool, rounds: int = 0) -> list:
     return gaps
 
 
+STATE_FIELDS = [f for f in FIELDS if f.startswith(("今の状態", "次の一手"))]  # 操作の後に書き直すべき欄（ops_after_note が見る）
+
+
+def note_state(body: str) -> str:
+    """今の状態・次の一手の欄の中身（出てくるものすべて。欄の範囲は note_gaps と同じ）の SHA-256 の先頭 16 桁。
+    done の行に残し、今の記録と比べる（ほかの欄の書き足し・touch では変わらない。#59）。"""
+    lines, parts = body.splitlines(), []
+    for name in STATE_FIELDS:
+        pat = field_line(name)
+        for at, l in enumerate(lines):
+            m = pat.match(l)
+            if not m:
+                continue
+            text = [l[m.end():]]
+            for nxt in lines[at + 1:]:
+                if HEADING.match(nxt) or any(p.match(nxt) for p in FIELD_LINES):
+                    break
+                text.append(nxt)
+            parts.append(name + "\n" + "\n".join(text).strip())
+    return hashlib.sha256("\n\0".join(parts).encode("utf-8")).hexdigest()[:16]
+
+
+def note_state_of(r: Path):
+    """操作を終えた時点の記録の note_state。記録を読めなければ None（done の記録は止めない）。"""
+    try:
+        return note_state(note_body(r / "note.md"))
+    except (RecordError, OSError):
+        return None
+
+
 def note_body(f: Path) -> str:
     """記録の中身。無ければ空。UTF-8 でない字は置き換えて読む（欄が空かを見るだけなので、止めない。置き換えか無視かは結果を変えない）。
     先頭の BOM は外す（残すと、見出しの無い記録の最初の欄の行が欄に見えず、書いた欄が無いと言われる）。
@@ -419,14 +451,18 @@ def note_body(f: Path) -> str:
 
 
 def ops_after_note(r: Path, f: Path) -> list:
-    """記録の本文（f）を最後に書いた時刻（mtime）より後に done になった操作（種類を問わない）。並びは ops の順のまま。
-    at を数として読めない done の記録は、比べられないので並べる（黙って落とさない）。mtime を読めなければ OSError、記録が読めなければ RecordError。"""
-    written = f.stat().st_mtime
+    """done の操作（種類を問わない）のうち、終えた後に記録の今の状態・次の一手の欄を書き直していないもの。並びは ops の順のまま。
+    done の行に note_state（終えた時点の欄の中身のハッシュ）があれば、今の欄と同じときだけ並べる（ほかの欄の書き足しでは消えない。#59）。
+    無い行（この変更より前の記録、終えた時点の記録を読めなかった行）は、記録を最後に書いた時刻（mtime）より後に done になったものを並べ、
+    at を数として読めない行は比べられないので並べる（黙って落とさない）。mtime を読めなければ OSError、記録が読めなければ RecordError。"""
+    written, now = f.stat().st_mtime, note_state(note_body(f))
     rows = []
     for e in ops(r).values():
-        at = e.get("at")
+        if e.get("state") != "done":
+            continue
+        at, state = e.get("at"), e.get("note_state")
         comparable = isinstance(at, (int, float)) and not isinstance(at, bool)
-        if e.get("state") != "done" or (comparable and at <= written):
+        if (state != now) if isinstance(state, str) else (comparable and at <= written):
             continue
         result = e.get("result")
         # 監督役が書いた記録（by が supervise）だけから終了コードを読む（手で閉じた記録の文は終了コードでない）
@@ -1178,6 +1214,9 @@ def op_step(a, r: Path, live, now: float, action: str):
     e.update({"what": a.what} if action == "begin" else {"result": a.result})
     if action == "done":  # 書いた者の印。手で閉じた記録は None（監督役の記録の印を上書きして、終了コードと読まれないように）
         e["by"] = getattr(a, "by", None)
+        state = note_state_of(r)  # 終えた時点の今の状態・次の一手（ops_after_note が比べる。読めなければ書かない）
+        if state:
+            e["note_state"] = state
     if acct:
         e.update({"from": acct["at"], "account": acct.get("login")})
     if verified:

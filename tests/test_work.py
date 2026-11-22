@@ -230,6 +230,21 @@ class TestWork(unittest.TestCase):
         rc, b = self.w("claim", "--holder", "B")
         self.assertNotIn("ops_after_note", b["note"])
 
+    def test_adding_another_field_after_the_op_keeps_it_listed_until_the_state_is_rewritten(self):
+        """操作の後に今の状態・次の一手でない欄（token の行）を書き足して最終更新が done より後になっても、欄は消えない。
+        今の状態を書き直すと消える（#59。引き受けた直後に token を書き足すと、最初の出力の後で欄が消えた）。"""
+        rc, a = self.w("claim", "--holder", "A")
+        f = self.written_before_ops(a, "# 作業の記録\n\n- 今の状態（ブランチ・commit・PR）: 返信は未投稿\n- 次の一手: 返信する\n- ホストと session ID:\n")
+        self.assertEqual(self.w("op", "run", "--token", a["token"], "--key", "local:demo", "--what", "demo", "--", "true")[0], 0)
+        later = self.done_at(a, "local:demo") + 10
+        f.write_text(f.read_text(encoding="utf-8").replace("- ホストと session ID:", "- ホストと session ID: token の行"), encoding="utf-8")
+        os.utime(f, (later, later))
+        rc, s = self.w("status")
+        self.assertEqual([o["key"] for o in s["note"].get("ops_after_note", [])], ["local:demo"])
+        f.write_text(f.read_text(encoding="utf-8").replace("返信は未投稿", "返信した"), encoding="utf-8")
+        rc, s = self.w("status")
+        self.assertNotIn("ops_after_note", s["note"])
+
     def test_an_op_still_begun_is_not_listed_after_the_note(self):
         """op begin だけで終わりの記録が無い操作は、ops_after_note に並ばない（pending_ops に出る）。"""
         rc, a = self.w("claim", "--holder", "A")
