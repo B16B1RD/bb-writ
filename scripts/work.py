@@ -1626,7 +1626,7 @@ def main() -> int:
             return task_command(a) if a.cmd == 'task' else integrate(a)
         except LeaseRefused as e:
             return out({'ok': False, 'reason': str(e)}, 3)
-        except PermissionError as e:  # 記録の置き場を権限で読み書きできない。ほかのコマンドと同じ 2（担当の拒否の 3 でない）
+        except PermissionError as e:  # 記録の置き場を権限で読み書きできない。権限の誤りは、ほかのコマンドと同じ 2（担当の拒否の 3 でない）
             return out({'ok': False, 'reason': f"記録の置き場を読み書きできない: {e}"}, 2)
         except RecordError as e:  # 形の違う記録は照合の拒否（6）でない
             return out({'ok': False, 'reason': str(e)}, 1)

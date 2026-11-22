@@ -573,10 +573,23 @@ class TestParallel(unittest.TestCase):
                 else:
                     self.assertEqual(got['note'].get('ops_after_note'), [row])
 
-    @unittest.skipIf(hasattr(os, 'geteuid') and os.geteuid() == 0, 'root では権限が効かない')
     def test_an_unreadable_op_record_is_told_apart_from_a_lease_refusal(self):
-        """権限で読めない ops.jsonl は、担当の拒否（3）でなく、記録の置き場を読み書きできない（2）で返す（#60）。担当の拒否は 3 のまま。"""
+        """権限で読めない記録は、担当の拒否（3）でなく、記録の置き場を読み書きできない（2）で返す（#60）。担当の拒否は 3 のまま。
+        task cleanup・task resume の ops.jsonl と、integrate のタスクの記録を見る。権限が効かない環境（root など）では飛ばす。"""
+        probe = Path(self.tmp.name) / 'probe'
+        probe.write_text('x')
+        probe.chmod(0)
+        try:
+            probe.read_text()
+            self.skipTest('この環境では権限が効かない')
+        except PermissionError:
+            pass
         a = self.start()
+        record = next(Path(self.env['BB_WRIT_STATE_DIR'], 'work').glob('repo-*')) / 'tasks' / (a['task'] + '.json')
+        record.chmod(0)
+        r = self.integrate(a, 'main', self.git(Path(a['dir']), 'rev-parse', 'HEAD'), code=2)
+        self.assertIn('記録の置き場を読み書きできない', r['reason'])
+        record.chmod(0o600)
         ops = next(Path(self.env['BB_WRIT_STATE_DIR'], 'work').glob('*/lease.json')).parent / 'ops.jsonl'
         ops.write_text('')
         ops.chmod(0)
