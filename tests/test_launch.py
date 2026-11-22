@@ -255,8 +255,8 @@ FAKE_CLAUDE = textwrap.dedent(r'''
     if sys.argv[1:3] == ["auth", "status"] or os.environ.get("ANTHROPIC_LOG") == "debug":
         # launcher の、専用ログインの組織の確かめ（claude auth status --json と、ANTHROPIC_LOG=debug の問い合わせ）。既存の記録（FAKE_ARGS など）と
         # 対象には触らず、呼び出しを FAKE_ARGS.login に 1 行ずつ足す。FAKE_LOGIN: auth status の答え（claude.ai・none・garbage・hang・
-        # odd-string・odd-type）、FAKE_LOGIN_ORG: ログインの組織、FAKE_TOKEN_ORG: トークンの組織（既定はログインと同じ）、
-        # FAKE_PROBE: 問い合わせの形（noheader・401・two・hang・stderr）、FAKE_PROBE_HOME: 問い合わせがホームの直下に空のファイルを作る
+        # bad-org・num-org・list・api_key）、FAKE_LOGIN_ORG: ログインの組織、FAKE_TOKEN_ORG: トークンの組織（既定はログインと同じ）、
+        # FAKE_PROBE: 問い合わせの形（noheader・401・two・hang・stderr・notuuid・exit1）、FAKE_PROBE_HOME: 問い合わせがホームの直下に空のファイルを作る
         import time
         kind = "auth" if sys.argv[1:3] == ["auth", "status"] else "probe"
         try:
@@ -267,27 +267,34 @@ FAKE_CLAUDE = textwrap.dedent(r'''
         os.write(_fd, (json.dumps({"kind": kind, "argv": sys.argv[1:], "pid": os.getpid(), "ppid": os.getppid(), "cwd": os.getcwd(), "stdin_is_devnull": _null,
                                    "env": {k: v for k, v in sorted(os.environ.items()) if k.startswith(("CLAUDE", "ANTHROPIC_"))}}) + "\n").encode())
         os.close(_fd)
-        login_org = os.environ.get("FAKE_LOGIN_ORG", "11111111-1111-4111-8111-111111111111")
+        login_org = os.environ.get("FAKE_LOGIN_ORG", "1a2b3c4d-1111-4111-8111-aaaaaaaaaaaa")
         if kind == "auth":  # 2.1.330 の欄の形（値は偽）
             how = os.environ.get("FAKE_LOGIN", "claude.ai")
             if how == "hang":
+                print("Hangmarkerzq", flush=True)
                 time.sleep(60)
             if how == "garbage":
                 print("Not logged in"); sys.exit(1)
             if how == "none":
                 print(json.dumps({"loggedIn": False, "authMethod": "none", "apiProvider": "firstParty"})); sys.exit(1)
-            if how in ("odd-string", "odd-type"):  # 短い英小文字・_・. でない authMethod（orgId 無し）
-                print(json.dumps({"loggedIn": True, "authMethod": "Odd Method <x9>" if how == "odd-string" else 12345})); sys.exit(0)
-            print(json.dumps({"loggedIn": True, "authMethod": how, "apiProvider": "firstParty", "email": "someone@example.invalid",
-                              "orgId": login_org, "orgName": "Example", "subscriptionType": "max"}))
+            if how == "list":
+                print("[]"); sys.exit(0)
+            if how == "api_key":  # 環境に ANTHROPIC_API_KEY が在るとき（orgId 無し）
+                print(json.dumps({"loggedIn": True, "authMethod": "api_key", "apiProvider": "firstParty"})); sys.exit(0)
+            org = {"bad-org": "org_not_a_uuid", "num-org": 12345}.get(how, login_org)
+            print(json.dumps({"loggedIn": True, "authMethod": "claude.ai" if how in ("bad-org", "num-org") else how, "apiProvider": "firstParty",
+                              "email": "someone@example.invalid", "orgId": org, "orgName": "Fakeorgnamezq", "subscriptionType": "max"}))
             sys.exit(0)
         how, org = os.environ.get("FAKE_PROBE", ""), os.environ.get("FAKE_TOKEN_ORG", login_org)
-        other = "22222222-2222-4222-8222-222222222222" if how == "two" else org
+        if how == "notuuid":
+            org = "org_0123456789"
+        other = "2c3d4e5f-2222-4222-8222-cccccccccccc" if how == "two" else org
         status = 401 if how == "401" else 200
         head = [] if how in ("noheader", "401") else [f'    "anthropic-organization-id": "{org}",']
         tail = [] if how in ("noheader", "401") else [f'  "anthropic-organization-id": "{other}",']
-        # ANTHROPIC_LOG=debug の claude -p の標準出力の形（2.1.330 の抜粋。値は偽）
+        # ANTHROPIC_LOG=debug の claude -p の標準出力の形（2.1.330 の抜粋。値は偽。Probemarkerzq は漏れを探す目印）
         lines = ['[log_e93a2a] sending request {', '  method: "POST",', '  url: "https://api.anthropic.com/v1/messages?beta=true",',
+                 '  body: { messages: [ { role: "user", content: "Probemarkerzq" } ] },',
                  '  headers: {', '    authorization: "***",', '  },', '}',
                  f'[log_e93a2a, request-id: "req_x"] post https://api.anthropic.com/v1/messages?beta=true succeeded with status {status} in 10ms',
                  '[log_e93a2a] response start {', '  url: "https://api.anthropic.com/v1/messages?beta=true",', f'  status: {status},',
@@ -302,7 +309,7 @@ FAKE_CLAUDE = textwrap.dedent(r'''
             print("\n".join(lines), flush=True)
         if how == "hang":
             time.sleep(60)
-        if how == "401":
+        if how in ("401", "exit1"):  # exit1: ヘッダは在るが、終了コード 1
             print(json.dumps({"type": "result", "is_error": True, "result": "Failed to authenticate. API Error: 401"})); sys.exit(1)
         print(json.dumps({"type": "result", "is_error": False, "result": "ok", "session_id": "p-1"}))
         sys.exit(0)
@@ -645,12 +652,12 @@ class TestLaunch(unittest.TestCase):
         (self.bin / "fake_env.json").write_text(json.dumps({k: v for k, v in env.items() if k.startswith("FAKE_")}))
         return env
 
-    def run_launch(self, host, mode="good", extra=(), path=None, cwd=None, env_extra=None, proc_cwd=None, raw=False):
+    def run_launch(self, host, mode="good", extra=(), path=None, cwd=None, env_extra=None, proc_cwd=None, raw=False, stdin=None):
         self.orphans()  # 前の回が途中で落ちて読まれなかった偽の子孫を、上書きする前に片付けに回す
         env = self.launch_env(mode, path, env_extra)
         target = ["--host", host, "--cwd", str(cwd or self.cwd)] if host else []  # host が無いのは --resume（記録から取る）
         p = subprocess.run([sys.executable, str(LAUNCH), *target, "--prompt-file", str(self.prompt), *extra],
-                           env=env, capture_output=True, text=True, timeout=120, cwd=proc_cwd)  # launcher が止まったら、試験ごと止まらずに落とす
+                           env=env, capture_output=True, text=True, timeout=120, cwd=proc_cwd, stdin=stdin)  # launcher が止まったら、試験ごと止まらずに落とす
         return p if raw else (p.returncode, json.loads(p.stdout))
 
     def launch_in_background(self, extra, mode="stop", env_extra=None):
@@ -2344,6 +2351,7 @@ class TestLaunch(unittest.TestCase):
                 self.assertTrue(any(words in p for p in rec["problems"]), rec)
                 if what == "no-subreaper":  # 子を起こさない
                     self.assertEqual(pids, [], rec)
+                    self.assertNotIn("claude_login", rec)  # 確かめは済んでいるが、起動しない記録には書かない
                 elif what == "unkillable":  # 止められなかった上の段を並べ、止めたものには並べない（下の段は、上の段が生きているので自分の下に来ない）
                     self.assertTrue(any(p.startswith(f"{pids[0]} ") for p in rec["problems"]), rec)
                     self.assertNotIn(pids[0], [int(p.split()[0]) for p in rec["stopped_after_exit"]], rec)
@@ -3488,8 +3496,9 @@ class TestLaunch(unittest.TestCase):
         kept = self.leftover("tmp", self.stamp(1, "-recent"), {"at": time.time() - 86400})
         rec = self.sweep_by_a_launch()
         self.assertNotIn("swept", rec)
-        # 状態の置き場に増えるのは、この起動の記録と報告と、専用ログインの組織の覚え（claude-login.json）だけ（片付けのための排他のファイルなどを作らない）
-        self.assertEqual(sorted(x.name for x in self.state.iterdir()), ["claude-login.json", "delegations", "delegations.jsonl"])
+        # 状態の置き場に増えるのは、この起動の記録と報告だけ（片付けのための排他のファイルなどを作らない）。専用ログインの組織の覚え
+        # （claude-login.json）は、片付けでなく確かめが書くので除く
+        self.assertEqual(sorted(x.name for x in self.state.iterdir() if x.name != "claude-login.json"), ["delegations", "delegations.jsonl"])
         self.assertEqual(sorted(x.name for x in kept.parent.iterdir()), ["tmp"])
         self.assertEqual(sorted(x.name for x in Path(rec["out"]).iterdir() if x.name != "launcher-error.log"),
                          sorted(x.name for x in Path(rec["out"]).iterdir()))
@@ -4194,14 +4203,25 @@ launch.claude_reads = claude_reads
         self.assertIn(f"claude setup-token のトークンを、{setup}", why)
         self.assertIn(section, why)
 
-    # 専用ログインの組織の確かめ（launcher の claude_login）。偽の値は実在しない形
-    LOGIN_ORG = "11111111-1111-4111-8111-111111111111"  # 偽の claude auth status の orgId の既定
-    TOKEN_ORG = "33333333-3333-4333-8333-333333333333"
+    # 専用ログインの組織の確かめ（launcher の claude_login）。偽の値は実在しない形（英字を含め、大文字にすると別の文字列になる）
+    LOGIN_ORG = "1a2b3c4d-1111-4111-8111-aaaaaaaaaaaa"  # 偽の claude auth status の orgId の既定
+    TOKEN_ORG = "5e6f7a8b-3333-4333-8333-bbbbbbbbbbbb"
+    NO_ORG = "launcher を呼んだ環境の Claude Code のログインに、組織（orgId）が無いか、uuid の形でない"
 
     def login_calls(self, kind: str) -> list:
-        """偽の claude が FAKE_ARGS.login に残した、確かめの呼び出し（kind は auth か probe）。"""
+        """偽の claude・dotenvx が FAKE_ARGS.login に残した、確かめの呼び出し（kind は auth・probe・dotenvx）。"""
         f = Path(str(self.args_file) + ".login")
         return [c for c in map(json.loads, f.read_text().splitlines() if f.exists() else []) if c["kind"] == kind]
+
+    def assert_no_login_leak(self, p):
+        """組織の ID（2 つ。小文字・大文字・ハイフン無し）、偽の auth status のメールと組織名、偽の問い合わせの出力の目印が、launcher の標準出力・
+        標準エラーと、状態の置き場の全ファイルに無い。"""
+        texts = {"stdout": p.stdout, "stderr": p.stderr, **{str(f): f.read_text(errors="replace") for f in self.state.rglob("*") if f.is_file()}}
+        words = [w for org in (self.LOGIN_ORG, self.TOKEN_ORG) for w in (org, org.replace("-", ""))]
+        words += ["someone@example.invalid".lower(), "fakeorgnamezq", "probemarkerzq", "req_x"]
+        for where, text in texts.items():
+            for w in words:
+                self.assertNotIn(w, text.lower(), where)
 
     def assert_gone(self, pid: int):
         """pid の偽のプロセスが残っていない。os.kill(pid, 0) が ProcessLookupError になるまで 5 秒待つ（/proc の無い OS でも）。
@@ -4225,11 +4245,12 @@ launch.claude_reads = claude_reads
 
     def test_a_token_from_another_organization_is_noted_without_stopping_the_child(self):
         """専用ログインのトークンの組織が、launcher を呼んだ環境のログインの組織と違うと、claude_login が different で、案内（claude setup-token）
-        が付き、子は起動して ok で返る。2 つの組織の ID は、標準出力・記録（record.json・delegations.jsonl）・claude-login.json のどこにも出ない。
-        比べを常に same にする、案内を落とす、起動を止める、組織の ID をどこかに書くと落ちる。"""
+        が付き、子は起動して ok で返り、続きから起動できる（確かめは status と続きの判定を変えない）。組織の ID・メール・組織名・問い合わせの
+        出力は、標準出力・標準エラー・記録（record.json・delegations.jsonl）・claude-login.json のどこにも出ず、claude-login.json はモード 0600 で
+        できる。比べを常に same にする、案内を落とす、起動を止める、different で続きを止める、どれかをどこかに書くと落ちる。"""
         p = self.run_launch("claude", env_extra={"FAKE_TOKEN_ORG": self.TOKEN_ORG}, raw=True)
         rec = json.loads(p.stdout)
-        self.assertEqual((p.returncode, rec["status"]), (0, "ok"), rec)
+        self.assertEqual((p.returncode, rec["status"], rec["resumable"], rec["blocked"]), (0, "ok", True, []), rec)
         self.assertTrue(self.args_file.exists())  # 子を起動した
         self.assertEqual(rec["claude_login"]["org"], "different", rec)
         self.assertEqual(set(rec["claude_login"]), {"org", "note"})
@@ -4240,20 +4261,17 @@ launch.claude_reads = claude_reads
         saved = self.state / "claude-login.json"
         self.assertEqual(set(json.loads(saved.read_text())), {"env", "org"})
         self.assertEqual(saved.stat().st_mode & 0o777, 0o600)
-        texts = {"stdout": p.stdout, "stderr": p.stderr, **{str(f): f.read_text(errors="replace") for f in self.state.rglob("*") if f.is_file()}}
-        self.assertIn(str(saved), texts)
-        for org in (self.LOGIN_ORG, self.TOKEN_ORG):
-            for where, text in texts.items():
-                self.assertNotIn(org, text.lower(), where)
-                self.assertNotIn(org.replace("-", ""), text.lower(), where)
+        self.assert_no_login_leak(p)
 
     def test_a_token_from_the_same_organization_adds_no_note(self):
-        """トークンの組織がログインの組織と同じなら、claude_login は {"org": "same"} だけ（案内が無い）。ID の大文字・小文字は問わない。
-        比べを常に different にする、same に案内を付ける、大文字のまま比べると落ちる。"""
-        for name, token in (("same", self.LOGIN_ORG), ("upper", self.LOGIN_ORG.upper())):
+        """トークンの組織がログインの組織と同じなら、claude_login は {"org": "same"} だけ（案内が無い）。ID の大文字・小文字は問わない
+        （ヘッダの値だけ大文字、orgId だけ大文字）。比べを常に different にする、same に案内を付ける、どちらかの側を小文字にせず比べる、
+        ヘッダの読み方で大文字・小文字を区別すると落ちる。"""
+        for name, login, token in (("same", self.LOGIN_ORG, self.LOGIN_ORG), ("header-upper", self.LOGIN_ORG, self.LOGIN_ORG.upper()),
+                                   ("orgid-upper", self.LOGIN_ORG.upper(), self.LOGIN_ORG)):
             with self.subTest(name):
                 (self.state / "claude-login.json").unlink(missing_ok=True)
-                rc, rec = self.run_launch("claude", env_extra={"FAKE_TOKEN_ORG": token})
+                rc, rec = self.run_launch("claude", env_extra={"FAKE_LOGIN_ORG": login, "FAKE_TOKEN_ORG": token})
                 self.assertEqual((rc, rec["status"], rec["claude_login"]), (0, "ok", {"org": "same"}), rec)
 
     def test_the_token_organization_is_asked_once_per_env_file_content(self):
@@ -4274,57 +4292,87 @@ launch.claude_reads = claude_reads
         self.assertEqual((len(self.login_calls("auth")), len(self.login_calls("probe"))), (4, 2))
 
     def test_an_unknown_login_organization_skips_the_query_and_still_starts_the_child(self):
-        """launcher を呼んだ環境のログインの組織が分からない（ログインが無い・JSON でない・終わらない・authMethod が読めない形）と、unknown で理由を
-        残し、問い合わせをせず、子は起動して ok で返る。理由に出力の中身を写さない（authMethod は短い英小文字・_・. の値だけを写す）。
-        ログインが無くても問い合わせる、起動を止める、上限を外す、出力を写す、authMethod の形を見ずに写すと落ちる。"""
-        for how, why, hidden in (("none", "authMethod は none", "Not logged in"), ("garbage", "JSON として読めない", "Not logged in"),
-                                 ("hang", "2 秒で終わらなかったので止めた", "Not logged in"),
-                                 ("odd-string", "authMethod は読めない形", "Odd Method"), ("odd-type", "authMethod は読めない形", "12345")):
+        """launcher を呼んだ環境のログインの組織が分からない（ログインが無い・JSON でない・終わらない・orgId が uuid の形でない・文字列でない・出力が
+        dict でない・API キーのログイン）と、unknown で理由（why）だけを残し（案内 note は無い）、問い合わせをせず、子は起動して ok で返る。理由に、
+        その場面の偽の出力に在る文字列（authMethod の値など）を写さない。ログインが無くても問い合わせる、起動を止める、上限を外す、orgId の形や
+        出力の dict を見ない、出力を写すと落ちる。短い上限は、終わらない場面にだけ掛ける。"""
+        no_org = self.NO_ORG
+        for how, why, hidden in (("none", no_org, ["none", "firstparty"]), ("garbage", "JSON として読めない", ["not logged in"]),
+                                 ("hang", "2 秒で終わらなかったので止めた", ["hangmarkerzq"]),
+                                 ("bad-org", no_org, ["org_not_a_uuid", "fakeorgnamezq", "someone@example.invalid", "claude.ai"]),
+                                 ("num-org", no_org, ["12345", "fakeorgnamezq"]), ("list", no_org, ["[]"]), ("api_key", no_org, ["api_key"])):
             with self.subTest(how):
                 Path(str(self.args_file) + ".login").unlink(missing_ok=True)
                 self.args_file.unlink(missing_ok=True)
                 started = time.monotonic()
-                rc, rec = self.run_launch("claude", env_extra={"FAKE_LOGIN": how, "BB_WRIT_LOGIN_CHECK_TIMEOUT": "2"})
+                rc, rec = self.run_launch("claude", env_extra={"FAKE_LOGIN": how, **({"BB_WRIT_LOGIN_CHECK_TIMEOUT": "2"} if how == "hang" else {})})
                 self.assertLess(time.monotonic() - started, 30)
                 self.assertEqual((rc, rec["status"], rec["claude_login"]["org"]), (0, "ok", "unknown"), rec)
                 self.assertEqual(set(rec["claude_login"]), {"org", "why"})
                 self.assertIn(why, rec["claude_login"]["why"])
-                self.assertNotIn(hidden, rec["claude_login"]["why"])
+                for h in hidden:
+                    self.assertNotIn(h, rec["claude_login"]["why"].lower())
                 self.assertEqual(self.login_calls("probe"), [])
                 self.assertTrue(self.args_file.exists())
                 self.assert_gone(self.login_calls("auth")[0]["pid"])
 
     def test_an_unreadable_query_output_is_unknown_and_not_remembered(self):
-        """問い合わせの出力に組織のヘッダが無い（終了コード 0）・終了コード 1 でヘッダが無い（401 の形）・値が 2 種類、のどれも unknown で、子は起動して
-        ok で返り、結果を覚えない（次の起動でまた問い合わせる）。読めないものを same・different にする、unknown を覚えると落ちる。"""
-        for how, why in (("noheader", "0 種類（終了コード 0）"), ("401", "0 種類（終了コード 1）"), ("two", "2 種類（終了コード 0）")):
+        """問い合わせの出力に組織のヘッダが無い（終了コード 0）・終了コード 1 でヘッダが無い（401 の形）・値が 2 種類・値が uuid の形でない、のどれも
+        unknown で、子は起動して ok で返り、結果を覚えない（次の起動でまた問い合わせる）。問い合わせが通った（終了コード 0）のに読めないときだけ、
+        確かめが働いていないことの案内（note。claude setup-token を含む）が付く。組織の ID・問い合わせの出力の目印は、どこにも出ない。
+        読めないものを same・different にする、unknown を覚える、uuid の形を見ない、通ったのに読めないときの案内を落とす、失敗した問い合わせにも
+        案内を付ける、出力を写すと落ちる。"""
+        for how, why, noted in (("noheader", "0 種類（終了コード 0）", True), ("401", "0 種類（終了コード 1）", False),
+                                ("two", "2 種類（終了コード 0）", True), ("notuuid", "0 種類（終了コード 0）", True)):
             with self.subTest(how):
                 Path(str(self.args_file) + ".login").unlink(missing_ok=True)
                 for _ in range(2):
-                    rc, rec = self.run_launch("claude", env_extra={"FAKE_PROBE": how})
-                    self.assertEqual((rc, rec["status"], rec["claude_login"]["org"]), (0, "ok", "unknown"), rec)
+                    p = self.run_launch("claude", env_extra={"FAKE_PROBE": how, "FAKE_TOKEN_ORG": self.TOKEN_ORG}, raw=True)
+                    rec = json.loads(p.stdout)
+                    self.assertEqual((p.returncode, rec["status"], rec["claude_login"]["org"]), (0, "ok", "unknown"), rec)
                     self.assertIn(why, rec["claude_login"]["why"])
+                    if noted:
+                        self.assertEqual(set(rec["claude_login"]), {"org", "why", "note"})
+                        self.assertIn("claude setup-token", rec["claude_login"]["note"])
+                    else:
+                        self.assertEqual(set(rec["claude_login"]), {"org", "why"})
                     self.assertFalse((self.state / "claude-login.json").exists())
+                    self.assert_no_login_leak(p)
                 self.assertEqual(len(self.login_calls("probe")), 2)
 
-    def test_a_query_that_does_not_end_is_stopped_with_its_process_tree(self):
-        """問い合わせが終わらないと、上限で dotenvx とその下の claude をまとめて止め、unknown で、子は起動して ok で返る。確かめのプロセスは残らない。
-        上限を外す、dotenvx だけを止める（下の claude が出力を開いたまま残り、読み終わらない）と落ちる。"""
+    def test_a_failed_query_that_shows_one_organization_is_still_used(self):
+        """問い合わせが終了コード 1 で終わっても、ヘッダの値が 1 種類読めれば、それを組織として比べ（different）、覚える（次の起動は問い合わせない）。
+        終了コードが 0 でないときにヘッダを捨てると落ちる。"""
+        for _ in range(2):
+            rc, rec = self.run_launch("claude", env_extra={"FAKE_PROBE": "exit1", "FAKE_TOKEN_ORG": self.TOKEN_ORG})
+            self.assertEqual((rc, rec["status"], rec["claude_login"]["org"]), (0, "ok", "different"), rec)
+        self.assertEqual(len(self.login_calls("probe")), 1)
+        self.assertTrue((self.state / "claude-login.json").exists())
+
+    def test_a_query_that_does_not_end_is_stopped_with_its_process_group(self):
+        """問い合わせが終わらないと、上限でプロセスグループ（dotenvx とその下の claude）をまとめて止め、unknown で（失敗した問い合わせなので
+        案内 note は無い）、子は起動して ok で返る。確かめのプロセスは残らない。上限を外す、dotenvx だけを止める（下の claude が残る）、
+        止めた問い合わせに案内を付けると落ちる。上限は claude auth status にも掛かるので、遅い機械でも auth status が終わる長さにする。"""
         started = time.monotonic()
-        rc, rec = self.run_launch("claude", env_extra={"FAKE_PROBE": "hang", "BB_WRIT_LOGIN_CHECK_TIMEOUT": "2"})
+        p = self.run_launch("claude", env_extra={"FAKE_PROBE": "hang", "BB_WRIT_LOGIN_CHECK_TIMEOUT": "5"}, raw=True)
+        rec = json.loads(p.stdout)
         self.assertLess(time.monotonic() - started, 30)
-        self.assertEqual((rc, rec["status"], rec["claude_login"]["org"]), (0, "ok", "unknown"), rec)
-        self.assertIn("2 秒で終わらなかったので止めた", rec["claude_login"]["why"])
+        self.assertEqual((p.returncode, rec["status"], rec["claude_login"]["org"]), (0, "ok", "unknown"), rec)
+        self.assertEqual(set(rec["claude_login"]), {"org", "why"})
+        self.assertIn("5 秒で終わらなかったので止めた", rec["claude_login"]["why"])
         self.assertFalse((self.state / "claude-login.json").exists())
+        self.assert_no_login_leak(p)
         probe = self.login_calls("probe")[0]
         self.assert_gone(probe["pid"])  # dotenvx の下の claude
         self.assert_gone(probe["ppid"])  # dotenvx
 
     def test_the_query_gets_only_its_own_claude_and_anthropic_variables(self):
         """問い合わせの環境には、親の CLAUDE*・ANTHROPIC_*（API キーなど）が渡らず、CLAUDE_CONFIG_DIR（専用ログインの置き場）・ANTHROPIC_LOG・
-        CLAUDE_CODE_DISABLE_BACKGROUND_TASKS だけが在る。claude auth status には launcher の環境がそのまま渡る。どちらも標準入力は閉じ、作業ディレクトリは
-        状態の置き場。問い合わせの dotenvx には、専用ログインの .env と .env.keys を -q・-f・-fk で渡す。子（本番の起動）の環境に ANTHROPIC_LOG は無い。
-        親の変数を外さない、auth status の環境を絞る、dotenvx の引数を落とす、子に ANTHROPIC_LOG を渡すと落ちる。"""
+        CLAUDE_CODE_DISABLE_BACKGROUND_TASKS だけが在る。claude auth status には launcher の環境がそのまま渡る。どちらも、launcher の標準入力が
+        pipe でも標準入力は閉じ、作業ディレクトリは状態の置き場。問い合わせは --restricted で起こし、dotenvx には、専用ログインの .env と
+        .env.keys を -q・-f・-fk で渡す。子（本番の起動）の環境に ANTHROPIC_LOG は無い。親の変数を外さない、auth status の環境を絞る、
+        標準入力を閉じない、--restricted・dotenvx の引数を落とす、子に ANTHROPIC_LOG を渡すと落ちる。"""
+        self.maxDiff = None
         parent = {"ANTHROPIC_API_KEY": "sk-ant-fake", "ANTHROPIC_BASE_URL": "http://example.invalid", "ANTHROPIC_LOG": "info",
                   "CLAUDE_CONFIG_DIR": str(Path(self.tmp.name) / "parent-claude"), "CLAUDE_CODE_ENTRYPOINT": "sdk-cli"}
         for write in ((), ("--write",)):
@@ -4332,20 +4380,20 @@ launch.claude_reads = claude_reads
                 Path(str(self.args_file) + ".login").unlink(missing_ok=True)
                 (self.state / "claude-login.json").unlink(missing_ok=True)
                 cwd = self.worktree("login")[1] if write else None
-                rc, rec = self.run_launch("claude", extra=write, cwd=cwd, env_extra=parent)
+                rc, rec = self.run_launch("claude", extra=write, cwd=cwd, env_extra=parent, stdin=subprocess.PIPE)
                 self.assertEqual((rec["status"], rec["claude_login"]), ("ok", {"org": "same"}), rec)
                 (auth,), (probe,) = self.login_calls("auth"), self.login_calls("probe")
                 self.assertEqual(probe["env"], {"CLAUDE_CONFIG_DIR": str(self.cfg / "claude-home"), "ANTHROPIC_LOG": "debug",
                                                 "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": "1"})
                 self.assertEqual(probe["argv"], ["-p", "ok とだけ返して", "--model", "haiku", "--output-format", "json",
-                                                 "--no-session-persistence", "--tools", ""])
+                                                 "--no-session-persistence", "--tools", "", "--restricted"])
                 self.assertEqual(auth["argv"], ["auth", "status", "--json"])
                 (dotenvx,) = self.login_calls("dotenvx")
                 self.assertEqual(dotenvx["argv"], ["run", "-q", "-f", str(self.cfg / ".env"), "-fk", str(self.cfg / ".env.keys"), "--",
                                                    "claude", *probe["argv"]])
                 self.assertEqual({k: auth["env"].get(k) for k in parent}, parent)
                 for c in (auth, probe):
-                    self.assertTrue(c["stdin_is_devnull"])
+                    self.assertTrue(c["stdin_is_devnull"], c["kind"])
                     self.assertEqual(Path(c["cwd"]).resolve(), self.state.resolve())
                 child = json.loads(Path(str(self.args_file) + ".env").read_text())
                 self.assertNotIn("ANTHROPIC_LOG", child)
@@ -4358,18 +4406,17 @@ launch.claude_reads = claude_reads
         self.assertEqual((rc, rec["status"], rec["claude_login"]["org"]), (0, "ok", "different"), rec)
 
     def test_an_unexpected_failure_in_the_check_does_not_stop_the_child(self):
-        """確かめの中の想定外の例外（専用ログインの .env を読めない）は、unknown にして例外の型の名前だけを残し、子は起動して ok で返る。
-        例外を受けずに起動の前の準備の失敗にすると落ちる。"""
-        if os.geteuid() == 0:
-            self.skipTest("root はモード 000 のファイルも読める")
-        env = self.cfg / ".env"
-        env.chmod(0)
-        try:
-            rc, rec = self.run_launch("claude")
-        finally:
-            env.chmod(0o644)
+        """確かめの中の想定外の例外は、unknown にして例外の型の名前だけを残し（例外の文は写さない）、子は起動して ok で返る。
+        例外を受けずに起動の前の準備の失敗にする、例外の文を写すと落ちる。"""
+        patch = """\
+            def boom(*a, **k):
+                raise RuntimeError("Leakmarkerzq")
+            launch.run_bounded = boom
+            """
+        rc, rec = self.launch_patched(patch, ["--host", "claude", "--cwd", str(self.cwd)])
         self.assertEqual((rc, rec["status"], rec["claude_login"]["org"]), (0, "ok", "unknown"), rec)
-        self.assertIn("PermissionError", rec["claude_login"]["why"])
+        self.assertIn("RuntimeError", rec["claude_login"]["why"])
+        self.assertNotIn("Leakmarkerzq", json.dumps(rec, ensure_ascii=False))
         self.assertTrue(self.args_file.exists())
 
     def test_what_the_check_leaves_in_home_is_not_the_child_residue(self):
@@ -4394,25 +4441,29 @@ launch.claude_reads = claude_reads
         self.assertFalse(Path(str(self.args_file) + ".login").exists())
 
     def test_a_broken_memory_of_the_token_organization_is_asked_again(self):
-        """壊れた claude-login.json（JSON でない・形が違う）は無いものとして扱い、問い合わせて書き直す。書けない（ディレクトリになっている）ときは、
-        起動を止めず、結果を使い、書けなかったことを cache に残す。壊れたものを信じる、読めずに止まる、書けずに止まると落ちる。"""
+        """壊れた claude-login.json（JSON でない・形が違う・org が 64 桁の 16 進の後に余分な文字が続く）は無いものとして扱い、問い合わせて書き直す。
+        前から在るファイルを書き直したときは、モードを変えない（0644 で在ったものは 0644 のまま。0600 になるのは launcher が作ったときだけ）。
+        書けない（ディレクトリになっている）ときは、起動を止めず、結果を使い、書けなかったことを cache に残す。壊れたものを信じる（org を前方一致で
+        見るなど）、読めずに止まる、書けずに止まると落ちる。"""
         import hashlib
         saved = self.state / "claude-login.json"
         env_sum = hashlib.sha256((self.cfg / ".env").read_bytes()).hexdigest()
+        login_sum = hashlib.sha256(self.LOGIN_ORG.encode()).hexdigest()
         for n, broken in enumerate(("not json", "[]", json.dumps({"env": env_sum, "org": 5}), json.dumps({"env": env_sum}),
-                                    json.dumps({"env": env_sum, "org": "x" * 64})), 1):
+                                    json.dumps({"env": env_sum, "org": "x" * 64}), json.dumps({"env": env_sum, "org": login_sum + "0"})), 1):
             with self.subTest(broken):
                 saved.write_text(broken)
+                saved.chmod(0o644)
                 rc, rec = self.run_launch("claude", env_extra={"FAKE_TOKEN_ORG": self.TOKEN_ORG})
                 self.assertEqual((rec["status"], rec["claude_login"]["org"]), ("ok", "different"), rec)
                 self.assertEqual(len(self.login_calls("probe")), n)
                 self.assertEqual(set(json.loads(saved.read_text())), {"env", "org"})
+                self.assertEqual(saved.stat().st_mode & 0o777, 0o644)  # 前から在るファイルのモードは変えない
         saved.unlink()
         saved.mkdir()
         rc, rec = self.run_launch("claude")
         self.assertEqual((rc, rec["status"], rec["claude_login"]["org"]), (0, "ok", "same"), rec)
         self.assertIn("覚えられなかった", rec["claude_login"]["cache"])
-        self.assertEqual(list(self.state.glob(".claude-login.*")), [])  # 一時ファイルを残さない
 
     def test_a_codex_child_does_not_start_on_a_stale_copy_of_bb_writ(self):
         # Codex の子は専用ログインに入れた写しのスキルと補助スクリプトを読む（読み取り専用の子は一覧だけで、本文は読めなかった）。
