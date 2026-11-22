@@ -460,6 +460,10 @@ FAKE_CLAUDE = textwrap.dedent(r'''
         result = result.replace('"conclusion": "', '"z": ' + "[" * 3000 + "]" * 3000 + ', "conclusion": "')
     if mode == "surrogate":  # JS の JSON.stringify は単独のサロゲートを \ud83d の形で出す。本文と、報告の JSON の中の両方
         result = "\ud83d" + result.replace('"conclusion": "', '"conclusion": "\\ud83d')
+    if mode in ("fable-unavailable", "fable-ran-out") and sys.argv[sys.argv.index("--model") + 1] == "fable":  # Fable の利用枠が尽きた
+        print(json.dumps({"type": "result", "result": "You've hit your Fable limit", "session_id": sid, "is_error": True,  # 尽きたのが途中なら費用がある
+                          "terminal_reason": "api_error", "total_cost_usd": 0.05 if mode == "fable-ran-out" else 0, "num_turns": 1}))
+        sys.exit(1)
     if os.environ.get("FAKE_EXIT"):  # 子が失敗した（後処理の理由と並ぶか確かめる）。FAKE_ERROR は失敗の結果の文
         print(json.dumps({"type": "result", "result": os.environ.get("FAKE_ERROR", ""), "session_id": sid, "is_error": True})); sys.exit(int(os.environ["FAKE_EXIT"]))
     print(json.dumps({"type": "result", "result": result, "session_id": ["s"] if mode == "shapes" else sid, "is_error": False,
@@ -2992,6 +2996,35 @@ class TestLaunch(unittest.TestCase):
         self.assertEqual((again["audit"], again["status"], again.get("deliver")), (True, "invalid-report", None), again)
         rc, rec = self.run_launch("claude", mode="deliver-missing")
         self.assertEqual((rec["status"], "deliver" in rec), ("ok", False), rec)
+
+    def test_a_fable_child_that_cannot_start_is_restarted_once_on_the_fallback_tier(self):
+        """Fable を頼んだ Claude Code の子が 1 ターンも進まずに API のエラーで終わったら、同じ起動の中で Opus high で 1 回だけ
+        立て直し、記録に model_fallback を残す（#56）。Fable を頼まない子と、続き（--resume）は立て直さない。"""
+        args = lambda: [json.loads(x) for x in [self.args_file.read_text()]][0]
+        rc, rec = self.run_launch("claude", mode="fable-unavailable", extra=["--interrogate", "--model", "fable", "--effort", "medium"])
+        self.assertEqual((rc, rec["status"], rec["interrogate"]), (0, "ok", True), rec)
+        self.assertEqual((rec["model_requested"], rec["effort_requested"]), ("opus", "high"), rec)
+        self.assertEqual((rec["model_fallback"]["from"], rec["model_fallback"]["to"]), (["fable", "medium"], ["opus", "high"]), rec)
+        self.assertIn("Fable limit", rec["model_fallback"]["why"][0])
+        first = json.loads((Path(rec["out"]) / "stdout-first.jsonl").read_text().strip().splitlines()[-1])
+        self.assertNotEqual(first["session_id"], rec["session"])  # 立て直しは新しい session（最初の起動の session を使い回さない）
+        argv = args()
+        self.assertEqual((argv[argv.index("--model") + 1], argv[argv.index("--session-id") + 1]), ("opus", rec["session"]))
+        recorded = json.loads((Path(rec["out"]) / "record.json").read_text())
+        self.assertEqual(recorded["model_fallback"], rec["model_fallback"])
+        rc, rec = self.run_launch("claude", mode="fable-unavailable", extra=["--model", "opus", "--effort", "high"])  # Fable を頼まない子
+        self.assertEqual((rec["status"], "model_fallback" in rec), ("ok", False), rec)
+        rc, rec = self.run_launch("claude", extra=["--model", "fable", "--effort", "high"])  # Fable で動いた子は立て直さない
+        self.assertNotIn("model_fallback", rec)
+        rc, rec = self.run_launch("claude", mode="fable-ran-out", extra=["--model", "fable", "--effort", "high"])  # 途中まで進んで尽きた子
+        self.assertEqual((rec["status"], "model_fallback" in rec, rec["model_requested"]), ("failed", False, "fable"), rec)
+
+    def test_a_child_that_ran_on_another_model_is_recorded_as_substituted(self):
+        """頼んだモデルと違うモデルで動いた Claude Code の子は、記録に model_substituted を残し、失敗にはしない（#56）。"""
+        rc, rec = self.run_launch("claude", extra=["--model", "opus", "--effort", "high"])  # 偽の子は sonnet で動いたと返す
+        self.assertEqual((rec["status"], rec.get("model_substituted")), ("ok", True), rec)
+        rc, rec = self.run_launch("claude", extra=["--model", "sonnet", "--effort", "medium"])
+        self.assertEqual((rec["status"], "model_substituted" in rec), ("ok", False), rec)
 
     def test_an_auditor_is_recorded_and_its_resume_stays_one(self):
         """work.py は、すべての push・pr で HEAD を対象にした監査役（返す前の判定）の記録を求める。続きも監査役のまま、
