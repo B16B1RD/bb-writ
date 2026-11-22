@@ -16,7 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent)); import process_limit  
 
 ROOT = Path(__file__).resolve().parents[1]
 LAUNCH = ROOT / "scripts" / "launch.py"
-GOOD = ('ok.\\n```json\\n{"conclusion": "x は正しい", "evidence": [{"what": "読んだ", "where": "a.txt:1"}], "unknowns": [], '
+GOOD = ('ok.\\n```json\\n{"conclusion": "x は正しい", "deliver": "yes", "evidence": [{"what": "読んだ", "where": "a.txt:1"}], "unknowns": [], '
         '"execution": {"completed": "yes", "commands": [{"command": "python3 -m unittest", "exit": 0}]}}\\n```')
 
 FAKE_CODEX = textwrap.dedent(r'''
@@ -444,6 +444,10 @@ FAKE_CLAUDE = textwrap.dedent(r'''
     if os.environ.get("FAKE_HANG"):  # 時間切れ（本物の -p --output-format json は、終わるまで何も出さない）
         import time
         time.sleep(60)
+    if mode == "deliver-no":  # 監査役が差し戻した
+        result = result.replace('"deliver": "yes"', '"deliver": "no"')
+    if mode == "deliver-missing":  # 監査役が判定を書かなかった
+        result = result.replace('"deliver": "yes", ', '')
     if mode == "unwritable-report":  # 試験の sitecustomize が書き出しを失敗させる印
         result = result.replace('"conclusion": "', '"__unwritable__": 1, "conclusion": "')
     if mode == "deep":  # 読めるが、記録（indent 付き）には書けない深さの報告
@@ -1044,8 +1048,11 @@ class TestLaunch(unittest.TestCase):
         rc, rec = self.run_launch("claude", extra=["--interrogate"])  # --interrogate の審査役も、監査役の文でなく順序の文
         self.assertEqual((rc, "HEAD を動かさない" in rec["next"], "前の監査" in rec["next"]), (0, True, False), rec)
         # 書く子・ok でない子に next を出さないことは test_only_a_child_counted_as_a_review_is_told_to_write_the_triage が見る
-        rc, rec = self.run_launch("claude", extra=["--audit"])  # 監査役を立て直すときは、前の監査の項目と、その後の差分に限る（#34）
+        # 監査役が差し戻したら、立て直すときは前の監査の項目と、その後の差分に限る（#34）。届けてよいなら、整える点を直して立て直さない
+        rc, rec = self.run_launch("claude", mode="deliver-no", extra=["--audit"])
         self.assertEqual((rc, "指摘の扱い" in rec["next"], "前の監査" in rec["next"], "HEAD を動かさない" in rec["next"]), (0, True, True, False), rec)
+        rc, rec = self.run_launch("claude", extra=["--audit"])
+        self.assertEqual((rc, "立て直さない" in rec["next"], "前の監査" in rec["next"]), (0, True, False), rec)
         no_untracked = Path(self.tmp.name) / "gitconfig"
         no_untracked.write_text("[status]\n\tshowUntrackedFiles = no\n")
         clean = Path(self.tmp.name) / "clean"
@@ -2950,6 +2957,18 @@ class TestLaunch(unittest.TestCase):
                     rc, rec = self.run_launch(host, extra=extra)
                     self.assertEqual((rc, rec["status"]), (0, "ok"), rec)
                     self.assertNotIn(mark, prompt())
+
+    def test_an_auditor_must_say_whether_to_deliver_and_the_record_keeps_it(self):
+        """監査役の報告は deliver（yes か no）を持つ。無ければ invalid-report。no も ok の報告として記録に残す（work.py が関門に
+        数えないのは test_work の側で見る）。監査役でない子には deliver を求めない。"""
+        recorded = lambda rec: json.loads((Path(rec["out"]) / "record.json").read_text())
+        for mode, status, deliver in (("good", "ok", "yes"), ("deliver-no", "ok", "no"), ("deliver-missing", "invalid-report", None)):
+            with self.subTest(mode=mode):
+                rc, rec = self.run_launch("claude", mode=mode, extra=["--audit"])
+                self.assertEqual((rec["status"], rec.get("deliver"), recorded(rec).get("deliver")), (status, deliver, deliver), rec)
+        self.assertIn("deliver が yes / no のどちらでもない（監査役の判定）", rec["problems"])
+        rc, rec = self.run_launch("claude", mode="deliver-missing")
+        self.assertEqual((rec["status"], "deliver" in rec), ("ok", False), rec)
 
     def test_an_auditor_is_recorded_and_its_resume_stays_one(self):
         """work.py は、すべての push・pr で HEAD を対象にした監査役（返す前の判定）の記録を求める。続きも監査役のまま、

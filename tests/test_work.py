@@ -440,7 +440,8 @@ class TestAccountCheck(unittest.TestCase):
             return
         state = Path(self.env["BB_WRIT_STATE_DIR"])
         out = state / "delegations" / f"r{len(list((state / 'delegations').glob('*'))) if (state / 'delegations').is_dir() else 0}"
-        rec = {"host": "claude", "cwd": str(self.wt), "write": False, "out": str(out), "head": p.stdout.strip(), "status": "ok", **over}
+        rec = {"host": "claude", "cwd": str(self.wt), "write": False, "out": str(out), "head": p.stdout.strip(), "status": "ok",
+               **({"deliver": "yes"} if over.get("audit") is True else {}), **over}
         rec = {k: v for k, v in rec.items() if v is not ...}  # ... はその欄を書かない
         out.mkdir(parents=True)
         (out / "record.json").write_text(json.dumps({**rec, **(record or {})}, indent=1), encoding="utf-8")
@@ -957,6 +958,22 @@ class TestReviewedCommit(unittest.TestCase):
         self.assertEqual(self.publish(tok, "pr:feat", "--reviewed", self.head())[0], 0)
         recs = {json.loads(x)["key"]: json.loads(x) for x in self.ops_file().decode().splitlines()}
         self.assertEqual(len(recs["push:feat@1"]["audits"]), 1)  # どの監査役の記録で通したかを残す
+
+    def test_an_audit_that_sent_the_work_back_does_not_open_the_gate(self):
+        # 監査役が本文で差し戻した（deliver: no）記録を、status の ok だけで関門に数えない。判定の欠けた記録と、行と record.json で
+        # 判定が食い違う記録も数えない
+        self.launcher_audits = False
+        tok = self.claim()
+        self.commit("src/fix.py")
+        self.review_record(self.head(), audit=True, deliver="no")
+        self.review_record(self.head(), audit=True, deliver=...)
+        self.review_record(self.head(), audit=True, record={"deliver": "no"})
+        self.review_record(self.head(), audit=True, deliver="no", record={"deliver": "yes"})
+        rc, r = self.publish(tok, "push:feat@1", "--reviewed", "none:文書だけ")
+        self.assertEqual(rc, 6, r)
+        self.assertIn("監査役", r["reason"])
+        self.review_record(self.head(), audit=True)
+        self.assertEqual(self.publish(tok, "push:feat@1", "--reviewed", "none:文書だけ")[0], 0)
 
     def test_an_audit_does_not_count_as_a_review(self):
         # 監査役は push ごとに立てる。審査役の代わりにすると、審査を通した commit の宣言が監査だけで通る
