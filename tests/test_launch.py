@@ -4259,7 +4259,8 @@ launch.claude_reads = claude_reads
         self.assertIn("claude setup-token", rec["claude_login"]["note"])
         launch = load_launch()
         self.assertNotEqual(launch.CLAUDE_LOGIN_NOTE, launch.CLAUDE_LOGIN_UNREAD_NOTE)
-        self.assertEqual(rec["claude_login"]["note"], launch.CLAUDE_LOGIN_NOTE)  # 読めないときの案内と取り違えない
+        # 読めないときの案内と取り違えない（別の定数を出す後退を見る。2 つの定数の中身そのものを入れ替える編集は見ない: 文面は人が読む）
+        self.assertEqual(rec["claude_login"]["note"], launch.CLAUDE_LOGIN_NOTE)
         self.assertEqual(json.loads((Path(rec["out"]) / "record.json").read_text(encoding="utf-8"))["claude_login"], rec["claude_login"])
         last = json.loads((self.state / "delegations.jsonl").read_text(encoding="utf-8").splitlines()[-1])
         self.assertEqual(last["claude_login"], rec["claude_login"])
