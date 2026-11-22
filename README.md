@@ -211,17 +211,23 @@ CLAUDE_CONFIG_DIR=~/.config/bb-writ/claude-home env -u ANTHROPIC_API_KEY -u ANTH
 
 `ok` と返れば、専用ログインで動く。先頭の `env -u` は、シェルにある API キーを外す（キーがあると、トークンより先に使われる。launcher も子に渡さない）。`Failed to authenticate. API Error: 401` で終われば、トークンが違うので、`claude setup-token` からやり直す。`claude auth status` は、トークンが無効でも `"loggedIn": true` を返すので、確かめに使わない。`~/.config/bb-writ/claude-home` は、子の Claude Code の設定と会話記録の置き場で、初めて使うときにできる。
 
-トークンは、`claude setup-token` でログインしたアカウントのもので、ふだんのログインを切り替えても変わらない。Claude のアカウントを切り替えたら、専用ログインのトークンも作り直す。作り直すには、上の `claude setup-token` から `dotenvx set …` までをもう一度実行する。`.env` の値は置き換わる（dotenvx 2.36.0 で確かめた）。その後、上の確かめの問い合わせをもう一度実行する。
+トークンは、`claude setup-token` でログインしたアカウントのもので、ふだんのログインを切り替えても変わらない。Claude のアカウントを切り替えたら、専用ログインのトークンも作り直す。作り直すには、上の `claude setup-token`・`IFS= read -rs T`・`dotenvx set …` の 3 つを、もう一度順に実行する。`.env` の値は置き換わる（dotenvx 2.36.0 で確かめた）。その後、上の確かめの問い合わせをもう一度実行する。
 
 専用ログインだけが利用枠の上限で断られ、同じ時刻のふだんのログインには枠が残っていたことがある。トークンを作り直すと通った（2026-11-22）。前のトークンが別のアカウントのものだったかは、確かめていない。
 
-bb-writ は、Claude Code の子を起動する前に、専用ログインのトークンの組織と、bb-writ を呼んだ環境の Claude Code のログインの組織を比べる。違えば、起動は止めずに、子の記録の `claude_login` に案内を出す。入口（指揮者）がその案内を返答で伝えるよう、`delegate` のスキルに書いてある。伝えるかは指揮者のモデルしだいで、伝えた回数は数えていない。トークンの組織は、専用ログインの `.env` の中身が変わった後の最初の起動で 1 回だけ（初めての起動と、`claude-login.json` が無い・読めないときも同じ）、専用ログインで Haiku に短い問い合わせをして、API の応答のヘッダ `anthropic-organization-id` から読む。読めなかったときは、次の起動でまた問い合わせる。覚えるのは、`.env` の中身の SHA-256 と、組織の ID の SHA-256 だけで、置き場は `~/.local/state/bb-writ/claude-login.json`。ログインの側は、`claude auth status --json` の `orgId` を使う。
+bb-writ は、Claude Code の子を起動する前に、専用ログインのトークンの組織と、bb-writ を呼んだ環境の Claude Code のログインの組織を比べる。違っても、確かめられなくても、起動は止めない。違えば、子の記録の `claude_login` に案内を出す。問い合わせは通ったのに組織を読めないときは、確かめが働いていないことを、同じく記録に案内として出す。入口（指揮者）がその案内を返答で伝えるよう、`delegate` のスキルに書いてある。伝えるかは指揮者のモデルしだいで、伝えた回数は数えていない。確かめた結果は、子の記録（`~/.local/state/bb-writ/delegations.jsonl` の、Claude Code の子の各行の `claude_login`）に残る。案内が返答に無いときは、ここで見られる。
+
+トークンの組織は、専用ログインの `.env` の中身が変わった後の最初の起動で 1 回だけ（初めての起動と、`claude-login.json` が無い・読めないときも同じ）、専用ログインで Haiku に短い問い合わせをして、API の応答のヘッダ `anthropic-organization-id` から読む。同時に起こした子は、それぞれ問い合わせる。ヘッダは、問い合わせに `ANTHROPIC_LOG=debug` を付けると出る SDK の debug の出力から読む。Claude Code の文書にこの変数の記述は無く、根拠は実物（Claude Code 2.1.330、WSL2）と SDK の文書。読めなかったときは、次の起動でまた問い合わせる。覚えるのは、`.env` の中身の SHA-256 と、組織の ID の SHA-256 だけで、置き場は `~/.local/state/bb-writ/claude-login.json`。ログインの側は、`claude auth status --json` の `orgId` を使う。
 
 この確かめが守らないこと：
 
 - 比べるのは組織で、同じ組織の中の別の人のトークンは見分けない。
-- bb-writ を呼んだ環境の `claude auth status --json` に `orgId` が無いときは比べない。Claude Code にログインしていないときと、環境に `ANTHROPIC_API_KEY` か `CLAUDE_CODE_OAUTH_TOKEN` が在るとき（`authMethod` が `api_key`・`oauth_token` になる）は、`orgId` が無い（Claude Code 2.1.330 で確かめた。ログインしていないときは空の設定の置き場で、環境の 2 つは偽の値を置いて。2026-11-22）。
-- 問い合わせの出力から組織を読めないときは、案内せず、記録に理由だけを書く。読み方は Claude Code 2.1.330 で確かめた。SDK の debug の出力の書式は版で変わりうると、公式の SDK の文書にある。
+- bb-writ を呼んだ環境の `claude auth status --json` の `orgId` が無いときと、uuid の形でないときは比べない。Claude Code にログインしていないときと、環境に `ANTHROPIC_API_KEY` か `CLAUDE_CODE_OAUTH_TOKEN` が在るとき（`authMethod` が `api_key`・`oauth_token` になる）は、`orgId` が無い（Claude Code 2.1.330 で確かめた。ログインしていないときは空の設定の置き場で、環境の 2 つは偽の値を置いて。2026-11-22）。
+- 問い合わせの出力から組織を読めないときは、比べない。問い合わせが通っていれば、確かめが働いていないことを案内し、通っていなければ、記録に理由だけを書く。読み方は Claude Code 2.1.330 で確かめた。SDK の debug の出力の書式は版で変わりうると、公式の SDK の文書にある。
+- 読めない状態が続く間は、起動のたびに問い合わせる（結果を覚えない）。
+- 利用枠で断られた問い合わせ（429）の応答にヘッダが付くかは、確かめていない（付けば読む）。
+- ログインの `orgId` とヘッダの値が同じだったのを見たのは、1 つのアカウントだけ。
+- macOS の実物では確かめていない（確かめたのは WSL2）。
 - 別のアカウントのトークンで実際に案内が出ることは、偽の CLI の試験で確かめただけで、実物では確かめていない。
 - わざと別のアカウントのトークンを使っているときも、案内は出続ける（止める設定は無い）。
 
