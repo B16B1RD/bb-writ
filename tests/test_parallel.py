@@ -573,6 +573,22 @@ class TestParallel(unittest.TestCase):
                 else:
                     self.assertEqual(got['note'].get('ops_after_note'), [row])
 
+    @unittest.skipIf(hasattr(os, 'geteuid') and os.geteuid() == 0, 'root では権限が効かない')
+    def test_an_unreadable_op_record_is_told_apart_from_a_lease_refusal(self):
+        """権限で読めない ops.jsonl は、担当の拒否（3）でなく、記録の置き場を読み書きできない（2）で返す（#60）。担当の拒否は 3 のまま。"""
+        a = self.start()
+        ops = next(Path(self.env['BB_WRIT_STATE_DIR'], 'work').glob('*/lease.json')).parent / 'ops.jsonl'
+        ops.write_text('')
+        ops.chmod(0)
+        self.addCleanup(ops.chmod, 0o600)
+        self.w('task', 'resume', '--dir', self.repo, '--task', a['task'], '--holder', 'Codex', code=3)  # 生きた担当がいる
+        self.w('task', 'cleanup', '--dir', a['dir'], '--token', 'other', '--saved', 'main', code=3)  # 別の token
+        r = self.w('task', 'cleanup', '--dir', a['dir'], '--token', a['token'], '--saved', 'main', code=2)
+        self.assertIn('記録の置き場を読み書きできない', r['reason'])
+        self.w('release', '--dir', a['dir'], '--token', a['token'])
+        r = self.w('task', 'resume', '--dir', self.repo, '--task', a['task'], '--holder', 'Codex', code=2)
+        self.assertIn('記録の置き場を読み書きできない', r['reason'])
+
     def test_resume_with_a_broken_op_record_answers_with_the_line(self):
         a = self.start()
         ops = next(Path(self.env['BB_WRIT_STATE_DIR'], 'work').glob('*/lease.json')).parent / 'ops.jsonl'

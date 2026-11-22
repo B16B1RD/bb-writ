@@ -30,7 +30,7 @@
   work.py integrate --dir <worktree> --token <t> --expected <統合先commit> --verified <検証済みcommit> → 排他・照合して fast-forward
   work.py task cleanup --dir <worktree> --token <t> --saved <別のブランチかタグ> → 変更が保存先に入っていれば片付け（squash・rebase の統合も可）
 
-task と integrate の照合拒否は終了コード 6、担当の拒否は 3。記録（ops.jsonl）の行が読めないか形が違えば 1 で、何行目かを示す。
+task と integrate の照合拒否は終了コード 6、担当の拒否は 3、記録の置き場を権限で読み書きできなければ 2（担当の拒否と見分ける。#60）。記録（ops.jsonl）の行が読めないか形が違えば 1 で、何行目かを示す。
 統合のロックは期限では奪わず、子の Git にも渡す。
 統合の記録はリポジトリ共通。中断後は前回の候補を含む統合先から完了を復元するか、新しく検証した候補で再開する。
 
@@ -743,11 +743,15 @@ def clean(d, ignored=False):
     return not git(d, 'status', '--porcelain', '--untracked-files=all', *(['--ignored=matching'] if ignored else []))
 
 
+class LeaseRefused(Exception):
+    """担当の拒否（終了コード 3）。OS が上げる PermissionError（記録を権限で読めない）と分ける（#60）。"""
+
+
 def current_lease(r, token):
     lease = held_lease(read(r / 'lease.json'), token)
     why = check_token(lease, token)
     if why:
-        raise PermissionError(why)
+        raise LeaseRefused(why)
     return lease
 
 
@@ -1620,8 +1624,10 @@ def main() -> int:
     if a.cmd in ('task', 'integrate'):
         try:
             return task_command(a) if a.cmd == 'task' else integrate(a)
-        except PermissionError as e:
+        except LeaseRefused as e:
             return out({'ok': False, 'reason': str(e)}, 3)
+        except PermissionError as e:  # 記録の置き場を権限で読み書きできない。ほかのコマンドと同じ 2（担当の拒否の 3 でない）
+            return out({'ok': False, 'reason': f"記録の置き場を読み書きできない: {e}"}, 2)
         except RecordError as e:  # 形の違う記録は照合の拒否（6）でない
             return out({'ok': False, 'reason': str(e)}, 1)
         except (ValueError, OSError) as e:
