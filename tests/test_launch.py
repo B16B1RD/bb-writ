@@ -877,14 +877,20 @@ class TestLaunch(unittest.TestCase):
         self.assertNotIn("stopped_by_signal", rec)
 
     def test_the_wait_honours_the_grace_outside_linux_too(self):
-        """Linux の外でも、シグナルの後の猶予で待つのをやめる（--timeout の残りまで止まらなかった）。猶予は --timeout より長くならない。"""
+        """Linux の外でも、シグナルの後の猶予で待つのをやめる（--timeout の残りまで止まらなかった）。猶予は --timeout より長くならない。
+        シグナルは、偽の子（TERM を受けても終わらない）が動き始めてから送る（偽の dotenvx がシグナルの受け手を置く前に送ると、dotenvx が
+        すぐに終わり、猶予の道を通らずに通った）。"""
         patch = """\
+            import time
             launch.LINUX = False
             launch.STOP_GRACE = 1
             real = subprocess.Popen
             def started(*a, **k):
                 p = real(*a, **k)
                 if k.get("start_new_session") and "--settings" in a[0]:  # 子の CLI の起動だけ（専用ログインの確かめも新しいセッションで起こす）
+                    mark, until = os.environ["FAKE_ARGS"] + ".started", time.monotonic() + 10
+                    while not os.path.exists(mark) and time.monotonic() < until:
+                        time.sleep(0.05)
                     os.kill(os.getpid(), signal.SIGTERM)
                 return p
             subprocess.Popen = started
@@ -949,7 +955,8 @@ class TestLaunch(unittest.TestCase):
         self.assertTrue(got["exists"], got)
 
     def test_a_signal_right_after_the_child_starts_is_not_lost(self):
-        """子の起動の直後に受けたシグナルでも、子に TERM を伝えて記録を書く（記録が無いまま子が動き続け、INT では動いている子の置き場を消した）。"""
+        """子の起動の直後に受けたシグナルでも、子に TERM を伝えて記録を書く（記録が無いまま子が動き続け、INT では動いている子の置き場を消した）。
+        起動の直後（受け手が子を知る前）に受けたシグナルを、起動の後で子へ伝えないと、子が止まらず落ちる。"""
         for sig in (signal.SIGTERM, signal.SIGINT):
             with self.subTest(sig=sig):
                 patch = f"""\
@@ -961,9 +968,14 @@ class TestLaunch(unittest.TestCase):
                         return p
                     subprocess.Popen = started
                     """
+                t0 = time.monotonic()
                 rc, rec = self.launch_patched(patch, ["--host", "claude", "--cwd", str(self.cwd)], mode="stop")
                 self.assertEqual(rec["stopped_by_signal"], int(sig), rec)
                 self.assertTrue(rec["resumable"], rec)
+                # 子に TERM が届いて止まった（偽の dotenvx が受け手を置く前なら -15、置いた後なら子へ伝えて 143）。伝えなければ、偽の子は
+                # 60 秒眠ってから終了コード 0 で終わる
+                self.assertIn(rec["exit_code"], (-int(signal.SIGTERM), 143), rec)
+                self.assertLess(time.monotonic() - t0, 30, rec)
 
     @unittest.skipUnless(sys.platform.startswith("linux"), "子を刈らずに待つのは Linux だけ")
     def test_a_child_reaped_late_does_not_read_as_exit_zero(self):
