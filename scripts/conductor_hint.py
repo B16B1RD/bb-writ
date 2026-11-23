@@ -12,8 +12,8 @@
 /bb-writ:bb-writ、利用者の行・入力を受け付けた行の文が /bb-writ:bb-writ か短い名前 /bb-writ で始まるもの）。入口の印の読み方は push_guard.py の entry_in を、
 入口だけの名前で使う（判定を写して 2 つ持たない）。本体 bb-writ:conduct だけを呼んだセッションは数えない（入口を通らず、
 指揮者がいない）。探索の入口 unknowns の印は、別の読み手 used_unknowns で数え、入口と別の案内を足す（素の push の守りの印には数えない）。
-入口の子（指揮者）が失敗して終わった知らせ（prompt の先頭の空白の後が <task-notification> で、入れ子でない知らせごとの最初の status が failed、
-その知らせの最初の task-id の子の会話記録が入口で始まる。子の見分けは push_guard.py の entry_child。failed_children）のターンには、
+入口の子（指揮者）が失敗して終わった知らせ（prompt の先頭の空白の後が <task-notification> で、先頭の知らせの見出しの status が failed、
+見出しの task-id のどれかの子の会話記録が入口で始まる。子の見分けは push_guard.py の entry_child。failed_children）のターンには、
 いつもの案内の代わりに FAILED を足す（#57。対話で、親が知らせの後に、関門を通さずに自分で依頼を進めた）。unknowns の案内は残す。
 failed のほかの終わり方（killed など）は見分けない（実物の値を確かめていない）。探索の入口 unknowns の子の失敗は見分けない
 （HINT_UNKNOWNS の括弧と unknowns の説明の文だけ）。
@@ -44,29 +44,19 @@ FAILED = ("bb-writ: 入口 bb-writ が立てた指揮者（背景の子）が、
           "依頼を自分では進めていないこと、次の手を伝えて止まる。次の手は 2 つ。(1) 本体を名前で呼ぶ（/bb-writ:conduct <依頼>）。"
           "呼んだセッションのモデルで、bb-writ の進め方（作業場所の確保・検証・関門）のまま進む。入口のモデルを使えない・利用枠が尽きたというエラーのときは、これ。"
           "(2) 入口を呼び直す（/bb-writ:bb-writ <依頼>）。混雑・通信など一時的なエラーのときと、利用枠が戻った後。")
-NOTICE = "<task-notification>"
-TAG = re.compile(r"<(/?)task-notification>")
+# 知らせの見出し（入力の先頭の知らせだけ）。task-id が 1 つ以上・tool-use-id（任意）・output-file（任意）・status の順（2.1.330 の会話記録）
+NOTICE_HEAD = re.compile(r"\A\s*<task-notification>\s*((?:<task-id>[A-Za-z0-9_-]{1,64}</task-id>\s*)+)"
+                         r"(?:<tool-use-id>[^<]*</tool-use-id>\s*)?(?:<output-file>[^<]*</output-file>\s*)?<status>([^<]*)</status>")
 TASK_ID = re.compile(r"<task-id>([A-Za-z0-9_-]{1,64})</task-id>")
-STATUS = re.compile(r"<status>([^<]*)</status>")
 
 
 def failed_children(prompt: str):
-    """知らせだけの入力（先頭の空白の後が <task-notification>）の、入れ子でない知らせごとに、最初の status が failed なら、最初の task-id を
-    返す。実物の知らせは、task-id・output-file・status・summary・note の順で、閉じる札を持つ（2.1.330 の会話記録）。本文（summary）が引用した
-    status は、知らせ自身の status より後ろなので見ず、引用した知らせは、閉じる札まで入れ子として数えて見ない。"""
-    if not prompt.lstrip().startswith(NOTICE):
-        return []
-    ids, depth = [], 0
-    for tag in TAG.finditer(prompt):
-        if tag.group(1):
-            depth = max(0, depth - 1)
-            continue
-        if depth == 0:
-            tid, status = TASK_ID.search(prompt, tag.end()), STATUS.search(prompt, tag.end())
-            if tid and status and status.group(1) == "failed":
-                ids.append(tid.group(1))
-        depth += 1
-    return ids
+    """入力の先頭の知らせの見出しの status が failed なら、見出しの task-id を返す。本文（summary・result・note）と、2 つ目からの知らせは
+    読まない（このリポジトリの会話記録の受け付けた知らせ 3,303 件は、すべて 1 入力に知らせ 1 つだった。2026-11-23）。"""
+    head = NOTICE_HEAD.match(prompt)
+    return TASK_ID.findall(head.group(1)) if head and head.group(2) == "failed" else []
+
+
 # 探索の入口 unknowns も別の子として動く（#58）。印は入口と別に持つ（素の push の守りの「入口を呼んだセッション」に数えない）
 HINT_UNKNOWNS = ("bb-writ: このセッションでは探索の入口 unknowns を呼んでいる。unknowns が立てた子（背景の子）がいるなら、次のとおりにする。"
                  "(1) 子の質問・報告を利用者に伝えるときは、返事は子に直接打つよう添える（動いている間は画面下の一覧で ↓ を 2 回押して"
