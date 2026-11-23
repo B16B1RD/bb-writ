@@ -2291,7 +2291,7 @@ class TestLaunch(unittest.TestCase):
                     return orig(cwd, checkout, *rest)
                 run = launch.subprocess.run
                 def boom(*a, **k):
-                    if "status" not in a[0]:  # git status だけを失敗させる（rev-parse は通る。壊れた index など）
+                    if WHICH not in a[0]:  # 名指しの 1 つの git だけを失敗させる（ほかは通る。壊れた index など）
                         return run(*a, **k)
                     if HOW == "timeout":
                         raise launch.subprocess.TimeoutExpired("git", 60)
@@ -2304,13 +2304,14 @@ class TestLaunch(unittest.TestCase):
             launch.claude_places = places
         """
         extra = ["--host", "claude", "--cwd", str(self.cwd)]
-        for how in ("timeout", "exit"):  # 時間切れと、終了コードが 0 でない（出力は空）
-            with self.subTest(how=how):
-                rc, rec = self.launch_patched(patch.replace("FAIL_AT", "1").replace("HOW", repr(how)), extra, mode="subdirs")
+        for how, which in (("timeout", "status"), ("exit", "status"), ("exit", "--show-prefix")):  # 時間切れと、終了コードが 0 でない（出力は空）
+            with self.subTest(how=how, which=which):
+                patched = patch.replace("HOW", repr(how)).replace("WHICH", repr(which))
+                rc, rec = self.launch_patched(patched.replace("FAIL_AT", "1"), extra, mode="subdirs")
                 self.assertEqual(rec["status"], "ok", rec)
                 self.assertTrue((self.cwd / "had" / ".claude" / ".cc-writes").is_dir())  # 前からあったかを言えないものは消さない
                 self.assertFalse((self.cwd / ".claude").exists())  # 直下は git によらず片付ける
-                rc, rec = self.launch_patched(patch.replace("FAIL_AT", "2").replace("HOW", repr(how)), extra, mode="subdirs")
+                rc, rec = self.launch_patched(patched.replace("FAIL_AT", "2"), extra, mode="subdirs")
                 self.assertEqual(rec["status"], "failed", rec)
                 self.assertIn("下の階層を確かめられない", " ".join(rec["problems"]))
 

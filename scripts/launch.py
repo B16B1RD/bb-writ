@@ -349,13 +349,17 @@ def cwd_residue(cwd: Path, before: set[str]) -> list[str]:
 def claude_places(cwd: Path, checkout: Path | None, use_git: bool = True) -> tuple[set[Path], bool]:
     """対象と元の checkout の直下の .claude と、対象の下で task cleanup と同じ見方（git status の無視するものを含む形）に出る
     .claude と .claude/.cc-writes と、下の階層を Git で見られたか。.cc-writes は、Claude Code が今いるディレクトリの .claude に設定を書くときの一時の置き場で、
-    --restricted の子は、対象の直下と、子が cd した下の階層にも空で残す（2.1.330）。起動の前後で比べ、その間に新しくできたもの（作ったのが
-    この子かは見分けない）だけを片付けの候補にする。下の階層を木ごと歩かず Git に聞くのは、無視するディレクトリ（node_modules など）に入らないため（木を歩くと、
+    --restricted の子は、対象の直下と、子が cd した下の階層にも空で残す（2.1.330）。起動の前後で比べ、その間に新しく Git に見えるようになったもの
+    （作ったのがこの子か、前からあって無視の規則が変わったものかは見分けない）だけを片付けの候補にする。下の階層を木ごと歩かず Git に聞くのは、無視するディレクトリ（node_modules など）に入らないため（木を歩くと、
     /mnt/c の下の約 1 万 2 千のディレクトリで、1 回に約 50 秒かかった）。Git に見えない空の置き場は task cleanup も数えない。
     下の階層の .claude は、それ自体が無視するものとして出たときだけ候補にする（.cc-writes の親として拾うと、Git に見えない前からの
     空の .claude を新しいものとして消す。.cc-writes を消した後の空の .claude は Git に見えず、task cleanup も数えない）。
-    守らない範囲: Git の作業ツリーでない対象と元の checkout の下の階層、無視するディレクトリの中、symlink の .claude、
-    同じ対象で並行する別の子や利用者のセッションが同じ間に作った空の置き場（一緒に消す）。"""
+    守らない範囲（どれも消すのは空のディレクトリだけ）: Git の作業ツリーでない対象と元の checkout の下の階層、無視するディレクトリの中、
+    symlink の .claude、同じ対象で並行する別の子や利用者のセッションが同じ間に作った空の置き場（一緒に消す。#65）、
+    起動中に無視の規則が変わって Git に見えるようになった前からの空の .cc-writes（一緒に消す）、
+    子が読めなくした場所の下（残る）、前に読めなかった場所の下の前からの空の置き場（一緒に消す）、
+    候補を得た後に別のプロセスが .claude を symlink に置き換えた場合（先の空の .cc-writes を消しうる）、
+    launcher の後の git（task cleanup・利用者の git status）が、子が足したサブモジュールの設定で動くこと（#64）。"""
     found, staged = {top / ".claude" for top in (cwd, checkout) if top is not None}, set()
     if not use_git:  # 子が Git の管理情報を変えた後などは、git を動かさない（偽の設定が sandbox の外で動きうる）
         return found_places(found), False
