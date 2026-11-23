@@ -346,32 +346,42 @@ def cwd_residue(cwd: Path, before: set[str]) -> list[str]:
     return left
 
 
-def claude_places(cwd: Path, checkout: Path | None) -> set[Path]:
+def claude_places(cwd: Path, checkout: Path | None, use_git: bool = True) -> tuple[set[Path], bool]:
     """対象と元の checkout の直下の .claude と、対象の下で task cleanup と同じ見方（git status の無視するものを含む形）に出る
-    .claude と .claude/.cc-writes。.cc-writes は、Claude Code が今いるディレクトリの .claude に設定を書くときの一時の置き場で、
-    --restricted の子は、対象の直下と、子が cd した下の階層にも空で残す（2.1.330）。起動の前後で比べ、この起動で新しくできたものだけを
-    片付けの候補にする。下の階層を木ごと歩かず Git に聞くのは、無視するディレクトリ（node_modules など）に入らないため（木を歩くと、
+    .claude と .claude/.cc-writes と、下の階層を Git で見られたか。.cc-writes は、Claude Code が今いるディレクトリの .claude に設定を書くときの一時の置き場で、
+    --restricted の子は、対象の直下と、子が cd した下の階層にも空で残す（2.1.330）。起動の前後で比べ、その間に新しくできたもの（作ったのが
+    この子かは見分けない）だけを片付けの候補にする。下の階層を木ごと歩かず Git に聞くのは、無視するディレクトリ（node_modules など）に入らないため（木を歩くと、
     /mnt/c の下の約 1 万 2 千のディレクトリで、1 回に約 50 秒かかった）。Git に見えない空の置き場は task cleanup も数えない。
     守らない範囲: Git の作業ツリーでない対象と元の checkout の下の階層、無視するディレクトリの中、symlink の .claude、
+    同じ対象で並行する別の子や利用者のセッションが同じ間に作った空の置き場（一緒に消す）、
     前からあった空の .claude（Git に見えないので、子がその中に .cc-writes を作ると、新しくできたものとして一緒に消す）。"""
     found = {top / ".claude" for top in (cwd, checkout) if top is not None}
+    if not use_git:  # 子が Git の管理情報を変えた後は、git を動かさない（偽の設定が sandbox の外で動きうる）
+        return found_places(found), False
     try:
         local = subprocess.run(["git", "rev-parse", "--local-env-vars"], capture_output=True, text=True, errors="surrogateescape", timeout=GIT_TIMEOUT)
         env = {k: v for k, v in os.environ.items() if k not in local.stdout.split()}
         top = subprocess.run(["git", "rev-parse", "--show-prefix"], cwd=cwd, env=env, capture_output=True, timeout=GIT_TIMEOUT)
+        # 追跡外のディレクトリは --untracked-files=all では行に出ない。空の置き場が出るのは、無視するもの（!!）としてだけ
         status = subprocess.run(["git", "--no-optional-locks", "status", "--porcelain", "-z", "--untracked-files=all", "--ignored=matching", "--", "."],
                                 cwd=cwd, env=env, capture_output=True, timeout=GIT_TIMEOUT)
     except (OSError, subprocess.TimeoutExpired):  # git が無い・管理ファイルが FIFO で止まる。直下だけを見る
         top = status = None
-    if top is not None and not top.returncode and not status.returncode:
+    below = top is not None and not top.returncode and not status.returncode
+    if below:
         for entry in status.stdout.split(b"\0"):
-            if entry[:3] not in (b"?? ", b"!! "):
+            if entry[:3] != b"!! ":
                 continue
             d = cwd / os.fsdecode(entry[3 + len(top.stdout.rstrip(b"\n")):])  # 道筋はリポジトリの根から。対象の下だけが出る（-- .）
             if d.name == ".claude":
                 found.add(d)
             elif d.name == ".cc-writes" and d.parent.name == ".claude":
                 found.add(d.parent)
+    return found_places(found), below
+
+
+def found_places(found: set[Path]) -> set[Path]:
+    """claude_places の候補の .claude のうち在るものと、その中の .cc-writes。"""
     found = {d for d in found if os.path.isdir(d) and not os.path.islink(d)}  # 読めない場所で止めない（isdir は False を返す）
     return found | {d / ".cc-writes" for d in found if os.path.isdir(d / ".cc-writes")}
 
@@ -2006,14 +2016,21 @@ def main() -> int:
                     rec.update(status="failed", problems=[headline + "この作業場所で git を動かす前に、下の場所を確かめる（偽の設定が sandbox の外で動きうる）"]
                                + changed[:20] + rec.get("problems", []))
             try:
-                made = sorted(claude_places(a.cwd, places[0]) - places[1], key=lambda d: len(d.parts), reverse=True) if places else []
-                for d in made:
+                made, below = set(), True
+                if places:
+                    (before, below_before), (after, below) = places[1], claude_places(a.cwd, places[0], "git" not in blocked)
+                    made = after - before
+                    if not below_before:  # 前に下の階層を見られなければ、前からあったかを言えない。直下だけを比べる
+                        made = {d for d in made if (d if d.name == ".claude" else d.parent).parent in (a.cwd, places[0])}
+                for d in sorted(made, key=lambda d: len(d.parts), reverse=True):
                     try:
                         if d.is_dir() and not d.is_symlink() and not any(d.iterdir()):
                             d.rmdir()
                     except FileNotFoundError:  # 同じ対象で並行する別の launcher が先に消した（空の置き場が無いという目的は満たす。
                         # 消し合う瞬間は偽の CLI で決まって起こせず、試験は無い。実物の Claude Code の子 3 人の同時起動で確かめた）
                         pass
+                if places and places[1][1] and not below and "git" not in blocked:  # 黙って残すと、task cleanup が後で止まる
+                    raise RuntimeError("子の後に git status で対象の下の階層を確かめられない")
             except Exception as e:  # 子が権限を変えたなど。残ったものは task cleanup が未保存の変更とみなす
                 blocked.append("cleanup")
                 rec.update(status="failed", problems=[f"子の起動で作られた空の .claude を片付けられない: {e!r}"[:300],
