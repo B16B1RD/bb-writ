@@ -377,8 +377,9 @@ FAKE_CLAUDE = textwrap.dedent(r'''
     if os.environ.get("FAKE_MODE") == "wrote":
         open(".claude/.cc-writes/x", "w").write("x")
     if os.environ.get("FAKE_MODE") == "subdirs":  # 2.1.330 の --restricted は、子が cd した下の階層にも作る
-        for d in ("sub", "sub/deep", "kept", "full", "had"):
+        for d in ("sub", "sub/deep", "kept", "full", "had", "whole"):
             os.makedirs(os.path.join(d, ".claude", ".cc-writes"), exist_ok=True)
+        os.makedirs("plain/.cc-writes")  # .claude の外の同じ名前は、Claude Code の置き場ではない
         open("full/.claude/.cc-writes/x", "w").write("x")
     if os.environ.get("FAKE_MODE") == "checkout":  # worktree の子は、元の checkout にも作る
         import subprocess
@@ -2226,18 +2227,45 @@ class TestLaunch(unittest.TestCase):
         self.assertTrue((self.cwd / ".claude" / ".cc-writes" / "x").exists())  # 中身があれば消さない
 
     def test_claude_leaves_no_empty_cc_writes_below_the_target(self):
-        # 子が cd した下の階層に残った空の .claude/.cc-writes で、task cleanup が作業場所を消せなかった（#63）
+        # 子が cd した下の階層に残った空の .claude/.cc-writes で、task cleanup が作業場所を消せなかった（#63）。
+        # 片付けの後、task cleanup と同じ見方（無視するものを含む git status）に、子の起動で新しくできた空の場所が出ない
+        git = lambda *a: subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", *a], cwd=self.cwd, check=True,
+                                        capture_output=True, text=True).stdout
+        (self.cwd / ".gitignore").write_text(".cc-writes/\n")
+        (self.cwd / "whole").mkdir()
+        (self.cwd / "whole" / ".gitignore").write_text(".claude/\n")  # .claude を丸ごと無視するリポジトリ
         (self.cwd / "kept" / ".claude").mkdir(parents=True)
         (self.cwd / "kept" / ".claude" / "settings.json").write_text("{}")
         (self.cwd / "had" / ".claude" / ".cc-writes").mkdir(parents=True)
+        outside = Path(self.tmp.name) / "outside"
+        outside.mkdir()
+        (self.cwd / ".claude").symlink_to(outside)  # 子は直下の .claude/.cc-writes を、その先（対象の外）に作る
+        git("init", "-q")
+        git("add", "-A")
+        git("commit", "-q", "-m", "1")
+        (self.cwd / "locked" / ".claude").mkdir(parents=True)
+        (self.cwd / "locked" / ".claude").chmod(0)  # 一時ディレクトリの片付けが権限を戻して消す
         rc, rec = self.run_launch("claude", "subdirs")
-        self.assertEqual(rec["status"], "ok", rec)
-        self.assertFalse((self.cwd / "sub" / ".claude").exists())  # この起動で新しくでき、空のままのものは消す
-        self.assertFalse((self.cwd / "sub" / "deep" / ".claude").exists())
+        self.assertEqual(rec["status"], "ok", rec)  # 読めない .claude があっても子を起動する
+        left = git("status", "--porcelain", "--untracked-files=all", "--ignored=matching").splitlines()
+        self.assertEqual(sorted(left), ["!! full/.claude/.cc-writes/", "!! had/.claude/.cc-writes/", "!! plain/.cc-writes/"])  # 中身があるもの・前からあったものは残す
+        self.assertFalse((self.cwd / "sub" / ".claude").exists())  # この起動で新しくでき、空のままのものは親の .claude ごと消す
+        self.assertFalse((self.cwd / "whole" / ".claude").exists())
         self.assertFalse((self.cwd / "kept" / ".claude" / ".cc-writes").exists())
         self.assertTrue((self.cwd / "kept" / ".claude" / "settings.json").exists())  # 中身のある .claude は残す
-        self.assertTrue((self.cwd / "full" / ".claude" / ".cc-writes" / "x").exists())  # 中身があれば消さない
-        self.assertTrue((self.cwd / "had" / ".claude" / ".cc-writes").is_dir())  # 前からあったものは残す
+        self.assertTrue((outside / ".cc-writes").is_dir())  # symlink の .claude の先（対象の外）は消さない
+
+    def test_claude_leaves_no_empty_cc_writes_below_a_target_inside_the_repository(self):
+        git = lambda *a: subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", *a], cwd=self.cwd, check=True,
+                                        capture_output=True, text=True).stdout
+        (self.cwd / ".gitignore").write_text(".cc-writes/\n")
+        git("init", "-q")
+        (self.cwd / "pkg").mkdir()
+        (self.cwd / "pkg" / "a.txt").write_text("x\n")  # 偽の子が証拠に挙げるファイル
+        rc, rec = self.run_launch("claude", "subdirs", cwd=self.cwd / "pkg")
+        self.assertEqual(rec["status"], "ok", rec)
+        self.assertFalse((self.cwd / "pkg" / "sub" / ".claude").exists())
+        self.assertTrue((self.cwd / "pkg" / "full" / ".claude" / ".cc-writes" / "x").exists())
 
     def test_child_leaving_empty_files_in_home_fails(self):
         # 起動の後にホームの直下へ空の .bash_profile が残ると、ログインシェルが .profile を読まず .bashrc も読まなくなった

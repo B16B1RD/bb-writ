@@ -347,18 +347,33 @@ def cwd_residue(cwd: Path, before: set[str]) -> list[str]:
 
 
 def claude_places(cwd: Path, checkout: Path | None) -> set[Path]:
-    """対象の下（.git を除く）と元の checkout の直下にある .claude と .claude/.cc-writes。.cc-writes は、Claude Code が
-    今いるディレクトリの .claude に設定を書くときの一時の置き場で、--restricted の子は、対象の直下と、子が cd した下の階層にも
-    空で残す（2.1.330）。起動の前後で比べ、この起動で新しくできたものだけを片付けの候補にする。
-    守らない範囲: symlink の先、読めないディレクトリの下、元の checkout の下の階層。"""
-    found = set()
-    for top, dirs, _ in os.walk(cwd):
-        dirs[:] = [d for d in dirs if d != ".git"]
-        if ".claude" in dirs:
-            found.add(Path(top) / ".claude")
-    if checkout is not None and (checkout / ".claude").is_dir():
-        found.add(checkout / ".claude")
-    return found | {d / ".cc-writes" for d in found if (d / ".cc-writes").is_dir()}
+    """対象と元の checkout の直下の .claude と、対象の下で task cleanup と同じ見方（git status の無視するものを含む形）に出る
+    .claude と .claude/.cc-writes。.cc-writes は、Claude Code が今いるディレクトリの .claude に設定を書くときの一時の置き場で、
+    --restricted の子は、対象の直下と、子が cd した下の階層にも空で残す（2.1.330）。起動の前後で比べ、この起動で新しくできたものだけを
+    片付けの候補にする。下の階層を木ごと歩かず Git に聞くのは、無視するディレクトリ（node_modules など）に入らないため（木を歩くと、
+    /mnt/c の下の約 1 万 2 千のディレクトリで、1 回に約 50 秒かかった）。Git に見えない空の置き場は task cleanup も数えない。
+    守らない範囲: Git の作業ツリーでない対象と元の checkout の下の階層、無視するディレクトリの中、symlink の .claude、
+    前からあった空の .claude（Git に見えないので、子がその中に .cc-writes を作ると、新しくできたものとして一緒に消す）。"""
+    found = {top / ".claude" for top in (cwd, checkout) if top is not None}
+    try:
+        local = subprocess.run(["git", "rev-parse", "--local-env-vars"], capture_output=True, text=True, errors="surrogateescape", timeout=GIT_TIMEOUT)
+        env = {k: v for k, v in os.environ.items() if k not in local.stdout.split()}
+        top = subprocess.run(["git", "rev-parse", "--show-prefix"], cwd=cwd, env=env, capture_output=True, timeout=GIT_TIMEOUT)
+        status = subprocess.run(["git", "--no-optional-locks", "status", "--porcelain", "-z", "--untracked-files=all", "--ignored=matching", "--", "."],
+                                cwd=cwd, env=env, capture_output=True, timeout=GIT_TIMEOUT)
+    except (OSError, subprocess.TimeoutExpired):  # git が無い・管理ファイルが FIFO で止まる。直下だけを見る
+        top = status = None
+    if top is not None and not top.returncode and not status.returncode:
+        for entry in status.stdout.split(b"\0"):
+            if entry[:3] not in (b"?? ", b"!! "):
+                continue
+            d = cwd / os.fsdecode(entry[3 + len(top.stdout.rstrip(b"\n")):])  # 道筋はリポジトリの根から。対象の下だけが出る（-- .）
+            if d.name == ".claude":
+                found.add(d)
+            elif d.name == ".cc-writes" and d.parent.name == ".claude":
+                found.add(d.parent)
+    found = {d for d in found if os.path.isdir(d) and not os.path.islink(d)}  # 読めない場所で止めない（isdir は False を返す）
+    return found | {d / ".cc-writes" for d in found if os.path.isdir(d / ".cc-writes")}
 
 
 def grok_ro_writable(home: Path) -> list[Path]:
