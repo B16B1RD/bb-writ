@@ -348,7 +348,7 @@ def cwd_residue(cwd: Path, before: set[str]) -> list[str]:
 
 def claude_places(cwd: Path, checkout: Path | None, use_git: bool = True) -> tuple[set[Path], bool]:
     """対象と元の checkout の直下の .claude と、対象の下で task cleanup と同じ見方（git status の無視するものを含む形）に出る
-    .claude と .claude/.cc-writes と、下の階層を Git で見られたか。.cc-writes は、Claude Code が今いるディレクトリの .claude に設定を書くときの一時の置き場で、
+    .claude と .claude/.cc-writes と、下の階層を Git で見られたか。.cc-writes は、Claude Code が今いるディレクトリの .claude に設定を書くときの一時の置き場（2.1.330 の本体のコードの stagingDir）で、
     --restricted の子は、対象の直下と、子が cd した下の階層にも空で残す（2.1.330）。起動の前後で比べ、その間に新しく Git に見えるようになったもの
     （作ったのがこの子か、前からあって無視の規則が変わったものかは見分けない）だけを片付けの候補にする。下の階層を木ごと歩かず Git に聞くのは、無視するディレクトリ（node_modules など）に入らないため（木を歩くと、
     /mnt/c の下の約 1 万 2 千のディレクトリで、1 回に約 50 秒かかった）。Git に見えない空の置き場は task cleanup も数えない。
@@ -360,7 +360,7 @@ def claude_places(cwd: Path, checkout: Path | None, use_git: bool = True) -> tup
     子が読めなくした場所の下（残る）、前に読めなかった場所の下の前からの空の置き場（一緒に消す）、
     候補を得た後に別のプロセスが .claude を symlink に置き換えた場合（先の空の .cc-writes を消しうる）、
     launcher の後の git（task cleanup・利用者の git status）が、子が足したサブモジュールの設定で動くこと（#64）。"""
-    found, staged = {top / ".claude" for top in (cwd, checkout) if top is not None}, set()
+    found, ignored_cc = {top / ".claude" for top in (cwd, checkout) if top is not None}, set()
     if not use_git:  # 子が Git の管理情報を変えた後などは、git を動かさない（偽の設定が sandbox の外で動きうる）
         return found_places(found), False
     try:
@@ -384,8 +384,8 @@ def claude_places(cwd: Path, checkout: Path | None, use_git: bool = True) -> tup
             if d.name == ".claude":
                 found.add(d)
             elif d.name == ".cc-writes" and d.parent.name == ".claude":
-                staged.add(d)  # Git は symlink の先へ入らないので、親は symlink でない（d 自身の symlink は、消すときに止める）
-    return found_places(found) | {d for d in staged if os.path.isdir(d)}, below
+                ignored_cc.add(d)  # Git は symlink の先へ入らないので、親は symlink でない（d 自身の symlink は、消すときに止める）
+    return found_places(found) | {d for d in ignored_cc if os.path.isdir(d)}, below
 
 
 def found_places(found: set[Path]) -> set[Path]:
@@ -1842,8 +1842,8 @@ def main() -> int:
             rec["grok_home"] = env["GROK_HOME"]  # 再開（grok -r）はこの home で
         if not why:
             # --restricted の Claude Code は、対象（子が cd した下の階層を含む）と（worktree なら）元の checkout に空の
-            # .claude/.cc-writes を作る（2.1.302・2.1.330）。残すと task cleanup が未保存の変更とみなすので、この起動で新しくでき、
-            # 空のままのものだけを後で消す
+            # .claude/.cc-writes を作る（2.1.302・2.1.330）。残すと task cleanup が未保存の変更とみなすので、この起動の間に新しく
+            # Git に見えるようになった空のものを後で消す（下の階層の親の .claude は消さない。claude_places）
             places = None
             if a.host == "claude":
                 git_dir, _ = grok_git_dir(a.cwd)
@@ -2038,7 +2038,8 @@ def main() -> int:
                         # 消し合う瞬間は偽の CLI で決まって起こせず、試験は無い。実物の Claude Code の子 3 人の同時起動で確かめた）
                         pass
                 if lost:  # 黙って残すと、task cleanup が後で止まる
-                    raise RuntimeError("子の後に git status で対象の下の階層を確かめられない")
+                    raise RuntimeError("子の後に git status で対象の下の階層を確かめられない。task cleanup の前に、"
+                                       "git status --porcelain --untracked-files=all --ignored=matching で空の .claude/.cc-writes を探して rmdir する")
             except Exception as e:  # 子が権限を変えたなど。残ったものは task cleanup が未保存の変更とみなす
                 blocked.append("cleanup")
                 rec.update(status="failed", problems=[f"子の起動で作られた空の .claude を片付けられない: {e!r}"[:300],

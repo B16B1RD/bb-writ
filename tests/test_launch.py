@@ -359,10 +359,12 @@ FAKE_CLAUDE = textwrap.dedent(r'''
     if mode == "tamper-submodule":  # 入れ子のリポジトリの設定に命令を置き、サブモジュールとして index に足す（snapshot は見ない）
         subprocess.run(["git", "init", "-q", "nested"])
         subprocess.run(git + ["-C", "nested", "commit", "-q", "--allow-empty", "-m", "x"])
-        subprocess.run(["git", "-C", "nested", "config", "core.fsmonitor", "touch " + os.environ["FAKE_ARGS"] + ".pwned"])
+        import shlex
+        subprocess.run(["git", "-C", "nested", "config", "core.fsmonitor", "touch " + shlex.quote(os.environ["FAKE_ARGS"] + ".pwned")])
         subprocess.run(["git", "add", "nested"], capture_output=True)
     if mode == "tamper-config":  # 親の git で動く設定を足す
-        open(os.path.join(common(), "config"), "a").write(f"[core]\n\tfsmonitor = touch {os.environ['FAKE_ARGS']}.pwned\n")
+        import shlex
+        open(os.path.join(common(), "config"), "a").write(f"[core]\n\tfsmonitor = touch {shlex.quote(os.environ['FAKE_ARGS'] + '.pwned')}\n")
     if mode == "tamper-gitfile":  # 作業場所の .git を偽のディレクトリへ向け直す
         open(".git", "w").write("gitdir: /tmp/fake-git\n")
     if mode == "home-residue":  # sandbox の設定が、守る対象のうち無いものをホームに空で作って残す（SUBPROCESS_ENV_SCRUB のとき。2.1.302）
@@ -387,6 +389,14 @@ FAKE_CLAUDE = textwrap.dedent(r'''
         os.makedirs("plain/.cc-writes", exist_ok=True)  # .claude の外の同じ名前は、Claude Code の置き場ではない
         os.makedirs("sub/.claude/other", exist_ok=True)  # .claude の中の別の名前（無視されて空でも、Claude Code の置き場ではない）
         open("full/.claude/.cc-writes/x", "w").write("x")
+        try:  # UTF-8 でない名前（作れないファイルシステムでは作らない）
+            os.makedirs(b"\xff/.claude/.cc-writes", exist_ok=True)
+        except OSError:
+            pass
+    if os.environ.get("FAKE_MODE") == "cc-link":  # 直下の .cc-writes を、対象の外の空のディレクトリへの symlink にする
+        os.rmdir(".claude/.cc-writes")
+        os.makedirs(os.environ["FAKE_ARGS"] + ".ccdir", exist_ok=True)
+        os.symlink(os.environ["FAKE_ARGS"] + ".ccdir", ".claude/.cc-writes")
     if os.environ.get("FAKE_MODE") == "checkout":  # worktree の子は、元の checkout にも作る
         import subprocess
         common = subprocess.run(["git", "rev-parse", "--path-format=absolute", "--git-common-dir"], capture_output=True, text=True).stdout.strip()
@@ -2231,12 +2241,15 @@ class TestLaunch(unittest.TestCase):
         (self.cwd / ".claude").mkdir()
         self.run_launch("claude", "wrote")
         self.assertTrue((self.cwd / ".claude" / ".cc-writes" / "x").exists())  # 中身があれば消さない
+        shutil.rmtree(self.cwd / ".claude")
+        rc, rec = self.run_launch("claude", "cc-link")
+        self.assertEqual(rec["status"], "ok", rec)  # symlink の .cc-writes は消さず、失敗にもしない
+        self.assertTrue(Path(str(self.args_file) + ".ccdir").is_dir(), rec)
 
     def test_claude_leaves_no_empty_cc_writes_below_the_target(self):
         # 子が cd した下の階層に残った空の .claude/.cc-writes で、task cleanup が作業場所を消せなかった（#63）。
         # 片付けの後、task cleanup と同じ見方（無視するものを含む git status）に、子の起動で新しくできた空の場所が出ない
-        git = lambda *a: subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", *a], cwd=self.cwd, check=True,
-                                        capture_output=True, text=True).stdout
+        git = self.repo_git()
         (self.cwd / ".gitignore").write_text(".cc-writes/\nother/\n")
         (self.cwd / "whole").mkdir()
         (self.cwd / "whole" / ".gitignore").write_text(".claude/\n")  # .claude を丸ごと無視するリポジトリ
@@ -2250,23 +2263,61 @@ class TestLaunch(unittest.TestCase):
         git("init", "-q")
         git("add", "-A")
         git("commit", "-q", "-m", "1")
-        (self.cwd / "locked" / ".claude").mkdir(parents=True)
-        (self.cwd / "locked" / ".claude").chmod(0)  # 一時ディレクトリの片付けが権限を戻して消す
         rc, rec = self.run_launch("claude", "subdirs")
-        self.assertEqual(rec["status"], "ok", rec)  # 読めない .claude があっても子を起動する
+        self.assertEqual(rec["status"], "ok", rec)
         left = git("status", "--porcelain", "--untracked-files=all", "--ignored=matching").splitlines()
-        self.assertEqual(sorted(left), ["!! full/.claude/.cc-writes/", "!! had/.claude/.cc-writes/", "!! plain/.cc-writes/", "!! sub/.claude/other/"])  # 中身があるもの・前からあったものは残す
-        self.assertFalse((self.cwd / "sub" / ".claude" / ".cc-writes").exists())  # この起動で新しくでき、空のままのものは消す
-        self.assertFalse((self.cwd / "whole" / ".claude").exists())  # 無視される .claude は、それ自体が新しければ消す
-        self.assertFalse((self.cwd / "日本 語" / ".claude" / ".cc-writes").exists())
-        self.assertTrue((self.cwd / "empty" / ".claude").is_dir())  # 前からある空の .claude は残す
-        self.assertFalse((self.cwd / "kept" / ".claude" / ".cc-writes").exists())
-        self.assertTrue((self.cwd / "kept" / ".claude" / "settings.json").exists())  # 中身のある .claude は残す
-        self.assertTrue((outside / ".cc-writes").is_dir())  # symlink の .claude の先（対象の外）は消さない
+        self.assertEqual(sorted(left), ["!! full/.claude/.cc-writes/", "!! had/.claude/.cc-writes/", "!! plain/.cc-writes/", "!! sub/.claude/other/"],
+                         rec)  # 中身があるもの・前からあったもの・Claude Code の置き場でないものは残す
+        gone = ["sub/.claude/.cc-writes", "whole/.claude", "日本 語/.claude/.cc-writes", "kept/.claude/.cc-writes"]  # この起動で新しくでき、空のままのもの
+        self.assertEqual([d for d in gone if (self.cwd / d).exists()], [], rec)
+        if os.path.isdir(bytes(self.cwd) + b"/\xff"):  # UTF-8 でない名前を作れたファイルシステムでは、それも消す
+            self.assertFalse(os.path.exists(bytes(self.cwd) + b"/\xff/.claude/.cc-writes"), rec)
+        self.assertTrue((self.cwd / "empty" / ".claude").is_dir(), rec)  # 前からある空の .claude は残す
+        self.assertTrue((self.cwd / "kept" / ".claude" / "settings.json").exists(), rec)  # 中身のある .claude は残す
+        self.assertTrue((outside / ".cc-writes").is_dir(), rec)  # symlink の .claude の先（対象の外）は消さない
+
+    def repo_git(self):
+        """試験のリポジトリを動かす git。開発機の全体の除外（~/.config/git/ignore）と設定を読まない。"""
+        env = {**os.environ, "HOME": str(self.home), "XDG_CONFIG_HOME": str(self.home / ".config"),
+               "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}
+        return lambda *a, cwd=None: subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", *a], cwd=cwd or self.cwd,
+                                                   env=env, check=True, capture_output=True, text=True).stdout
+
+    def claude_places_isolated(self, cwd, extra_env=None):
+        """claude_places を、開発機の全体の除外を読まない環境で呼ぶ。"""
+        from unittest import mock
+        launch = load_launch()
+        env = {"HOME": str(self.home), "XDG_CONFIG_HOME": str(self.home / ".config"), **(extra_env or {})}
+        with mock.patch.dict(os.environ, env):
+            return launch.claude_places(cwd, None)
+
+    def test_claude_places_reads_only_the_target_and_only_ignored_lines(self):
+        # 審査（条件 (5) の子）が、試験の通る後退として示した経路
+        git = self.repo_git()
+        (self.cwd / ".gitignore").write_text(".cc-writes/\n")
+        (self.cwd / "pkg").mkdir()
+        (self.cwd / "pkg" / ".gitignore").write_text("!.cc-writes/\n")  # 対象の中では無視しない（Git に見えない）
+        (self.cwd / "pkg" / "r" / ".claude" / ".cc-writes").mkdir(parents=True)
+        (self.cwd / "other" / ".claude" / ".cc-writes").mkdir(parents=True)  # 対象の外。-- . が無いと、prefix の切り取りで pkg/r/... に化ける
+        (self.cwd / "pkg" / "q" / ".claude" / ".cc-writes").mkdir(parents=True)
+        (self.cwd / "pkg" / "abcq" / ".claude").mkdir(parents=True)
+        (self.cwd / "pkg" / "abcq" / ".claude" / ".cc-writes").write_text("x")  # 追跡するファイル。改名の行の前の道筋は印を持たない
+        git("init", "-q")
+        git("add", "-A")
+        git("commit", "-q", "-m", "1")
+        git("mv", "pkg/abcq", "pkg/moved")
+        places, below = self.claude_places_isolated(self.cwd / "pkg")
+        self.assertTrue(below)
+        self.assertEqual(places, set(), places)  # 前からある Git に見えない置き場を、候補にしない
+        (self.cwd / "pkg" / "s" / ".claude" / ".cc-writes").mkdir(parents=True)
+        (self.cwd / "pkg" / ".gitignore").write_text("")
+        other = Path(self.tmp.name) / "other-repo"
+        git("init", "-q", str(other))
+        places, below = self.claude_places_isolated(self.cwd / "pkg", {"GIT_DIR": str(other / ".git")})  # 親の GIT_DIR に従わない
+        self.assertIn(self.cwd / "pkg" / "s" / ".claude" / ".cc-writes", places)
 
     def test_claude_leaves_no_empty_cc_writes_below_a_target_inside_the_repository(self):
-        git = lambda *a: subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", *a], cwd=self.cwd, check=True,
-                                        capture_output=True, text=True).stdout
+        git = self.repo_git()
         (self.cwd / ".gitignore").write_text(".cc-writes/\n")
         git("init", "-q")
         (self.cwd / "pkg").mkdir()
@@ -2278,8 +2329,7 @@ class TestLaunch(unittest.TestCase):
 
     def test_cc_writes_below_are_compared_only_when_git_saw_them_before_and_after(self):
         # 前の 1 回だけ git が失敗すると、前からある空の置き場を新しいものとして消した。後だけ失敗すると、残りを黙って見逃した
-        git = lambda *a: subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", *a], cwd=self.cwd, check=True,
-                                        capture_output=True, text=True).stdout
+        git = self.repo_git()
         (self.cwd / ".gitignore").write_text(".cc-writes/\n")
         git("init", "-q")
         (self.cwd / "had" / ".claude" / ".cc-writes").mkdir(parents=True)
@@ -2323,12 +2373,15 @@ class TestLaunch(unittest.TestCase):
                 calls.append(1)
                 if len(calls) == 2:
                     subprocess.run(["git", "init", "-q"], cwd=cwd, check=True)
-                    subprocess.run(["git", "config", "core.fsmonitor", "touch " + os.environ["FAKE_ARGS"] + ".pwned"], cwd=cwd, check=True)
+                    import shlex
+                    subprocess.run(["git", "config", "core.fsmonitor", "touch " + shlex.quote(os.environ["FAKE_ARGS"] + ".pwned")], cwd=cwd, check=True)
                     open(os.path.join(cwd, ".gitignore"), "w").write(".cc-writes/\\n")
                 return orig(cwd, checkout, *rest)
             launch.claude_places = places
         """
         rc, rec = self.launch_patched(patch, ["--host", "claude", "--cwd", str(self.cwd)], mode="subdirs")
+        self.assertEqual(rec["status"], "ok", rec)  # 片付けまで進んだ（差し替えの git init が失敗すると failed になる）
+        self.assertTrue((self.cwd / ".git").is_dir(), rec)
         self.assertFalse(Path(str(self.args_file) + ".pwned").exists(), rec)
 
     def test_claude_places_does_not_stop_at_an_unreadable_claude(self):
