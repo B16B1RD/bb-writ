@@ -352,11 +352,12 @@ def claude_places(cwd: Path, checkout: Path | None, use_git: bool = True) -> tup
     --restricted の子は、対象の直下と、子が cd した下の階層にも空で残す（2.1.330）。起動の前後で比べ、その間に新しくできたもの（作ったのが
     この子かは見分けない）だけを片付けの候補にする。下の階層を木ごと歩かず Git に聞くのは、無視するディレクトリ（node_modules など）に入らないため（木を歩くと、
     /mnt/c の下の約 1 万 2 千のディレクトリで、1 回に約 50 秒かかった）。Git に見えない空の置き場は task cleanup も数えない。
+    下の階層の .claude は、それ自体が無視するものとして出たときだけ候補にする（.cc-writes の親として拾うと、Git に見えない前からの
+    空の .claude を新しいものとして消す。.cc-writes を消した後の空の .claude は Git に見えず、task cleanup も数えない）。
     守らない範囲: Git の作業ツリーでない対象と元の checkout の下の階層、無視するディレクトリの中、symlink の .claude、
-    同じ対象で並行する別の子や利用者のセッションが同じ間に作った空の置き場（一緒に消す）、
-    前からあった空の .claude（Git に見えないので、子がその中に .cc-writes を作ると、新しくできたものとして一緒に消す）。"""
-    found = {top / ".claude" for top in (cwd, checkout) if top is not None}
-    if not use_git:  # 子が Git の管理情報を変えた後は、git を動かさない（偽の設定が sandbox の外で動きうる）
+    同じ対象で並行する別の子や利用者のセッションが同じ間に作った空の置き場（一緒に消す）。"""
+    found, staged = {top / ".claude" for top in (cwd, checkout) if top is not None}, set()
+    if not use_git:  # 子が Git の管理情報を変えた後などは、git を動かさない（偽の設定が sandbox の外で動きうる）
         return found_places(found), False
     try:
         local = subprocess.run(["git", "rev-parse", "--local-env-vars"], capture_output=True, text=True, errors="surrogateescape", timeout=GIT_TIMEOUT)
@@ -376,8 +377,8 @@ def claude_places(cwd: Path, checkout: Path | None, use_git: bool = True) -> tup
             if d.name == ".claude":
                 found.add(d)
             elif d.name == ".cc-writes" and d.parent.name == ".claude":
-                found.add(d.parent)
-    return found_places(found), below
+                staged.add(d)  # Git は symlink の先へ入らないので、親は symlink でない
+    return found_places(found) | {d for d in staged if os.path.isdir(d)}, below
 
 
 def found_places(found: set[Path]) -> set[Path]:
@@ -2016,12 +2017,12 @@ def main() -> int:
                     rec.update(status="failed", problems=[headline + "この作業場所で git を動かす前に、下の場所を確かめる（偽の設定が sandbox の外で動きうる）"]
                                + changed[:20] + rec.get("problems", []))
             try:
-                made, below = set(), True
+                made, lost = set(), False
                 if places:
-                    (before, below_before), (after, below) = places[1], claude_places(a.cwd, places[0], "git" not in blocked)
-                    made = after - before
-                    if not below_before:  # 前に下の階層を見られなければ、前からあったかを言えない。直下だけを比べる
-                        made = {d for d in made if (d if d.name == ".claude" else d.parent).parent in (a.cwd, places[0])}
+                    # 前に下の階層を見られなければ、前からあったかを言えないので、後も直下だけを見る（git も動かさない）
+                    before, below_before = places[1]
+                    after, below = claude_places(a.cwd, places[0], below_before and "git" not in blocked)
+                    made, lost = after - before, below_before and not below and "git" not in blocked
                 for d in sorted(made, key=lambda d: len(d.parts), reverse=True):
                     try:
                         if d.is_dir() and not d.is_symlink() and not any(d.iterdir()):
@@ -2029,7 +2030,7 @@ def main() -> int:
                     except FileNotFoundError:  # 同じ対象で並行する別の launcher が先に消した（空の置き場が無いという目的は満たす。
                         # 消し合う瞬間は偽の CLI で決まって起こせず、試験は無い。実物の Claude Code の子 3 人の同時起動で確かめた）
                         pass
-                if places and places[1][1] and not below and "git" not in blocked:  # 黙って残すと、task cleanup が後で止まる
+                if lost:  # 黙って残すと、task cleanup が後で止まる
                     raise RuntimeError("子の後に git status で対象の下の階層を確かめられない")
             except Exception as e:  # 子が権限を変えたなど。残ったものは task cleanup が未保存の変更とみなす
                 blocked.append("cleanup")

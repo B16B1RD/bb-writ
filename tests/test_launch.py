@@ -377,9 +377,9 @@ FAKE_CLAUDE = textwrap.dedent(r'''
     if os.environ.get("FAKE_MODE") == "wrote":
         open(".claude/.cc-writes/x", "w").write("x")
     if os.environ.get("FAKE_MODE") == "subdirs":  # 2.1.330 の --restricted は、子が cd した下の階層にも作る
-        for d in ("sub", "sub/deep", "kept", "full", "had", "whole", "日本 語"):  # 空白と UTF-8 の名前も
+        for d in ("sub", "sub/deep", "kept", "full", "had", "whole", "日本 語", "empty"):  # 空白と UTF-8 の名前も
             os.makedirs(os.path.join(d, ".claude", ".cc-writes"), exist_ok=True)
-        os.makedirs("plain/.cc-writes")  # .claude の外の同じ名前は、Claude Code の置き場ではない
+        os.makedirs("plain/.cc-writes", exist_ok=True)  # .claude の外の同じ名前は、Claude Code の置き場ではない
         open("full/.claude/.cc-writes/x", "w").write("x")
     if os.environ.get("FAKE_MODE") == "checkout":  # worktree の子は、元の checkout にも作る
         import subprocess
@@ -2237,6 +2237,7 @@ class TestLaunch(unittest.TestCase):
         (self.cwd / "kept" / ".claude").mkdir(parents=True)
         (self.cwd / "kept" / ".claude" / "settings.json").write_text("{}")
         (self.cwd / "had" / ".claude" / ".cc-writes").mkdir(parents=True)
+        (self.cwd / "empty" / ".claude").mkdir(parents=True)  # 前からある空の .claude（Git に見えない）
         outside = Path(self.tmp.name) / "outside"
         outside.mkdir()
         (self.cwd / ".claude").symlink_to(outside)  # 子は直下の .claude/.cc-writes を、その先（対象の外）に作る
@@ -2249,9 +2250,10 @@ class TestLaunch(unittest.TestCase):
         self.assertEqual(rec["status"], "ok", rec)  # 読めない .claude があっても子を起動する
         left = git("status", "--porcelain", "--untracked-files=all", "--ignored=matching").splitlines()
         self.assertEqual(sorted(left), ["!! full/.claude/.cc-writes/", "!! had/.claude/.cc-writes/", "!! plain/.cc-writes/"])  # 中身があるもの・前からあったものは残す
-        self.assertFalse((self.cwd / "sub" / ".claude").exists())  # この起動で新しくでき、空のままのものは親の .claude ごと消す
-        self.assertFalse((self.cwd / "whole" / ".claude").exists())
-        self.assertFalse((self.cwd / "日本 語" / ".claude").exists())
+        self.assertFalse((self.cwd / "sub" / ".claude" / ".cc-writes").exists())  # この起動で新しくでき、空のままのものは消す
+        self.assertFalse((self.cwd / "whole" / ".claude").exists())  # 無視される .claude は、それ自体が新しければ消す
+        self.assertFalse((self.cwd / "日本 語" / ".claude" / ".cc-writes").exists())
+        self.assertTrue((self.cwd / "empty" / ".claude").is_dir())  # 前からある空の .claude は残す
         self.assertFalse((self.cwd / "kept" / ".claude" / ".cc-writes").exists())
         self.assertTrue((self.cwd / "kept" / ".claude" / "settings.json").exists())  # 中身のある .claude は残す
         self.assertTrue((outside / ".cc-writes").is_dir())  # symlink の .claude の先（対象の外）は消さない
@@ -2265,7 +2267,7 @@ class TestLaunch(unittest.TestCase):
         (self.cwd / "pkg" / "a.txt").write_text("x\n")  # 偽の子が証拠に挙げるファイル
         rc, rec = self.run_launch("claude", "subdirs", cwd=self.cwd / "pkg")
         self.assertEqual(rec["status"], "ok", rec)
-        self.assertFalse((self.cwd / "pkg" / "sub" / ".claude").exists())
+        self.assertFalse((self.cwd / "pkg" / "sub" / ".claude" / ".cc-writes").exists())
         self.assertTrue((self.cwd / "pkg" / "full" / ".claude" / ".cc-writes" / "x").exists())
 
     def test_cc_writes_below_are_compared_only_when_git_saw_them_before_and_after(self):
@@ -2283,7 +2285,9 @@ class TestLaunch(unittest.TestCase):
                     return orig(cwd, checkout, *rest)
                 run = launch.subprocess.run
                 def boom(*a, **k):
-                    raise launch.subprocess.TimeoutExpired("git", 60)
+                    if HOW == "timeout":
+                        raise launch.subprocess.TimeoutExpired("git", 60)
+                    return launch.subprocess.CompletedProcess(a[0], 128, b"", b"fatal")
                 launch.subprocess.run = boom
                 try:
                     return orig(cwd, checkout, *rest)
@@ -2292,13 +2296,40 @@ class TestLaunch(unittest.TestCase):
             launch.claude_places = places
         """
         extra = ["--host", "claude", "--cwd", str(self.cwd)]
-        rc, rec = self.launch_patched(patch.replace("FAIL_AT", "1"), extra, mode="subdirs")
-        self.assertEqual(rec["status"], "ok", rec)
-        self.assertTrue((self.cwd / "had" / ".claude" / ".cc-writes").is_dir())  # 前からあったかを言えないものは消さない
-        self.assertFalse((self.cwd / ".claude").exists())  # 直下は git によらず片付ける
-        rc, rec = self.launch_patched(patch.replace("FAIL_AT", "2"), extra, mode="subdirs")
-        self.assertEqual(rec["status"], "failed", rec)
-        self.assertIn("下の階層を確かめられない", " ".join(rec["problems"]))
+        for how in ("timeout", "exit"):  # 時間切れと、終了コードが 0 でない（出力は空）
+            with self.subTest(how=how):
+                rc, rec = self.launch_patched(patch.replace("FAIL_AT", "1").replace("HOW", repr(how)), extra, mode="subdirs")
+                self.assertEqual(rec["status"], "ok", rec)
+                self.assertTrue((self.cwd / "had" / ".claude" / ".cc-writes").is_dir())  # 前からあったかを言えないものは消さない
+                self.assertFalse((self.cwd / ".claude").exists())  # 直下は git によらず片付ける
+                rc, rec = self.launch_patched(patch.replace("FAIL_AT", "2").replace("HOW", repr(how)), extra, mode="subdirs")
+                self.assertEqual(rec["status"], "failed", rec)
+                self.assertIn("下の階層を確かめられない", " ".join(rec["problems"]))
+
+    def test_cc_writes_cleanup_runs_no_git_the_target_did_not_have_before(self):
+        # Git でない対象で子が git init し、設定に命令を足しても、片付けはその設定で git を動かさない（sandbox の外で走る）
+        patch = """
+            orig, calls = launch.claude_places, []
+            def places(cwd, checkout, *rest):
+                calls.append(1)
+                if len(calls) == 2:
+                    subprocess.run(["git", "init", "-q"], cwd=cwd, check=True)
+                    subprocess.run(["git", "config", "core.fsmonitor", "touch " + os.environ["FAKE_ARGS"] + ".pwned"], cwd=cwd, check=True)
+                    open(os.path.join(cwd, ".gitignore"), "w").write(".cc-writes/\\n")
+                return orig(cwd, checkout, *rest)
+            launch.claude_places = places
+        """
+        rc, rec = self.launch_patched(patch, ["--host", "claude", "--cwd", str(self.cwd)], mode="subdirs")
+        self.assertFalse(Path(str(self.args_file) + ".pwned").exists(), rec)
+
+    def test_claude_places_does_not_stop_at_an_unreadable_claude(self):
+        launch = load_launch()
+        (self.cwd / ".claude").mkdir()
+        (self.cwd / ".claude").chmod(0)  # 一時ディレクトリの片付けが権限を戻して消す
+        if os.access(self.cwd / ".claude", os.X_OK):
+            self.skipTest("root は権限で止められない")
+        places, below = launch.claude_places(self.cwd, None)
+        self.assertEqual((places, below), ({self.cwd / ".claude"}, False))
 
     def test_child_leaving_empty_files_in_home_fails(self):
         # 起動の後にホームの直下へ空の .bash_profile が残ると、ログインシェルが .profile を読まず .bashrc も読まなくなった
