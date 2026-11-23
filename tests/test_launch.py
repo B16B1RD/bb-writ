@@ -3009,7 +3009,7 @@ class TestLaunch(unittest.TestCase):
         self.assertEqual((rec["status"], "deliver" in rec), ("ok", False), rec)
 
     def test_a_fable_child_that_cannot_start_is_restarted_once_on_the_fallback_tier(self):
-        """Fable を頼んだ Claude Code の子が 費用が 0 のまま（作業を始める前に） API のエラーで終わったら、同じ起動の中で Opus high で 1 回だけ
+        """Fable を頼んだ Claude Code の子が、費用が 0 のまま（作業を始める前に） API のエラーで終わったら、同じ起動の中で Opus high で 1 回だけ
         立て直し、記録に model_fallback を残す（#56）。Fable を頼まない子と、続き（--resume）は立て直さない。"""
         args = lambda: [json.loads(x) for x in [self.args_file.read_text()]][0]
         rc, rec = self.run_launch("claude", mode="fable-unavailable", extra=["--interrogate", "--model", "fable", "--effort", "medium"])

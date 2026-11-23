@@ -65,7 +65,7 @@ CHOICES = {
     "write": {"claude": ("opus", "high"), "codex": ("gpt-6-sol", "medium"), "grok": ("grok-4.7", "medium")},
     "hardest": {"claude": ("fable", "medium"), "codex": ("gpt-6.1-sol", "high")},
 }
-# Fable を使えないとき（利用枠が尽きた 429・使えないモデルの 404）の代わりの段（#56）。子が 費用が 0 のまま（作業を始める前に）このエラーで終わったら、
+# Fable を使えないとき（利用枠が尽きた 429・使えないモデルの 404）の代わりの段（#56）。子が、費用が 0 のまま（作業を始める前に）このエラーで終わったら、
 # 同じ起動の中で 1 回だけこの段で立て直す（Opus high は、審査役で Fable medium に次いで欠陥を挙げた。上の CHOICES の注釈）
 FALLBACK = {"claude": {"fable": ("opus", "high")}}
 TIMEOUTS = {"hardest": 3600}  # 既定の --timeout（表に無い役割は 1800）。最上段の書く子は 1 回が長い
@@ -1842,7 +1842,7 @@ def main() -> int:
             # 子が残した背景のプロセスが、終了後の照合の後に書き換えないよう、プロセスグループごと止める。子の CLI が新しいセッションに
             # 切り離した子孫（Claude Code の Bash）はグループの外なので、Linux では自分の下に来たものを残らなくなるまで止める
             budget = a.timeout  # 立て直した子には、残りの期限だけを渡す（1 回の起動は --timeout を越えない）
-            while True:  # Fable を使えずに 1 ターンも進まなかった子だけ、代わりの段で 1 回立て直す（fable_unavailable）
+            while True:  # Fable を使えずに 費用が 0 のまま（作業を始める前に）終わった子だけ、代わりの段で 1 回立て直す（fable_unavailable）
                 child = subprocess.Popen(cmd, cwd=a.cwd, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                          start_new_session=True)  # バイトで受ける（子の出力は UTF-8 とは限らない）
                 if "sig" in stop:
