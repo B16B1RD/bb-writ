@@ -50,8 +50,9 @@ def starts_with(text: str, names) -> bool:
 def used_unknowns(path: str, push_guard) -> bool:
     """会話記録に、探索の入口 unknowns を呼んだ印があるか。数えるのは、Skill ツールの bb-writ:unknowns の呼び出し、利用者の行の
     スラッシュの記録、利用者の行と入力を受け付けた行のうち、名前で始まる素の文（fork するスキルをスラッシュで呼ぶと、この形で残る）。
-    短い名前 /unknowns は素の文でだけ数え、Skill ツールの短い名前 unknowns は数えない（ほかのプラグインの unknowns と見分けない）。
-    試験は、名前の境目（/bb-writ:unknownsx）・文の途中の名前・先頭の空白・enqueue でない行・壊れた行の扱いを見ない。"""
+    短い名前は、素の文と受け付けた行の /unknowns だけを数え、Skill ツールの短い名前 unknowns とスラッシュの記録の /unknowns は数えない
+    （どれも、ほかのプラグインの unknowns とは見分けない）。試験は、名前の境目（/bb-writ:unknownsx）・文の途中の名前・先頭の空白・
+    enqueue でない行・壊れた行・深い入れ子の行（json.loads が RecursionError を上げる）の扱いを見ない。"""
     with open(path, encoding="utf-8", errors="replace") as f:
         for line in f:
             if "unknowns" not in line:
