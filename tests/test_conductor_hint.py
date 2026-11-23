@@ -2,7 +2,8 @@
 続きは、親が進めず・渡さずに、利用者が指揮者に直接打つよう案内する hook（scripts/conductor_hint.py）。
 
 見ないこと: 案内の文面（どの言い回しで親が従うかは、実物で数える）。additionalContext が空でない文であることだけを見る。
-会話記録の行の材料は tests/test_push_guard.py のものを使う（印の読み方は push_guard.py の entry_in と同じなので、写しを作らない）。"""
+会話記録の行の材料は tests/test_push_guard.py のものを使う（入口の印の読み方は push_guard.py の entry_in と同じなので、写しを作らない）。
+探索の入口 unknowns の印（conductor_hint.py の used_unknowns）は、この試験の中で組んだ行で見る。"""
 import json
 import os
 import shutil

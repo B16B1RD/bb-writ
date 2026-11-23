@@ -9,9 +9,9 @@
 求める）。指揮者がいるか、入力が指揮者への返事かは、ここでは決めない（会話記録から確かめられない。親のモデルが案内の条件で決める）。
 
 数える印は、入口（Skill ツールの bb-writ:bb-writ と短い名前 bb-writ、利用者の行の先頭のスラッシュの記録の名前
-/bb-writ:bb-writ、利用者の行・入力を受け付けた行の文が /bb-writ:bb-writ か短い名前 /bb-writ で始まるもの）。読み方は push_guard.py の entry_in を、
+/bb-writ:bb-writ、利用者の行・入力を受け付けた行の文が /bb-writ:bb-writ か短い名前 /bb-writ で始まるもの）。入口の印の読み方は push_guard.py の entry_in を、
 入口だけの名前で使う（判定を写して 2 つ持たない）。本体 bb-writ:conduct だけを呼んだセッションは数えない（入口を通らず、
-指揮者がいない）と、探索の入口 unknowns（used_unknowns。入口と別の案内を足し、素の push の守りの印には数えない）。
+指揮者がいない）。探索の入口 unknowns の印は、別の読み手 used_unknowns で数え、入口と別の案内を足す（素の push の守りの印には数えない）。
 足さない場合: 入力が /bb-writ:unknowns・/unknowns・/bb-writ:explore で始まる（unknowns を呼ぶ入力と、失敗の後に本体を呼ぶ回避）、入力に agent_id がある（親でなく子への入力。指揮者の依頼文に混ざらないように）、入力が入口をスラッシュで呼ぶ形
 （/bb-writ:bb-writ と短い名前 /bb-writ の 2 つで、名前そのものか、名前の直後が空白の類（空白・タブ・改行など）。比べ方は
 push_guard.py の slash_line で、会話記録の印と同じ。これから指揮者を立てる入力。
@@ -36,7 +36,8 @@ HINT_UNKNOWNS = ("bb-writ: このセッションでは探索の入口 unknowns �
                  "(1) 子の質問・報告を利用者に伝えるときは、返事は子に直接打つよう添える（動いている間は画面下の一覧で ↓ を 2 回押して"
                  " Enter、終わった後は /tasks から子を開いて、入力欄に打つ）。"
                  "(2) 利用者の入力が、子の質問・報告への返事か、その探索の続きの依頼のときは、自分では進めず、子にも渡さずに、"
-                 "同じ直接の返事のしかたを利用者に伝える。別の用件のときと、子がいないときは、そのまま自分で進める。")
+                 "同じ直接の返事のしかたを利用者に伝える。別の用件のときと、子がいないとき（子がモデルのエラーで失敗し、本体 explore を"
+                 "名前で呼んで、このセッションで探索を続けているときを含む）は、そのまま自分で進める。")
 UNKNOWNS_NAMES = ("/bb-writ:unknowns", "/unknowns")
 SKIP_NAMES = UNKNOWNS_NAMES + ("/bb-writ:explore",)  # この入力そのものには足さない（入口を呼ぶ入力と、失敗の後に本体を呼ぶ回避）
 
@@ -48,14 +49,16 @@ def starts_with(text: str, names) -> bool:
 
 def used_unknowns(path: str, push_guard) -> bool:
     """会話記録に、探索の入口 unknowns を呼んだ印があるか。数えるのは、Skill ツールの bb-writ:unknowns の呼び出し、利用者の行の
-    スラッシュの記録、利用者の行と入力を受け付けた行のうち、名前で始まる素の文（fork するスキルをスラッシュで呼ぶと、この形で残る）。"""
+    スラッシュの記録、利用者の行と入力を受け付けた行のうち、名前で始まる素の文（fork するスキルをスラッシュで呼ぶと、この形で残る）。
+    短い名前 /unknowns は素の文でだけ数え、Skill ツールの短い名前 unknowns は数えない（ほかのプラグインの unknowns と見分けない）。
+    試験は、名前の境目（/bb-writ:unknownsx）・文の途中の名前・先頭の空白・enqueue でない行・壊れた行の扱いを見ない。"""
     with open(path, encoding="utf-8", errors="replace") as f:
         for line in f:
             if "unknowns" not in line:
                 continue
             try:
                 d = json.loads(line)
-            except ValueError:
+            except Exception:  # 形の違う行は飛ばし、後ろの行を読み続ける（used_entry と同じ）
                 continue
             if not isinstance(d, dict):
                 continue
