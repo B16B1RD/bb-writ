@@ -363,8 +363,11 @@ def claude_places(cwd: Path, checkout: Path | None, use_git: bool = True) -> tup
         local = subprocess.run(["git", "rev-parse", "--local-env-vars"], capture_output=True, text=True, errors="surrogateescape", timeout=GIT_TIMEOUT)
         env = {k: v for k, v in os.environ.items() if k not in local.stdout.split()}
         top = subprocess.run(["git", "rev-parse", "--show-prefix"], cwd=cwd, env=env, capture_output=True, timeout=GIT_TIMEOUT)
-        # 追跡外のディレクトリは --untracked-files=all では行に出ない。空の置き場が出るのは、無視するもの（!!）としてだけ
-        status = subprocess.run(["git", "--no-optional-locks", "status", "--porcelain", "-z", "--untracked-files=all", "--ignored=matching", "--", "."],
+        # 追跡外のディレクトリは --untracked-files=all では行に出ない。空の置き場が出るのは、無視するもの（!!）としてだけ。
+        # サブモジュールの中では git を起動しない（子が index に足した入れ子のリポジトリの設定が、sandbox の外で動く。中の無視するものは
+        # もとより行に出ない）
+        status = subprocess.run(["git", "--no-optional-locks", "status", "--porcelain", "-z", "--untracked-files=all", "--ignored=matching",
+                                 "--ignore-submodules=all", "--", "."],
                                 cwd=cwd, env=env, capture_output=True, timeout=GIT_TIMEOUT)
     except (OSError, subprocess.TimeoutExpired):  # git が無い・管理ファイルが FIFO で止まる。直下だけを見る
         top = status = None
@@ -377,7 +380,7 @@ def claude_places(cwd: Path, checkout: Path | None, use_git: bool = True) -> tup
             if d.name == ".claude":
                 found.add(d)
             elif d.name == ".cc-writes" and d.parent.name == ".claude":
-                staged.add(d)  # Git は symlink の先へ入らないので、親は symlink でない
+                staged.add(d)  # Git は symlink の先へ入らないので、親は symlink でない（d 自身の symlink は、消すときに止める）
     return found_places(found) | {d for d in staged if os.path.isdir(d)}, below
 
 

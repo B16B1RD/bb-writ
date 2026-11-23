@@ -356,6 +356,11 @@ FAKE_CLAUDE = textwrap.dedent(r'''
     if mode == "tamper-main":  # 統合先を動かす
         evil = subprocess.run(git + ["commit-tree", "-m", "x", "HEAD^{tree}"], capture_output=True, text=True).stdout.strip()
         subprocess.run(git + ["update-ref", "refs/heads/main", evil])
+    if mode == "tamper-submodule":  # 入れ子のリポジトリの設定に命令を置き、サブモジュールとして index に足す（snapshot は見ない）
+        subprocess.run(["git", "init", "-q", "nested"])
+        subprocess.run(git + ["-C", "nested", "commit", "-q", "--allow-empty", "-m", "x"])
+        subprocess.run(["git", "-C", "nested", "config", "core.fsmonitor", "touch " + os.environ["FAKE_ARGS"] + ".pwned"])
+        subprocess.run(["git", "add", "nested"], capture_output=True)
     if mode == "tamper-config":  # 親の git で動く設定を足す
         open(os.path.join(common(), "config"), "a").write(f"[core]\n\tfsmonitor = touch {os.environ['FAKE_ARGS']}.pwned\n")
     if mode == "tamper-gitfile":  # 作業場所の .git を偽のディレクトリへ向け直す
@@ -2285,6 +2290,8 @@ class TestLaunch(unittest.TestCase):
                     return orig(cwd, checkout, *rest)
                 run = launch.subprocess.run
                 def boom(*a, **k):
+                    if "status" not in a[0]:  # git status だけを失敗させる（rev-parse は通る。壊れた index など）
+                        return run(*a, **k)
                     if HOW == "timeout":
                         raise launch.subprocess.TimeoutExpired("git", 60)
                     return launch.subprocess.CompletedProcess(a[0], 128, b"", b"fatal")
@@ -3825,6 +3832,10 @@ class TestLaunch(unittest.TestCase):
             self.assertFalse(Path(str(self.args_file) + ".pwned").exists(), mode)  # 止めた後の片付けも、子が足した設定で git を動かさない
             if mode == "tamper-main":  # 動いた ref の前後の値と、戻すコマンドを示す
                 self.assertTrue(any(x.startswith("refs/heads/main: ") and "update-ref refs/heads/main " in x for x in rec["problems"]), rec)
+        _, wt = self.worktree("tamper-submodule")
+        rc, rec = self.run_launch("claude", "tamper-submodule", extra=["--write"], cwd=wt)
+        self.assertTrue((wt / "nested" / ".git").is_dir(), rec)  # 偽の子が入れ子のリポジトリを作れた
+        self.assertFalse(Path(str(self.args_file) + ".pwned").exists(), rec)  # 片付けの git はサブモジュールの中で動かない
 
     def test_codex_write_in_worktree_gets_only_commit_dirs(self):
         repo, wt = self.worktree("cx")
