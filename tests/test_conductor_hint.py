@@ -137,6 +137,26 @@ class TestConductorHint(unittest.TestCase):
             with self.subTest(name):
                 self.assertTrue(self.hinted(OTHER_SKILL, BROKEN_ROW, *NULL_ROWS, row), "スラッシュの記録の入口の印を数えなかった")
 
+    def test_a_session_that_called_unknowns_gets_the_unknowns_hint_but_is_not_an_entry_session(self):
+        """探索の入口 unknowns も別の子として動くので、呼んだセッションには、その子への返事のしかたの案内を足す（#58）。
+        入口の案内とは別の文で、素の push の守りの「入口を呼んだセッション」には数えない。unknowns をスラッシュで呼ぶ入力には足さない。"""
+        sys.path.insert(0, str(ROOT / "scripts")); import push_guard  # noqa: E402
+        unknowns_tool = {"type": "assistant", "message": {"role": "assistant", "content": [
+            {"type": "tool_use", "id": "toolu_u", "name": "Skill", "input": {"skill": "bb-writ:unknowns"}}]}}
+        unknowns_slash = {"type": "user", "message": {"role": "user", "content":
+            "<command-message>bb-writ:unknowns</command-message>\n<command-name>/bb-writ:unknowns</command-name>\n<command-args>題</command-args>"}}
+        for name, row in (("Skill ツール", unknowns_tool), ("スラッシュ", unknowns_slash)):
+            with self.subTest(name):
+                path = self.transcript(OTHER_SKILL, row)
+                got = self.run_hint(self.stdin(path))
+                self.assertIsNotNone(got, "unknowns を呼んだセッションに案内が無い")
+                ctx = got["hookSpecificOutput"]["additionalContext"]
+                self.assertIn("unknowns", ctx)
+                self.assertNotIn("入口 bb-writ を呼んでいる", ctx)
+                self.assertFalse(push_guard.used_entry(path))  # 素の push の守りは、unknowns だけのセッションを止めない
+                for prompt in ("/bb-writ:unknowns 次の題", "/unknowns"):
+                    self.assertIsNone(self.run_hint(self.stdin(path, prompt)), prompt)
+
     def test_input_it_cannot_judge_ends_quietly(self):  # R9
         for name, raw in (("JSON でない", "A で"), ("空", ""), ("JSON の配列", "[1, 2]"),
                           ("会話記録の欄が無い", json.dumps({"hook_event_name": "UserPromptSubmit", "prompt": PROMPT})),

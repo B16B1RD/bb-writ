@@ -150,7 +150,7 @@ Claude Code は、普通の依頼文だけでは入口を使わない。入口�
 - 委任と審査：`delegate`（別系統の CLI の起動）、`interrogate`（2 系統の審査役）。
 - 検証：`create-verification-skill`（対象のリポジトリに検証スキルを作って 1 回通す）、`create-formal-verification-skill`（順序・途中の死・再開の約束を全部の順序で確かめる検査を作る。pstack の同名のスキルの考え方から書き直した）、`create-property-test-skill`（入力の形・文字コード・大きさの約束を、揺れの一覧を組み合わせた多数の入力で確かめる性質の試験を作る）。
 - 学び：`reflect`（振り返って行き先へ送る）、`correct`（繰り返す誤りを起こせなくする）。
-- 探索：`unknowns`（実装前に、盲点の洗い出しや案の比較をする）。
+- 探索：`unknowns`（実装前に、盲点の洗い出しや案の比較をする）。入口 `bb-writ` と同じく、Claude Code では Fable で動く別の子として立ち、進め方の全文は本体 `explore` にある。返事は子に直接打つ（`/tasks` から開く）。Fable を使えずに子が失敗したときは、本体を名前で呼ぶ（`/bb-writ:explore <題>`）と、呼んだセッションのモデルで進む。
 - 原則：1 本ずつ別のスキル `principle-*`（18 本）。本体の「原則の索引」から、仕事の局面に当たるものだけを呼ぶ。
 - hook（Claude Code）：2 つある。1 つ目は、入口か本体を呼んだセッション（入口が立てた指揮者とその子孫を含み、子の会話記録で見分ける。指揮者が launcher で立てる子は含まない）で、関門（`work.py op run`）を通さない普段の書き方の `git push`・`gh pr create`・`gh pr merge`・`gh release create` を拒否する（`hooks/hooks.json`）。入口を呼ばないセッションと、`sh -c` などの別の語に包んだ書き方は止めない（範囲は `scripts/push_guard.py` の docstring）。Codex と Grok Build では止めず、同じことを入口の文が求める。2 つ目は、入口を呼んだセッションで、hook が発火するたびに（利用者の入力のほか、指揮者の終わりの知らせ・子からの伝言でも発火する）、指揮者がいるなら、その質問・報告への返事と続きの依頼は、親が自分で進めず、指揮者にも渡さずに、利用者が指揮者に直接打つよう、親のセッションに案内する（`scripts/conductor_hint.py`）。案内だけで、入力は止めない。従うかは親のモデルしだい。Codex と Grok Build では案内は足されない（入口が呼んだセッションの中で動くので、要らない）。
 

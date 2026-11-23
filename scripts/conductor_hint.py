@@ -31,6 +31,19 @@ HINT = ("bb-writ: このセッションでは入口 bb-writ を呼んでいる�
         "指揮者にも渡さずに、同じ直接の返事のしかたを利用者に伝える（指揮者は、親を通した返事を、本人の選択と確かめられずに断ることがある）。"
         "別の用件のときと、指揮者がいないときは、そのまま自分で進める。")
 ENTRY_SKILLS = {"bb-writ:bb-writ", "bb-writ"}  # 入口だけ（本体 bb-writ:conduct は数えない）
+# 探索の入口 unknowns も別の子として動く（#58）。印は入口と別に持つ（素の push の守りの「入口を呼んだセッション」に数えない）
+HINT_UNKNOWNS = ("bb-writ: このセッションでは探索の入口 unknowns を呼んでいる。unknowns が立てた子（背景の子）がいるなら、次のとおりにする。"
+                 "(1) 子の質問・報告を利用者に伝えるときは、返事は子に直接打つよう添える（動いている間は画面下の一覧で ↓ を 2 回押して"
+                 " Enter、終わった後は /tasks から子を開いて、入力欄に打つ）。"
+                 "(2) 利用者の入力が、子の質問・報告への返事か、その探索の続きの依頼のときは、自分では進めず、子にも渡さずに、"
+                 "同じ直接の返事のしかたを利用者に伝える。別の用件のときと、子がいないときは、そのまま自分で進める。")
+UNKNOWNS_SKILLS = {"bb-writ:unknowns", "unknowns"}
+UNKNOWNS_NAMES = ("/bb-writ:unknowns", "/unknowns")
+
+
+def unknowns_line(prompt: str) -> bool:
+    """入力が、探索の入口をスラッシュで呼ぶ形か（名前の直後が空白の類か文の終わり）。"""
+    return any(prompt.startswith(n) and (len(prompt) == len(n) or prompt[len(n)].isspace()) for n in UNKNOWNS_NAMES)
 
 
 def main() -> int:
@@ -39,14 +52,17 @@ def main() -> int:
         import push_guard
         d = json.load(sys.stdin)
         prompt = d.get("prompt")
-        calls_entry = isinstance(prompt, str) and push_guard.slash_line(prompt)  # 入口をスラッシュで呼ぶ入力（比べ方は push_guard の 1 か所）
-        if (d.get("agent_id") or calls_entry
-                or not push_guard.used_entry(d["transcript_path"], ENTRY_SKILLS, {push_guard.ENTRY_NAME})):
+        calls_entry = isinstance(prompt, str) and (push_guard.slash_line(prompt) or unknowns_line(prompt))  # 入口をスラッシュで呼ぶ入力
+        if d.get("agent_id") or calls_entry:
+            return 0
+        hints = [h for h, skills, slashes in ((HINT, ENTRY_SKILLS, {push_guard.ENTRY_NAME}), (HINT_UNKNOWNS, UNKNOWNS_SKILLS, {"/bb-writ:unknowns"}))
+                 if push_guard.used_entry(d["transcript_path"], skills, slashes)]
+        if not hints:
             return 0
     except Exception:  # 判定できなければ何も足さない（入力を止めない）
         return 0
     # ensure_ascii（既定）: 出力の符号化が日本語を扱えない環境でも、書き出しで落ちて案内が消えないように
-    print(json.dumps({"hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "additionalContext": HINT}}))
+    print(json.dumps({"hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "additionalContext": "\n".join(hints)}}))
     return 0
 
 

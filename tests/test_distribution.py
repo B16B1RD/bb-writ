@@ -51,8 +51,8 @@ class TestSkills(unittest.TestCase):
     def test_skills_do_not_point_at_other_plugin_files(self):
         """Claude Code はプラグイン内の別ファイルの Read に承認を求める。スキルは本文だけで届く（scripts の実行は除く）。"""
         for p in (ROOT / "skills").glob("*/SKILL.md"):
-            if p.parent.name == "unknowns":
-                continue  # 自分の置き場の references を読む既存のスキル
+            if p.parent.name == "explore":
+                continue  # 自分の置き場の references を読む既存のスキル（探索の本体。入口 unknowns から移した）
             text = p.read_text(encoding="utf-8")
             self.assertNotIn("references/", text, p)
             self.assertNotIn("playbooks/", text, p)
@@ -63,17 +63,20 @@ class TestSkills(unittest.TestCase):
         本体は fork しない（本体が fork すると、指揮者の中にもう 1 人の指揮者が立つ）。
         確かめるのは、入口の frontmatter の 2 行、入口の本文の最初の段落の「最初に、」で始まる文が本体の名前を挙げること、本体の frontmatter にその 2 つの
         キーが無いことだけ（fork した子が実際にそのモデルで動くかは、実物の CLI で確かめる。本体の文が残っているかも見ない）。"""
-        text = (ROOT / "skills" / "bb-writ" / "SKILL.md").read_text(encoding="utf-8")
-        head = text.split("---", 2)[1]
-        self.assertIn("\ncontext: fork\n", head)
-        self.assertIn("\nmodel: fable\n", head)
-        paragraphs = [p for p in skill_body(self, text, "bb-writ").split("\n\n") if p.strip() and not p.lstrip().startswith("#")]
-        first = [s for s in paragraphs[0].split("。") if s.startswith("最初に、")]  # 最初に読む先を言う文（書き換えたら、ここの目印も直す）
-        self.assertEqual(len(first), 1, paragraphs[0][:80])
-        self.assertIn("`bb-writ:conduct`", first[0])
-        body_head = (ROOT / "skills" / "conduct" / "SKILL.md").read_text(encoding="utf-8").split("---", 2)[1]
-        self.assertNotIn("\ncontext:", body_head)
-        self.assertNotIn("\nmodel:", body_head)
+        # 探索の入口 unknowns と本体 explore も同じ形（#58。frontmatter の model だけでは、2 ターン目からセッションのモデルで動いた）
+        for entry, body in (("bb-writ", "conduct"), ("unknowns", "explore")):
+            with self.subTest(entry=entry):
+                text = (ROOT / "skills" / entry / "SKILL.md").read_text(encoding="utf-8")
+                head = text.split("---", 2)[1]
+                self.assertIn("\ncontext: fork\n", head)
+                self.assertIn("\nmodel: fable\n", head)
+                paragraphs = [p for p in skill_body(self, text, entry).split("\n\n") if p.strip() and not p.lstrip().startswith("#")]
+                first = [s for s in paragraphs[0].split("。") if s.startswith("最初に、")]  # 最初に読む先を言う文（書き換えたら、ここの目印も直す）
+                self.assertEqual(len(first), 1, paragraphs[0][:80])
+                self.assertIn(f"`bb-writ:{body}`", first[0])
+                body_head = (ROOT / "skills" / body / "SKILL.md").read_text(encoding="utf-8").split("---", 2)[1]
+                self.assertNotIn("\ncontext:", body_head)
+                self.assertNotIn("\nmodel:", body_head)
 
     def test_entry_keeps_what_to_ask_and_review_rules_within_the_compaction_head(self):
         """Claude Code は要約の後、呼んだスキルを先頭 5,000 トークンまで戻す（合計の枠を超えた古いものは落ちる）。
