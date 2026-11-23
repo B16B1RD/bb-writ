@@ -168,6 +168,27 @@ class TestConductorHint(unittest.TestCase):
                 for prompt in ("/bb-writ:unknowns 次の題", "/unknowns", "/bb-writ:explore 題"):  # 入口と、失敗の後に本体を呼ぶ回避
                     self.assertIsNone(self.run_hint(self.stdin(path, prompt)), prompt)
 
+    def test_a_failure_notice_of_the_conductor_gets_the_stop_hint(self):
+        """入口の子（指揮者）が失敗して終わった知らせのターンには、いつもの案内の代わりに、依頼を自分で進めず、失敗と次の手を伝えて
+        止まる案内を足す（#57。親が関門を通さずに依頼を進めた）。入口でない子の失敗と、終わった知らせには足さない。"""
+        from test_push_guard import entry_first_row, CONDUCTOR
+        path = self.transcript(OTHER_SKILL, BY_SKILL_TOOL)
+        sub = Path(path).parent / "s1" / "subagents"
+        sub.mkdir(parents=True)
+        (sub / f"agent-{CONDUCTOR}.jsonl").write_text(json.dumps(entry_first_row(), ensure_ascii=False) + "\n", encoding="utf-8")
+        other = "b" * 17
+        (sub / f"agent-{other}.jsonl").write_text(json.dumps({"type": "user", "message": {"role": "user", "content": "別の子"}}) + "\n",
+                                                  encoding="utf-8")
+        notice = lambda agent, status: (f"<task-notification>\n<task-id>{agent}</task-id>\n<status>{status}</status>\n"
+                                        "<summary>Agent failed: There's an issue with the selected model</summary>\n</task-notification>")
+        ctx = lambda prompt: (self.run_hint(self.stdin(path, prompt)) or {}).get("hookSpecificOutput", {}).get("additionalContext", "")
+        failed = ctx(notice(CONDUCTOR, "failed"))
+        self.assertIn("失敗して終わった", failed)
+        self.assertIn("/bb-writ:conduct", failed)
+        self.assertNotIn("失敗して終わった", ctx(notice(other, "failed")))  # 入口でない子
+        self.assertNotIn("失敗して終わった", ctx(notice(CONDUCTOR, "completed")))  # 終わった知らせ
+        self.assertNotIn("失敗して終わった", ctx(PROMPT))
+
     def test_input_it_cannot_judge_ends_quietly(self):  # R9
         for name, raw in (("JSON でない", "A で"), ("空", ""), ("JSON の配列", "[1, 2]"),
                           ("会話記録の欄が無い", json.dumps({"hook_event_name": "UserPromptSubmit", "prompt": PROMPT})),

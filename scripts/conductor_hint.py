@@ -12,6 +12,9 @@
 /bb-writ:bb-writ、利用者の行・入力を受け付けた行の文が /bb-writ:bb-writ か短い名前 /bb-writ で始まるもの）。入口の印の読み方は push_guard.py の entry_in を、
 入口だけの名前で使う（判定を写して 2 つ持たない）。本体 bb-writ:conduct だけを呼んだセッションは数えない（入口を通らず、
 指揮者がいない）。探索の入口 unknowns の印は、別の読み手 used_unknowns で数え、入口と別の案内を足す（素の push の守りの印には数えない）。
+入口の子（指揮者）が失敗して終わった知らせ（prompt が <task-notification> で始まり、<task-id> の子の会話記録が入口で始まり、
+<status>failed</status> を含む。子の見分けは push_guard.py の entry_child）のターンには、いつもの案内の代わりに FAILED を足す（#57。
+対話で、親が知らせの後に、関門を通さずに自分で依頼を進めた）。探索の入口 unknowns の子の失敗は見分けない（unknowns の説明の文だけ）。
 足さない場合: 入力が /bb-writ:unknowns・/unknowns・/bb-writ:explore で始まる（unknowns を呼ぶ入力と、失敗の後に本体を呼ぶ回避）、入力に agent_id がある（親でなく子への入力。指揮者の依頼文に混ざらないように）、入力が入口をスラッシュで呼ぶ形
 （/bb-writ:bb-writ と短い名前 /bb-writ の 2 つで、名前そのものか、名前の直後が空白の類（空白・タブ・改行など）。比べ方は
 push_guard.py の slash_line で、会話記録の印と同じ。これから指揮者を立てる入力。
@@ -21,6 +24,7 @@ push_guard.py の slash_line で、会話記録の印と同じ。これから指
 コマンドが何も出さずに 0 で終わる。標準ライブラリだけ。
 """
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -31,6 +35,13 @@ HINT = ("bb-writ: このセッションでは入口 bb-writ を呼んでいる�
         "指揮者にも渡さずに、同じ直接の返事のしかたを利用者に伝える（指揮者は、親を通した返事を、本人の選択と確かめられずに断ることがある）。"
         "別の用件のときと、指揮者がいないときは、そのまま自分で進める。")
 ENTRY_SKILLS = {"bb-writ:bb-writ", "bb-writ"}  # 入口だけ（本体 bb-writ:conduct は数えない）
+# 入口の子（指揮者）が失敗して終わった知らせのターンには、いつもの案内の代わりにこれを足す（#57。親が関門を通さずに依頼を進めた）
+FAILED = ("bb-writ: 入口 bb-writ が立てた指揮者（背景の子）が、失敗して終わった（いま届いた知らせ）。指揮者に頼んであった依頼を、自分で引き継いで進めない"
+          "（そのためにファイルを読まず、書き換えず、子も立てず、スキルも呼ばない）。利用者に、指揮者が失敗したことと理由（知らせの文）、"
+          "依頼を自分では進めていないこと、次の手を伝えて止まる。次の手は 2 つ。(1) 本体を名前で呼ぶ（/bb-writ:conduct <依頼>）。"
+          "呼んだセッションのモデルで、bb-writ の進め方（作業場所の確保・検証・関門）のまま進む。入口のモデルを使えない・利用枠が尽きたというエラーのときは、これ。"
+          "(2) 入口を呼び直す（/bb-writ:bb-writ <依頼>）。混雑・通信など一時的なエラーのときと、利用枠が戻った後。")
+NOTICE = re.compile(r"\A\s*<task-notification>\s*<task-id>([A-Za-z0-9_-]{1,64})</task-id>.*?<status>failed</status>", re.S)
 # 探索の入口 unknowns も別の子として動く（#58）。印は入口と別に持つ（素の push の守りの「入口を呼んだセッション」に数えない）
 HINT_UNKNOWNS = ("bb-writ: このセッションでは探索の入口 unknowns を呼んでいる。unknowns が立てた子（背景の子）がいるなら、次のとおりにする。"
                  "(1) 子の質問・報告を利用者に伝えるときは、返事は子に直接打つよう添える（動いている間は画面下の一覧で ↓ を 2 回押して"
@@ -87,6 +98,10 @@ def main() -> int:
         prompt = d.get("prompt")
         calls_entry = isinstance(prompt, str) and (push_guard.slash_line(prompt) or starts_with(prompt, SKIP_NAMES))  # 入口・本体を呼ぶ入力
         if d.get("agent_id") or calls_entry:
+            return 0
+        m = NOTICE.match(prompt) if isinstance(prompt, str) else None
+        if m and push_guard.entry_child(d["transcript_path"], m.group(1)):  # 入口の子が失敗した知らせ
+            print(json.dumps({"hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "additionalContext": FAILED}}))
             return 0
         hints = ([HINT] if push_guard.used_entry(d["transcript_path"], ENTRY_SKILLS, {push_guard.ENTRY_NAME}) else []) + (
             [HINT_UNKNOWNS] if used_unknowns(d["transcript_path"], push_guard) else [])
