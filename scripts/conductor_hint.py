@@ -12,10 +12,12 @@
 /bb-writ:bb-writ、利用者の行・入力を受け付けた行の文が /bb-writ:bb-writ か短い名前 /bb-writ で始まるもの）。入口の印の読み方は push_guard.py の entry_in を、
 入口だけの名前で使う（判定を写して 2 つ持たない）。本体 bb-writ:conduct だけを呼んだセッションは数えない（入口を通らず、
 指揮者がいない）。探索の入口 unknowns の印は、別の読み手 used_unknowns で数え、入口と別の案内を足す（素の push の守りの印には数えない）。
-入口の子（指揮者）が失敗して終わった知らせ（prompt が <task-notification> で始まり、<task-id> の子の会話記録が入口で始まり、
-<status>failed</status> を含む。子の見分けは push_guard.py の entry_child）のターンには、いつもの案内の代わりに FAILED を足す（#57。
-対話で、親が知らせの後に、関門を通さずに自分で依頼を進めた）。探索の入口 unknowns の子の失敗は見分けない（unknowns の説明の文だけ）。
-足さない場合: 入力が /bb-writ:unknowns・/unknowns・/bb-writ:explore で始まる（unknowns を呼ぶ入力と、失敗の後に本体を呼ぶ回避）、入力に agent_id がある（親でなく子への入力。指揮者の依頼文に混ざらないように）、入力が入口をスラッシュで呼ぶ形
+入口の子（指揮者）が失敗して終わった知らせ（prompt の先頭の空白の後が <task-notification> で、知らせごとの最初の status が failed、
+その知らせの最初の task-id の子の会話記録が入口で始まる。子の見分けは push_guard.py の entry_child。failed_children）のターンには、
+いつもの案内の代わりに FAILED を足す（#57。対話で、親が知らせの後に、関門を通さずに自分で依頼を進めた）。unknowns の案内は残す。
+failed のほかの終わり方（killed など）は見分けない（実物の値を確かめていない）。探索の入口 unknowns の子の失敗は見分けない
+（HINT_UNKNOWNS の括弧と unknowns の説明の文だけ）。
+足さない場合: 入力が /bb-writ:unknowns・/unknowns・/bb-writ:explore・/bb-writ:conduct で始まる（unknowns を呼ぶ入力と、失敗の後に本体を呼ぶ回避）、入力に agent_id がある（親でなく子への入力。指揮者の依頼文に混ざらないように）、入力が入口をスラッシュで呼ぶ形
 （/bb-writ:bb-writ と短い名前 /bb-writ の 2 つで、名前そのものか、名前の直後が空白の類（空白・タブ・改行など）。比べ方は
 push_guard.py の slash_line で、会話記録の印と同じ。これから指揮者を立てる入力。
 入口を短い名前の /bb-writ で呼ぶと、会話記録の行は /bb-writ:bb-writ になるが、prompt は打ったままの /bb-writ で届く）、印が無い、
@@ -33,7 +35,8 @@ HINT = ("bb-writ: このセッションでは入口 bb-writ を呼んでいる�
         " Enter、終わった後は /tasks から指揮者を開いて、入力欄に打つ）。"
         "(2) 利用者の入力が、指揮者の質問・報告への返事か、その仕事の続きの依頼のときは、自分では進めず（ファイルも読まず、書き換えず）、"
         "指揮者にも渡さずに、同じ直接の返事のしかたを利用者に伝える（指揮者は、親を通した返事を、本人の選択と確かめられずに断ることがある）。"
-        "別の用件のときと、指揮者がいないときは、そのまま自分で進める。")
+        "別の用件のときと、指揮者がいないときは、そのまま自分で進める。ただし、失敗して終わった指揮者の依頼は、利用者が本体を名前で呼ぶ"
+        "（/bb-writ:conduct <依頼>）か入口を呼び直すまで、自分で進めない。")
 ENTRY_SKILLS = {"bb-writ:bb-writ", "bb-writ"}  # 入口だけ（本体 bb-writ:conduct は数えない）
 # 入口の子（指揮者）が失敗して終わった知らせのターンには、いつもの案内の代わりにこれを足す（#57。親が関門を通さずに依頼を進めた）
 FAILED = ("bb-writ: 入口 bb-writ が立てた指揮者（背景の子）が、失敗して終わった（いま届いた知らせ）。指揮者に頼んであった依頼を、自分で引き継いで進めない"
@@ -41,7 +44,22 @@ FAILED = ("bb-writ: 入口 bb-writ が立てた指揮者（背景の子）が、
           "依頼を自分では進めていないこと、次の手を伝えて止まる。次の手は 2 つ。(1) 本体を名前で呼ぶ（/bb-writ:conduct <依頼>）。"
           "呼んだセッションのモデルで、bb-writ の進め方（作業場所の確保・検証・関門）のまま進む。入口のモデルを使えない・利用枠が尽きたというエラーのときは、これ。"
           "(2) 入口を呼び直す（/bb-writ:bb-writ <依頼>）。混雑・通信など一時的なエラーのときと、利用枠が戻った後。")
-NOTICE = re.compile(r"\A\s*<task-notification>\s*<task-id>([A-Za-z0-9_-]{1,64})</task-id>.*?<status>failed</status>", re.S)
+NOTICE = "<task-notification>"
+TASK_ID = re.compile(r"<task-id>([A-Za-z0-9_-]{1,64})</task-id>")
+STATUS = re.compile(r"<status>([^<]*)</status>")
+
+
+def failed_children(prompt: str):
+    """知らせだけの入力（先頭の空白の後が <task-notification>）を知らせごとに分け、最初の status が failed の知らせの、最初の task-id を返す。
+    知らせの中の後ろの文（summary・result の引用）と、ほかの知らせの status は見ない。閉じる札は数えない（hook の記録で確かめていない）。"""
+    if not prompt.lstrip().startswith(NOTICE):
+        return []
+    ids = []
+    for part in prompt.split(NOTICE)[1:]:
+        tid, status = TASK_ID.search(part), STATUS.search(part)
+        if tid and status and status.group(1) == "failed" and tid.start() < status.start():
+            ids.append(tid.group(1))
+    return ids
 # 探索の入口 unknowns も別の子として動く（#58）。印は入口と別に持つ（素の push の守りの「入口を呼んだセッション」に数えない）
 HINT_UNKNOWNS = ("bb-writ: このセッションでは探索の入口 unknowns を呼んでいる。unknowns が立てた子（背景の子）がいるなら、次のとおりにする。"
                  "(1) 子の質問・報告を利用者に伝えるときは、返事は子に直接打つよう添える（動いている間は画面下の一覧で ↓ を 2 回押して"
@@ -50,7 +68,7 @@ HINT_UNKNOWNS = ("bb-writ: このセッションでは探索の入口 unknowns �
                  "同じ直接の返事のしかたを利用者に伝える。別の用件のときと、子がいないとき（子がモデルのエラーで失敗し、本体 explore を"
                  "名前で呼んで、このセッションで探索を続けているときを含む）は、そのまま自分で進める。")
 UNKNOWNS_NAMES = ("/bb-writ:unknowns", "/unknowns")
-SKIP_NAMES = UNKNOWNS_NAMES + ("/bb-writ:explore",)  # この入力そのものには足さない（入口を呼ぶ入力と、失敗の後に本体を呼ぶ回避）
+SKIP_NAMES = UNKNOWNS_NAMES + ("/bb-writ:explore", "/bb-writ:conduct")  # この入力そのものには足さない（入口を呼ぶ入力と、失敗の後に本体を呼ぶ回避）
 
 
 def starts_with(text: str, names) -> bool:
@@ -99,11 +117,8 @@ def main() -> int:
         calls_entry = isinstance(prompt, str) and (push_guard.slash_line(prompt) or starts_with(prompt, SKIP_NAMES))  # 入口・本体を呼ぶ入力
         if d.get("agent_id") or calls_entry:
             return 0
-        m = NOTICE.match(prompt) if isinstance(prompt, str) else None
-        if m and push_guard.entry_child(d["transcript_path"], m.group(1)):  # 入口の子が失敗した知らせ
-            print(json.dumps({"hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "additionalContext": FAILED}}))
-            return 0
-        hints = ([HINT] if push_guard.used_entry(d["transcript_path"], ENTRY_SKILLS, {push_guard.ENTRY_NAME}) else []) + (
+        failed = isinstance(prompt, str) and any(push_guard.entry_child(d["transcript_path"], a) for a in failed_children(prompt))
+        hints = ([FAILED] if failed else [HINT] if push_guard.used_entry(d["transcript_path"], ENTRY_SKILLS, {push_guard.ENTRY_NAME}) else []) + (
             [HINT_UNKNOWNS] if used_unknowns(d["transcript_path"], push_guard) else [])
         if not hints:
             return 0

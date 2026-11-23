@@ -2,6 +2,7 @@
 続きは、親が進めず・渡さずに、利用者が指揮者に直接打つよう案内する hook（scripts/conductor_hint.py）。
 
 見ないこと: 案内の文面（どの言い回しで親が従うかは、実物で数える）。additionalContext が空でない文であることだけを見る。
+ただし、どの案内が付いたか（失敗の案内・いつもの案内・unknowns の案内）は、それぞれの目印の語で見分ける。
 会話記録の行の材料は tests/test_push_guard.py のものを使う（入口の印の読み方は push_guard.py の entry_in と同じなので、写しを作らない）。
 探索の入口 unknowns の印（conductor_hint.py の used_unknowns）は、この試験の中で組んだ行で見る。"""
 import json
@@ -80,14 +81,15 @@ class TestConductorHint(unittest.TestCase):
             self.assertTrue(self.hinted(BY_SKILL_TOOL, agent_id=""), "agent_id が空の親の入力に案内が付かなかった")
 
     def test_a_prompt_that_calls_the_entry_by_slash_gets_no_hint(self):  # R3
-        # 入口をスラッシュで呼ぶ入力は、これから指揮者を立てる入力（短い名前の /bb-writ でも、prompt は打ったままで届く）
-        for prompt in ("/bb-writ:bb-writ 直して", "/bb-writ:bb-writ", "/bb-writ:bb-writ\n続きを",
+        # 入口をスラッシュで呼ぶ入力は、これから指揮者を立てる入力（短い名前の /bb-writ でも、prompt は打ったままで届く）。
+        # 本体を名前で呼ぶ入力は、指揮者が失敗した後の次の手（続きを指揮者へ回す案内を付けない。#57）
+        for prompt in ("/bb-writ:bb-writ 直して", "/bb-writ:bb-writ", "/bb-writ:bb-writ\n続きを", "/bb-writ:conduct 続きを",
                        "/bb-writ 直して", "/bb-writ", "/bb-writ\t直して", "/bb-writ\n直して", "/bb-writ\u3000直して"):
             with self.subTest(prompt=prompt):
                 self.assertFalse(self.hinted(BY_FORKED_SLASH, prompt=prompt), "入口をスラッシュで呼ぶ入力に案内が付いた")
         # 名前の前方一致、ほかのコマンド、/ で始まる普通の返事（パス・案の名前）、文の途中の名前には付ける。先頭に空白のある形は、
         # 2.1.329 では Claude Code が先頭の空白を削った prompt を hook に渡すので届かない。届いたときは、入口の呼び出しと見ずに足す
-        for prompt in ("/bb-writer 直して", "/bb-writ:bb-writer 直して", "/bb-writ:conduct 続きを", "/compact",
+        for prompt in ("/bb-writer 直して", "/bb-writ:bb-writer 直して", "/bb-writ:conductor 続きを", "/compact",
                        "/tmp に保存して", "/README.md を編集して", "/A で進めて", "/案A で", "/tmp/x に保存して", "/",
                        "さっきの /bb-writ の続き", " /bb-writ 直して"):
             with self.subTest(prompt=prompt):
@@ -170,7 +172,8 @@ class TestConductorHint(unittest.TestCase):
 
     def test_a_failure_notice_of_the_conductor_gets_the_stop_hint(self):
         """入口の子（指揮者）が失敗して終わった知らせのターンには、いつもの案内の代わりに、依頼を自分で進めず、失敗と次の手を伝えて
-        止まる案内を足す（#57。親が関門を通さずに依頼を進めた）。入口でない子の失敗と、終わった知らせには足さない。"""
+        止まる案内を足す（#57。親が関門を通さずに依頼を進めた）。見るのは知らせごとの最初の status と task-id だけで、入口でない子の失敗・
+        終わった知らせ・本文の引用・利用者の文の後ろの知らせ・子への入力には足さない。"""
         from test_push_guard import entry_first_row, CONDUCTOR
         path = self.transcript(OTHER_SKILL, BY_SKILL_TOOL)
         sub = Path(path).parent / "s1" / "subagents"
@@ -179,15 +182,30 @@ class TestConductorHint(unittest.TestCase):
         other = "b" * 17
         (sub / f"agent-{other}.jsonl").write_text(json.dumps({"type": "user", "message": {"role": "user", "content": "別の子"}}) + "\n",
                                                   encoding="utf-8")
-        notice = lambda agent, status: (f"<task-notification>\n<task-id>{agent}</task-id>\n<status>{status}</status>\n"
-                                        "<summary>Agent failed: There's an issue with the selected model</summary>\n</task-notification>")
-        ctx = lambda prompt: (self.run_hint(self.stdin(path, prompt)) or {}).get("hookSpecificOutput", {}).get("additionalContext", "")
+        # 実物の知らせの形（2.1.330）: task-id・output-file・status・summary の順。閉じる札は数えない
+        notice = lambda agent, status, summary="Agent failed: There's an issue with the selected model": (
+            f"<task-notification>\n<task-id>{agent}</task-id>\n<output-file>/tmp/x/{agent}.output</output-file>\n<status>{status}</status>\n"
+            f"<summary>{summary}</summary>\n</task-notification>")
+        ctx = lambda prompt, **kw: (self.run_hint(self.stdin(path, prompt, **kw)) or {}).get("hookSpecificOutput", {}).get("additionalContext", "")
+        FAIL, USUAL = "いま届いた知らせ", "入口 bb-writ を呼んでいる"  # 失敗の案内といつもの案内の目印
         failed = ctx(notice(CONDUCTOR, "failed"))
-        self.assertIn("失敗して終わった", failed)
+        self.assertIn(FAIL, failed)
         self.assertIn("/bb-writ:conduct", failed)
-        self.assertNotIn("失敗して終わった", ctx(notice(other, "failed")))  # 入口でない子
-        self.assertNotIn("失敗して終わった", ctx(notice(CONDUCTOR, "completed")))  # 終わった知らせ
-        self.assertNotIn("失敗して終わった", ctx(PROMPT))
+        self.assertNotIn(USUAL, failed)  # いつもの案内の代わり
+        for name, prompt, want in (
+                ("入口でない子の失敗", notice(other, "failed"), USUAL),
+                ("終わった知らせ", notice(CONDUCTOR, "completed"), USUAL),
+                ("本文が failed を引用", notice(CONDUCTOR, "completed", "報告: <status>failed</status> を見分ける"), USUAL),
+                ("指揮者は終わり、別の子が失敗", notice(CONDUCTOR, "completed") + notice(other, "failed"), USUAL),
+                ("別の子は終わり、指揮者が失敗", notice(other, "completed") + notice(CONDUCTOR, "failed"), FAIL),
+                ("利用者の文の後ろの知らせ", "これ見て\n" + notice(CONDUCTOR, "failed"), USUAL),
+                ("普通の入力", PROMPT, USUAL)):
+            with self.subTest(name):
+                got = ctx(prompt)
+                self.assertIn(want, got)
+                self.assertNotIn(FAIL if want == USUAL else USUAL, got)
+        with self.subTest("子への入力"):  # 指揮者が立てた子の失敗の知らせは、agent_id 付きで指揮者に届く
+            self.assertEqual("", ctx(notice(CONDUCTOR, "failed"), agent_id="a1b2c3"))
 
     def test_input_it_cannot_judge_ends_quietly(self):  # R9
         for name, raw in (("JSON でない", "A で"), ("空", ""), ("JSON の配列", "[1, 2]"),
