@@ -65,8 +65,8 @@ CHOICES = {
     "write": {"claude": ("opus", "high"), "codex": ("gpt-6-sol", "medium"), "grok": ("grok-4.7", "medium")},
     "hardest": {"claude": ("fable", "medium"), "codex": ("gpt-6.1-sol", "high")},
 }
-# Fable を使えないとき（利用枠が尽きた・アカウントが使えない）の代わりの段（#56）。子が 1 ターンも進まずに API のエラーで終わったら、
-# 同じ起動の中で 1 回だけこの段で立て直す（Opus high は、審査役で Fable medium に次いで欠陥を挙げ、検証役でも人のレビューの指摘の半分を挙げた）
+# Fable を使えないとき（利用枠が尽きた 429・使えないモデルの 404）の代わりの段（#56）。子が 1 ターンも進まずにこのエラーで終わったら、
+# 同じ起動の中で 1 回だけこの段で立て直す（Opus high は、審査役で Fable medium に次いで欠陥を挙げた。上の CHOICES の注釈）
 FALLBACK = {"claude": {"fable": ("opus", "high")}}
 TIMEOUTS = {"hardest": 3600}  # 既定の --timeout（表に無い役割は 1800）。最上段の書く子は 1 回が長い
 QUOTA = re.compile(r"usage limit|rate limit|quota|exceeded your|too many requests|(?:status|code|http|error)\W{0,12}429\b|\b429 too many|limit reached|out of credits", re.I)
@@ -1014,11 +1014,13 @@ def text_of(v) -> str:
 
 
 def fable_unavailable(a, got: dict, timed_out: bool, stop: dict, left: list) -> bool:
-    """Fable を頼んだ Claude Code の子が、1 ターンも進まずに API のエラーで終わった（利用枠が尽きた 429、使えないモデルの 404 など）。
-    途中まで進んだ子（費用が 0 でない）・続き・時間切れ・止められた子・止めきれない子孫が残った子は、立て直さない（#56）。"""
+    """表の段（別名 fable）を頼んだ子が、1 ターンも進まずに、利用枠が尽きた（429）か使えないモデル（404）の API のエラーで終わった。
+    ほかのエラー（過負荷・回線・認証）、途中まで進んだ子（費用が 0 でない）、続き、時間切れ、止められた子（子を刈った後に受けたシグナルも）、
+    止めきれない子孫が残った子は、立て直さない（#56）。"""
     usage = got.get("usage") or {}
-    return (a.host == "claude" and not a.resume and a.model in FALLBACK.get(a.host, {}) and not timed_out and "sig" not in stop
-            and not left and got.get("is_error") is True and got.get("terminal_reason") == "api_error" and not usage.get("cost_usd"))
+    return (not a.resume and a.model in FALLBACK.get(a.host, {}) and not timed_out and "sig" not in stop and "late" not in stop
+            and not left and got.get("is_error") is True and got.get("terminal_reason") == "api_error"
+            and got.get("api_error_status") in (404, 429) and not usage.get("cost_usd"))
 
 
 def json_lines(out: str) -> list:
@@ -1035,7 +1037,7 @@ def parse_claude(out: str) -> dict:
             except (ValueError, RecursionError):
                 continue
     return {"text": text_of(d.get("result")), "session": text_of(d.get("session_id")) or None, "is_error": d.get("is_error"),
-            "terminal_reason": d.get("terminal_reason"),
+            "terminal_reason": d.get("terminal_reason"), "api_error_status": d.get("api_error_status"),
             "errors": [str(d.get("result"))[:300]] if d.get("is_error") else [],
             "model_effective": sorted(obj(d.get("modelUsage")).keys()) or None,
             "usage": {"cost_usd": d.get("total_cost_usd"), "turns": d.get("num_turns")}}
@@ -1820,7 +1822,10 @@ def main() -> int:
             # シグナルは記録せず、記録を書き終えるまで待たせる（照合の間の Ctrl-C で後処理の git が止まると、head などが欠けうる）。
             # 起動時に無視されていたシグナル（nohup の HUP）は無視のまま。受け手は Popen の前に置く（Popen の直後に受けたものも子に伝える）
             def forward(n, _frame):
-                if "sig" in stop or stop.get("reaped"):
+                if stop.get("reaped"):  # 刈った後のシグナルは子に伝えず記録もしないが、立て直しは止める（fable_unavailable）
+                    stop.setdefault("late", n)
+                    return
+                if "sig" in stop:
                     return
                 stop["sig"] = n
                 if child is not None:
@@ -1830,6 +1835,7 @@ def main() -> int:
                     signal.signal(s, forward)
             # 子が残した背景のプロセスが、終了後の照合の後に書き換えないよう、プロセスグループごと止める。子の CLI が新しいセッションに
             # 切り離した子孫（Claude Code の Bash）はグループの外なので、Linux では自分の下に来たものを残らなくなるまで止める
+            budget = a.timeout  # 立て直した子には、残りの期限だけを渡す（1 回の起動は --timeout を越えない）
             while True:  # Fable を使えずに 1 ターンも進まなかった子だけ、代わりの段で 1 回立て直す（fable_unavailable）
                 child = subprocess.Popen(cmd, cwd=a.cwd, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                          start_new_session=True)  # バイトで受ける（子の出力は UTF-8 とは限らない）
@@ -1846,7 +1852,7 @@ def main() -> int:
                         readers[-1].start()
                     # 出力が閉じるのでなく、子の CLI が終わるのを待つ（子孫が出力を開いたままでも）
                     try:
-                        wait_for_exit(child, a.timeout, stop)
+                        wait_for_exit(child, budget, stop)
                     except subprocess.TimeoutExpired:  # 止めた後も出力を読み、session を記録する（--resume で続きから起動できる）
                         timed_out = True
                     timed_out = timed_out or bool(stop.get("timed_out"))  # 時間切れの TERM で、子が片付けて終わった
@@ -1876,23 +1882,23 @@ def main() -> int:
                     raise RuntimeError("子の CLI が終わった後も、ほかのプロセスが子の出力を開いたまま")
                 p = subprocess.CompletedProcess(cmd, None if exit_lost else child.poll(), stdout.decode("utf-8", "replace"), stderr.decode("utf-8", "replace"))
                 got = {"claude": parse_claude, "codex": parse_codex, "grok": parse_grok}[a.host](p.stdout)
-                if "model_fallback" in rec or not fable_unavailable(a, got, timed_out, stop, left):
+                budget = a.timeout - (time.monotonic() - t0)
+                if "model_fallback" in rec or budget <= 0 or not fable_unavailable(a, got, timed_out, stop, left):
                     break
                 (out_dir / "stdout-first.jsonl").write_bytes(stdout)  # 最初の起動の出力も残す
                 (out_dir / "stderr-first.log").write_bytes(stderr)
                 to = FALLBACK[a.host][a.model]
                 rec["model_fallback"] = {"from": [a.model, a.effort], "to": list(to), "why": got["errors"][:1]}
                 a.model, a.effort, a.session = to[0], to[1], str(uuid.uuid4())
-                rec.update(model_requested=a.model, effort_requested=a.effort, session=a.session)
+                rec.update(model_requested=a.model, effort_requested=a.effort, chosen_by="fallback", session=a.session)
                 cmd = [a.model if i and cmd[i - 1] == "--model" else a.effort if i and cmd[i - 1] == "--effort"
                        else a.session if i and cmd[i - 1] == "--session-id" else x for i, x in enumerate(cmd)]
                 stop.pop("reaped", None)
-                if LINUX:
-                    become_subreaper()
             # 警告の行（sandbox の適用失敗、効かなかった引数）があれば、権限の約束どおりに動いたか分からないので結果を使わない
             unsafe = [l for l in p.stderr.splitlines() if a.host == "grok" and GROK_WARNING.search(l)][-5:]
             rec.update(exit_code=p.returncode, session=got["session"] or a.session, model_effective=got["model_effective"], usage=got["usage"])
-            if a.host == "claude" and got["model_effective"] and not any(a.model in m for m in got["model_effective"]):
+            asked = re.sub(r"\[.*\]$", "", a.model).lower()  # 「opus[1m]」の付記と大文字小文字は問わない
+            if a.host == "claude" and got["model_effective"] and not any(asked in m.lower() for m in got["model_effective"]):
                 rec["model_substituted"] = True  # 頼んだモデルと違うモデルで動いた（組織の制限など。失敗にはしない。#56）
             # 読み取り専用の Codex の実効の権限。続きでは、前の起動で照らし終えた turn（その起動の deny で照らした）を除く
             breach = a.host == "codex" and not a.write and codex_breach(got.get("permissions", [])[a.codex_turns:], a.codex_denies)

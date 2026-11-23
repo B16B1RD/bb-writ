@@ -460,10 +460,21 @@ FAKE_CLAUDE = textwrap.dedent(r'''
         result = result.replace('"conclusion": "', '"z": ' + "[" * 3000 + "]" * 3000 + ', "conclusion": "')
     if mode == "surrogate":  # JS の JSON.stringify は単独のサロゲートを \ud83d の形で出す。本文と、報告の JSON の中の両方
         result = "\ud83d" + result.replace('"conclusion": "', '"conclusion": "\\ud83d')
-    if mode in ("fable-unavailable", "fable-ran-out") and sys.argv[sys.argv.index("--model") + 1] == "fable":  # Fable の利用枠が尽きた
-        print(json.dumps({"type": "result", "result": "You've hit your Fable limit", "session_id": sid, "is_error": True,  # 尽きたのが途中なら費用がある
-                          "terminal_reason": "api_error", "total_cost_usd": 0.05 if mode == "fable-ran-out" else 0, "num_turns": 1}))
+    if mode.startswith("fable-") and sys.argv[sys.argv.index("--model") + 1] == "fable":  # Fable の利用枠が尽きた（429）
+        if mode == "fable-slow":  # 失敗を返すまでに時間がかかる（立て直した子の期限を確かめる）
+            import time
+            time.sleep(2)
+        r = {"type": "result", "result": "You've hit your Fable limit", "session_id": sid, "is_error": True, "terminal_reason": "api_error",
+             "api_error_status": 429, "total_cost_usd": 0.05 if mode == "fable-ran-out" else 0, "num_turns": 1}  # 尽きたのが途中なら費用がある
+        if mode == "fable-overloaded":  # 一時の過負荷（立て直さない）
+            r.update(result="API Error: 529 overloaded_error", api_error_status=529)
+        if mode == "fable-no-reason":  # 終わり方の欄が無い失敗（立て直さない）
+            r.pop("terminal_reason")
+        print(json.dumps(r))
         sys.exit(1)
+    if mode == "fable-slow" and sys.argv[sys.argv.index("--model") + 1] == "opus":  # 立て直した子が終わらない
+        import time
+        time.sleep(60)
     if os.environ.get("FAKE_EXIT"):  # 子が失敗した（後処理の理由と並ぶか確かめる）。FAKE_ERROR は失敗の結果の文
         print(json.dumps({"type": "result", "result": os.environ.get("FAKE_ERROR", ""), "session_id": sid, "is_error": True})); sys.exit(int(os.environ["FAKE_EXIT"]))
     print(json.dumps({"type": "result", "result": result, "session_id": ["s"] if mode == "shapes" else sid, "is_error": False,
@@ -3009,22 +3020,42 @@ class TestLaunch(unittest.TestCase):
         first = json.loads((Path(rec["out"]) / "stdout-first.jsonl").read_text().strip().splitlines()[-1])
         self.assertNotEqual(first["session_id"], rec["session"])  # 立て直しは新しい session（最初の起動の session を使い回さない）
         argv = args()
-        self.assertEqual((argv[argv.index("--model") + 1], argv[argv.index("--session-id") + 1]), ("opus", rec["session"]))
+        self.assertEqual((argv[argv.index("--model") + 1], argv[argv.index("--effort") + 1], argv[argv.index("--session-id") + 1]),
+                         ("opus", "high", rec["session"]))
+        self.assertEqual(rec["chosen_by"], "fallback")
+        rc, again = self.run_launch(None, mode="fable-unavailable", extra=["--resume", rec["out"]])  # 続きは代えた段のまま起こす
+        argv = args()
+        self.assertEqual((again["status"], argv[argv.index("--model") + 1], "model_fallback" in again), ("ok", "opus", False), again)
         recorded = json.loads((Path(rec["out"]) / "record.json").read_text())
         self.assertEqual(recorded["model_fallback"], rec["model_fallback"])
         rc, rec = self.run_launch("claude", mode="fable-unavailable", extra=["--model", "opus", "--effort", "high"])  # Fable を頼まない子
         self.assertEqual((rec["status"], "model_fallback" in rec), ("ok", False), rec)
         rc, rec = self.run_launch("claude", extra=["--model", "fable", "--effort", "high"])  # Fable で動いた子は立て直さない
         self.assertNotIn("model_fallback", rec)
-        rc, rec = self.run_launch("claude", mode="fable-ran-out", extra=["--model", "fable", "--effort", "high"])  # 途中まで進んで尽きた子
-        self.assertEqual((rec["status"], "model_fallback" in rec, rec["model_requested"]), ("failed", False, "fable"), rec)
+        # Fable のまま時間切れで止めた子の続きは、同じエラーでも立て直さない（続きの会話を捨てて最初から起こさない）
+        rc, stopped = self.run_launch("claude", extra=["--model", "fable", "--effort", "high", "--timeout", "2"], env_extra={"FAKE_HANG": "1"})
+        self.assertEqual(stopped["status"], "timeout", stopped)
+        rc, again = self.run_launch(None, mode="fable-unavailable", extra=["--resume", stopped["out"]])
+        self.assertEqual((again["status"], "model_fallback" in again, again["model_requested"]), ("failed", False, "fable"), again)
+        # 途中まで進んで尽きた子・一時の過負荷・終わり方の欄が無い失敗は、立て直さない
+        for mode in ("fable-ran-out", "fable-overloaded", "fable-no-reason"):
+            with self.subTest(mode=mode):
+                rc, rec = self.run_launch("claude", mode=mode, extra=["--model", "fable", "--effort", "high"])
+                self.assertEqual((rec["status"], "model_fallback" in rec, rec["model_requested"]), ("failed", False, "fable"), rec)
+
+    def test_a_restarted_child_gets_only_the_time_left(self):
+        """立て直した子には、残りの期限だけを渡す（1 回の起動は --timeout を大きく越えない。#56 の審査）。"""
+        rc, rec = self.run_launch("claude", mode="fable-slow", extra=["--model", "fable", "--effort", "high", "--timeout", "4"])
+        self.assertEqual((rec["status"], "model_fallback" in rec), ("timeout", True), rec)
+        self.assertLess(rec["duration_s"], 6.5, rec)  # 取り直すと 2 秒の失敗の後に 4 秒待ち、さらに片付けを待つ
 
     def test_a_child_that_ran_on_another_model_is_recorded_as_substituted(self):
         """頼んだモデルと違うモデルで動いた Claude Code の子は、記録に model_substituted を残し、失敗にはしない（#56）。"""
         rc, rec = self.run_launch("claude", extra=["--model", "opus", "--effort", "high"])  # 偽の子は sonnet で動いたと返す
         self.assertEqual((rec["status"], rec.get("model_substituted")), ("ok", True), rec)
-        rc, rec = self.run_launch("claude", extra=["--model", "sonnet", "--effort", "medium"])
-        self.assertEqual((rec["status"], "model_substituted" in rec), ("ok", False), rec)
+        for model in ("sonnet", "Sonnet", "sonnet[1m]"):  # 付記と大文字小文字は問わない
+            rc, rec = self.run_launch("claude", extra=["--model", model, "--effort", "medium"])
+            self.assertEqual((rec["status"], "model_substituted" in rec), ("ok", False), (model, rec))
 
     def test_an_auditor_is_recorded_and_its_resume_stays_one(self):
         """work.py は、すべての push・pr で HEAD を対象にした監査役（返す前の判定）の記録を求める。続きも監査役のまま、
