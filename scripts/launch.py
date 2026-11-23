@@ -65,7 +65,7 @@ CHOICES = {
     "write": {"claude": ("opus", "high"), "codex": ("gpt-6-sol", "medium"), "grok": ("grok-4.7", "medium")},
     "hardest": {"claude": ("fable", "medium"), "codex": ("gpt-6.1-sol", "high")},
 }
-# Fable を使えないとき（利用枠が尽きた 429・使えないモデルの 404）の代わりの段（#56）。子が 1 ターンも進まずにこのエラーで終わったら、
+# Fable を使えないとき（利用枠が尽きた 429・使えないモデルの 404）の代わりの段（#56）。子が 費用が 0 のまま（作業を始める前に）このエラーで終わったら、
 # 同じ起動の中で 1 回だけこの段で立て直す（Opus high は、審査役で Fable medium に次いで欠陥を挙げた。上の CHOICES の注釈）
 FALLBACK = {"claude": {"fable": ("opus", "high")}}
 TIMEOUTS = {"hardest": 3600}  # 既定の --timeout（表に無い役割は 1800）。最上段の書く子は 1 回が長い
@@ -1014,14 +1014,15 @@ def text_of(v) -> str:
 
 
 def fable_unavailable(a, got: dict, timed_out: bool, stop: dict, left: list) -> bool:
-    """表の段（別名 fable）を頼んだ子が、1 ターンも進まずに、利用枠が尽きた（429）か使えないモデル（404）の API のエラーで終わった。
+    """表の段（別名 fable）を頼んだ子が、費用が 0 のまま（作業を始める前に）、利用枠が尽きた（429）か使えないモデル（404）の API のエラーで終わった。
     ほかのエラー（過負荷・回線・認証）、途中まで進んだ子（費用が 0 でない）、続き、時間切れ、止められた子（子を刈った後に受けたシグナルも）、
     止めきれない子孫が残った子は、立て直さない（#56）。
     守らない範囲: 立て直すと決めてから 2 回目の子が起き終わるまでの数ミリ秒に受けたシグナルは、捨てられるか 2 回目の子に届かない
     （2 回目の子は期限か STOP_GRACE の後に止まる）。刈った後のシグナルで立て直しをやめた記録に、その事実は残らない。残りの期限が
     わずかでも 2 回目の子を起こす。表のキーとの比べは別名そのままで、「Fable」「fable[1m]」は立て直さない。model_substituted は、
     日付つきの名前・別名でない名前（opusplan など）を頼むと誤って付く。試験は、間のシグナルと、404・401 の違い（偽の子は 429 と 529
-    だけを返す）を見ない（404 で立て直すことは実物の CLI で 1 回確かめた）。"""
+    だけを返す）を見ない（404 で立て直すことは実物の CLI で 1 回確かめた）。時間切れ・止められた子・残った子孫・is_error・残りの期限が
+    0 以下の条件も、試験は見ない（外しても試験は通る）。"""
     usage = got.get("usage") or {}
     return (not a.resume and a.model in FALLBACK.get(a.host, {}) and not timed_out and "sig" not in stop and "late" not in stop
             and not left and got.get("is_error") is True and got.get("terminal_reason") == "api_error"
