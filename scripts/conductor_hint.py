@@ -8,11 +8,11 @@
 案内だけで、入力は止めない（AGENTS.md: 必須の機能を hook に置かない。hook が動かないホストでも、入口の description が同じことを
 求める）。指揮者がいるか、入力が指揮者への返事かは、ここでは決めない（会話記録から確かめられない。親のモデルが案内の条件で決める）。
 
-数える印は入口だけ（Skill ツールの bb-writ:bb-writ と短い名前 bb-writ、利用者の行の先頭のスラッシュの記録の名前
+数える印は、入口（Skill ツールの bb-writ:bb-writ と短い名前 bb-writ、利用者の行の先頭のスラッシュの記録の名前
 /bb-writ:bb-writ、利用者の行・入力を受け付けた行の文が /bb-writ:bb-writ か短い名前 /bb-writ で始まるもの）。読み方は push_guard.py の entry_in を、
 入口だけの名前で使う（判定を写して 2 つ持たない）。本体 bb-writ:conduct だけを呼んだセッションは数えない（入口を通らず、
-指揮者がいない）。
-足さない場合: 入力に agent_id がある（親でなく子への入力。指揮者の依頼文に混ざらないように）、入力が入口をスラッシュで呼ぶ形
+指揮者がいない）と、探索の入口 unknowns（used_unknowns。入口と別の案内を足し、素の push の守りの印には数えない）。
+足さない場合: 入力が /bb-writ:unknowns・/unknowns・/bb-writ:explore で始まる（unknowns を呼ぶ入力と、失敗の後に本体を呼ぶ回避）、入力に agent_id がある（親でなく子への入力。指揮者の依頼文に混ざらないように）、入力が入口をスラッシュで呼ぶ形
 （/bb-writ:bb-writ と短い名前 /bb-writ の 2 つで、名前そのものか、名前の直後が空白の類（空白・タブ・改行など）。比べ方は
 push_guard.py の slash_line で、会話記録の印と同じ。これから指揮者を立てる入力。
 入口を短い名前の /bb-writ で呼ぶと、会話記録の行は /bb-writ:bb-writ になるが、prompt は打ったままの /bb-writ で届く）、印が無い、
@@ -37,13 +37,42 @@ HINT_UNKNOWNS = ("bb-writ: このセッションでは探索の入口 unknowns �
                  " Enter、終わった後は /tasks から子を開いて、入力欄に打つ）。"
                  "(2) 利用者の入力が、子の質問・報告への返事か、その探索の続きの依頼のときは、自分では進めず、子にも渡さずに、"
                  "同じ直接の返事のしかたを利用者に伝える。別の用件のときと、子がいないときは、そのまま自分で進める。")
-UNKNOWNS_SKILLS = {"bb-writ:unknowns", "unknowns"}
 UNKNOWNS_NAMES = ("/bb-writ:unknowns", "/unknowns")
+SKIP_NAMES = UNKNOWNS_NAMES + ("/bb-writ:explore",)  # この入力そのものには足さない（入口を呼ぶ入力と、失敗の後に本体を呼ぶ回避）
 
 
-def unknowns_line(prompt: str) -> bool:
-    """入力が、探索の入口をスラッシュで呼ぶ形か（名前の直後が空白の類か文の終わり）。"""
-    return any(prompt.startswith(n) and (len(prompt) == len(n) or prompt[len(n)].isspace()) for n in UNKNOWNS_NAMES)
+def starts_with(text: str, names) -> bool:
+    """文が、どれかの名前で始まり、名前の直後が空白の類か文の終わりか（先頭の空白は削らない。入口の比べ方と同じ）。"""
+    return isinstance(text, str) and any(text.startswith(n) and (len(text) == len(n) or text[len(n)].isspace()) for n in names)
+
+
+def used_unknowns(path: str, push_guard) -> bool:
+    """会話記録に、探索の入口 unknowns を呼んだ印があるか。数えるのは、Skill ツールの bb-writ:unknowns の呼び出し、利用者の行の
+    スラッシュの記録、利用者の行と入力を受け付けた行のうち、名前で始まる素の文（fork するスキルをスラッシュで呼ぶと、この形で残る）。"""
+    with open(path, encoding="utf-8", errors="replace") as f:
+        for line in f:
+            if "unknowns" not in line:
+                continue
+            try:
+                d = json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(d, dict):
+                continue
+            if d.get("type") == "queue-operation" and d.get("operation") == "enqueue" and starts_with(d.get("content"), UNKNOWNS_NAMES):
+                return True
+            m = d.get("message") if isinstance(d.get("message"), dict) else {}
+            content = m.get("content")
+            blocks = content if isinstance(content, list) else [content]
+            for b in blocks:
+                if d.get("type") == "assistant" and isinstance(b, dict) and b.get("type") == "tool_use" and b.get("name") == "Skill" \
+                        and isinstance(b.get("input"), dict) and b["input"].get("skill") == "bb-writ:unknowns":
+                    return True
+                text = b.get("text") if isinstance(b, dict) and b.get("type") == "text" else b
+                if d.get("type") == "user" and isinstance(text, str) and (
+                        starts_with(text, UNKNOWNS_NAMES) or push_guard.slash_name(text) == "/bb-writ:unknowns"):
+                    return True
+    return False
 
 
 def main() -> int:
@@ -52,11 +81,11 @@ def main() -> int:
         import push_guard
         d = json.load(sys.stdin)
         prompt = d.get("prompt")
-        calls_entry = isinstance(prompt, str) and (push_guard.slash_line(prompt) or unknowns_line(prompt))  # 入口をスラッシュで呼ぶ入力
+        calls_entry = isinstance(prompt, str) and (push_guard.slash_line(prompt) or starts_with(prompt, SKIP_NAMES))  # 入口・本体を呼ぶ入力
         if d.get("agent_id") or calls_entry:
             return 0
-        hints = [h for h, skills, slashes in ((HINT, ENTRY_SKILLS, {push_guard.ENTRY_NAME}), (HINT_UNKNOWNS, UNKNOWNS_SKILLS, {"/bb-writ:unknowns"}))
-                 if push_guard.used_entry(d["transcript_path"], skills, slashes)]
+        hints = ([HINT] if push_guard.used_entry(d["transcript_path"], ENTRY_SKILLS, {push_guard.ENTRY_NAME}) else []) + (
+            [HINT_UNKNOWNS] if used_unknowns(d["transcript_path"], push_guard) else [])
         if not hints:
             return 0
     except Exception:  # 判定できなければ何も足さない（入力を止めない）

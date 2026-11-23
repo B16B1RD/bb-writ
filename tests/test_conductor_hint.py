@@ -145,7 +145,17 @@ class TestConductorHint(unittest.TestCase):
             {"type": "tool_use", "id": "toolu_u", "name": "Skill", "input": {"skill": "bb-writ:unknowns"}}]}}
         unknowns_slash = {"type": "user", "message": {"role": "user", "content":
             "<command-message>bb-writ:unknowns</command-message>\n<command-name>/bb-writ:unknowns</command-name>\n<command-args>題</command-args>"}}
-        for name, row in (("Skill ツール", unknowns_tool), ("スラッシュ", unknowns_slash)):
+        raw = {"type": "user", "message": {"role": "user", "content": "/bb-writ:unknowns 題"}}  # fork するスキルをスラッシュで呼んだ形
+        raw_block = {"type": "user", "message": {"role": "user", "content": [{"type": "text", "text": "/bb-writ:unknowns\n題"}]}}
+        queued = {"type": "queue-operation", "operation": "enqueue", "content": "/bb-writ:unknowns 題"}
+        quoted = {"type": "assistant", "message": {"role": "assistant", "content": "/bb-writ:unknowns を呼ぶとよい"}}  # 書き手の文は数えない
+        self.assertIsNone(self.run_hint(self.stdin(self.transcript(OTHER_SKILL, quoted))))
+        for name, row in (("入口だけ（スラッシュの素の行）", BY_FORKED_SLASH), ("入口だけ（Skill ツール）", BY_SKILL_TOOL)):
+            with self.subTest(name):  # 入口だけのセッションに、unknowns の案内を足さない
+                ctx = self.run_hint(self.stdin(self.transcript(OTHER_SKILL, row)))["hookSpecificOutput"]["additionalContext"]
+                self.assertNotIn("unknowns", ctx)
+        for name, row in (("Skill ツール", unknowns_tool), ("スラッシュの記録", unknowns_slash), ("素の行", raw),
+                          ("素の行の text ブロック", raw_block), ("受け付けた行", queued)):
             with self.subTest(name):
                 path = self.transcript(OTHER_SKILL, row)
                 got = self.run_hint(self.stdin(path))
@@ -154,7 +164,7 @@ class TestConductorHint(unittest.TestCase):
                 self.assertIn("unknowns", ctx)
                 self.assertNotIn("入口 bb-writ を呼んでいる", ctx)
                 self.assertFalse(push_guard.used_entry(path))  # 素の push の守りは、unknowns だけのセッションを止めない
-                for prompt in ("/bb-writ:unknowns 次の題", "/unknowns"):
+                for prompt in ("/bb-writ:unknowns 次の題", "/unknowns", "/bb-writ:explore 題"):  # 入口と、失敗の後に本体を呼ぶ回避
                     self.assertIsNone(self.run_hint(self.stdin(path, prompt)), prompt)
 
     def test_input_it_cannot_judge_ends_quietly(self):  # R9
