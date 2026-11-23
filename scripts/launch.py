@@ -358,6 +358,7 @@ def claude_places(cwd: Path, checkout: Path | None, use_git: bool = True) -> tup
     symlink の .claude、同じ対象で並行する別の子や利用者のセッションが同じ間に作った空の置き場（一緒に消す。#65）、
     起動中に無視の規則が変わって Git に見えるようになった前からの空の .cc-writes（一緒に消す）、
     子が読めなくした場所の下（残る）、前に読めなかった場所の下の前からの空の置き場（一緒に消す）、
+    起動の前の git が失敗・時間切れのときと、子が Git の管理情報を変えた後の下の階層（残る。status は前者で ok、後者で failed）、
     候補を得た後に別のプロセスが .claude を symlink に置き換えた場合（先の空の .cc-writes を消しうる）、
     launcher の後の git（task cleanup・利用者の git status）が、子が足したサブモジュールの設定で動くこと（#64）。"""
     found, ignored_cc = {top / ".claude" for top in (cwd, checkout) if top is not None}, set()
