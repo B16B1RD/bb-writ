@@ -322,7 +322,7 @@ def cli_place(p: Path) -> bool:
     return p.parent == home / ".claude" or p == home / ".config" / "anthropic"
 
 
-def cwd_residue(cwd: Path, before: set[str]) -> list[str]:
+def cwd_residue(cwd: Path, before: set[str], use_git: bool = True) -> list[str]:
     """書く子の起動で対象の直下に新しくでき、中身が空のまま（空のファイルと空のディレクトリだけ。入れ子を含む）で、Git が追跡していない場所。
     Claude Code の sandbox は、守る対象のうち無いもの（.bashrc・.gitconfig・.claude/ の下など）を対象に空で作り、子の CLI が
     正常に終わると片付けるが、時間切れで止めると残った（2.1.310）。0 バイトのファイルが残ると task cleanup が未保存の変更とみなし、
@@ -339,7 +339,8 @@ def cwd_residue(cwd: Path, before: set[str]) -> list[str]:
         return p.is_file() and p.stat().st_size == 0
     new = sorted(str(p) for p in cwd.iterdir() if str(p) not in before)
     left = [p for p in new if bare(Path(p))]
-    if left and (cwd / ".git").exists():  # 追跡している（index にある）ものは子が意図して足したので数えない
+    if left and use_git and (cwd / ".git").exists():  # 追跡している（index にある）ものは子が意図して足したので数えない。
+        # 子が Git の管理情報を変えた後は git を動かさず、照らさないまま全部を返す
         out = subprocess.run(["git", "-C", str(cwd), "ls-files", "-z", "--", *[Path(p).name for p in left]], capture_output=True, text=True, check=True, timeout=GIT_TIMEOUT)
         tracked = {cwd / n.split("/")[0] for n in out.stdout.split("\0") if n}
         left = [p for p in left if Path(p) not in tracked]
@@ -490,6 +491,32 @@ def read_head(f: Path) -> str:
     return head.decode("utf-8", "surrogateescape") if len(head) <= 4096 else f"（4 KiB を超える。{digest}）"
 
 
+def nested_repos(own: Path, cwd: Path) -> dict[str, str]:
+    """作業場所の入れ子のリポジトリ（index の gitlink と、追跡外で無視しない入れ子のリポジトリ）の、.git と設定の表し。
+    git status は gitlink の中で、その設定（core.fsmonitor など）を動かす。追跡外のものには入らないが、git add -A で gitlink になる。
+    子が足した・変えたものを git_changes が止める。ls-files は最上位の core.fsmonitor を動かすので外して呼ぶ。
+    守らない範囲: 無視するディレクトリの中の入れ子のリポジトリ、設定の include の先、設定より後に読まれるもの（hooks など）。"""
+    local = subprocess.run(["git", "rev-parse", "--local-env-vars"], capture_output=True, text=True, errors="surrogateescape", timeout=GIT_TIMEOUT)
+    env = {k: v for k, v in os.environ.items() if k not in local.stdout.split()}
+    git = ["git", "-c", "core.fsmonitor=false", "--git-dir", str(own), "--work-tree", str(cwd), "ls-files", "-z"]
+    staged = subprocess.run(git + ["-s"], cwd=cwd, env=env, capture_output=True, check=True, timeout=GIT_TIMEOUT).stdout.split(b"\0")
+    others = subprocess.run(git + ["-o", "--exclude-standard"], cwd=cwd, env=env, capture_output=True, check=True, timeout=GIT_TIMEOUT).stdout.split(b"\0")
+    paths = {os.fsdecode(e.split(b"\t", 1)[1]) for e in staged if e.startswith(b"160000 ") and b"\t" in e}
+    paths |= {os.fsdecode(e[:-1]) for e in others if e.endswith(b"/")}  # ls-files -o は入れ子のリポジトリに入らず、「名前/」で出す
+    out = {}
+    for name in sorted(paths):
+        dot = cwd / name / ".git"
+        rep, head, regular = read_child_file(dot, 4096)
+        if rep is not None and not regular and dot.is_dir() and not dot.is_symlink():
+            config = dot / "config"
+        elif regular and head.startswith(b"gitdir: "):  # 初期化したサブモジュール・worktree の .git ファイル
+            config = (cwd / name / os.fsdecode(head[len(b"gitdir: "):].strip())) / "config"
+        else:
+            config = None
+        out[str(cwd / name)] = f"{rep} 設定: {read_child_file(config)[0] if config else None}"
+    return out
+
+
 def git_snapshot(own: Path, common: Path, cwd: Path) -> dict:
     """書く子の前後で比べる Git の管理情報。子の書いた .git ファイルを読まないよう、共通ディレクトリを明示して読む。"""
     for f in (common / "config", common / "packed-refs"):  # git が開いたまま止まる・尽きるもの（FIFO・デバイス）を渡さない
@@ -507,7 +534,16 @@ def git_snapshot(own: Path, common: Path, cwd: Path) -> dict:
         files += sorted(f for f in d.rglob("*") if f.is_file() or f.is_symlink()) if d.is_dir() else []
     return {"refs": dict(r.split(" ", 1) for r in refs if " " in r),
             "files": {str(f): read_child_file(f)[0] for f in files},
-            "head": read_head(own / "HEAD")}
+            "head": read_head(own / "HEAD"),
+            "nested": nested_or_why(own, cwd)}
+
+
+def nested_or_why(own: Path, cwd: Path) -> dict[str, str]:
+    """nested_repos。数えられなければ（子が HEAD・index を壊したなど）、そのこと自体を 1 つの差として返す（ほかの差の行を消さない）。"""
+    try:
+        return nested_repos(own, cwd)
+    except (OSError, subprocess.SubprocessError) as e:
+        return {f"{cwd}（入れ子のリポジトリを数えられない: {type(e).__name__}）": ""}
 
 
 def git_changes(before: dict, after: dict, common: Path) -> list[str]:
@@ -522,6 +558,8 @@ def git_changes(before: dict, after: dict, common: Path) -> list[str]:
             undo = f"git --git-dir {common} update-ref {r} {old}" if old else f"git --git-dir {common} update-ref -d {r}"
             out.append(f"{r}: {old or '(無し)'} → {new or '(削除)'}（戻すなら: {undo}）")
     out += sorted(f for f in set(before["files"]) | set(after["files"]) if before["files"].get(f) != after["files"].get(f))
+    out += [f"{d}（入れ子のリポジトリ。git status・git add -A がその設定で動きうる）"
+            for d in sorted(set(before["nested"]) | set(after["nested"])) if before["nested"].get(d) != after["nested"].get(d)]
     if after["head"] != before["head"]:
         out.append(f"HEAD: {before['head']!r} → {after['head']!r}")
     return out
@@ -2047,7 +2085,7 @@ def main() -> int:
                                                       f"詳細: {launcher_error(out_dir)}"] + rec.get("problems", []))
             if cwd_before is not None:
                 try:
-                    rec["cwd_residue"] = cwd_residue(a.cwd, cwd_before)
+                    rec["cwd_residue"] = cwd_residue(a.cwd, cwd_before, "git" not in blocked)
                 except Exception as e:
                     rec.setdefault("cwd_residue", [])
                     blocked.append("cwd")
@@ -2073,7 +2111,9 @@ def main() -> int:
                 rec.update(status="failed", problems=["子の起動の後、ホームに空のファイル・ディレクトリが新しく残った。中身を確かめて消す"
                                                       "（空の ~/.bash_profile があると、ログインシェルが ~/.profile と ~/.bashrc を読まない）"]
                            + rec["home_residue"][:20] + rec.get("problems", []))
-    if rec["head"] and clean_head(a.cwd) != rec["head"]:  # 確かめた後、子の終わりまでに作業ツリーが変わった（子が見たものが commit と違いうる）
+    if rec["head"] and "git" in blocked:  # 子が変えた Git の管理情報で git を動かさない（偽の設定が sandbox の外で動きうる）
+        rec.update(head=None, head_lost="子が Git の管理情報を変えたので、終わりに HEAD と作業ツリーを確かめなかった")
+    elif rec["head"] and clean_head(a.cwd) != rec["head"]:  # 確かめた後、子の終わりまでに作業ツリーが変わった（子が見たものが commit と違いうる）
         rec.update(head=None, head_lost="子の起動の前に確かめた後、終わりまでに対象の HEAD か作業ツリーが変わったか、終わりに確かめられなかった")
     elif rec["head"] and a.resume and (seen := next((h for h in [a.prev_head, *(r["saw"] for r in a.history if "saw" in r)] if h != rec["head"]), rec["head"])) != rec["head"]:
         # 続きの子は、前の起動で別の commit（か未 commit の変更）を見た。前の記録へ戻って続けたときも、その session が見たものを数える
