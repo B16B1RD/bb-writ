@@ -195,6 +195,7 @@ class TestConductorHint(unittest.TestCase):
         for name, prompt, want in (
                 ("入口でない子の失敗", notice(other, "failed"), USUAL),
                 ("終わった知らせ", notice(CONDUCTOR, "completed"), USUAL),
+                ("failed と等しくない status", notice(CONDUCTOR, "not-failed"), USUAL),
                 ("本文が failed を引用", notice(CONDUCTOR, "completed", "報告: <status>failed</status> を見分ける"), USUAL),
                 ("指揮者は終わり、別の子が失敗", notice(CONDUCTOR, "completed") + notice(other, "failed"), USUAL),
                 ("本文が失敗の知らせを丸ごと引用", notice(CONDUCTOR, "completed", "報告: " + notice(CONDUCTOR, "failed")), USUAL),
