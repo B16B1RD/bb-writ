@@ -203,6 +203,9 @@ class TestConductorHint(unittest.TestCase):
                 ("本文が開く札だけを書く", notice(CONDUCTOR, "completed", "先頭が <task-notification> か <status>failed</status>"), USUAL),
                 ("本文が閉じる札の後に失敗を書く", notice(CONDUCTOR, "completed", "</task-notification>" + notice(CONDUCTOR, "failed")), USUAL),
                 ("見出しの task-id が複数", notice(CONDUCTOR, "failed").replace("</task-id>", f"</task-id>\n<task-id>{other}</task-id>", 1), FAIL),
+                ("見出しの 2 つ目の task-id が指揮者", notice(other, "failed").replace("</task-id>", f"</task-id>\n<task-id>{CONDUCTOR}</task-id>", 1), FAIL),
+                ("output-file の無い見出し", notice(CONDUCTOR, "failed").replace(f"<output-file>/tmp/x/{CONDUCTOR}.output</output-file>\n", ""), FAIL),
+                ("先頭の空白", "\n " + notice(CONDUCTOR, "failed"), FAIL),
                 ("見出しの tool-use-id", notice(CONDUCTOR, "failed").replace("</task-id>", "</task-id>\n<tool-use-id>toolu_x</tool-use-id>", 1), FAIL),
                 ("利用者の文の後ろの知らせ", "これ見て\n" + notice(CONDUCTOR, "failed"), USUAL),
                 ("普通の入力", PROMPT, USUAL)):

@@ -52,7 +52,9 @@ TASK_ID = re.compile(r"<task-id>([A-Za-z0-9_-]{1,64})</task-id>")
 
 def failed_children(prompt: str):
     """入力の先頭の知らせの見出しの status が failed なら、見出しの task-id を返す。本文（summary・result・note）と、2 つ目からの知らせは
-    読まない（このリポジトリの会話記録の受け付けた知らせ 3,303 件は、すべて 1 入力に知らせ 1 つだった。2026-11-23）。"""
+    読まない（このリポジトリの会話記録で、受け付けた知らせ 3,303 件と、知らせで始まる user の行 1,015 件は、すべて知らせ 1 つだった。
+    2026-11-23）。守らない範囲: 見出しの要素が NOTICE_HEAD の並びと違う版（知らない要素が status の前に入る・順が変わる）では、
+    失敗の案内が付かず、いつもの案内になる（試験は 2.1.330 の形だけを見る）。status は failed と等しいときだけ数える。"""
     head = NOTICE_HEAD.match(prompt)
     return TASK_ID.findall(head.group(1)) if head and head.group(2) == "failed" else []
 
