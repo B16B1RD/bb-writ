@@ -346,6 +346,21 @@ def cwd_residue(cwd: Path, before: set[str]) -> list[str]:
     return left
 
 
+def claude_places(cwd: Path, checkout: Path | None) -> set[Path]:
+    """対象の下（.git を除く）と元の checkout の直下にある .claude と .claude/.cc-writes。.cc-writes は、Claude Code が
+    今いるディレクトリの .claude に設定を書くときの一時の置き場で、--restricted の子は、対象の直下と、子が cd した下の階層にも
+    空で残す（2.1.330）。起動の前後で比べ、この起動で新しくできたものだけを片付けの候補にする。
+    守らない範囲: symlink の先、読めないディレクトリの下、元の checkout の下の階層。"""
+    found = set()
+    for top, dirs, _ in os.walk(cwd):
+        dirs[:] = [d for d in dirs if d != ".git"]
+        if ".claude" in dirs:
+            found.add(Path(top) / ".claude")
+    if checkout is not None and (checkout / ".claude").is_dir():
+        found.add(checkout / ".claude")
+    return found | {d / ".cc-writes" for d in found if (d / ".cc-writes").is_dir()}
+
+
 def grok_ro_writable(home: Path) -> list[Path]:
     """Grok の read-only の sandbox でも書ける場所（公式文書 18-sandbox と、実物の sessions/sandbox-events.jsonl の read_write_paths）。"""
     roots = [Path("/tmp"), Path("/var/tmp"), Path(tempfile.gettempdir()), home]  # gettempdir は macOS の一時ディレクトリ
@@ -1793,13 +1808,14 @@ def main() -> int:
         if a.host == "grok" and not why:
             rec["grok_home"] = env["GROK_HOME"]  # 再開（grok -r）はこの home で
         if not why:
-            # --restricted の Claude Code は、対象と（worktree なら）元の checkout に空の .claude/.cc-writes を作る（2.1.302）。
-            # 残すと task cleanup が未保存の変更とみなすので、この起動で新しくでき、空のままのものだけを後で消す
-            made = []
+            # --restricted の Claude Code は、対象（子が cd した下の階層を含む）と（worktree なら）元の checkout に空の
+            # .claude/.cc-writes を作る（2.1.302・2.1.330）。残すと task cleanup が未保存の変更とみなすので、この起動で新しくでき、
+            # 空のままのものだけを後で消す
+            places = None
             if a.host == "claude":
                 git_dir, _ = grok_git_dir(a.cwd)
-                for top in {a.cwd, *([git_dir.parent] if git_dir and git_dir.name == ".git" else [])}:
-                    made += [d for d in (top / ".claude", top / ".claude" / ".cc-writes") if not d.exists()]
+                checkout = git_dir.parent if git_dir and git_dir.name == ".git" and git_dir.parent != a.cwd else None
+                places = (checkout, claude_places(a.cwd, checkout))
                 # 専用ログインのトークンの組織を確かめる。ホームの前後の比較の「前」を取る前に済ませる（確かめのプロセスがホームに
                 # 残したものを、子の残りとして数えない）。記録に書くのは、子を起動するときだけ
                 login = claude_login(config_dir())
@@ -1975,7 +1991,8 @@ def main() -> int:
                     rec.update(status="failed", problems=[headline + "この作業場所で git を動かす前に、下の場所を確かめる（偽の設定が sandbox の外で動きうる）"]
                                + changed[:20] + rec.get("problems", []))
             try:
-                for d in reversed(made):
+                made = sorted(claude_places(a.cwd, places[0]) - places[1], key=lambda d: len(d.parts), reverse=True) if places else []
+                for d in made:
                     try:
                         if d.is_dir() and not d.is_symlink() and not any(d.iterdir()):
                             d.rmdir()

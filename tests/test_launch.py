@@ -376,6 +376,10 @@ FAKE_CLAUDE = textwrap.dedent(r'''
             import time; time.sleep(60)
     if os.environ.get("FAKE_MODE") == "wrote":
         open(".claude/.cc-writes/x", "w").write("x")
+    if os.environ.get("FAKE_MODE") == "subdirs":  # 2.1.330 の --restricted は、子が cd した下の階層にも作る
+        for d in ("sub", "sub/deep", "kept", "full", "had"):
+            os.makedirs(os.path.join(d, ".claude", ".cc-writes"), exist_ok=True)
+        open("full/.claude/.cc-writes/x", "w").write("x")
     if os.environ.get("FAKE_MODE") == "checkout":  # worktree の子は、元の checkout にも作る
         import subprocess
         common = subprocess.run(["git", "rev-parse", "--path-format=absolute", "--git-common-dir"], capture_output=True, text=True).stdout.strip()
@@ -2220,6 +2224,20 @@ class TestLaunch(unittest.TestCase):
         (self.cwd / ".claude").mkdir()
         self.run_launch("claude", "wrote")
         self.assertTrue((self.cwd / ".claude" / ".cc-writes" / "x").exists())  # 中身があれば消さない
+
+    def test_claude_leaves_no_empty_cc_writes_below_the_target(self):
+        # 子が cd した下の階層に残った空の .claude/.cc-writes で、task cleanup が作業場所を消せなかった（#63）
+        (self.cwd / "kept" / ".claude").mkdir(parents=True)
+        (self.cwd / "kept" / ".claude" / "settings.json").write_text("{}")
+        (self.cwd / "had" / ".claude" / ".cc-writes").mkdir(parents=True)
+        rc, rec = self.run_launch("claude", "subdirs")
+        self.assertEqual(rec["status"], "ok", rec)
+        self.assertFalse((self.cwd / "sub" / ".claude").exists())  # この起動で新しくでき、空のままのものは消す
+        self.assertFalse((self.cwd / "sub" / "deep" / ".claude").exists())
+        self.assertFalse((self.cwd / "kept" / ".claude" / ".cc-writes").exists())
+        self.assertTrue((self.cwd / "kept" / ".claude" / "settings.json").exists())  # 中身のある .claude は残す
+        self.assertTrue((self.cwd / "full" / ".claude" / ".cc-writes" / "x").exists())  # 中身があれば消さない
+        self.assertTrue((self.cwd / "had" / ".claude" / ".cc-writes").is_dir())  # 前からあったものは残す
 
     def test_child_leaving_empty_files_in_home_fails(self):
         # 起動の後にホームの直下へ空の .bash_profile が残ると、ログインシェルが .profile を読まず .bashrc も読まなくなった
