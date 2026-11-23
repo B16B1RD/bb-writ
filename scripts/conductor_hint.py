@@ -12,12 +12,12 @@
 /bb-writ:bb-writ、利用者の行・入力を受け付けた行の文が /bb-writ:bb-writ か短い名前 /bb-writ で始まるもの）。入口の印の読み方は push_guard.py の entry_in を、
 入口だけの名前で使う（判定を写して 2 つ持たない）。本体 bb-writ:conduct だけを呼んだセッションは数えない（入口を通らず、
 指揮者がいない）。探索の入口 unknowns の印は、別の読み手 used_unknowns で数え、入口と別の案内を足す（素の push の守りの印には数えない）。
-入口の子（指揮者）が失敗して終わった知らせ（prompt の先頭の空白の後が <task-notification> で、知らせごとの最初の status が failed、
+入口の子（指揮者）が失敗して終わった知らせ（prompt の先頭の空白の後が <task-notification> で、入れ子でない知らせごとの最初の status が failed、
 その知らせの最初の task-id の子の会話記録が入口で始まる。子の見分けは push_guard.py の entry_child。failed_children）のターンには、
 いつもの案内の代わりに FAILED を足す（#57。対話で、親が知らせの後に、関門を通さずに自分で依頼を進めた）。unknowns の案内は残す。
 failed のほかの終わり方（killed など）は見分けない（実物の値を確かめていない）。探索の入口 unknowns の子の失敗は見分けない
 （HINT_UNKNOWNS の括弧と unknowns の説明の文だけ）。
-足さない場合: 入力が /bb-writ:unknowns・/unknowns・/bb-writ:explore・/bb-writ:conduct で始まる（unknowns を呼ぶ入力と、失敗の後に本体を呼ぶ回避）、入力に agent_id がある（親でなく子への入力。指揮者の依頼文に混ざらないように）、入力が入口をスラッシュで呼ぶ形
+足さない場合: 入力が /bb-writ:unknowns・/unknowns・/bb-writ:explore・/bb-writ:conduct・/conduct で始まる（unknowns を呼ぶ入力と、失敗の後に本体を呼ぶ回避）、入力に agent_id がある（親でなく子への入力。指揮者の依頼文に混ざらないように）、入力が入口をスラッシュで呼ぶ形
 （/bb-writ:bb-writ と短い名前 /bb-writ の 2 つで、名前そのものか、名前の直後が空白の類（空白・タブ・改行など）。比べ方は
 push_guard.py の slash_line で、会話記録の印と同じ。これから指揮者を立てる入力。
 入口を短い名前の /bb-writ で呼ぶと、会話記録の行は /bb-writ:bb-writ になるが、prompt は打ったままの /bb-writ で届く）、印が無い、
@@ -45,20 +45,27 @@ FAILED = ("bb-writ: 入口 bb-writ が立てた指揮者（背景の子）が、
           "呼んだセッションのモデルで、bb-writ の進め方（作業場所の確保・検証・関門）のまま進む。入口のモデルを使えない・利用枠が尽きたというエラーのときは、これ。"
           "(2) 入口を呼び直す（/bb-writ:bb-writ <依頼>）。混雑・通信など一時的なエラーのときと、利用枠が戻った後。")
 NOTICE = "<task-notification>"
+TAG = re.compile(r"<(/?)task-notification>")
 TASK_ID = re.compile(r"<task-id>([A-Za-z0-9_-]{1,64})</task-id>")
 STATUS = re.compile(r"<status>([^<]*)</status>")
 
 
 def failed_children(prompt: str):
-    """知らせだけの入力（先頭の空白の後が <task-notification>）を知らせごとに分け、最初の status が failed の知らせの、最初の task-id を返す。
-    知らせの中の後ろの文（summary・result の引用）と、ほかの知らせの status は見ない。閉じる札は数えない（hook の記録で確かめていない）。"""
+    """知らせだけの入力（先頭の空白の後が <task-notification>）の、入れ子でない知らせごとに、最初の status が failed なら、最初の task-id を
+    返す。実物の知らせは、task-id・output-file・status・summary・note の順で、閉じる札を持つ（2.1.330 の会話記録）。本文（summary）が引用した
+    status は、知らせ自身の status より後ろなので見ず、引用した知らせは、閉じる札まで入れ子として数えて見ない。"""
     if not prompt.lstrip().startswith(NOTICE):
         return []
-    ids = []
-    for part in prompt.split(NOTICE)[1:]:
-        tid, status = TASK_ID.search(part), STATUS.search(part)
-        if tid and status and status.group(1) == "failed" and tid.start() < status.start():
-            ids.append(tid.group(1))
+    ids, depth = [], 0
+    for tag in TAG.finditer(prompt):
+        if tag.group(1):
+            depth = max(0, depth - 1)
+            continue
+        if depth == 0:
+            tid, status = TASK_ID.search(prompt, tag.end()), STATUS.search(prompt, tag.end())
+            if tid and status and status.group(1) == "failed":
+                ids.append(tid.group(1))
+        depth += 1
     return ids
 # 探索の入口 unknowns も別の子として動く（#58）。印は入口と別に持つ（素の push の守りの「入口を呼んだセッション」に数えない）
 HINT_UNKNOWNS = ("bb-writ: このセッションでは探索の入口 unknowns を呼んでいる。unknowns が立てた子（背景の子）がいるなら、次のとおりにする。"
@@ -68,7 +75,7 @@ HINT_UNKNOWNS = ("bb-writ: このセッションでは探索の入口 unknowns �
                  "同じ直接の返事のしかたを利用者に伝える。別の用件のときと、子がいないとき（子がモデルのエラーで失敗し、本体 explore を"
                  "名前で呼んで、このセッションで探索を続けているときを含む）は、そのまま自分で進める。")
 UNKNOWNS_NAMES = ("/bb-writ:unknowns", "/unknowns")
-SKIP_NAMES = UNKNOWNS_NAMES + ("/bb-writ:explore", "/bb-writ:conduct")  # この入力そのものには足さない（入口を呼ぶ入力と、失敗の後に本体を呼ぶ回避）
+SKIP_NAMES = UNKNOWNS_NAMES + ("/bb-writ:explore", "/bb-writ:conduct", "/conduct")  # この入力そのものには足さない（入口を呼ぶ入力と、失敗の後に本体を呼ぶ回避）
 
 
 def starts_with(text: str, names) -> bool:

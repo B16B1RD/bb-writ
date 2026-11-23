@@ -83,7 +83,7 @@ class TestConductorHint(unittest.TestCase):
     def test_a_prompt_that_calls_the_entry_by_slash_gets_no_hint(self):  # R3
         # 入口をスラッシュで呼ぶ入力は、これから指揮者を立てる入力（短い名前の /bb-writ でも、prompt は打ったままで届く）。
         # 本体を名前で呼ぶ入力は、指揮者が失敗した後の次の手（続きを指揮者へ回す案内を付けない。#57）
-        for prompt in ("/bb-writ:bb-writ 直して", "/bb-writ:bb-writ", "/bb-writ:bb-writ\n続きを", "/bb-writ:conduct 続きを",
+        for prompt in ("/bb-writ:bb-writ 直して", "/bb-writ:bb-writ", "/bb-writ:bb-writ\n続きを", "/bb-writ:conduct 続きを", "/conduct 続きを",
                        "/bb-writ 直して", "/bb-writ", "/bb-writ\t直して", "/bb-writ\n直して", "/bb-writ\u3000直して"):
             with self.subTest(prompt=prompt):
                 self.assertFalse(self.hinted(BY_FORKED_SLASH, prompt=prompt), "入口をスラッシュで呼ぶ入力に案内が付いた")
@@ -197,6 +197,8 @@ class TestConductorHint(unittest.TestCase):
                 ("終わった知らせ", notice(CONDUCTOR, "completed"), USUAL),
                 ("本文が failed を引用", notice(CONDUCTOR, "completed", "報告: <status>failed</status> を見分ける"), USUAL),
                 ("指揮者は終わり、別の子が失敗", notice(CONDUCTOR, "completed") + notice(other, "failed"), USUAL),
+                ("本文が失敗の知らせを丸ごと引用", notice(CONDUCTOR, "completed", "報告: " + notice(CONDUCTOR, "failed")), USUAL),
+                ("別の子の本文が指揮者の失敗を引用", notice(other, "completed", notice(CONDUCTOR, "failed")) + notice(other, "completed"), USUAL),
                 ("別の子は終わり、指揮者が失敗", notice(other, "completed") + notice(CONDUCTOR, "failed"), FAIL),
                 ("利用者の文の後ろの知らせ", "これ見て\n" + notice(CONDUCTOR, "failed"), USUAL),
                 ("普通の入力", PROMPT, USUAL)):
@@ -206,6 +208,15 @@ class TestConductorHint(unittest.TestCase):
                 self.assertNotIn(FAIL if want == USUAL else USUAL, got)
         with self.subTest("子への入力"):  # 指揮者が立てた子の失敗の知らせは、agent_id 付きで指揮者に届く
             self.assertEqual("", ctx(notice(CONDUCTOR, "failed"), agent_id="a1b2c3"))
+        with self.subTest("次のターンのいつもの案内"):  # 失敗した指揮者の依頼は、本体か入口を呼ぶまで進めない、を添える
+            self.assertIn("/bb-writ:conduct", ctx(PROMPT))
+        with self.subTest("unknowns の案内は残す"):
+            unknowns = {"type": "assistant", "message": {"role": "assistant", "content": [
+                {"type": "tool_use", "id": "toolu_u", "name": "Skill", "input": {"skill": "bb-writ:unknowns"}}]}}
+            path = self.transcript(OTHER_SKILL, BY_SKILL_TOOL, unknowns)
+            got = ctx(notice(CONDUCTOR, "failed"))
+            self.assertIn(FAIL, got)
+            self.assertIn("探索の入口 unknowns", got)
 
     def test_input_it_cannot_judge_ends_quietly(self):  # R9
         for name, raw in (("JSON でない", "A で"), ("空", ""), ("JSON の配列", "[1, 2]"),
