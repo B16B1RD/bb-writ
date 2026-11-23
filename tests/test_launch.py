@@ -385,6 +385,7 @@ FAKE_CLAUDE = textwrap.dedent(r'''
         for d in ("sub", "sub/deep", "kept", "full", "had", "whole", "日本 語", "empty"):  # 空白と UTF-8 の名前も
             os.makedirs(os.path.join(d, ".claude", ".cc-writes"), exist_ok=True)
         os.makedirs("plain/.cc-writes", exist_ok=True)  # .claude の外の同じ名前は、Claude Code の置き場ではない
+        os.makedirs("sub/.claude/other", exist_ok=True)  # .claude の中の別の名前（無視されて空でも、Claude Code の置き場ではない）
         open("full/.claude/.cc-writes/x", "w").write("x")
     if os.environ.get("FAKE_MODE") == "checkout":  # worktree の子は、元の checkout にも作る
         import subprocess
@@ -2236,7 +2237,7 @@ class TestLaunch(unittest.TestCase):
         # 片付けの後、task cleanup と同じ見方（無視するものを含む git status）に、子の起動で新しくできた空の場所が出ない
         git = lambda *a: subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", *a], cwd=self.cwd, check=True,
                                         capture_output=True, text=True).stdout
-        (self.cwd / ".gitignore").write_text(".cc-writes/\n")
+        (self.cwd / ".gitignore").write_text(".cc-writes/\nother/\n")
         (self.cwd / "whole").mkdir()
         (self.cwd / "whole" / ".gitignore").write_text(".claude/\n")  # .claude を丸ごと無視するリポジトリ
         (self.cwd / "kept" / ".claude").mkdir(parents=True)
@@ -2254,7 +2255,7 @@ class TestLaunch(unittest.TestCase):
         rc, rec = self.run_launch("claude", "subdirs")
         self.assertEqual(rec["status"], "ok", rec)  # 読めない .claude があっても子を起動する
         left = git("status", "--porcelain", "--untracked-files=all", "--ignored=matching").splitlines()
-        self.assertEqual(sorted(left), ["!! full/.claude/.cc-writes/", "!! had/.claude/.cc-writes/", "!! plain/.cc-writes/"])  # 中身があるもの・前からあったものは残す
+        self.assertEqual(sorted(left), ["!! full/.claude/.cc-writes/", "!! had/.claude/.cc-writes/", "!! plain/.cc-writes/", "!! sub/.claude/other/"])  # 中身があるもの・前からあったものは残す
         self.assertFalse((self.cwd / "sub" / ".claude" / ".cc-writes").exists())  # この起動で新しくでき、空のままのものは消す
         self.assertFalse((self.cwd / "whole" / ".claude").exists())  # 無視される .claude は、それ自体が新しければ消す
         self.assertFalse((self.cwd / "日本 語" / ".claude" / ".cc-writes").exists())
@@ -3834,7 +3835,8 @@ class TestLaunch(unittest.TestCase):
                 self.assertTrue(any(x.startswith("refs/heads/main: ") and "update-ref refs/heads/main " in x for x in rec["problems"]), rec)
         _, wt = self.worktree("tamper-submodule")
         rc, rec = self.run_launch("claude", "tamper-submodule", extra=["--write"], cwd=wt)
-        self.assertTrue((wt / "nested" / ".git").is_dir(), rec)  # 偽の子が入れ子のリポジトリを作れた
+        index = subprocess.run(["git", "ls-files", "-s", "nested"], cwd=wt, capture_output=True, text=True).stdout
+        self.assertTrue(index.startswith("160000 "), (index, rec))  # 偽の子が入れ子のリポジトリをサブモジュールとして index に足せた
         self.assertFalse(Path(str(self.args_file) + ".pwned").exists(), rec)  # 片付けの git はサブモジュールの中で動かない
 
     def test_codex_write_in_worktree_gets_only_commit_dirs(self):
