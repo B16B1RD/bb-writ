@@ -53,7 +53,7 @@ from pathlib import Path
 sys.dont_write_bytecode = True  # work.py の import で、プラグインの置き場に __pycache__ を作らない
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from work import root as work_record  # noqa: E402  作業場所ごとの記録の置き場（担当・記録・証拠）
-from work import holds_no_file  # noqa: E402  ファイルを持たないディレクトリか（task cleanup と同じ見方）
+from work import claude_staging_only  # noqa: E402  Claude Code の空の置き場か（task cleanup と同じ見方）
 
 # 親が --model・--effort を省いたときの、役割ごとのモデルと effort（親が渡せば、それが勝つ）。表に無い組み合わせは --model と --effort を渡す。
 # 最も難しい依頼（設計、大きな移行・リファクタリング、長い無人実行）を任せる書く子（--hardest）は最上段。
@@ -337,13 +337,13 @@ QUIET_GIT = ["git", "-c", "core.fsmonitor=false"]
 
 
 def cwd_residue(cwd: Path, before: set[str]) -> list[str]:
-    """書く子の起動で対象の直下に新しくでき、中身が空のまま（空のファイルと空のディレクトリだけ。入れ子を含む）で、空のファイルを持ち、
-    Git が追跡していない場所。
+    """書く子の起動で対象の直下に新しくでき、中身が空のまま（空のファイルと空のディレクトリだけ。入れ子を含む）で、Git が追跡していない場所。
     Claude Code の sandbox は、守る対象のうち無いもの（.bashrc・.gitconfig・.claude/ の下など）を対象に空で作り、子の CLI が
     正常に終わると片付けるが、時間切れで止めると残った（2.1.310）。0 バイトのファイルが残ると task cleanup が未保存の変更とみなし、
     次の書き手の git add -A で commit に入りうる。黙って消さない（子が意図して作った空のファイルかもしれない）。
-    ファイルを持たないディレクトリは数えない（Git にも task cleanup にも見えない。Claude Code が設定を書くときの空の
-    .claude/.cc-writes は、同じ場所の別のセッションも使う。#65）。
+    Claude Code の空の置き場だけの .claude（claude_staging_only）は数えない（同じ場所の別のセッションも使い、消さない。#65）。
+    before は起動の前の直下の場所で、その置き場だけの .claude を入れない（新しくできたものと同じに見る。前の子が残した .claude の下に、
+    後の子が時間切れで残した 0 バイトの settings.json などを見落とした）。
     守らない範囲: 前からあるディレクトリの下、index と照らすのは対象が作業ツリーの根（.git がある）のときだけ、Git の設定・環境を
     書き換えた子や親（設定の FIFO・GIT_DIR）、pathspec の記号を含む名前、Python の再帰の上限を超える入れ子、index にある場所を
     含む新しいディレクトリの下の追跡外のもの（index とは直下の名前で照らす）。git の時間切れと、
@@ -355,7 +355,7 @@ def cwd_residue(cwd: Path, before: set[str]) -> list[str]:
             return all(bare(c) for c in p.iterdir())
         return p.is_file() and p.stat().st_size == 0
     new = sorted(str(p) for p in cwd.iterdir() if str(p) not in before)
-    left = [p for p in new if bare(Path(p)) and not holds_no_file(p)]
+    left = [p for p in new if bare(Path(p)) and not claude_staging_only(p)]
     if left and (cwd / ".git").exists():  # 追跡している（index にある）ものは子が意図して足したので数えない。
         # 子が書けた設定の命令を走らせない形で（QUIET_GIT。子が git init した対象でも）
         out = subprocess.run([*QUIET_GIT, "-C", str(cwd), "ls-files", "-z", "--", *[Path(p).name for p in left]], capture_output=True, text=True, check=True, timeout=GIT_TIMEOUT)
@@ -1815,7 +1815,7 @@ def main() -> int:
         if not why:
             # Claude Code の子は、対象（子が cd した下の階層を含む）と（worktree なら）元の checkout に、設定を書くときの空の
             # .claude/.cc-writes を作る（2.1.302・2.1.330）。消さない（同じ場所の別のセッションも使い、消すと、その設定の書き込みが
-            # 拒まれた。#65）。ファイルを持たないディレクトリは、task cleanup も書く子の残り（cwd_residue）も数えない
+            # 拒まれた。#65）。その置き場だけの .claude は、task cleanup も書く子の残り（cwd_residue）も数えない
             if a.host == "claude":
                 # 専用ログインのトークンの組織を確かめる。ホームの前後の比較の「前」を取る前に済ませる（確かめのプロセスがホームに
                 # 残したものを、子の残りとして数えない）。記録に書くのは、子を起動するときだけ
@@ -1823,7 +1823,9 @@ def main() -> int:
             # 子の前後でホームを比べ、新しくできて空のままの場所を残りとして報告する。黙って消さない（同じ時刻に別の道具が作ったものかもしれない）
             skip = [config_dir(), state_dir(), out_dir, a.cwd, Path.home() / ".cache"]
             home_before, _, unreadable_before = home_entries(skip)
-            cwd_before = {str(p) for p in a.cwd.iterdir()} if a.write else None  # 読み取り専用の子は書かず、同じ対象で並行する審査役の一時的な場所を数えてしまう
+            # 読み取り専用の子は書かず、同じ対象で並行する審査役の一時的な場所を数えてしまう。Claude Code の空の置き場だけの .claude は
+            # 前からあるものに数えない（cwd_residue）
+            cwd_before = {str(p) for p in a.cwd.iterdir() if not claude_staging_only(p)} if a.write else None
             had_git = os.path.lexists(a.cwd / ".git")  # Git でない対象に、書く子がリポジトリを作ったかを見る（照合する snapshot が無い）
             if LINUX:
                 become_subreaper()

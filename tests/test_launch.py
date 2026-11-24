@@ -402,7 +402,7 @@ FAKE_CLAUDE = textwrap.dedent(r'''
         open("note.txt", "w").write("x")  # 中身のあるものは残りでない
         os.makedirs("mixed"); open("mixed/empty", "w").close(); open("mixed/data", "w").write("x")  # 中身のあるものを含むディレクトリも
         os.symlink(".bashrc", "link")  # symlink は数えない
-        os.makedirs("dirs-only/a")  # ファイルを持たないディレクトリは数えない（Claude Code の空の .claude/.cc-writes。#65）
+        os.makedirs("dirs-only/a")  # ファイルを持たないディレクトリも数える（数えないのは Claude Code の空の置き場だけの .claude。#65）
         if os.path.exists(".git"):  # 追跡させた空のファイルは、子が意図して足したもの
             open("keep", "w").close(); os.makedirs("pkg"); open("pkg/__init__.py", "w").close()
             subprocess.run(git + ["add", "keep", "pkg/__init__.py"])  # 新しいディレクトリの下に追跡させたものも
@@ -2269,8 +2269,7 @@ class TestLaunch(unittest.TestCase):
             (home / ".bash_profile").unlink()
 
     def test_empty_places_the_child_leaves_in_the_target_fail(self):
-        # 時間切れで止めた Claude Code の書く子が、対象に 0 バイトの .bashrc などと、空のディレクトリだけの .claude/ を残した（2.1.310）。
-        # 数えるのは 0 バイトのファイルと、それを持つディレクトリ（ファイルを持たないディレクトリは、Git にも task cleanup にも見えない）
+        # 時間切れで止めた Claude Code の書く子が、対象に 0 バイトの .bashrc などと、空のディレクトリだけの .claude/ を残した（2.1.310）
         def target(name, git=False):  # 前の場合の残りが次の場合の「前からあるもの」にならないよう、場合ごとに新しい対象を使う
             if git:  # 書く子は worktree で起動する。.git がファイルの作業ツリー
                 d = self.worktree(name)[1]
@@ -2288,7 +2287,7 @@ class TestLaunch(unittest.TestCase):
                 rc, rec = self.run_launch("claude", mode, extra=list(extra), cwd=d)
                 self.assertEqual((rc, rec["status"], rec["resumable"]), (2, "failed", True), rec)  # 空の残りは、確かめて片付けた後に続けられる
                 self.assertEqual(rec["problems"][-1], f"--resume {rec['out']} で続きから起動できる")
-                self.assertEqual(rec["cwd_residue"], [str(d / ".bashrc"), str(d / ".claude")])
+                self.assertEqual(rec["cwd_residue"], [str(d / ".bashrc"), str(d / ".claude"), str(d / "dirs-only")])
                 for f in rec["cwd_residue"]:  # 黙って消さない
                     self.assertTrue(Path(f).exists())
         with self.subTest("read-only"):  # 読み取り専用の子は比べない（並行する審査役の一時的な場所を、互いの残りとして数えない）
@@ -2297,6 +2296,29 @@ class TestLaunch(unittest.TestCase):
         with self.subTest("nothing-left"):
             rc, rec = self.run_launch("claude", extra=["--write"], cwd=target("clean"))
             self.assertEqual((rc, rec["status"], rec["cwd_residue"]), (0, "ok", []), rec)
+
+    def test_empty_files_a_later_child_leaves_under_the_kept_claude_dir_fail(self):
+        # launcher は Claude Code の子が残した空の .claude/.cc-writes を消さない（#65）ので、後の子の前から .claude が在る。
+        # 後の書く子が時間切れでその下に残した 0 バイトのファイル（.claude/settings.json など）を見落とし、git add -A で commit に入った
+        d = self.worktree("kept")[1].resolve()
+        rc, rec = self.run_launch("claude", cwd=d)  # 前の子（審査役など）
+        self.assertEqual(rec["status"], "ok", rec)
+        self.assertTrue((d / ".claude" / ".cc-writes").is_dir())
+        rc, rec = self.run_launch("claude", extra=["--write"], cwd=d)  # 置き場だけのままの .claude は、後の子の残りでもない
+        self.assertEqual((rec["status"], rec["cwd_residue"]), ("ok", []), rec)
+        rc, rec = self.run_launch("claude", "cwd-residue-hang", extra=["--write", "--timeout", "3"], cwd=d)
+        self.assertEqual((rec["status"], rec["cwd_residue"]), ("failed", [str(d / ".bashrc"), str(d / ".claude"), str(d / "dirs-only")]), rec)
+
+    def test_empty_files_a_child_makes_under_places_that_were_there_before_are_not_residue(self):
+        # 起動の前からある場所の下は、空のディレクトリの下でも数えない（前にファイルを持たなかった場所をどれも新しく数えると、
+        # 利用者が置いた空の build/ に普通の書く子が空の目印を作るだけで failed になった）
+        for name, place in (("stamp", "build/.stamp"), ("pkg", "pkg/sub/__init__.py")):
+            with self.subTest(name):
+                d = self.worktree(name)[1].resolve()
+                (d / place).parent.mkdir(parents=True)
+                rc, rec = self.run_launch("claude", extra=["--write"], cwd=d, env_extra={"FAKE_APPEND_FILE": str(d / place), "FAKE_APPEND_TEXT": ""})
+                self.assertEqual((rec["status"], rec["cwd_residue"]), ("ok", []), rec)
+                self.assertEqual((d / place).stat().st_size, 0)  # 子が作った
 
     @unittest.skipUnless(sys.platform.startswith("linux"), "子の CLI が切り離した子孫を止めるのは Linux だけ（PR_SET_CHILD_SUBREAPER）")
     def test_processes_the_child_detached_do_not_outlive_it(self):
