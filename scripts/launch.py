@@ -360,8 +360,8 @@ def claude_places(cwd: Path, checkout: Path | None, use_git: bool = True) -> tup
     起動中に無視の規則が変わって Git に見えるようになった前からの空の .cc-writes（一緒に消す）、
     子が読めなくした場所の下（残る）、前に読めなかった場所の下の前からの空の置き場（一緒に消す）、
     起動の前の git が失敗・時間切れのときと、子が Git の管理情報を変えた後の下の階層（残る。status は前者で ok、後者で failed）、
-    候補を得た後に別のプロセスが .claude を symlink に置き換えた場合（先の空の .cc-writes を消しうる）、
-    launcher の後の git（task cleanup・利用者の git status）が、子が足したサブモジュールの設定で動くこと（#64）。"""
+    候補を得た後に別のプロセスが .claude を symlink に置き換えた場合（先の空の .cc-writes を消しうる）。
+    子が書けた設定・hooks・入れ子のリポジトリで後の git が命令を走らせうる形は、書く子の照合（git_trust）が止める。"""
     found, ignored_cc = {top / ".claude" for top in (cwd, checkout) if top is not None}, set()
     if not use_git:  # 子が Git の管理情報を変えた後などは、git を動かさない（偽の設定が sandbox の外で動きうる）
         return found_places(found), False
@@ -491,29 +491,35 @@ def read_head(f: Path) -> str:
     return head.decode("utf-8", "surrogateescape") if len(head) <= 4096 else f"（4 KiB を超える。{digest}）"
 
 
-def nested_repos(own: Path, cwd: Path) -> dict[str, str]:
-    """作業場所の入れ子のリポジトリ（index の gitlink と、追跡外で無視しない入れ子のリポジトリ）の、.git と設定の表し。
-    git status は gitlink の中で、その設定（core.fsmonitor など）を動かす。追跡外のものには入らないが、git add -A で gitlink になる。
-    子が足した・変えたものを git_changes が止める。ls-files は最上位の core.fsmonitor を動かすので外して呼ぶ。
-    守らない範囲: 無視するディレクトリの中の入れ子のリポジトリ、設定の include の先、設定より後に読まれるもの（hooks など）。"""
-    local = subprocess.run(["git", "rev-parse", "--local-env-vars"], capture_output=True, text=True, errors="surrogateescape", timeout=GIT_TIMEOUT)
-    env = {k: v for k, v in os.environ.items() if k not in local.stdout.split()}
-    git = ["git", "-c", "core.fsmonitor=false", "--git-dir", str(own), "--work-tree", str(cwd), "ls-files", "-z"]
-    staged = subprocess.run(git + ["-s"], cwd=cwd, env=env, capture_output=True, check=True, timeout=GIT_TIMEOUT).stdout.split(b"\0")
-    others = subprocess.run(git + ["-o", "--exclude-standard"], cwd=cwd, env=env, capture_output=True, check=True, timeout=GIT_TIMEOUT).stdout.split(b"\0")
-    paths = {os.fsdecode(e.split(b"\t", 1)[1]) for e in staged if e.startswith(b"160000 ") and b"\t" in e}
-    paths |= {os.fsdecode(e[:-1]) for e in others if e.endswith(b"/")}  # ls-files -o は入れ子のリポジトリに入らず、「名前/」で出す
-    out = {}
-    for name in sorted(paths):
-        dot = cwd / name / ".git"
-        rep, head, regular = read_child_file(dot, 4096)
-        if rep is not None and not regular and dot.is_dir() and not dot.is_symlink():
-            config = dot / "config"
-        elif regular and head.startswith(b"gitdir: "):  # 初期化したサブモジュール・worktree の .git ファイル
-            config = (cwd / name / os.fsdecode(head[len(b"gitdir: "):].strip())) / "config"
-        else:
-            config = None
-        out[str(cwd / name)] = f"{rep} 設定: {read_child_file(config)[0] if config else None}"
+def git_trust(own: Path) -> dict:
+    """書く子の後に、作業場所で素の git status が命令を走らせうる出どころ（git 2.43 で測った。#64）。
+    実効の設定（local・worktree の範囲。include・includeIf・config.worktree を git 自身が解く。fsmonitor・filter はここに出る）、
+    hooks の置き場（core.hooksPath を解いた先。status は index を書くと post-index-change を走らせる）の中身、
+    初期化した gitlink と追跡外の入れ子のリポジトリ（status は gitlink の中で、その設定・hooks を走らせる。追跡外のものは
+    git add -A で gitlink になる）。入れ子の中は子が書けるので、比べずに、在れば止める。
+    ここで動かす git（config --list・rev-parse・ls-files に -c core.fsmonitor=false）は、どの出どころの命令も走らせない（測った）。
+    数えられないものは errors に入れ、在るものとして止める。
+    守らない範囲: global・system の設定と利用者の環境、git 2.43 で測っていない命令の出どころ、commit した中身が持つ命令（届ける前の審査で読む）。"""
+    out = {"config": None, "hooks": {}, "nested": [], "errors": []}
+    try:
+        top = Path(os.fsdecode(Path(own, "gitdir").read_bytes().strip())).parent  # 作業場所の根（--cwd が下の階層でも）
+        local = subprocess.run(["git", "rev-parse", "--local-env-vars"], capture_output=True, text=True, errors="surrogateescape", timeout=GIT_TIMEOUT)
+        env = {k: v for k, v in os.environ.items() if k not in local.stdout.split()}
+        git = ["git", "-c", "core.fsmonitor=false", "--git-dir", str(own), "--work-tree", str(top)]
+        run = lambda *args: subprocess.run(git + list(args), cwd=top, env=env, capture_output=True, check=True, timeout=GIT_TIMEOUT).stdout
+        rows = run("config", "--list", "--includes", "--show-origin", "--show-scope", "-z").split(b"\0")  # 範囲・出どころ・設定の 3 つ組
+        triples = [rows[i:i + 3] for i in range(0, len(rows) - 2, 3)]
+        out["config"] = [b"\t".join(t) for t in triples if t[0] in (b"local", b"worktree")]  # 子が書ける範囲。global・system は子の外
+        hooks = top / os.fsdecode(run("rev-parse", "--git-path", "hooks").strip())  # 相対の hooksPath は作業場所の根から
+        files = sorted(f for f in hooks.rglob("*") if f.is_file() or f.is_symlink()) if hooks.is_dir() else []
+        out["hooks"] = {str(f): read_child_file(f)[0] for f in files}
+        staged = run("ls-files", "-s", "-z").split(b"\0")
+        others = run("ls-files", "-o", "--exclude-standard", "-z").split(b"\0")
+        paths = {os.fsdecode(e.split(b"\t", 1)[1]) for e in staged if e.startswith(b"160000 ") and b"\t" in e}
+        out["nested"] = sorted({str(top / p) for p in paths if os.path.lexists(top / p / ".git")}  # 初期化したもの（.git の形を問わない）
+                               | {str(top / os.fsdecode(e[:-1])) for e in others if e.endswith(b"/")})  # ls-files -o は入れ子に入らず「名前/」で出す
+    except (OSError, ValueError, subprocess.SubprocessError) as e:
+        out["errors"].append(f"{e!r}"[:300])
     return out
 
 
@@ -535,15 +541,7 @@ def git_snapshot(own: Path, common: Path, cwd: Path) -> dict:
     return {"refs": dict(r.split(" ", 1) for r in refs if " " in r),
             "files": {str(f): read_child_file(f)[0] for f in files},
             "head": read_head(own / "HEAD"),
-            "nested": nested_or_why(own, cwd)}
-
-
-def nested_or_why(own: Path, cwd: Path) -> dict[str, str]:
-    """nested_repos。数えられなければ（子が HEAD・index を壊したなど）、そのこと自体を 1 つの差として返す（ほかの差の行を消さない）。"""
-    try:
-        return nested_repos(own, cwd)
-    except (OSError, subprocess.SubprocessError) as e:
-        return {f"{cwd}（入れ子のリポジトリを数えられない: {type(e).__name__}）": ""}
+            "trust": git_trust(own)}
 
 
 def git_changes(before: dict, after: dict, common: Path) -> list[str]:
@@ -558,8 +556,13 @@ def git_changes(before: dict, after: dict, common: Path) -> list[str]:
             undo = f"git --git-dir {common} update-ref {r} {old}" if old else f"git --git-dir {common} update-ref -d {r}"
             out.append(f"{r}: {old or '(無し)'} → {new or '(削除)'}（戻すなら: {undo}）")
     out += sorted(f for f in set(before["files"]) | set(after["files"]) if before["files"].get(f) != after["files"].get(f))
-    out += [f"{d}（入れ子のリポジトリ。git status・git add -A がその設定で動きうる）"
-            for d in sorted(set(before["nested"]) | set(after["nested"])) if before["nested"].get(d) != after["nested"].get(d)]
+    b, a = before["trust"], after["trust"]  # git status が命令を走らせうる出どころ（git_trust）
+    if a["config"] != b["config"]:
+        out.append("Git の実効の設定（include の先・config.worktree を含む）が変わった: " + "、".join(
+            sorted({os.fsdecode(r) for r in set(a["config"] or []) ^ set(b["config"] or [])}))[:300])
+    out += sorted(f"{f}（hooks）" for f in set(b["hooks"]) | set(a["hooks"]) if b["hooks"].get(f) != a["hooks"].get(f))
+    out += [f"{d}（入れ子のリポジトリ。git status・git add -A が、子の書けるその設定・hooks で動きうる）" for d in a["nested"]]
+    out += [f"git status の出どころを数えられない: {e}" for e in a["errors"]]
     if after["head"] != before["head"]:
         out.append(f"HEAD: {before['head']!r} → {after['head']!r}")
     return out
