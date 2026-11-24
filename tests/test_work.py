@@ -3655,14 +3655,16 @@ class TestQuietGit(unittest.TestCase):
                 os.utime(wt / "a.txt", (time.time() + 5, time.time() + 5))  # 大きさは同じで更新時刻だけ進める（filter・index の書き直し）
                 self.marker.unlink(missing_ok=True)
                 saved = "saved-" + case if case == "hooks-committed" else "main"
-                rc, out = self.work("task", "cleanup", "--dir", str(wt), "--token", token, "--saved", saved)
-                self.assertEqual(rc, expected[case], (case, out))
-                self.assertFalse(self.marker.exists(), (case, out))
-                if wt.exists():  # 仕込みが本物であることの確かめ（片付けで作業場所が消えた段は、素の status を動かせない）
-                    subprocess.run(["git", "status", "--porcelain"], cwd=wt, env=self.env, capture_output=True, stdin=subprocess.DEVNULL, timeout=60)
-                    self.assertTrue(self.marker.exists(), case)
-                for key in ("core.fsmonitor", "core.hooksPath", "extensions.worktreeConfig"):
-                    subprocess.run(["git", "config", "--unset", key], cwd=self.repo, env=self.env, capture_output=True)
+                try:
+                    rc, out = self.work("task", "cleanup", "--dir", str(wt), "--token", token, "--saved", saved)
+                    self.assertFalse(self.marker.exists(), (case, out))  # 印を先に見る（落ちた理由が読めるように）
+                    self.assertEqual(rc, expected[case], (case, out))
+                    if wt.exists():  # 仕込みが本物であることの確かめ（片付けで作業場所が消えた段は、素の status を動かせない）
+                        subprocess.run(["git", "status", "--porcelain"], cwd=wt, env=self.env, capture_output=True, stdin=subprocess.DEVNULL, timeout=60)
+                        self.assertTrue(self.marker.exists(), case)
+                finally:  # 次の段に設定を残さない
+                    for key in ("core.fsmonitor", "core.hooksPath", "extensions.worktreeConfig"):
+                        subprocess.run(["git", "config", "--unset", key], cwd=self.repo, env=self.env, capture_output=True)
 
 
     def test_integrate_runs_no_git_command_from_a_nested_repository(self):

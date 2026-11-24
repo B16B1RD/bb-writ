@@ -325,8 +325,10 @@ def cli_place(p: Path) -> bool:
 # 書く子が書けた作業場所で動かす git の頭。git status・ls-files が設定から走らせる core.fsmonitor を外す（コマンド行の -c は、
 # include・config.worktree の値より強く、中で起こす git にも伝わる。git 2.43 で測った。#64）。hooks（post-index-change）は
 # status に --no-optional-locks を、入れ子の設定は --ignore-submodules（all・dirty）を、呼ぶ側が付ける。
-# 守らない範囲: filter（利用者の設定が作業場所の中のスクリプトを指すと、子が書き換えたものが走る。LFS などの required の filter を
-# 外すと status が壊れるので外さない）、git 2.43 で測っていない命令の出どころ、利用者・指揮者が後で動かす素の git。
+# 守らない範囲: filter（どこで定めたものも外さない。利用者の設定が作業場所の中のスクリプトを指すもの、子が書ける include の先・
+# config.worktree で定めたものも走る。LFS などの required の filter を外すと status が壊れるため。子が共通の config・config.worktree を
+# 変えたときと、Git でなかった対象にリポジトリを作ったときは、照合が止める）、git 2.43 で測っていない命令の出どころ、
+# 利用者・指揮者が後で動かす素の git。
 QUIET_GIT = ["git", "-c", "core.fsmonitor=false"]
 
 
@@ -1868,6 +1870,7 @@ def main() -> int:
             skip = [config_dir(), state_dir(), out_dir, a.cwd, Path.home() / ".cache"]
             home_before, _, unreadable_before = home_entries(skip)
             cwd_before = {str(p) for p in a.cwd.iterdir()} if a.write else None  # 読み取り専用の子は書かず、同じ対象で並行する審査役の一時的な場所を数えてしまう
+            had_git = os.path.lexists(a.cwd / ".git")  # Git でない対象に、書く子がリポジトリを作ったかを見る（照合する snapshot が無い）
             if LINUX:
                 become_subreaper()
     except Exception as e:
@@ -2019,6 +2022,12 @@ def main() -> int:
                 blocked.append("left")
                 rec.update(status="failed", problems=["子の CLI が終わった後、子が起こしたプロセスを止められない。下のプロセスを確かめて止める"]
                            + left[:20] + rec.get("problems", []))
+            if a.write and snapshot is None and not had_git and os.path.lexists(a.cwd / ".git"):
+                # 子が作ったリポジトリの設定（filter など）は、次の起動の clean_head や、後の git が走らせる（#64）
+                blocked.append("git")
+                rec.update(status="failed", problems=["Git でなかった対象に、書く子がリポジトリ（.git）を作った。この場所で git を動かす前に"
+                                                      "（launcher の起動も含む）、その設定と hooks を確かめる（偽の設定が sandbox の外で動きうる）",
+                                                      str(a.cwd / ".git")] + rec.get("problems", []))
             if snapshot:
                 try:
                     # Claude Code の sandbox は、worktree の管理ディレクトリに保護のための空の config.worktree を作る（2.1.302）。

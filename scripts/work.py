@@ -783,7 +783,7 @@ def contained(repo, commit, ref, look_only=False):
 
 # 書く子が書けた作業場所で動かす git に付ける -c（launch.py の QUIET_GIT と同じ）。git status・worktree remove が設定から走らせる
 # core.fsmonitor を外す（コマンド行の -c は include・config.worktree の値より強く、中で起こす git にも伝わる。git 2.43 で測った。#64）。
-# filter は外さない（LFS などの required の filter を外すと status が壊れる。守らない範囲は launch.py の QUIET_GIT の注釈）。
+# filter は外さない（どこで定めたものも。LFS などの required の filter を外すと status が壊れる。守らない範囲は launch.py の QUIET_GIT の注釈）。
 QUIET = ['-c', 'core.fsmonitor=false']
 
 
