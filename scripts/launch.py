@@ -344,9 +344,7 @@ def cwd_residue(cwd: Path, before: set[str]) -> list[str]:
     次の書き手の git add -A で commit に入りうる。黙って消さない（子が意図して作った空のファイルかもしれない）。
     ファイルを持たないディレクトリは数えない（Git にも task cleanup にも見えない。Claude Code が設定を書くときの空の
     .claude/.cc-writes は、同じ場所の別のセッションも使う。#65）。
-    before は起動の前に直下に在り、ファイルを持っていた場所。ファイルを持たなかった場所は新しくできたものと同じに見る（前の子が残した
-    空の .claude の下に、後の子が時間切れで残した 0 バイトの settings.json などを見落とした）。
-    守らない範囲: 前からある、ファイルを持つディレクトリの下、index と照らすのは対象が作業ツリーの根（.git がある）のときだけ、Git の設定・環境を
+    守らない範囲: 前からあるディレクトリの下、index と照らすのは対象が作業ツリーの根（.git がある）のときだけ、Git の設定・環境を
     書き換えた子や親（設定の FIFO・GIT_DIR）、pathspec の記号を含む名前、Python の再帰の上限を超える入れ子、index にある場所を
     含む新しいディレクトリの下の追跡外のもの（index とは直下の名前で照らす）。git の時間切れと、
     読めない場所での failed は試験で見ない。"""
@@ -1825,9 +1823,7 @@ def main() -> int:
             # 子の前後でホームを比べ、新しくできて空のままの場所を残りとして報告する。黙って消さない（同じ時刻に別の道具が作ったものかもしれない）
             skip = [config_dir(), state_dir(), out_dir, a.cwd, Path.home() / ".cache"]
             home_before, _, unreadable_before = home_entries(skip)
-            # 読み取り専用の子は書かず、同じ対象で並行する審査役の一時的な場所を数えてしまう。ファイルを持たない場所は前からあるものに
-            # 数えない（cwd_residue）
-            cwd_before = {str(p) for p in a.cwd.iterdir() if not holds_no_file(p)} if a.write else None
+            cwd_before = {str(p) for p in a.cwd.iterdir()} if a.write else None  # 読み取り専用の子は書かず、同じ対象で並行する審査役の一時的な場所を数えてしまう
             had_git = os.path.lexists(a.cwd / ".git")  # Git でない対象に、書く子がリポジトリを作ったかを見る（照合する snapshot が無い）
             if LINUX:
                 become_subreaper()
