@@ -793,12 +793,38 @@ def contained(repo, commit, ref, look_only=False):
 QUIET = ['-c', 'core.fsmonitor=false']
 
 
+def holds_no_file(p):
+    """p が、どの深さにもファイル（ディレクトリでないもの。symlink を含む）を持たないディレクトリか。最初のファイルで止め、
+    symlink の先へ入らない。読めない場所は、中身を言えないので持つとみなす。"""
+    if os.path.islink(p) or not os.path.isdir(p):
+        return False
+    todo = [p]
+    try:
+        while todo:
+            with os.scandir(todo.pop()) as entries:
+                for e in entries:
+                    if not e.is_dir(follow_symlinks=False):
+                        return False
+                    todo.append(e.path)
+    except OSError:
+        return False
+    return True
+
+
 def clean(d, ignored=False, child=False):
-    """未保存の変更が無いか。命令を走らせない形の status（QUIET、hooks を走らせない --no-optional-locks）で見る。
+    """作業ツリーの根 d に、未保存の変更が無いか。命令を走らせない形の status（QUIET、hooks を走らせない --no-optional-locks）で見る。
     child（書く子が書けた作業場所）では、入れ子のリポジトリの設定を読まないよう、サブモジュールの中に入らない
-    （--ignore-submodules=dirty。サブモジュールが別の commit を指す変更は数える）。"""
-    return not git(d, *QUIET, '--no-optional-locks', 'status', '--porcelain', '--untracked-files=all',
-                   *(['--ignore-submodules=dirty'] if child else []), *(['--ignored=matching'] if ignored else []))
+    （--ignore-submodules=dirty。サブモジュールが別の commit を指す変更は数える）。
+    追跡外・無視するものの行のうち、ファイルを持たないディレクトリは数えない（保存するものが無い）。Claude Code が設定を書くときの
+    空の .claude/.cc-writes は、同じ場所の別のセッションも使うので、片付けのために消させない（launcher が消して、並行するセッションの
+    設定の書き込みが拒まれた。#65）。"""
+    p = subprocess.run(['git', '-C', str(d), *QUIET, '--no-optional-locks', 'status', '--porcelain', '-z', '--untracked-files=all',
+                        *(['--ignore-submodules=dirty'] if child else []), *(['--ignored=matching'] if ignored else [])],
+                       stdin=subprocess.DEVNULL, capture_output=True)
+    if p.returncode:
+        raise ValueError(os.fsdecode(p.stderr).strip() or 'git が失敗した')
+    # 1 欄は「XY 道筋」（道筋はリポジトリの根から、引用しない）。改名の元の道筋の欄は、改名の欄で数え終わっている
+    return all(e[:3] in (b'?? ', b'!! ') and holds_no_file(os.path.join(os.fsencode(d), e[3:])) for e in p.stdout.split(b'\0') if e)
 
 
 class LeaseRefused(Exception):

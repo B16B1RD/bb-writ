@@ -746,6 +746,30 @@ class TestParallel(unittest.TestCase):
         self.w('task', 'cleanup', '--dir', a['dir'], '--token', a['token'], '--saved', 'main', code=6)
         self.assertEqual((Path(a['dir']) / '.env').read_text(), '試験用のローカル設定')
 
+    def test_cleanup_does_not_count_directories_that_hold_no_file(self):
+        """Claude Code が設定を書くときの空の .claude/.cc-writes は、同じ場所の別のセッションも使う。task cleanup がそれを未保存の
+        変更に数えたので launcher が消し、並行するセッションの設定の書き込みが拒まれた（#65）。ファイルを持たないディレクトリは、
+        無視されていてもいなくても数えない。中にファイル（symlink を含む）があれば拒む。"""
+        a = self.start()
+        d = Path(a['dir'])
+        (d / '.gitignore').write_text('/.claude/\n/日本 語/.claude/\n')  # 下の sub/.claude は無視しない
+        self.git(d, 'add', '.gitignore')
+        self.git(d, 'commit', '-qm', '置き場を除外')
+        self.integrate(a, a['base'], self.git(d, 'rev-parse', 'HEAD'))
+        for place in ('.claude/.cc-writes', '日本 語/.claude/.cc-writes', 'sub/.claude/.cc-writes'):
+            (d / place).mkdir(parents=True)
+        listing = self.git(d, 'status', '--porcelain', '--untracked-files=all', '--ignored=matching').splitlines()
+        for line in ('!! .claude/', '!! "\\346\\227\\245\\346\\234\\254 \\350\\252\\236/.claude/"'):  # 無視するものとして見える
+            self.assertIn(line, listing)
+        staged = d / '.claude' / '.cc-writes' / 'settings.local.json.tmp'
+        for make in (lambda: staged.write_text('{}'), lambda: staged.symlink_to('/nonexistent')):
+            make()
+            self.w('task', 'cleanup', '--dir', a['dir'], '--token', a['token'], '--saved', 'main', code=6)
+            self.assertTrue(staged.is_symlink() or staged.is_file())
+            staged.unlink()
+        self.w('task', 'cleanup', '--dir', a['dir'], '--token', a['token'], '--saved', 'main')
+        self.assertFalse(d.exists())
+
     def test_new_task_does_not_implicitly_include_another_task(self):
         a = self.start()
         self.change(a, 'other-task')
