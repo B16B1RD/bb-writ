@@ -1,4 +1,4 @@
-"""モデルを、それが写す関数の本文に結ぶ（tests/test_oprun_model.py・tests/test_task_model.py）。
+"""モデルを、それが写す関数の本文に結ぶ（tests/test_oprun_model.py・tests/test_task_model.py・tests/test_sweep_model.py）。
 
 ハッシュは、関数の本文（デコレータを含む）と、本文が読むモジュールの水準の定数の代入の文から、コメント・先頭の docstring・空行・
 行末の空白を除いたものに掛ける（Python の版によらない）。意味の同じ書式の変更（括弧・引用符・改行の位置）でも変わる。そのときも
