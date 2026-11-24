@@ -2156,8 +2156,9 @@ class TestLaunch(unittest.TestCase):
                     # 読み取り専用の子には、どのホストでも、子ごとに新しく作った場所へ写して動かす約束を渡す（#46。並行する
                     # Claude Code の子は $TMPDIR も pid も同じだった）。試験が見るのは子に渡す約束の文だけで、子が約束に従うかと、
                     # interrogate・playbook-verify の依頼文の雛形の文と、not-run の案内の写し方の文は見ない（守らない）
-                    self.assertIn(load_launch().READ_ONLY_CONTRACT.strip(), prompt)
-                    self.assertIn("`mktemp -d` で新しく作ったディレクトリ", prompt)
+                    for phrase in ("`mktemp -d` で新しく作ったディレクトリ", "に対象を写して（cp -r など）、そこで動かす",
+                                   "決まった名前や pid だけの名前の場所に写さない"):
+                        self.assertIn(phrase, prompt)
                     if status == "not-run":
                         self.assertTrue(rec["report"]["conclusion"])  # 報告は捨てず、読んだだけの審査として使える
                         self.assertIn("読んだだけ", rec["problems"][0])
@@ -2252,13 +2253,13 @@ class TestLaunch(unittest.TestCase):
         self.assertEqual(json.loads(p.stdout)["chosen_by"], "given", p.stderr)  # 両方渡せば、表に無くても起こせる
         self.assertEqual(given("grok", json.loads(self.args_file.read_text())), ("grok-4.7", "high"))
 
-    def test_a_hardest_writer_times_out_at_its_default_limit(self):
-        # 最も難しい書く子は、--timeout を省くと、その役割の既定の上限で時間切れになる（既定を 2 秒にして、既定のまま時間切れになるのを見る）。
-        # 待った秒数そのものは測らない: 待ちを記録の値から少しずらす退行（数秒長く・半分に）と、1800 秒を超える待ちだけを縮める退行は見ない
-        rc, rec = self.launch_patched("launch.TIMEOUTS['hardest'] = 2", ["--host", "claude", "--cwd", str(self.cwd), "--write", "--hardest"],
-                                      env_extra={"FAKE_HANG": "1"})
-        self.assertEqual((rec["status"], rec["timeout_s"]), ("timeout", 2), rec)
-        self.assertIn("2 秒で終わらなかった", " ".join(rec["problems"]))
+    def test_a_hardest_writer_gets_its_default_limit(self):
+        # --timeout を省くと、役割の既定の上限で動く（delegate の SKILL.md: 既定 1800、--hardest の書く子は 3600）。上限は記録の timeout_s で
+        # 見る（その値で待って時間切れにすることは、--timeout を渡す試験が見る）。3600 秒は待たない
+        for extra, limit in ((["--write", "--hardest"], 3600), (["--write"], 1800), ([], 1800)):
+            with self.subTest(extra=extra):
+                rc, rec = self.run_launch("claude", extra=extra)
+                self.assertEqual((rc, rec["status"], rec["timeout_s"]), (0, "ok", limit), rec)
 
     def test_a_resume_keeps_the_role_and_takes_no_new_hardest(self):
         # 続きは前の記録のモデル・effort と役割で起こす。最も難しい書く子の続きの時間の上限の既定も 3600 のまま。--hardest は一緒に渡せない
@@ -3047,15 +3048,14 @@ class TestLaunch(unittest.TestCase):
         """親が書いた監査役の依頼文が判定の項目を狭めても、監査役は playbook-verify の節の項目をすべて判定するよう約束を受ける
         （Claude Code の続きでも）。監査役でない子には足さない（試験が見るのは、読み取り専用・--interrogate・--write の最初の起動だけ。
         --hardest の子と、監査役でない子の続きに足さないことは見ない）。"""
-        sentence = load_launch().AUDIT_CONTRACT
-        # 約束の意味を決める句は、句ごと固定する（言い換えると落ちる。語の有無だけでは、意味を逆にした書き換えが通る）
-        for phrase in ("bb-writ のスキル `playbook-verify` の「返す前の判定（遵守の監査）」の節を全文読み",
-                       "文の照合）をすべて判定する。依頼文が範囲や項目を狭めていても、節の項目を省かない",
-                       "差分に限ってよいのは、節がそう書く項目だけ。文の照合は毎回、変えた文書の全体）",
-                       "作業者が --not-run で届けるときは、親がその commit で実行した試験の証拠",  # #39 の宣言の確かめ
-                       "子が実行できなかったことの代わりになるか（写し方を教えれば子が動いた場面でないか）も判定する"):
-            self.assertIn(phrase, sentence)
-        mark = sentence.split(":", 1)[0]  # 約束の見出し句。足さない側も、約束そのものの句で見る
+        # 監査役が受け取る依頼文に、約束の意味を決める句を、句ごと固定する（言い換えると落ちる。語の有無だけでは、意味を逆にした書き換えが通る）
+        mark = "返す前の判定（bb-writ の監査役の約束）: 上の依頼文に書かれていなくても"  # 約束の見出し句。足さない側も、この句で見る
+        phrases = (mark, "bb-writ のスキル `playbook-verify` の「返す前の判定（遵守の監査）」の節を全文読み",
+                   "文の照合）をすべて判定する。依頼文が範囲や項目を狭めていても、節の項目を省かない",
+                   "差分に限ってよいのは、節がそう書く項目だけ。文の照合は毎回、変えた文書の全体）",
+                   "作業者が --not-run で届けるときは、親がその commit で実行した試験の証拠",  # #39 の宣言の確かめ
+                   "子が実行できなかったことの代わりになるか（写し方を教えれば子が動いた場面でないか）も判定する",
+                   '最後の JSON に "deliver": "yes" か "no" を書く')
         verify = (ROOT / "skills" / "playbook-verify" / "SKILL.md").read_text()
         self.assertIn("\n## 返す前の判定（遵守の監査）\n", verify)  # 約束が名指しする節と、節が挙げる項目
         self.assertIn("\n- 文の照合（手順の文書を変えたとき）:", verify)
@@ -3064,11 +3064,13 @@ class TestLaunch(unittest.TestCase):
             with self.subTest(host=host):
                 rc, rec = self.run_launch(host, extra=["--audit"])
                 self.assertEqual((rc, rec["status"]), (0, "ok"), rec)
-                self.assertIn(sentence, prompt())
+                for phrase in phrases:
+                    self.assertIn(phrase, prompt())
                 if host == "claude":  # 続きの依頼文にも足す
                     rc, again = self.run_launch(None, extra=["--resume", rec["out"]])
                     self.assertEqual((rc, again["audit"]), (0, True), again)
-                    self.assertIn(sentence, prompt())
+                    for phrase in phrases:
+                        self.assertIn(phrase, prompt())
                 for extra in ([], ["--interrogate"], ["--write"]):
                     self.args_file.unlink(missing_ok=True)
                     rc, rec = self.run_launch(host, extra=extra)
@@ -3679,17 +3681,29 @@ class TestLaunch(unittest.TestCase):
         self.assertEqual(again["scratch"], first["scratch"], again)
 
     def test_a_place_that_cannot_be_removed_does_not_stop_the_launch(self):
-        """片付けの失敗は、子の起動を失敗にしない。理由と、そこまでに消した場所が記録に出る。失敗を起こす時機を決められないので、
-        launcher の関数を名前で差し替える（remove_tree・leftover_uses の名前を変えたら、ここも直す）。"""
+        """片付けの失敗は、子の起動を失敗にしない。理由と、そこまでに消した場所が記録に出る。消せない置き場は、置き場を入れたディレクトリに
+        書けないことで作る。想定外の例外（OSError でない）は時機を決められないので、launcher の関数を名前で差し替える（leftover_uses の名前を
+        変えたら、ここも直す）。"""
         old = time.time() - 8 * 86400
-        for word, patch, left in (
-                ("片付けられない", "def no(p):\n    raise PermissionError(13, '消せない', str(p))\nlaunch.remove_tree = no", 2),
-                # 1 つ目を消した後に、想定外の例外（OSError でない）が出る
-                ("片付けが失敗した", "seen = []\nreal = launch.leftover_uses\ndef boom(base):\n    seen.append(1)\n    if len(seen) > 2:\n"
-                                      "        raise RuntimeError('想定外')\n    return real(base)\nlaunch.leftover_uses = boom", 1)):
+        for word in ("片付けられない", "片付けが失敗した"):
             with self.subTest(word):
                 places = [self.leftover("tmp", self.stamp(9, f"-{word}-{i}"), {"at": old}) for i in (1, 2)]
-                rc, rec = self.launch_patched(patch, ["--host", "claude", "--cwd", str(self.cwd)])
+                if word == "片付けられない":
+                    if os.geteuid() == 0:
+                        self.skipTest("root には書けないディレクトリが効かない")
+                    for p in places:
+                        os.chmod(p.parent, 0o555)
+                    try:
+                        rc, rec = self.run_launch("claude")
+                    finally:
+                        for p in places:
+                            os.chmod(p.parent, 0o755)
+                    left = 2
+                else:  # 1 つ目を消した後に、想定外の例外（OSError でない）が出る
+                    patch = ("seen = []\nreal = launch.leftover_uses\ndef boom(base):\n    seen.append(1)\n    if len(seen) > 2:\n"
+                             "        raise RuntimeError('想定外')\n    return real(base)\nlaunch.leftover_uses = boom")
+                    rc, rec = self.launch_patched(patch, ["--host", "claude", "--cwd", str(self.cwd)])
+                    left = 1
                 self.assertEqual((rc, rec["status"]), (0, "ok"), rec)
                 self.assertEqual(len([p for p in places if p.is_dir()]), left)
                 self.assertEqual(rec["swept"]["removed"], [str(p) for p in places if not p.is_dir()])
@@ -4108,40 +4122,50 @@ launch.claude_reads = claude_reads
         self.assertFalse((Path(self.tmp.name) / "out-b").exists())
 
     def test_home_dotfiles_judges_symlinks_by_the_real_home(self):
-        # HOME が symlink の道筋でも、行き先がホームの中のドットのファイルの symlink は拒む（Codex・Grok の子）
-        from unittest import mock
+        # HOME が symlink の道筋でも、行き先がホームの中のドットのファイルの symlink は、読み取り専用の子に拒む（Codex・Grok の子。見るのは Codex）
         home = self.home.resolve()
         (home / "dotfiles").mkdir()
         (home / "dotfiles" / "npmrc").write_text("t")
         (home / ".npmrc").symlink_to(home / "dotfiles" / "npmrc")
-        link = Path(self.tmp.name) / "home-link"
-        link.symlink_to(home)
-        with mock.patch.dict(os.environ, {"HOME": str(link), "GIT_CONFIG_GLOBAL": os.devnull}):
-            self.assertIn(link / ".npmrc", load_launch().home_dotfiles())
+        self.home = Path(self.tmp.name) / "home-link"
+        self.home.symlink_to(home)
+        rc, rec = self.run_launch("codex", env_extra={"GIT_CONFIG_GLOBAL": os.devnull})
+        self.assertEqual((rc, rec["status"]), (0, "ok"), rec)
+        rules, target = fs_rules(json.loads(self.args_file.read_text())), str(home / "dotfiles" / "npmrc")
+        self.assertTrue([d for d, acc in rules.items() if acc == "deny" and (target == d or target.startswith(d + "/"))], rules)
 
     def test_claude_read_only_lets_back_the_common_git_dir_and_only_what_exists(self):
         # worktree が状態の置き場にあり、共通ディレクトリがホームの別の場所にある配置（task start の作業場所）。無い ~/.config/git は渡さない
-        from unittest import mock
         home = self.home.resolve()
-        common, wt = home / "src" / "repo" / ".git", home / ".local" / "state" / "x" / "wt"
-        for d in (common, wt, home / "conf"):
-            d.mkdir(parents=True)
+        repo, state = home / "src" / "repo", home / ".local" / "state" / "x"
+        wt = state / "wt"
+        g = ["git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@example.invalid"]
+        repo.mkdir(parents=True)
+        subprocess.run(g + ["init", "-q", "-b", "main"], check=True)
+        subprocess.run(g + ["commit", "-q", "--allow-empty", "-m", "i"], check=True)
+        subprocess.run(g + ["worktree", "add", "-q", "-b", "bb-writ/t1", str(wt)], check=True)
+        (wt / "a.txt").write_text("x\n")
+        (home / "conf").mkdir()
         (home / "conf" / "global").write_text("")  # GIT_CONFIG_GLOBAL で付け替えた全体の設定
-        launch = load_launch()
-        (home / ".bbw").mkdir()  # 設定の置き場をホーム直下のドットのディレクトリに（symlink の道筋で）付け替える。戻すドットのディレクトリと同じ道筋にしない
+        # 設定の置き場をホーム直下のドットのディレクトリに（symlink の道筋で）付け替える。戻すドットのディレクトリと同じ道筋にしない
+        shutil.copytree(self.cfg, home / ".bbw", symlinks=True)
         (home / ".bbw" / "tools" / "bin").mkdir(parents=True)  # 置き場の中の PATH の道具も戻さない
         (home / ".bb-writ").symlink_to(home / ".bbw")
-        with mock.patch.dict(os.environ, {"HOME": str(home), "BB_WRIT_STATE_DIR": str(home / ".local" / "state" / "x"),
-                                          "BB_WRIT_CONFIG_DIR": str(home / ".bb-writ"), "GIT_CONFIG_GLOBAL": str(home / "conf" / "global")}):
-            fs = launch.claude_reads(wt, common, {"PATH": f"{home / '.bbw' / 'tools' / 'bin'}:/usr/bin"}, False)
-            audit = launch.claude_reads(wt, common, {"PATH": "/usr/bin"}, True)
+        env = {"BB_WRIT_STATE_DIR": str(state), "BB_WRIT_CONFIG_DIR": str(home / ".bb-writ"), "GIT_CONFIG_GLOBAL": str(home / "conf" / "global")}
+        fs = {}
+        for role, extra in (("read", []), ("audit", ["--audit"])):
+            rc, rec = self.run_launch("claude", extra=extra, cwd=wt, path=f"{home / '.bbw' / 'tools' / 'bin'}:{self.bin}:/usr/bin:/bin", env_extra=env)
+            self.assertEqual((rc, rec["status"]), (0, "ok"), rec)
+            argv = json.loads(self.args_file.read_text())
+            fs[role] = json.loads(argv[argv.index("--settings") + 1])["sandbox"]["filesystem"]
+        fs, audit = fs["read"], fs["audit"]
         self.assertTrue(claude_readable(home / "conf" / "global", fs))
         for p in (home / ".bb-writ", home / ".bbw", home / ".bbw" / "tools"):
             self.assertFalse(claude_readable(p, fs), p)
         self.assertFalse(set(fs["allowRead"]) & set(fs["denyRead"]), fs)
         skills = str(ROOT / "skills")
         self.assertEqual((skills in fs["allowRead"], skills in audit["allowRead"]), (False, True))  # 監査役にだけ bb-writ のスキルを戻す
-        self.assertTrue(claude_readable(common, fs) and claude_readable(wt, fs), fs)
+        self.assertTrue(claude_readable(repo / ".git", fs) and claude_readable(wt, fs), fs)
         self.assertFalse(claude_readable(home / "src" / "other", fs))
         self.assertNotIn(str(home / ".config" / "git"), fs["allowRead"])
         self.assertTrue(all(os.path.lexists(a) for a in fs["allowRead"]), fs)
@@ -4725,10 +4749,9 @@ launch.claude_reads = claude_reads
         self.assertEqual(rec["claude_login"]["org"], "different", rec)
         self.assertEqual(set(rec["claude_login"]), {"org", "note"})
         self.assertIn("claude setup-token", rec["claude_login"]["note"])
-        launch = load_launch()
-        self.assertNotEqual(launch.CLAUDE_LOGIN_NOTE, launch.CLAUDE_LOGIN_UNREAD_NOTE)
-        # 読めないときの案内と取り違えない（別の定数を出す後退を見る。2 つの定数の中身そのものを入れ替える編集は見ない: 文面は人が読む）
-        self.assertEqual(rec["claude_login"]["note"], launch.CLAUDE_LOGIN_NOTE)
+        # 読めないときの案内と取り違えない（別の組織だと言い、読めなかったとは言わない）
+        self.assertIn("のログインとは別の組織のもの", rec["claude_login"]["note"])
+        self.assertNotIn("読めなかった", rec["claude_login"]["note"])
         self.assertEqual(json.loads((Path(rec["out"]) / "record.json").read_text(encoding="utf-8"))["claude_login"], rec["claude_login"])
         last = json.loads((self.state / "delegations.jsonl").read_text(encoding="utf-8").splitlines()[-1])
         self.assertEqual(last["claude_login"], rec["claude_login"])
@@ -4796,7 +4819,6 @@ launch.claude_reads = claude_reads
         確かめが働いていないことの案内（note。claude setup-token を含む）が付く。組織の ID・問い合わせの出力の目印は、どこにも出ない。
         読めないものを same・different にする、unknown を覚える、uuid の形を見ない、通ったのに読めないときの案内を落とす、失敗した問い合わせにも
         案内を付ける、出力を写すと落ちる。"""
-        unread_note = load_launch().CLAUDE_LOGIN_UNREAD_NOTE
         for how, why, noted in (("noheader", "0 種類（終了コード 0）", True), ("401", "0 種類（終了コード 1）", False),
                                 ("two", "2 種類（終了コード 0）", True), ("notuuid", "0 種類（終了コード 0）", True)):
             with self.subTest(how):
@@ -4809,7 +4831,10 @@ launch.claude_reads = claude_reads
                     if noted:
                         self.assertEqual(set(rec["claude_login"]), {"org", "why", "note"})
                         self.assertIn("claude setup-token", rec["claude_login"]["note"])
-                        self.assertEqual(rec["claude_login"]["note"], unread_note)  # 別の組織の案内と取り違えない
+                        # 別の組織の案内と取り違えない（読めなかったと言い、確かめが働いていないことを伝える）
+                        self.assertIn("問い合わせの出力から読めなかった", rec["claude_login"]["note"])
+                        self.assertIn("この確かめ（トークンとログインの組織の比べ）は、いま働いていない", rec["claude_login"]["note"])
+                        self.assertNotIn("別の組織のもの", rec["claude_login"]["note"])
                     else:
                         self.assertEqual(set(rec["claude_login"]), {"org", "why"})
                     self.assertFalse((self.state / "claude-login.json").exists())
