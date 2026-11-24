@@ -375,6 +375,24 @@ FAKE_CLAUDE = textwrap.dedent(r'''
         os.utime(os.environ["FAKE_MODIFY"], (_t.time() + 5, _t.time() + 5))
     if os.environ.get("FAKE_LEAVE_EMPTY"):  # 対象の直下に空のファイルを残す（cwd_residue が index と照らす道を通す）
         open("left-empty", "w").close()
+    if os.environ.get("FAKE_PUT"):  # 子が置き換える・消すもの: [種類, 道筋, 値] の並び（@COMMON@ は共通ディレクトリ、@GITDIR@ は作業場所の管理ディレクトリ）
+        for _kind, _place, _value in json.loads(os.environ["FAKE_PUT"]):
+            for _mark, _flag in (("@COMMON@", "--git-common-dir"), ("@GITDIR@", "--git-dir")):
+                if _mark in _place:
+                    _place = _place.replace(_mark, subprocess.run(["git", "rev-parse", "--path-format=absolute", _flag],
+                                                                  capture_output=True, text=True).stdout.strip())
+            if os.path.lexists(_place):
+                os.unlink(_place)
+            if _kind == "hex":  # バイト列（UTF-8 でないものも）
+                open(_place, "wb").write(bytes.fromhex(_value))
+            elif _kind == "fill":  # [繰り返すバイト列, 回数, 末尾]（環境変数に載らない大きさ）
+                open(_place, "wb").write(bytes.fromhex(_value[0]) * _value[1] + bytes.fromhex(_value[2]))
+            elif _kind == "fifo":
+                os.mkfifo(_place)
+            elif _kind == "symlink":
+                os.symlink(_value, _place)
+            elif _kind == "sparse":  # 中身の無い大きなファイル
+                open(_place, "wb").truncate(_value)
     if mode == "git-init-tamper":  # Git でない対象で git init し、設定に命令を置く（launcher は起動の前に照合する snapshot を持たない）
         import shlex
         subprocess.run(["git", "init", "-q"])
@@ -466,7 +484,8 @@ FAKE_CLAUDE = textwrap.dedent(r'''
     # ORPHAN
     if mode == "blockout":  # 結果の置き場をふさぐ（launcher の想定外の失敗を起こす）
         os.makedirs(os.path.join(os.environ["FAKE_OUT"], "stdout.jsonl"))
-    result = os.environ["FAKE_TEXT"]
+    # FAKE_TEXT_FILE: 環境変数に載らない大きさの報告（1 つの値は 128 KiB まで）
+    result = open(os.environ["FAKE_TEXT_FILE"], encoding="utf-8").read() if os.environ.get("FAKE_TEXT_FILE") else os.environ["FAKE_TEXT"]
     argv = sys.argv[1:]
     open(os.environ["FAKE_ARGS"] + ".calls", "a").write(json.dumps(argv) + "\n")  # 起動ごとに 1 行
     if "--resume" in argv and os.environ.get("FAKE_RESUMED_TEXT"):  # 続きでは、報告を直して返す
@@ -752,6 +771,16 @@ class TestLaunch(unittest.TestCase):
         self.assertTrue(Path(str(self.args_file) + ".started").exists())
         return p
 
+    def launcher_site(self, body: str) -> dict:
+        """launcher のプロセスにだけ、外の世界（時計・ファイルシステム）の振る舞いを差し替える環境。launcher の関数の名前には触れない。
+        PYTHONPATH の sitecustomize が、起動したのが launch.py のときだけ body を動かす（偽の子の CLI には効かない）。"""
+        site = Path(tempfile.mkdtemp(dir=self.tmp.name, prefix="site-"))
+        # Python 3.9 の pathlib は、読み込むときに os.open などを写して持つ（差し替えた関数を後から読むと、メソッドとして呼ばれて落ちる）。
+        # launch.py と同じく、差し替えの前に読んでおく
+        (site / "sitecustomize.py").write_text("import os, sys\nif os.path.basename(sys.argv[0]) == 'launch.py':\n    import pathlib\n"
+                                               + textwrap.indent(textwrap.dedent(body), "    "))
+        return {"PYTHONPATH": str(site)}
+
     def launch_patched(self, patch, extra, mode="good", env_extra=None):
         """launch.py を import し、patch（Python の文）を当ててから main を動かす。起きる時機を決められない場面だけに使う。"""
         env = self.launch_env(mode, env_extra=env_extra)
@@ -825,20 +854,26 @@ class TestLaunch(unittest.TestCase):
                 self.assertEqual(rc, 0, again)
 
     def test_a_breach_is_told_from_having_nothing_to_check_by_the_start_of_the_reason(self):
-        """照らせなかった理由だけを unchecked に分ける。理由の文にはパスが入るので、文の途中の一致で分けない。"""
-        unread = 'real([], [])'  # 実物の文（記録が無い）
-        rollouts = '"続きの Codex の記録ファイルが 1 つでない（2 個）。"'
-        for reason, kind in ((unread, "unchecked"), (rollouts, "unchecked"),
-                             ('"Codex の実効の権限に deny が無い: /some/確かめられない/x"', "breach"),
-                             (f'"Codex の実効の権限に deny が無い: /" + {unread}', "breach"), (f'"Codex の実効の権限に deny が無い: /" + {rollouts}', "breach")):
-            with self.subTest(reason=reason):
-                patch = f"""\
-                    real = launch.codex_breach
-                    reason = {reason}
-                    launch.codex_breach = lambda *a: reason
-                    """
-                rc, rec = self.launch_patched(patch, ["--host", "codex", "--cwd", str(self.cwd)])
-                self.assertEqual(rec["blocked"], [kind], rec)
+        """照らせなかった理由だけを unchecked に分ける。理由の文にはパスが入るので、文の途中の一致で分けない（拒めなかった場所の
+        道筋に、照らせなかった理由の文の先頭と同じ語が入っていても breach）。"""
+        with self.subTest("記録が無い"):
+            rc, rec = self.run_launch("codex", "no-rollout")
+            self.assertEqual(rec["blocked"], ["unchecked"], rec)
+        with self.subTest("続きの記録ファイルが 2 つ"):
+            rc, first = self.run_launch("codex", extra=["--timeout", "2"], env_extra={"FAKE_HANG": "1", "FAKE_ROLLOUT_APPEND": "1"})
+            other = self.cfg / "codex-home" / "sessions" / "other"
+            other.mkdir()
+            shutil.copy(next((self.cfg / "codex-home" / "sessions" / "fake").glob("rollout-*")), other / "rollout-2-0199aaaa-bbbb-7ccc-8ddd-eeeeffff0000.jsonl")
+            rc, again = self.run_launch(None, extra=["--resume", first["out"]], env_extra={"FAKE_ROLLOUT_APPEND": "1"})
+            shutil.rmtree(other)
+            self.assertEqual(again["blocked"], ["unchecked"], again)
+        for name in ("plain", "Codex の実効の権限を記録（x", "続きの Codex の記録ファイルが x"):  # 拒む専用ログインの置き場の道筋の中の語
+            with self.subTest(name):
+                cfg = Path(self.tmp.name) / name / "cfg"
+                shutil.copytree(self.cfg, cfg, symlinks=True)
+                rc, rec = self.run_launch("codex", "deny-dropped", env_extra={"BB_WRIT_CONFIG_DIR": str(cfg)})
+                self.assertIn(str(cfg.resolve()), rec["problems"][0], rec)  # 理由の文の途中に、その語が入った
+                self.assertEqual(rec["blocked"], ["breach"], rec)
 
     def test_a_signal_during_the_timeout_grace_does_not_send_a_second_term(self):
         p = self.launch_in_background(["--host", "claude", "--cwd", str(self.cwd), "--timeout", "1"])
@@ -915,42 +950,30 @@ class TestLaunch(unittest.TestCase):
         self.assertIsNone(again["head"], again)
         self.assertNotIn("next", again)
 
+    # 壁時計の飛びは、子の CLI が動き始めた後（偽の子が FAKE_ARGS を書いた後）に 100 秒進む時計で作る（launcher の待ち方には触れない）
+    WALL_CLOCK_JUMPS_ONCE_THE_CHILD_RUNS = """
+        import time
+        _real = time.time
+        time.time = lambda: _real() + (100 if os.path.exists(os.environ["FAKE_ARGS"]) else 0)
+    """
+
     def test_the_duration_does_not_follow_a_jump_of_the_wall_clock(self):
         """所要時間（duration_s）は、壁時計が飛んでも延びない。WSL2 の壁時計は約 35 秒ごとに約 2.3 秒進み、それに重なった時間切れの
-        起動の duration_s が 5 秒を超えた（単調時計では毎回約 3.8 秒。Issue #33）。子を待ち終えた後に、壁時計だけを 100 秒進める。"""
-        rc, rec = self.launch_patched("""
-            import time
-            real, ahead = time.time, [0]
-            time.time = lambda: real() + ahead[0]
-            wait = launch.wait_for_exit
-            def jump_after(*args, **kwargs):
-                try:
-                    return wait(*args, **kwargs)
-                finally:
-                    ahead[0] = 100
-            launch.wait_for_exit = jump_after
-        """, ["--host", "claude", "--cwd", str(self.cwd)])
+        起動の duration_s が 5 秒を超えた（単調時計では毎回約 3.8 秒。Issue #33）。子が動いている間に、壁時計だけを 100 秒進める。"""
+        rc, rec = self.run_launch("claude", env_extra=self.launcher_site(self.WALL_CLOCK_JUMPS_ONCE_THE_CHILD_RUNS))
         self.assertEqual((rc, rec["status"]), (0, "ok"), rec)
         self.assertGreaterEqual(rec["duration_s"], 0, rec)  # 始めと終わりで時計を混ぜると、どちらかの向きで外れる
         self.assertLess(rec["duration_s"], 50, rec)
         self.assertGreater(rec["at"], time.time() + 50, rec)  # 起動の終わりの時刻（片付けの期限に使う）は、壁時計のまま
 
     def test_a_jump_of_the_wall_clock_does_not_bring_the_timeout_forward(self):
-        """時間切れの期限も、壁時計が飛んでも早まらない（子を待ち始めてすぐ、壁時計だけを 100 秒進める）。進めるのは launcher の中で
-        最初に呼ばれた time.sleep（今は wait_for_exit の待ち）で、進んだ時機は確かめない。待ち方を time.sleep 以外に変えたり、期限を
-        決める前に time.sleep を呼んだりした上で期限を壁時計にすると、この試験は通る。期限と所要時間の両方を壁時計に戻した形も
-        この試験は通り、test_the_duration_does_not_follow_a_jump_of_the_wall_clock が落とす（守らない）。"""
-        rc, rec = self.launch_patched("""
-            import time
-            real, ahead, nap = time.time, [0], time.sleep
-            time.time = lambda: real() + ahead[0]
-            def jump_then_sleep(s):
-                ahead[0] = 100
-                nap(s)
-            time.sleep = jump_then_sleep
-        """, ["--host", "claude", "--cwd", str(self.cwd), "--timeout", "3"], env_extra={"FAKE_HANG": "1"})
+        """時間切れの期限も、壁時計が飛んでも早まらない（子が動き始めた後に、壁時計だけを 100 秒進める）。期限を子の起動の後に
+        壁時計で決め直す形は、この試験は通る（守らない）。期限と所要時間の両方を壁時計に戻した形もこの試験は通り、
+        test_the_duration_does_not_follow_a_jump_of_the_wall_clock が落とす。"""
+        rc, rec = self.run_launch("claude", extra=["--timeout", "3"],
+                                  env_extra={"FAKE_HANG": "1", **self.launcher_site(self.WALL_CLOCK_JUMPS_ONCE_THE_CHILD_RUNS)})
         self.assertEqual((rc, rec["status"], rec["problems"][:1]), (2, "timeout", ["3 秒で終わらなかった"]), rec)
-        self.assertGreaterEqual(rec["duration_s"], 2.9, rec)  # 期限を壁時計で見ると、最初の待ちで TERM を送って 1 秒も経たずに終わる
+        self.assertGreaterEqual(rec["duration_s"], 2.9, rec)  # 期限を壁時計で見ると、時計が飛んだ直後に TERM を送って 1 秒も経たずに終わる
 
     def test_a_timed_out_child_gets_a_term_and_time_to_clean_up(self):
         """時間切れも、まず TERM を送って子の片付けを待つ（いきなり KILL すると、子の CLI の置き場が残る）。"""
@@ -1005,46 +1028,26 @@ class TestLaunch(unittest.TestCase):
     def test_a_git_error_in_another_encoding_does_not_lose_the_record(self):
         """子が .git を壊して git の文言が UTF-8 でなくても、落ちずに記録を書く（Git の管理情報の変更の警告が消えた）。"""
         d = self.worktree("garbled")[1]
-        patch = f"""\
-            real = launch.git_snapshot
-            def snap(*a):
-                if os.path.exists(os.environ["FAKE_ARGS"]):
-                    open({str(d / ".git")!r}, "wb").write(b"gitdir: /nonexistent/\\xff\\n")
-                return real(*a)
-            launch.git_snapshot = snap
-            """
-        rc, rec = self.launch_patched(patch, ["--host", "claude", "--cwd", str(d), "--write"])
+        rc, rec = self.run_launch("claude", extra=["--write"], cwd=d,
+                                  env_extra={"FAKE_PUT": json.dumps([["hex", ".git", b"gitdir: /nonexistent/\xff\n".hex()]])})
         self.assertEqual((rc, rec["status"], rec["head"]), (2, "failed", None), rec)
         self.assertTrue((Path(rec["out"]) / "record.json").is_file())
 
     def test_git_output_in_another_encoding_reaches_the_record(self):
-        """子を起こす前から .git の文言が UTF-8 でなくても記録を書く。非 UTF-8 のパスは壊さずに持ち回る。"""
+        """子を起こす前から .git の文言が UTF-8 でなくても記録を書く。"""
         d = self.worktree("garbled2")[1]
         (d / ".git").write_bytes(b"gitdir: /nonexistent/\xff\n")
         rc, rec = self.run_launch("claude", cwd=d)
         self.assertIsNone(rec["head"], rec)
         self.assertTrue((Path(rec["out"]) / "record.json").is_file())
-        try:
-            odd = os.fsencode(self.tmp.name) + b"/r\xff"
-            os.mkdir(odd)
-        except OSError:
-            self.skipTest("この OS は UTF-8 でない名前を作れない")
-        subprocess.run([b"git", b"init", b"-q", odd], check=True)
-        patch = f"""\
-            own, common, why = launch.worktree_dirs(os.fsdecode({odd!r}))
-            import json
-            print(json.dumps({{"exists": os.path.isdir(own)}}))
-            sys.exit(0)
-            """
-        rc, got = self.launch_patched(patch, [])
-        self.assertTrue(got["exists"], got)
 
     def test_a_signal_right_after_the_child_starts_is_not_lost(self):
         """子の起動の直後に受けたシグナルでも、子に TERM を伝えて記録を書く（記録が無いまま子が動き続け、INT では動いている子の置き場を消した）。
         起動の直後（受け手が子を知る前）に受けたシグナルを、起動の後で子へ伝えないと、子が止まらず落ちる。"""
         for sig in (signal.SIGTERM, signal.SIGINT):
             with self.subTest(sig=sig):
-                patch = f"""\
+                site = self.launcher_site(f"""
+                    import subprocess
                     real = subprocess.Popen
                     def started(*a, **k):
                         p = real(*a, **k)
@@ -1052,9 +1055,9 @@ class TestLaunch(unittest.TestCase):
                             os.kill(os.getpid(), {int(sig)})
                         return p
                     subprocess.Popen = started
-                    """
+                """)
                 t0 = time.monotonic()
-                rc, rec = self.launch_patched(patch, ["--host", "claude", "--cwd", str(self.cwd)], mode="stop")
+                rc, rec = self.run_launch("claude", "stop", env_extra=site)
                 self.assertEqual(rec["stopped_by_signal"], int(sig), rec)
                 self.assertTrue(rec["resumable"], rec)
                 # 子に TERM が届いて止まった（終了コードは、TERM が届いた時機で変わる: 偽の dotenvx が受け手を置く前に受ければ -15、子へ伝えて
@@ -1067,15 +1070,16 @@ class TestLaunch(unittest.TestCase):
     @unittest.skipUnless(sys.platform.startswith("linux"), "子を刈らずに待つのは Linux だけ")
     def test_a_child_reaped_late_does_not_read_as_exit_zero(self):
         """KILL の後も child.wait が切れ、子を別の場所で刈ると、poll が 0 を返した。終了コードは分からないと書く。"""
-        patch = """\
+        site = self.launcher_site("""
+            import subprocess
             real = subprocess.Popen.wait
             def wait(self, timeout=None):
                 if timeout == 10:
                     raise subprocess.TimeoutExpired(self.args, timeout)
                 return real(self, timeout)
             subprocess.Popen.wait = wait
-            """
-        rc, rec = self.launch_patched(patch, ["--host", "claude", "--cwd", str(self.cwd), "--timeout", "1"], env_extra={"FAKE_HANG": "1"})
+        """)
+        rc, rec = self.run_launch("claude", extra=["--timeout", "1"], env_extra={"FAKE_HANG": "1", **site})
         self.assertEqual(rec["status"], "timeout", rec)
         self.assertIsNone(rec["exit_code"], rec)
 
@@ -1452,30 +1456,37 @@ class TestLaunch(unittest.TestCase):
         self.assertEqual((rc, rec["status"], rec["resumable"], bool(rec["session"])), (2, "failed", False, True), rec)
 
     def test_report_check_does_not_crash_on_odd_reports(self):
-        launch = load_launch()
-        for text, problem in (('```json\n{"conclusion": "c", "evidence": ["a.txt:1"]}', "where の無い証拠"),
-                              ('```json\n{"a": ' + "[" * 100000 + "]" * 100000 + "}", "深"),
-                              ('```json\n{"conclusion": "c", "evidence": [{"where": "' + "x" * 5000 + ':1"}]}', "証拠のファイルが無い")):
+        """形の崩れた報告（証拠が文字列・深すぎる入れ子・長すぎる where）でも落ちずに invalid-report を返し、子の長い文を
+        そのまま記録に積まない（理由の 1 行は 400 字まで）。"""
+        deep = Path(self.tmp.name) / "deep.md"
+        deep.write_text('```json\n{"a": ' + "[" * 100000 + "]" * 100000 + "}", encoding="utf-8")
+        for env, problem in (({"FAKE_TEXT": '```json\n{"conclusion": "c", "evidence": ["a.txt:1"]}'}, "where の無い証拠"),
+                             ({"FAKE_TEXT_FILE": str(deep)}, "深"),
+                             ({"FAKE_TEXT": '```json\n{"conclusion": "c", "evidence": [{"where": "' + "x" * 5000 + ':1"}]}'}, "証拠のファイルが無い")):
             with self.subTest(problem=problem):
-                r, problems = launch.check_report(text, self.cwd)
+                rc, rec = self.run_launch("claude", env_extra=env)
+                self.assertEqual((rc, rec["status"]), (2, "invalid-report"), rec)
+                problems = rec["problems"]
                 if problem == "深":  # 読めないか、記録に書けない（Python の版で深さの上限が違う。3.15 の decoder は読める）
-                    self.assertTrue([p for p in problems if "読めない" in p or "深すぎて" in p] or r is not None and json.dumps(r, indent=1), problems)
+                    self.assertTrue([p for p in problems if "読めない" in p or "深すぎて" in p], problems)
                 else:
                     self.assertTrue([p for p in problems if problem in p], problems)
-                self.assertTrue(all(len(p) <= 400 for p in problems))  # 子の長い文を、そのまま記録に積まない
+                self.assertTrue(all(len(p) <= 400 for p in problems), problems)
 
     def test_git_snapshot_reads_refs_that_are_not_utf8(self):
-        launch = load_launch()
-        repo = Path(self.tmp.name) / "g"
-        repo.mkdir()
+        """名前が UTF-8 でない ref も、書く子の前後の照合に入る（子がそれを動かすと、Git の管理情報の変更として出る）。"""
+        repo, wt = self.worktree("odd-ref")
         g = ["git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@example.invalid"]
-        subprocess.run(g + ["init", "-q"], check=True)
-        subprocess.run(g + ["commit", "-q", "--allow-empty", "-m", "x"], check=True)
-        head = subprocess.run(g + ["rev-parse", "HEAD"], capture_output=True, text=True, check=True).stdout.strip()
+        first = subprocess.run(g + ["rev-parse", "HEAD"], capture_output=True, text=True, check=True).stdout.strip()
+        subprocess.run(g + ["commit", "-q", "--allow-empty", "-m", "2"], check=True)
+        second = subprocess.run(g + ["rev-parse", "HEAD"], capture_output=True, text=True, check=True).stdout.strip()
         # macOS（APFS）は UTF-8 でないファイル名を拒むので、ref のファイルでなく packed-refs に書く
-        (repo / ".git" / "packed-refs").write_bytes(b"# pack-refs with: peeled fully-peeled sorted \n" + head.encode() + b" refs/heads/bb-writ/a\xff\n")
-        snap = launch.git_snapshot(repo / ".git", repo / ".git", repo)
-        self.assertEqual(len(snap["refs"]), 2)
+        packed = lambda h: b"# pack-refs with: peeled fully-peeled sorted \n" + h.encode() + b" refs/heads/bb-writ/a\xff\n"
+        (repo / ".git" / "packed-refs").write_bytes(packed(first))
+        rc, rec = self.run_launch("claude", extra=["--write"], cwd=wt,
+                                  env_extra={"FAKE_PUT": json.dumps([["hex", "@COMMON@/packed-refs", packed(second).hex()]])})
+        self.assertEqual((rc, rec["status"], rec["blocked"]), (2, "failed", ["git"]), rec)
+        self.assertTrue([p for p in rec["problems"] if p.startswith("refs/heads/bb-writ/a") and f"{first} → {second}" in p], rec["problems"])
 
     def test_codex_ok_is_read_only_by_default(self):
         other = self.cfg / "codex-home" / "sessions" / "rollout-1-zz-t-1.jsonl"  # 別の記録（名前の末尾が session と同じ）
@@ -2145,8 +2156,9 @@ class TestLaunch(unittest.TestCase):
                     # 読み取り専用の子には、どのホストでも、子ごとに新しく作った場所へ写して動かす約束を渡す（#46。並行する
                     # Claude Code の子は $TMPDIR も pid も同じだった）。試験が見るのは子に渡す約束の文だけで、子が約束に従うかと、
                     # interrogate・playbook-verify の依頼文の雛形の文と、not-run の案内の写し方の文は見ない（守らない）
-                    self.assertIn(load_launch().READ_ONLY_CONTRACT.strip(), prompt)
-                    self.assertIn("`mktemp -d` で新しく作ったディレクトリ", prompt)
+                    for phrase in ("`mktemp -d` で新しく作ったディレクトリ", "に対象を写して（cp -r など）、そこで動かす",
+                                   "決まった名前や pid だけの名前の場所に写さない"):
+                        self.assertIn(phrase, prompt)
                     if status == "not-run":
                         self.assertTrue(rec["report"]["conclusion"])  # 報告は捨てず、読んだだけの審査として使える
                         self.assertIn("読んだだけ", rec["problems"][0])
@@ -2241,13 +2253,13 @@ class TestLaunch(unittest.TestCase):
         self.assertEqual(json.loads(p.stdout)["chosen_by"], "given", p.stderr)  # 両方渡せば、表に無くても起こせる
         self.assertEqual(given("grok", json.loads(self.args_file.read_text())), ("grok-4.7", "high"))
 
-    def test_a_hardest_writer_times_out_at_its_default_limit(self):
-        # 最も難しい書く子は、--timeout を省くと、その役割の既定の上限で時間切れになる（既定を 2 秒にして、既定のまま時間切れになるのを見る）。
-        # 待った秒数そのものは測らない: 待ちを記録の値から少しずらす退行（数秒長く・半分に）と、1800 秒を超える待ちだけを縮める退行は見ない
-        rc, rec = self.launch_patched("launch.TIMEOUTS['hardest'] = 2", ["--host", "claude", "--cwd", str(self.cwd), "--write", "--hardest"],
-                                      env_extra={"FAKE_HANG": "1"})
-        self.assertEqual((rec["status"], rec["timeout_s"]), ("timeout", 2), rec)
-        self.assertIn("2 秒で終わらなかった", " ".join(rec["problems"]))
+    def test_a_hardest_writer_gets_its_default_limit(self):
+        # --timeout を省くと、役割の既定の上限で動く（delegate の SKILL.md: 既定 1800、--hardest の書く子は 3600）。上限は記録の timeout_s で
+        # 見る（その値で待って時間切れにすることは、--timeout を渡す試験が見る）。3600 秒は待たない
+        for extra, limit in ((["--write", "--hardest"], 3600), (["--write"], 1800), ([], 1800)):
+            with self.subTest(extra=extra):
+                rc, rec = self.run_launch("claude", extra=extra)
+                self.assertEqual((rc, rec["status"], rec["timeout_s"]), (0, "ok", limit), rec)
 
     def test_a_resume_keeps_the_role_and_takes_no_new_hardest(self):
         # 続きは前の記録のモデル・effort と役割で起こす。最も難しい書く子の続きの時間の上限の既定も 3600 のまま。--hardest は一緒に渡せない
@@ -2602,89 +2614,83 @@ class TestLaunch(unittest.TestCase):
         self.assertTrue([p for p in rec["problems"] if "ホームの残りを確かめられない" in p], rec)
 
     def test_files_vanishing_during_the_home_scan_are_not_unreadable(self):
-        launch, home = load_launch(), Path(self.tmp.name) / "vanish"
-        (home / ".claude").mkdir(parents=True)
-        (home / ".claude" / "x").write_text("x")
-        real_scandir = os.scandir
-        for when in (1, 2):  # 空かを見るとき、降りるとき
+        """子の後のホームの走査の途中で、別のセッションが一時ディレクトリを消しても（走査の途中で無くなった）、読めない場所に数えず ok で返す。
+        消える時機は、launcher のプロセスの os.scandir が、子が動き始めた後に ~/.claude を開くときに作る（空かを見るとき、降りるとき）。"""
+        (self.home / ".claude").mkdir()
+        (self.home / ".claude" / "x").write_text("x")
+        for when in (1, 2):
             with self.subTest(when=when):
-                seen = []
-
-                def flaky(d):  # 別のセッションが一時ディレクトリを消した（走査の途中で無くなった）
-                    if str(d).endswith(".claude"):
-                        seen.append(d)
-                        if len(seen) == when:
-                            raise FileNotFoundError(d)
-                    return real_scandir(d)
-                old_home = os.environ.get("HOME")
-                os.environ["HOME"], launch.os.scandir = str(home), flaky
-                try:
-                    _, _, unreadable = launch.home_entries([])
-                finally:
-                    launch.os.scandir = real_scandir
-                    os.environ["HOME"] = old_home
-                self.assertEqual((len(seen), unreadable), (when, set()))
+                site = self.launcher_site(f"""
+                    _real, _seen = os.scandir, []
+                    def _flaky(d="."):
+                        if not isinstance(d, int) and str(d).endswith("/.claude") and os.path.exists(os.environ["FAKE_ARGS"]):
+                            _seen.append(d)
+                            if len(_seen) == {when}:
+                                open(os.environ["FAKE_ARGS"] + ".vanished", "w").close()
+                                raise FileNotFoundError(2, "消えた", str(d))
+                        return _real(d)
+                    os.scandir = _flaky
+                """)
+                self.args_file.unlink(missing_ok=True)
+                rc, rec = self.run_launch("claude", env_extra=site)
+                self.assertTrue(Path(str(self.args_file) + ".vanished").exists(), "消える場面を作れなかった")
+                Path(str(self.args_file) + ".vanished").unlink()
+                self.assertEqual((rc, rec["status"]), (0, "ok"), rec)
 
     def test_child_files_are_read_without_blocking_or_exhausting_memory(self):
-        launch, d = load_launch(), Path(self.tmp.name) / "cf"
-        d.mkdir()
-        os.mkfifo(d / "fifo")
-        (d / "zero").symlink_to("/dev/zero")
-        (d / "lfifo").symlink_to(d / "fifo")  # FIFO を指す symlink も、開くところで止まらない
-        for name in ("fifo", "zero", "lfifo"):
-            code = (f"import importlib.util; s = importlib.util.spec_from_file_location('l', {str(LAUNCH)!r}); "
-                    f"m = importlib.util.module_from_spec(s); s.loader.exec_module(m); print(m.read_child_file(__import__('pathlib').Path({str(d / name)!r}))[0])")
-            p = subprocess.run([sys.executable, "-B", "-c", code], capture_output=True, text=True, timeout=20)  # 開くところで止まらない
-            self.assertEqual(p.returncode, 0, p.stderr[-300:])
-            self.assertNotIn("sha256:", p.stdout)  # 読まずに種類で表す
-            self.assertIn("（", p.stdout)
-        (d / "l1").symlink_to("a-target")
-        (d / "l2").symlink_to("b-target")
-        self.assertNotEqual(launch.read_child_file(d / "l1")[0], launch.read_child_file(d / "l2")[0])  # 行き先の変化も差分
-        (d / "l3").symlink_to("x" * 53)  # 表しの長さがハッシュと同じになる行き先
-        self.assertFalse(launch.read_child_file(d / "l3")[2])
-        self.assertTrue(launch.read_head(d / "l3").startswith("symlink: "))  # 空の HEAD と読み違えない
-        a, b = d / "a", d / "b"
-        a.write_bytes(b"x" * 70000 + b"1")
-        b.write_bytes(b"x" * 70000 + b"2")
-        self.assertNotEqual(launch.read_head(a), launch.read_head(b))  # 先頭が同じでも、後ろの違いを見る
-        self.assertIsNone(launch.read_child_file(d / "missing")[0])
+        """書く子が Git の管理情報（作業場所の config.worktree・HEAD、hooks）を FIFO・/dev/zero への symlink・巨大なファイルに替えても、
+        launcher は止まらず尽きずに照合を終え、変わったものを全部出す（symlink は行き先の変化、ファイルは後ろの違いと消えたことも）。
+        メモリの上限は Linux だけで掛ける。"""
+        repo, wt = self.worktree("child-files")
+        hooks, own = repo / ".git" / "hooks", repo / ".git" / "worktrees" / "child-files-wt"
+        hooks.mkdir(exist_ok=True)
+        (hooks / "l1").symlink_to("a-target")
+        (hooks / "big").write_bytes(b"x" * 70000 + b"1")  # 先頭が同じでも、後ろの違いを見る
+        (hooks / "gone").write_text("x")
+        puts = [["fifo", "@GITDIR@/config.worktree", None], ["symlink", "@COMMON@/hooks/zero", "/dev/zero"],
+                ["symlink", "@COMMON@/hooks/lfifo", str(own / "config.worktree")], ["symlink", "@COMMON@/hooks/l1", "b-target"],
+                ["fill", "@COMMON@/hooks/big", [b"x".hex(), 70000, b"2".hex()]], ["remove", "@COMMON@/hooks/gone", None],
+                ["sparse", "@COMMON@/hooks/huge", 768 << 20], ["symlink", "@GITDIR@/HEAD", "x" * 53]]  # 表しの長さがハッシュと同じになる行き先
+        env = {"FAKE_PUT": json.dumps(puts)}
         if sys.platform.startswith("linux"):  # 大きなファイルも一定のメモリで読む（RLIMIT_AS が効くのは Linux）
-            big = d / "big"
-            with open(big, "wb") as f:
-                f.truncate(768 << 20)  # 疎なファイル
-            code = ("import resource, sys, importlib.util; resource.setrlimit(resource.RLIMIT_AS, (512 << 20, 512 << 20)); "
-                    f"s = importlib.util.spec_from_file_location('l', {str(LAUNCH)!r}); m = importlib.util.module_from_spec(s); "
-                    f"s.loader.exec_module(m); print(len(m.read_child_file(__import__('pathlib').Path({str(big)!r}))[0]))")
-            p = subprocess.run([sys.executable, "-B", "-c", code], capture_output=True, text=True, timeout=120)
-            self.assertEqual(p.stdout.strip(), str(len("-rw-r--r-- sha256: ") + 64), p.stderr[-500:])  # 権限と中身のハッシュ
+            env.update(self.launcher_site("import resource\nresource.setrlimit(resource.RLIMIT_AS, (512 << 20, 512 << 20))"))
+        rc, rec = self.run_launch("claude", extra=["--write"], cwd=wt, env_extra=env)
+        self.assertEqual((rc, rec["status"], rec["blocked"]), (2, "failed", ["git"]), rec)
+        changed = rec["problems"]
+        for place in [own / "config.worktree", *(hooks / n for n in ("zero", "lfifo", "l1", "big", "gone", "huge"))]:
+            self.assertIn(str(place.parent.resolve() / place.name), changed)
+        self.assertTrue([p for p in changed if p.startswith("HEAD: ") and "symlink: " in p.split(" → ")[1]], changed)  # 空の HEAD と読み違えない
 
     def test_rollout_reading_is_bounded(self):
-        launch, d = load_launch(), Path(self.tmp.name) / "ro"
-        d.mkdir()
-        f = d / "r.jsonl"
-        f.write_bytes(b'{"type": "turn_context", "payload": {"model": "m"}}\n' * 10 + b"y" * (3 << 20) + b"\n")
-        lines = list(launch.rollout_lines(f))
-        self.assertGreater(len(lines), 10)  # 10 行と、割れた巨大な行（1 行も返らなければ、下は何も確かめない）
-        self.assertTrue(all(len(l) <= 1 << 20 for l in lines))  # 巨大な行は割れて、読めない行になる
-        self.assertEqual(list(launch.rollout_lines(f, limit=200))[-1], b'{"type": "turn_context", "payload": {}}')  # 上限で実効値を不明にする
-        os.mkfifo(d / "fifo")
-        self.assertEqual(list(launch.rollout_lines(d / "fifo")), [])  # 止まらない
-        if sys.platform.startswith("linux"):  # 書き手のいる FIFO でも止まらない（O_RDWR で書き手を持つのは Linux の振る舞い）
-            w = os.open(d / "fifo", os.O_RDWR)
-            try:
-                code = (f"import importlib.util; s = importlib.util.spec_from_file_location('l', {str(LAUNCH)!r}); m = importlib.util.module_from_spec(s); "
-                        f"s.loader.exec_module(m); print(list(m.rollout_lines(__import__('pathlib').Path({str(d / 'fifo')!r}))))")
-                p = subprocess.run([sys.executable, "-B", "-c", code], capture_output=True, text=True, timeout=20)
-                self.assertEqual(p.stdout.strip(), "[]", p.stderr[-300:])
-            finally:
-                os.close(w)
-        (d / "dir.jsonl").mkdir()
-        self.assertEqual(list(launch.rollout_lines(d / "dir.jsonl")), [])  # 通常のファイルだけを読む
-        big = d / "big.jsonl"
-        with open(big, "wb") as fh:
-            fh.truncate(300 << 20)  # 疎なファイル。既定の上限（256 MiB）を越える
-        self.assertEqual(list(launch.rollout_lines(big))[-1], b'{"type": "turn_context", "payload": {}}')
+        """読み取り専用の Codex の子の記録（rollout）が、FIFO（書き手がいても）・ディレクトリ・巨大なものに替わっていても、launcher は
+        止まらずに権限を「確かめられない」とする。全体の上限（256 MiB）を越えた記録は、その後ろに正しい turn があっても使わない。
+        1 行の上限（1 MiB）は test_codex_read_only_wider_than_the_profile_is_failed の big-wide-line が見る。"""
+        sessions = self.cfg / "codex-home" / "sessions"
+        rc, rec = self.run_launch("codex")  # 偽の Codex が、引数どおりの正しい記録を sessions/fake に書く
+        self.assertEqual((rc, rec["status"]), (0, "ok"), rec)
+        good = next((sessions / "fake").glob("rollout-*")).read_bytes()
+
+        def placed(n, make):  # 試験が sessions/fake の外に置いた記録を、偽の Codex はそのまま使う
+            thread = f"0199aaaa-bbbb-7ccc-8ddd-eeeeffff{3000 + n}"
+            (sessions / "other").mkdir(exist_ok=True)
+            make(sessions / "other" / f"rollout-1-{thread}.jsonl")
+            return {"FAKE_THREAD": thread}
+        for n, (name, make) in enumerate((("fifo", os.mkfifo), ("dir", os.mkdir), ("huge", lambda f: f.write_bytes(b"") or os.truncate(f, 300 << 20)))):
+            with self.subTest(name):
+                env = placed(n, make)
+                writer = os.open(sessions / "other" / f"rollout-1-{env['FAKE_THREAD']}.jsonl", os.O_RDWR) if name == "fifo" and sys.platform.startswith("linux") else None
+                try:  # 書き手のいる FIFO（O_RDWR で書き手を持つのは Linux の振る舞い）
+                    rc, rec = self.run_launch("codex", env_extra=env)
+                finally:
+                    if writer is not None:
+                        os.close(writer)
+                self.assertEqual((rc, rec["status"], rec["blocked"]), (2, "failed", ["unchecked"]), rec)
+                self.assertIn("確かめられない", rec["problems"][0])
+        with self.subTest("全体の上限の後ろの正しい turn"):
+            pad = b'{"type": "event_msg", "pad": "' + b"a" * ((1 << 20) - 64) + b'"}\n'  # 1 行は 1 MiB の内側
+            env = placed(9, lambda f: f.write_bytes(pad * 257 + good))
+            rc, rec = self.run_launch("codex", env_extra=env)
+            self.assertEqual((rc, rec["status"], rec["blocked"]), (2, "failed", ["unchecked"]), rec)
 
     def test_claude_staging_dirs_stay_for_the_sessions_that_share_them(self):
         # Claude Code が設定を書くときの空の .claude/.cc-writes は、同じ場所の別のセッションも使う。launcher が子の後に消すと、
@@ -3042,15 +3048,14 @@ class TestLaunch(unittest.TestCase):
         """親が書いた監査役の依頼文が判定の項目を狭めても、監査役は playbook-verify の節の項目をすべて判定するよう約束を受ける
         （Claude Code の続きでも）。監査役でない子には足さない（試験が見るのは、読み取り専用・--interrogate・--write の最初の起動だけ。
         --hardest の子と、監査役でない子の続きに足さないことは見ない）。"""
-        sentence = load_launch().AUDIT_CONTRACT
-        # 約束の意味を決める句は、句ごと固定する（言い換えると落ちる。語の有無だけでは、意味を逆にした書き換えが通る）
-        for phrase in ("bb-writ のスキル `playbook-verify` の「返す前の判定（遵守の監査）」の節を全文読み",
-                       "文の照合）をすべて判定する。依頼文が範囲や項目を狭めていても、節の項目を省かない",
-                       "差分に限ってよいのは、節がそう書く項目だけ。文の照合は毎回、変えた文書の全体）",
-                       "作業者が --not-run で届けるときは、親がその commit で実行した試験の証拠",  # #39 の宣言の確かめ
-                       "子が実行できなかったことの代わりになるか（写し方を教えれば子が動いた場面でないか）も判定する"):
-            self.assertIn(phrase, sentence)
-        mark = sentence.split(":", 1)[0]  # 約束の見出し句。足さない側も、約束そのものの句で見る
+        # 監査役が受け取る依頼文に、約束の意味を決める句を、句ごと固定する（言い換えると落ちる。語の有無だけでは、意味を逆にした書き換えが通る）
+        mark = "返す前の判定（bb-writ の監査役の約束）: 上の依頼文に書かれていなくても"  # 約束の見出し句。足さない側も、この句で見る
+        phrases = (mark, "bb-writ のスキル `playbook-verify` の「返す前の判定（遵守の監査）」の節を全文読み",
+                   "文の照合）をすべて判定する。依頼文が範囲や項目を狭めていても、節の項目を省かない",
+                   "差分に限ってよいのは、節がそう書く項目だけ。文の照合は毎回、変えた文書の全体）",
+                   "作業者が --not-run で届けるときは、親がその commit で実行した試験の証拠",  # #39 の宣言の確かめ
+                   "子が実行できなかったことの代わりになるか（写し方を教えれば子が動いた場面でないか）も判定する",
+                   '最後の JSON に "deliver": "yes" か "no" を書く')
         verify = (ROOT / "skills" / "playbook-verify" / "SKILL.md").read_text()
         self.assertIn("\n## 返す前の判定（遵守の監査）\n", verify)  # 約束が名指しする節と、節が挙げる項目
         self.assertIn("\n- 文の照合（手順の文書を変えたとき）:", verify)
@@ -3059,11 +3064,13 @@ class TestLaunch(unittest.TestCase):
             with self.subTest(host=host):
                 rc, rec = self.run_launch(host, extra=["--audit"])
                 self.assertEqual((rc, rec["status"]), (0, "ok"), rec)
-                self.assertIn(sentence, prompt())
+                for phrase in phrases:
+                    self.assertIn(phrase, prompt())
                 if host == "claude":  # 続きの依頼文にも足す
                     rc, again = self.run_launch(None, extra=["--resume", rec["out"]])
                     self.assertEqual((rc, again["audit"]), (0, True), again)
-                    self.assertIn(sentence, prompt())
+                    for phrase in phrases:
+                        self.assertIn(phrase, prompt())
                 for extra in ([], ["--interrogate"], ["--write"]):
                     self.args_file.unlink(missing_ok=True)
                     rc, rec = self.run_launch(host, extra=extra)
@@ -3402,8 +3409,8 @@ class TestLaunch(unittest.TestCase):
         finally:
             os.close(fd)
         after = self.leftover("tmp", self.stamp(9, "-b-after"), {"at": old})
-        patch = "import resource\nresource.setrlimit(resource.RLIMIT_NOFILE, (200, resource.getrlimit(resource.RLIMIT_NOFILE)[1]))"
-        rc, rec = self.launch_patched(patch, ["--host", "claude", "--cwd", str(self.cwd)])
+        rc, rec = self.run_launch("claude", env_extra=self.launcher_site(
+            "import resource\nresource.setrlimit(resource.RLIMIT_NOFILE, (200, resource.getrlimit(resource.RLIMIT_NOFILE)[1]))"))
         self.assertEqual((rc, rec["status"]), (0, "ok"), rec)
         self.assertEqual((sorted(rec["swept"]["removed"]), rec["swept"]["problems"]), (sorted([str(deep), str(after)]), []))
         self.assertFalse(os.path.lexists(deep) or os.path.lexists(after))
@@ -3430,7 +3437,7 @@ class TestLaunch(unittest.TestCase):
         place = self.leftover("tmp", self.stamp(9, "-skip"), {"at": time.time() - 8 * 86400})
         for i in range(40):
             (place / f"f{i:02d}").write_text("x")
-        patch = """
+        site = self.launcher_site("""
             import stat
             real_scandir = os.scandir
             class Entry:
@@ -3454,8 +3461,8 @@ class TestLaunch(unittest.TestCase):
                     self.pos += 1
                     return Entry(self.fd, names[self.pos - 1])
             os.scandir = lambda p=".": ByPosition(p) if isinstance(p, int) else real_scandir(p)
-        """
-        rc, rec = self.launch_patched(patch, ["--host", "claude", "--cwd", str(self.cwd)])
+        """)
+        rc, rec = self.run_launch("claude", env_extra=site)
         self.assertEqual((rc, rec["status"]), (0, "ok"), rec)
         self.assertFalse(os.path.lexists(place))
         self.assertEqual((rec["swept"]["removed"], rec["swept"]["problems"]), ([str(place)], []))
@@ -3497,7 +3504,7 @@ class TestLaunch(unittest.TestCase):
             (kept / "keep").write_text("x")
             shutil.rmtree(self.state / d, ignore_errors=True)
             (self.state / d).symlink_to(outside / d, target_is_directory=True)
-        rec = self.launch_patched("", ["--host", "claude", "--cwd", str(self.cwd), "--out", str(Path(self.tmp.name) / "out-linked")])[1]
+        rec = self.run_launch("claude", extra=["--out", str(Path(self.tmp.name) / "out-linked")])[1]
         self.assertEqual(rec["status"], "ok", rec)
         self.assertEqual(len(list(outside.rglob("keep"))), 2)
         self.assertEqual(rec["swept"]["removed"], [])
@@ -3573,12 +3580,17 @@ class TestLaunch(unittest.TestCase):
         place = self.leftover("tmp", self.stamp(9, "-swapped"), {"at": time.time() - 8 * 86400})
         (place / "victim").mkdir()
         (place / "victim" / "inner").write_text("x")
-        patch = ("import os as _os\n_real, _done = _os.open, []\ndef racing(path, flags, mode=0o777, *, dir_fd=None):\n"
-                 "    if path == 'victim' and dir_fd is not None and not _done:\n        _done.append(1)\n"
-                 "        _os.rename('victim', 'moved', src_dir_fd=dir_fd, dst_dir_fd=dir_fd)\n"
-                 f"        _os.symlink({str(outside)!r}, 'victim', dir_fd=dir_fd)\n"
-                 "    return _real(path, flags, mode, dir_fd=dir_fd)\n_os.open = racing")
-        rc, rec = self.launch_patched(patch, ["--host", "claude", "--cwd", str(self.cwd)])
+        site = self.launcher_site(f"""
+            _real, _done = os.open, []
+            def racing(path, flags, mode=0o777, *, dir_fd=None):
+                if path == 'victim' and dir_fd is not None and not _done:
+                    _done.append(1)
+                    os.rename('victim', 'moved', src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+                    os.symlink({str(outside)!r}, 'victim', dir_fd=dir_fd)
+                return _real(path, flags, mode, dir_fd=dir_fd)
+            os.open = racing
+        """)
+        rc, rec = self.run_launch("claude", env_extra=site)
         self.assertEqual((rc, rec["status"]), (0, "ok"), rec)
         self.assertTrue((outside / "keep").exists(), "差し替えた先の中が消えた")
         self.assertTrue((place / "victim").is_symlink())  # 差し替えは起きた
@@ -3592,11 +3604,17 @@ class TestLaunch(unittest.TestCase):
         rc, first = self.run_launch("codex", extra=["--timeout", "2"], env_extra={"FAKE_HANG": "1"})
         place = first["scratch"]
         self.args_file.unlink(missing_ok=True)
-        code = (f"import fcntl, os, shutil, stat, sys\nsys.path.insert(0, {str(LAUNCH.parent)!r})\nimport launch\nreal = fcntl.flock\n"
-                "def late(fd, op):\n    n = fd if isinstance(fd, int) else fd.fileno()\n    if stat.S_ISDIR(os.fstat(n).st_mode):\n"
-                f"        shutil.rmtree({place!r}, ignore_errors=True)\n    return real(fd, op)\nfcntl.flock = late\n"
-                f"sys.argv = ['launch.py', '--prompt-file', {str(self.prompt)!r}, '--resume', {first['out']!r}]\nsys.exit(launch.main())\n")
-        p = subprocess.run([sys.executable, "-B", "-c", code], env=self.launch_env(), capture_output=True, text=True, timeout=120)
+        site = self.launcher_site(f"""
+            import fcntl, shutil, stat
+            real = fcntl.flock
+            def late(fd, op):
+                n = fd if isinstance(fd, int) else fd.fileno()
+                if stat.S_ISDIR(os.fstat(n).st_mode):
+                    shutil.rmtree({place!r}, ignore_errors=True)
+                return real(fd, op)
+            fcntl.flock = late
+        """)
+        p = self.run_launch(None, extra=["--resume", first["out"]], env_extra=site, raw=True)
         self.assertEqual(p.returncode, 2, p.stdout + p.stderr)
         self.assertIn("一時ディレクトリ（scratch）が無い", p.stderr)
         self.assertFalse(self.args_file.exists())      # 子を起こさない
@@ -3629,10 +3647,17 @@ class TestLaunch(unittest.TestCase):
         最初の起動は、排他なしで進む。その環境を作るために、launcher の中の flock を、ディレクトリには使えない応答に差し替える。"""
         old = time.time() - 8 * 86400
         places = [self.leftover("tmp", self.stamp(9, "-one"), {"at": old}), self.leftover("home", self.stamp(9, "-two"), {"at": old})]
-        patch = ("import errno, fcntl, os, stat\nreal = fcntl.flock\ndef unsupported(fd, op):\n    n = fd if isinstance(fd, int) else fd.fileno()\n"
-                 "    if stat.S_ISDIR(os.fstat(n).st_mode):\n        raise OSError(errno.EOPNOTSUPP, 'ディレクトリの排他は使えない')\n    return real(fd, op)\n"
-                 "fcntl.flock = unsupported")
-        rc, rec = self.launch_patched(patch, ["--host", "codex", "--cwd", str(self.cwd)])
+        site = self.launcher_site("""
+            import errno, fcntl, stat
+            real = fcntl.flock
+            def unsupported(fd, op):
+                n = fd if isinstance(fd, int) else fd.fileno()
+                if stat.S_ISDIR(os.fstat(n).st_mode):
+                    raise OSError(errno.EOPNOTSUPP, 'ディレクトリの排他は使えない')
+                return real(fd, op)
+            fcntl.flock = unsupported
+        """)
+        rc, rec = self.run_launch("codex", env_extra=site)
         self.assertEqual((rc, rec["status"]), (0, "ok"), rec)  # 読み取り専用の Codex の子（自分の一時ディレクトリを持つ）も起動する
         self.assertEqual([p for p in places if not p.is_dir()], [])
         self.assertEqual((rec["swept"]["removed"], len(rec["swept"]["problems"])), ([], 1), rec["swept"])
@@ -3656,17 +3681,29 @@ class TestLaunch(unittest.TestCase):
         self.assertEqual(again["scratch"], first["scratch"], again)
 
     def test_a_place_that_cannot_be_removed_does_not_stop_the_launch(self):
-        """片付けの失敗は、子の起動を失敗にしない。理由と、そこまでに消した場所が記録に出る。失敗を起こす時機を決められないので、
-        launcher の関数を名前で差し替える（remove_tree・leftover_uses の名前を変えたら、ここも直す）。"""
+        """片付けの失敗は、子の起動を失敗にしない。理由と、そこまでに消した場所が記録に出る。消せない置き場は、置き場を入れたディレクトリに
+        書けないことで作る。想定外の例外（OSError でない）は時機を決められないので、launcher の関数を名前で差し替える（leftover_uses の名前を
+        変えたら、ここも直す）。"""
         old = time.time() - 8 * 86400
-        for word, patch, left in (
-                ("片付けられない", "def no(p):\n    raise PermissionError(13, '消せない', str(p))\nlaunch.remove_tree = no", 2),
-                # 1 つ目を消した後に、想定外の例外（OSError でない）が出る
-                ("片付けが失敗した", "seen = []\nreal = launch.leftover_uses\ndef boom(base):\n    seen.append(1)\n    if len(seen) > 2:\n"
-                                      "        raise RuntimeError('想定外')\n    return real(base)\nlaunch.leftover_uses = boom", 1)):
+        for word in ("片付けられない", "片付けが失敗した"):
             with self.subTest(word):
                 places = [self.leftover("tmp", self.stamp(9, f"-{word}-{i}"), {"at": old}) for i in (1, 2)]
-                rc, rec = self.launch_patched(patch, ["--host", "claude", "--cwd", str(self.cwd)])
+                if word == "片付けられない":
+                    if os.geteuid() == 0:
+                        self.skipTest("root には書けないディレクトリが効かない")
+                    for p in places:
+                        os.chmod(p.parent, 0o555)
+                    try:
+                        rc, rec = self.run_launch("claude")
+                    finally:
+                        for p in places:
+                            os.chmod(p.parent, 0o755)
+                    left = 2
+                else:  # 1 つ目を消した後に、想定外の例外（OSError でない）が出る
+                    patch = ("seen = []\nreal = launch.leftover_uses\ndef boom(base):\n    seen.append(1)\n    if len(seen) > 2:\n"
+                             "        raise RuntimeError('想定外')\n    return real(base)\nlaunch.leftover_uses = boom")
+                    rc, rec = self.launch_patched(patch, ["--host", "claude", "--cwd", str(self.cwd)])
+                    left = 1
                 self.assertEqual((rc, rec["status"]), (0, "ok"), rec)
                 self.assertEqual(len([p for p in places if p.is_dir()]), left)
                 self.assertEqual(rec["swept"]["removed"], [str(p) for p in places if not p.is_dir()])
@@ -4085,40 +4122,50 @@ launch.claude_reads = claude_reads
         self.assertFalse((Path(self.tmp.name) / "out-b").exists())
 
     def test_home_dotfiles_judges_symlinks_by_the_real_home(self):
-        # HOME が symlink の道筋でも、行き先がホームの中のドットのファイルの symlink は拒む（Codex・Grok の子）
-        from unittest import mock
+        # HOME が symlink の道筋でも、行き先がホームの中のドットのファイルの symlink は、読み取り専用の子に拒む（Codex・Grok の子。見るのは Codex）
         home = self.home.resolve()
         (home / "dotfiles").mkdir()
         (home / "dotfiles" / "npmrc").write_text("t")
         (home / ".npmrc").symlink_to(home / "dotfiles" / "npmrc")
-        link = Path(self.tmp.name) / "home-link"
-        link.symlink_to(home)
-        with mock.patch.dict(os.environ, {"HOME": str(link), "GIT_CONFIG_GLOBAL": os.devnull}):
-            self.assertIn(link / ".npmrc", load_launch().home_dotfiles())
+        self.home = Path(self.tmp.name) / "home-link"
+        self.home.symlink_to(home)
+        rc, rec = self.run_launch("codex", env_extra={"GIT_CONFIG_GLOBAL": os.devnull})
+        self.assertEqual((rc, rec["status"]), (0, "ok"), rec)
+        rules, target = fs_rules(json.loads(self.args_file.read_text())), str(home / "dotfiles" / "npmrc")
+        self.assertTrue([d for d, acc in rules.items() if acc == "deny" and (target == d or target.startswith(d + "/"))], rules)
 
     def test_claude_read_only_lets_back_the_common_git_dir_and_only_what_exists(self):
         # worktree が状態の置き場にあり、共通ディレクトリがホームの別の場所にある配置（task start の作業場所）。無い ~/.config/git は渡さない
-        from unittest import mock
         home = self.home.resolve()
-        common, wt = home / "src" / "repo" / ".git", home / ".local" / "state" / "x" / "wt"
-        for d in (common, wt, home / "conf"):
-            d.mkdir(parents=True)
+        repo, state = home / "src" / "repo", home / ".local" / "state" / "x"
+        wt = state / "wt"
+        g = ["git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@example.invalid"]
+        repo.mkdir(parents=True)
+        subprocess.run(g + ["init", "-q", "-b", "main"], check=True)
+        subprocess.run(g + ["commit", "-q", "--allow-empty", "-m", "i"], check=True)
+        subprocess.run(g + ["worktree", "add", "-q", "-b", "bb-writ/t1", str(wt)], check=True)
+        (wt / "a.txt").write_text("x\n")
+        (home / "conf").mkdir()
         (home / "conf" / "global").write_text("")  # GIT_CONFIG_GLOBAL で付け替えた全体の設定
-        launch = load_launch()
-        (home / ".bbw").mkdir()  # 設定の置き場をホーム直下のドットのディレクトリに（symlink の道筋で）付け替える。戻すドットのディレクトリと同じ道筋にしない
+        # 設定の置き場をホーム直下のドットのディレクトリに（symlink の道筋で）付け替える。戻すドットのディレクトリと同じ道筋にしない
+        shutil.copytree(self.cfg, home / ".bbw", symlinks=True)
         (home / ".bbw" / "tools" / "bin").mkdir(parents=True)  # 置き場の中の PATH の道具も戻さない
         (home / ".bb-writ").symlink_to(home / ".bbw")
-        with mock.patch.dict(os.environ, {"HOME": str(home), "BB_WRIT_STATE_DIR": str(home / ".local" / "state" / "x"),
-                                          "BB_WRIT_CONFIG_DIR": str(home / ".bb-writ"), "GIT_CONFIG_GLOBAL": str(home / "conf" / "global")}):
-            fs = launch.claude_reads(wt, common, {"PATH": f"{home / '.bbw' / 'tools' / 'bin'}:/usr/bin"}, False)
-            audit = launch.claude_reads(wt, common, {"PATH": "/usr/bin"}, True)
+        env = {"BB_WRIT_STATE_DIR": str(state), "BB_WRIT_CONFIG_DIR": str(home / ".bb-writ"), "GIT_CONFIG_GLOBAL": str(home / "conf" / "global")}
+        fs = {}
+        for role, extra in (("read", []), ("audit", ["--audit"])):
+            rc, rec = self.run_launch("claude", extra=extra, cwd=wt, path=f"{home / '.bbw' / 'tools' / 'bin'}:{self.bin}:/usr/bin:/bin", env_extra=env)
+            self.assertEqual((rc, rec["status"]), (0, "ok"), rec)
+            argv = json.loads(self.args_file.read_text())
+            fs[role] = json.loads(argv[argv.index("--settings") + 1])["sandbox"]["filesystem"]
+        fs, audit = fs["read"], fs["audit"]
         self.assertTrue(claude_readable(home / "conf" / "global", fs))
         for p in (home / ".bb-writ", home / ".bbw", home / ".bbw" / "tools"):
             self.assertFalse(claude_readable(p, fs), p)
         self.assertFalse(set(fs["allowRead"]) & set(fs["denyRead"]), fs)
         skills = str(ROOT / "skills")
         self.assertEqual((skills in fs["allowRead"], skills in audit["allowRead"]), (False, True))  # 監査役にだけ bb-writ のスキルを戻す
-        self.assertTrue(claude_readable(common, fs) and claude_readable(wt, fs), fs)
+        self.assertTrue(claude_readable(repo / ".git", fs) and claude_readable(wt, fs), fs)
         self.assertFalse(claude_readable(home / "src" / "other", fs))
         self.assertNotIn(str(home / ".config" / "git"), fs["allowRead"])
         self.assertTrue(all(os.path.lexists(a) for a in fs["allowRead"]), fs)
@@ -4516,7 +4563,8 @@ launch.claude_reads = claude_reads
             with self.subTest(f"right before starting ({name})"):
                 calls.unlink(missing_ok=True)
                 t0 = time.monotonic()
-                rc, rec = self.launch_patched("""
+                site = self.launcher_site("""
+                    import signal, subprocess
                     real = subprocess.Popen
                     class Popen(real):
                         def __init__(self, args, *k, **kw):  # 2 回目の子の CLI を起こす間際（1 回目の子は .calls に書いた）
@@ -4524,7 +4572,8 @@ launch.claude_reads = claude_reads
                                 os.kill(os.getpid(), signal.SIGTERM)
                             super().__init__(args, *k, **kw)
                     subprocess.Popen = Popen
-                    """, ["--host", "claude", "--cwd", str(self.cwd), *extra, "--timeout", "30"], env_extra={**env, "FAKE_MODE_2": "stop"})
+                """)
+                rc, rec = self.run_launch("claude", extra=[*extra, "--timeout", "30"], env_extra={**env, "FAKE_MODE_2": "stop", **site})
                 self.assertEqual((started in rec, rec.get("stopped_by_signal")), (True, int(signal.SIGTERM)), rec)  # 2 回目の子を起こした
                 # その子が TERM を受けて終わった（終了コードは届いた時機で -15・143・241。伝えなければ KILL の -9）
                 self.assertNotIn(rec["exit_code"], (0, -int(signal.SIGKILL)), rec)
@@ -4700,10 +4749,9 @@ launch.claude_reads = claude_reads
         self.assertEqual(rec["claude_login"]["org"], "different", rec)
         self.assertEqual(set(rec["claude_login"]), {"org", "note"})
         self.assertIn("claude setup-token", rec["claude_login"]["note"])
-        launch = load_launch()
-        self.assertNotEqual(launch.CLAUDE_LOGIN_NOTE, launch.CLAUDE_LOGIN_UNREAD_NOTE)
-        # 読めないときの案内と取り違えない（別の定数を出す後退を見る。2 つの定数の中身そのものを入れ替える編集は見ない: 文面は人が読む）
-        self.assertEqual(rec["claude_login"]["note"], launch.CLAUDE_LOGIN_NOTE)
+        # 読めないときの案内と取り違えない（別の組織だと言い、読めなかったとは言わない）
+        self.assertIn("のログインとは別の組織のもの", rec["claude_login"]["note"])
+        self.assertNotIn("読めなかった", rec["claude_login"]["note"])
         self.assertEqual(json.loads((Path(rec["out"]) / "record.json").read_text(encoding="utf-8"))["claude_login"], rec["claude_login"])
         last = json.loads((self.state / "delegations.jsonl").read_text(encoding="utf-8").splitlines()[-1])
         self.assertEqual(last["claude_login"], rec["claude_login"])
@@ -4771,7 +4819,6 @@ launch.claude_reads = claude_reads
         確かめが働いていないことの案内（note。claude setup-token を含む）が付く。組織の ID・問い合わせの出力の目印は、どこにも出ない。
         読めないものを same・different にする、unknown を覚える、uuid の形を見ない、通ったのに読めないときの案内を落とす、失敗した問い合わせにも
         案内を付ける、出力を写すと落ちる。"""
-        unread_note = load_launch().CLAUDE_LOGIN_UNREAD_NOTE
         for how, why, noted in (("noheader", "0 種類（終了コード 0）", True), ("401", "0 種類（終了コード 1）", False),
                                 ("two", "2 種類（終了コード 0）", True), ("notuuid", "0 種類（終了コード 0）", True)):
             with self.subTest(how):
@@ -4784,7 +4831,10 @@ launch.claude_reads = claude_reads
                     if noted:
                         self.assertEqual(set(rec["claude_login"]), {"org", "why", "note"})
                         self.assertIn("claude setup-token", rec["claude_login"]["note"])
-                        self.assertEqual(rec["claude_login"]["note"], unread_note)  # 別の組織の案内と取り違えない
+                        # 別の組織の案内と取り違えない（読めなかったと言い、確かめが働いていないことを伝える）
+                        self.assertIn("問い合わせの出力から読めなかった", rec["claude_login"]["note"])
+                        self.assertIn("この確かめ（トークンとログインの組織の比べ）は、いま働いていない", rec["claude_login"]["note"])
+                        self.assertNotIn("別の組織のもの", rec["claude_login"]["note"])
                     else:
                         self.assertEqual(set(rec["claude_login"]), {"org", "why"})
                     self.assertFalse((self.state / "claude-login.json").exists())
