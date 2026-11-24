@@ -322,7 +322,19 @@ def cli_place(p: Path) -> bool:
     return p.parent == home / ".claude" or p == home / ".config" / "anthropic"
 
 
-def cwd_residue(cwd: Path, before: set[str], use_git: bool = True) -> list[str]:
+def quiet_git(cwd: Path, env: dict | None = None) -> list[str]:
+    """書く子が書けた作業場所で動かす git の頭。git status・worktree remove が設定から走らせる命令（core.fsmonitor と、filter の
+    clean・smudge・process）を外す（コマンド行の -c は、include・config.worktree の値より強く、中で起こす git にも伝わる。
+    git 2.43 で測った。#64）。filter の名前は、命令を走らせない git config で読む。hooks（post-index-change）は status に
+    --no-optional-locks を、入れ子の設定は --ignore-submodules=all を、呼ぶ側が付ける。
+    守らない範囲: git 2.43 で測っていない命令の出どころ、利用者・指揮者が後で動かす素の git。"""
+    names = subprocess.run(["git", "config", "--name-only", "--get-regexp", r"^filter\..*\.(clean|smudge|process)$"], cwd=cwd, env=env,
+                           capture_output=True, text=True, errors="surrogateescape", timeout=GIT_TIMEOUT).stdout.split()
+    drivers = sorted({n.rsplit(".", 1)[0] for n in names})
+    return ["git", "-c", "core.fsmonitor=false", *[c for d in drivers for k in ("clean", "smudge", "process") for c in ("-c", f"{d}.{k}=")]]
+
+
+def cwd_residue(cwd: Path, before: set[str]) -> list[str]:
     """書く子の起動で対象の直下に新しくでき、中身が空のまま（空のファイルと空のディレクトリだけ。入れ子を含む）で、Git が追跡していない場所。
     Claude Code の sandbox は、守る対象のうち無いもの（.bashrc・.gitconfig・.claude/ の下など）を対象に空で作り、子の CLI が
     正常に終わると片付けるが、時間切れで止めると残った（2.1.310）。0 バイトのファイルが残ると task cleanup が未保存の変更とみなし、
@@ -339,9 +351,9 @@ def cwd_residue(cwd: Path, before: set[str], use_git: bool = True) -> list[str]:
         return p.is_file() and p.stat().st_size == 0
     new = sorted(str(p) for p in cwd.iterdir() if str(p) not in before)
     left = [p for p in new if bare(Path(p))]
-    if left and use_git and (cwd / ".git").exists():  # 追跡している（index にある）ものは子が意図して足したので数えない。
-        # 照合していない（Git でなかった対象に子が git init した）か、子が Git の管理情報を変えた後は、git を動かさず全部を返す
-        out = subprocess.run(["git", "-C", str(cwd), "ls-files", "-z", "--", *[Path(p).name for p in left]], capture_output=True, text=True, check=True, timeout=GIT_TIMEOUT)
+    if left and (cwd / ".git").exists():  # 追跡している（index にある）ものは子が意図して足したので数えない。
+        # 子が書けた設定の命令を走らせない形で（quiet_git。子が git init した対象でも）
+        out = subprocess.run([*quiet_git(cwd), "-C", str(cwd), "ls-files", "-z", "--", *[Path(p).name for p in left]], capture_output=True, text=True, check=True, timeout=GIT_TIMEOUT)
         tracked = {cwd / n.split("/")[0] for n in out.stdout.split("\0") if n}
         left = [p for p in left if Path(p) not in tracked]
     return left
@@ -361,7 +373,7 @@ def claude_places(cwd: Path, checkout: Path | None, use_git: bool = True) -> tup
     子が読めなくした場所の下（残る）、前に読めなかった場所の下の前からの空の置き場（一緒に消す）、
     起動の前の git が失敗・時間切れのときと、子が Git の管理情報を変えた後の下の階層（残る。status は前者で ok、後者で failed）、
     候補を得た後に別のプロセスが .claude を symlink に置き換えた場合（先の空の .cc-writes を消しうる）。
-    子が書けた設定・hooks・入れ子のリポジトリで後の git が命令を走らせうる形は、書く子の照合（git_trust）が止める。"""
+    ここで動かす git は、子が書けた設定・hooks・入れ子のリポジトリの命令を走らせない（quiet_git）。"""
     found, ignored_cc = {top / ".claude" for top in (cwd, checkout) if top is not None}, set()
     if not use_git:  # 子が Git の管理情報を変えた後などは、git を動かさない（偽の設定が sandbox の外で動きうる）
         return found_places(found), False
@@ -372,7 +384,7 @@ def claude_places(cwd: Path, checkout: Path | None, use_git: bool = True) -> tup
         # 追跡外のディレクトリは --untracked-files=all では行に出ない。空の置き場が出るのは、無視するもの（!!）としてだけ。
         # サブモジュールの中では git を起動しない（子が index に足した入れ子のリポジトリの設定が、sandbox の外で動く。中の無視するものは
         # もとより行に出ない）
-        status = subprocess.run(["git", "--no-optional-locks", "status", "--porcelain", "-z", "--untracked-files=all", "--ignored=matching",
+        status = subprocess.run([*quiet_git(cwd, env), "--no-optional-locks", "status", "--porcelain", "-z", "--untracked-files=all", "--ignored=matching",
                                  "--ignore-submodules=all", "--", "."],
                                 cwd=cwd, env=env, capture_output=True, timeout=GIT_TIMEOUT)
     except (OSError, subprocess.TimeoutExpired):  # git が無い・管理ファイルが FIFO で止まる。直下だけを見る
@@ -491,38 +503,6 @@ def read_head(f: Path) -> str:
     return head.decode("utf-8", "surrogateescape") if len(head) <= 4096 else f"（4 KiB を超える。{digest}）"
 
 
-def git_trust(own: Path) -> dict:
-    """書く子の後に、作業場所で素の git status が命令を走らせうる出どころ（git 2.43 で測った。#64）。
-    実効の設定（local・worktree の範囲。include・includeIf・config.worktree を git 自身が解く。fsmonitor・filter はここに出る）、
-    hooks の置き場（core.hooksPath を解いた先。status は index を書くと post-index-change を走らせる）の中身、
-    初期化した gitlink と追跡外の入れ子のリポジトリ（status は gitlink の中で、その設定・hooks を走らせる。追跡外のものは
-    git add -A で gitlink になる）。入れ子の中は子が書けるので、比べずに、在れば止める。
-    ここで動かす git（config --list・rev-parse・ls-files に -c core.fsmonitor=false）は、どの出どころの命令も走らせない（測った）。
-    数えられないものは errors に入れ、在るものとして止める。
-    守らない範囲: global・system の設定と利用者の環境、git 2.43 で測っていない命令の出どころ、commit した中身が持つ命令（届ける前の審査で読む）。"""
-    out = {"config": None, "hooks": {}, "nested": [], "errors": []}
-    try:
-        top = Path(os.fsdecode(Path(own, "gitdir").read_bytes().strip())).parent  # 作業場所の根（--cwd が下の階層でも）
-        local = subprocess.run(["git", "rev-parse", "--local-env-vars"], capture_output=True, text=True, errors="surrogateescape", timeout=GIT_TIMEOUT)
-        env = {k: v for k, v in os.environ.items() if k not in local.stdout.split()}
-        git = ["git", "-c", "core.fsmonitor=false", "--git-dir", str(own), "--work-tree", str(top)]
-        run = lambda *args: subprocess.run(git + list(args), cwd=top, env=env, capture_output=True, check=True, timeout=GIT_TIMEOUT).stdout
-        rows = run("config", "--list", "--includes", "--show-origin", "--show-scope", "-z").split(b"\0")  # 範囲・出どころ・設定の 3 つ組
-        triples = [rows[i:i + 3] for i in range(0, len(rows) - 2, 3)]
-        out["config"] = [b"\t".join(t) for t in triples if t[0] in (b"local", b"worktree")]  # 子が書ける範囲。global・system は子の外
-        hooks = top / os.fsdecode(run("rev-parse", "--git-path", "hooks").strip())  # 相対の hooksPath は作業場所の根から
-        files = sorted(f for f in hooks.rglob("*") if f.is_file() or f.is_symlink()) if hooks.is_dir() else []
-        out["hooks"] = {str(f): read_child_file(f)[0] for f in files}
-        staged = run("ls-files", "-s", "-z").split(b"\0")
-        others = run("ls-files", "-o", "--exclude-standard", "-z").split(b"\0")
-        paths = {os.fsdecode(e.split(b"\t", 1)[1]) for e in staged if e.startswith(b"160000 ") and b"\t" in e}
-        out["nested"] = sorted({str(top / p) for p in paths if os.path.lexists(top / p / ".git")}  # 初期化したもの（.git の形を問わない）
-                               | {str(top / os.fsdecode(e[:-1])) for e in others if e.endswith(b"/")})  # ls-files -o は入れ子に入らず「名前/」で出す
-    except (OSError, ValueError, subprocess.SubprocessError) as e:
-        out["errors"].append(f"{e!r}"[:300])
-    return out
-
-
 def git_snapshot(own: Path, common: Path, cwd: Path) -> dict:
     """書く子の前後で比べる Git の管理情報。子の書いた .git ファイルを読まないよう、共通ディレクトリを明示して読む。"""
     for f in (common / "config", common / "packed-refs"):  # git が開いたまま止まる・尽きるもの（FIFO・デバイス）を渡さない
@@ -540,8 +520,7 @@ def git_snapshot(own: Path, common: Path, cwd: Path) -> dict:
         files += sorted(f for f in d.rglob("*") if f.is_file() or f.is_symlink()) if d.is_dir() else []
     return {"refs": dict(r.split(" ", 1) for r in refs if " " in r),
             "files": {str(f): read_child_file(f)[0] for f in files},
-            "head": read_head(own / "HEAD"),
-            "trust": git_trust(own)}
+            "head": read_head(own / "HEAD")}
 
 
 def git_changes(before: dict, after: dict, common: Path) -> list[str]:
@@ -556,13 +535,6 @@ def git_changes(before: dict, after: dict, common: Path) -> list[str]:
             undo = f"git --git-dir {common} update-ref {r} {old}" if old else f"git --git-dir {common} update-ref -d {r}"
             out.append(f"{r}: {old or '(無し)'} → {new or '(削除)'}（戻すなら: {undo}）")
     out += sorted(f for f in set(before["files"]) | set(after["files"]) if before["files"].get(f) != after["files"].get(f))
-    b, a = before["trust"], after["trust"]  # git status が命令を走らせうる出どころ（git_trust）
-    if a["config"] != b["config"]:
-        out.append("Git の実効の設定（include の先・config.worktree を含む）が変わった: " + "、".join(
-            sorted({os.fsdecode(r) for r in set(a["config"] or []) ^ set(b["config"] or [])}))[:300])
-    out += sorted(f"{f}（hooks）" for f in set(b["hooks"]) | set(a["hooks"]) if b["hooks"].get(f) != a["hooks"].get(f))
-    out += [f"{d}（入れ子のリポジトリ。git status・git add -A が、子の書けるその設定・hooks で動きうる）" for d in a["nested"]]
-    out += [f"git status の出どころを数えられない: {e}" for e in a["errors"]]
     if after["head"] != before["head"]:
         out.append(f"HEAD: {before['head']!r} → {after['head']!r}")
     return out
@@ -1302,14 +1274,16 @@ def clean_head(cwd: Path) -> str | None:
     """対象の HEAD の commit。Git の作業ツリーでないか、未 commit の変更（staged・追跡外のファイルを含む。無視するものは除く）があれば None。
     子が見たものを commit に結び付け、work.py の --reviewed がこの記録と照らす（Issue #14）。
     親の GIT_DIR・GIT_WORK_TREE など（git rev-parse --local-env-vars）は外す（別の場所を見て、対象の変更を見落とす）。
-    追跡外のファイルとサブモジュールの中の変更は、設定（status.showUntrackedFiles=no、diff.ignoreSubmodules・submodule.<名>.ignore）に関わらず数える。
-    assume-unchanged・skip-worktree・fsmonitor で隠した変更は見分けない。"""
+    追跡外のファイルと、サブモジュールが別の commit を指す変更は、設定（status.showUntrackedFiles=no、diff.ignoreSubmodules・
+    submodule.<名>.ignore）に関わらず数える。書く子の後の作業場所でも動くので、子が書けた設定の命令を走らせない形で見る（quiet_git、
+    --no-optional-locks。サブモジュールの中には入らず、中の未 commit の変更は数えない。#64）。
+    assume-unchanged・skip-worktree で隠した変更は見分けない。"""
     try:
         local = subprocess.run(["git", "rev-parse", "--local-env-vars"], capture_output=True, text=True, errors="surrogateescape", timeout=GIT_TIMEOUT)
         env = {k: v for k, v in os.environ.items() if k not in local.stdout.split()}
         head = subprocess.run(["git", "rev-parse", "--verify", "HEAD^{commit}"], cwd=cwd, env=env, capture_output=True, text=True, errors="surrogateescape", timeout=GIT_TIMEOUT)
         # バイトで受ける（ファイル名は UTF-8 とは限らない）。index を書き直すロックを取らない（利用者の git と競わない）
-        status = subprocess.run(["git", "--no-optional-locks", "status", "--porcelain", "--untracked-files=normal", "--ignore-submodules=none"], cwd=cwd, env=env,
+        status = subprocess.run([*quiet_git(cwd, env), "--no-optional-locks", "status", "--porcelain", "--untracked-files=normal", "--ignore-submodules=dirty"], cwd=cwd, env=env,
                                 capture_output=True, timeout=GIT_TIMEOUT)
     except (OSError, subprocess.TimeoutExpired):  # git が無い・対象が無い・管理ファイルが FIFO で止まる
         return None
@@ -2088,7 +2062,7 @@ def main() -> int:
                                                       f"詳細: {launcher_error(out_dir)}"] + rec.get("problems", []))
             if cwd_before is not None:
                 try:
-                    rec["cwd_residue"] = cwd_residue(a.cwd, cwd_before, snapshot is not None and "git" not in blocked)
+                    rec["cwd_residue"] = cwd_residue(a.cwd, cwd_before)
                 except Exception as e:
                     rec.setdefault("cwd_residue", [])
                     blocked.append("cwd")
@@ -2114,8 +2088,8 @@ def main() -> int:
                 rec.update(status="failed", problems=["子の起動の後、ホームに空のファイル・ディレクトリが新しく残った。中身を確かめて消す"
                                                       "（空の ~/.bash_profile があると、ログインシェルが ~/.profile と ~/.bashrc を読まない）"]
                            + rec["home_residue"][:20] + rec.get("problems", []))
-    if rec["head"] and "git" in blocked:  # 子が変えた Git の管理情報で git を動かさない（偽の設定が sandbox の外で動きうる）
-        rec.update(head=None, head_lost="子が Git の管理情報を変えたので、終わりに HEAD と作業ツリーを確かめなかった")
+    if rec["head"] and a.write:  # 書く子の後は、子が書けた設定で素の git status を動かさない。work.py は書く子の head を数えない
+        rec.update(head=None, head_lost="書く子の後は、HEAD と作業ツリーを確かめない（子が書けた設定の命令を走らせないため）")
     elif rec["head"] and clean_head(a.cwd) != rec["head"]:  # 確かめた後、子の終わりまでに作業ツリーが変わった（子が見たものが commit と違いうる）
         rec.update(head=None, head_lost="子の起動の前に確かめた後、終わりまでに対象の HEAD か作業ツリーが変わったか、終わりに確かめられなかった")
     elif rec["head"] and a.resume and (seen := next((h for h in [a.prev_head, *(r["saw"] for r in a.history if "saw" in r)] if h != rec["head"]), rec["head"])) != rec["head"]:

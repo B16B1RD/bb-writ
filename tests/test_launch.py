@@ -361,18 +361,25 @@ FAKE_CLAUDE = textwrap.dedent(r'''
         os.makedirs(os.path.dirname(place) or ".", exist_ok=True)
         open(place, "a").write(os.environ["FAKE_APPEND_TEXT"].replace("@ARGS@", os.environ["FAKE_ARGS"]))
         os.chmod(place, 0o755)
+    if os.environ.get("FAKE_MODIFY"):  # 追跡するファイルの更新時刻だけを進める（大きさが同じなので、status は filter を通して中身を比べ、index を書き直す）
+        import time as _t
+        os.utime(os.environ["FAKE_MODIFY"], (_t.time() + 5, _t.time() + 5))
     if os.environ.get("FAKE_LEAVE_EMPTY"):  # 対象の直下に空のファイルを残す（cwd_residue が index と照らす道を通す）
         open("left-empty", "w").close()
     if mode == "git-init-tamper":  # Git でない対象で git init し、設定に命令を置く（launcher は起動の前に照合する snapshot を持たない）
         import shlex
         subprocess.run(["git", "init", "-q"])
         subprocess.run(["git", "config", "core.fsmonitor", "touch " + shlex.quote(os.environ["FAKE_ARGS"] + ".pwned")])
-    if mode == "nested-untracked":  # 追跡外の入れ子のリポジトリを作る（git add -A で gitlink になる）
-        subprocess.run(["git", "init", "-q", "deep/x/nested"])
-    if mode in ("sub-config", "sub2-config"):  # 前からある初期化したサブモジュールの設定に命令を置く（.git ディレクトリ・.git ファイルの先）
-        import shlex
-        place = "sub/.git/config" if mode == "sub-config" else ".sub2git/config"
-        open(place, "a").write(f"[core]\n\tfsmonitor = touch {shlex.quote(os.environ['FAKE_ARGS'] + '.pwned')}\n")
+    if mode == "tamper-submodule-filter":  # 入れ子のリポジトリの設定に filter を置き、サブモジュールとして index に足す（入れ子の filter の名前は上書きされない）
+        import shlex, time as _t
+        subprocess.run(["git", "init", "-q", "nested"])
+        open("nested/b.txt", "w").write("b\n")
+        open("nested/.gitattributes", "w").write("b.txt filter=y\n")
+        subprocess.run(git + ["-C", "nested", "add", "b.txt", ".gitattributes"])
+        subprocess.run(git + ["-C", "nested", "commit", "-q", "-m", "x"])
+        subprocess.run(["git", "-C", "nested", "config", "filter.y.clean", "sh -c " + shlex.quote("touch " + shlex.quote(os.environ["FAKE_ARGS"] + ".pwned") + "; cat")])
+        subprocess.run(["git", "add", "nested"], capture_output=True)
+        os.utime("nested/b.txt", (_t.time() + 5, _t.time() + 5))
     if mode == "tamper-submodule":  # 入れ子のリポジトリの設定に命令を置き、サブモジュールとして index に足す（snapshot は見ない）
         subprocess.run(["git", "init", "-q", "nested"])
         subprocess.run(git + ["-C", "nested", "commit", "-q", "--allow-empty", "-m", "x"])
@@ -1188,7 +1195,11 @@ class TestLaunch(unittest.TestCase):
         self.assertEqual((rc, rec["head"]), (0, git("rev-parse", "HEAD")), rec)
         ignore = Path(self.tmp.name) / "ignore-submodules"
         ignore.write_text("[diff]\n\tignoreSubmodules = all\n")
-        (self.cwd / "s" / "x.txt").write_text("x\n")
+        (self.cwd / "s" / "x.txt").write_text("x\n")  # サブモジュールの中の未 commit の変更は数えない（中の設定で命令を走らせないため。#64）
+        rc, rec = self.run_launch("claude", env_extra={"GIT_CONFIG_GLOBAL": str(ignore)})
+        self.assertEqual((rc, rec["head"]), (0, git("rev-parse", "HEAD")), rec)
+        git("add", "x.txt", cwd=self.cwd / "s")
+        git("commit", "-q", "-m", "x", cwd=self.cwd / "s")  # サブモジュールが別の commit を指すと、無視する設定があっても数える
         rc, rec = self.run_launch("claude", env_extra={"GIT_CONFIG_GLOBAL": str(ignore)})
         self.assertEqual((rc, rec["head"]), (0, None), rec)
 
@@ -3851,8 +3862,8 @@ class TestLaunch(unittest.TestCase):
         rc, rec = self.run_launch("claude", cwd=wt)
         self.assertEqual((rec["status"], bool(rec["head"])), ("ok", True), rec)
         self.assertIn("指摘の扱い", rec["next"])
-        rc, rec = self.run_launch("claude", extra=["--write"], cwd=wt)  # 書く子は、head があっても審査に数えない
-        self.assertEqual((rec["status"], bool(rec["head"])), ("ok", True), rec)
+        rc, rec = self.run_launch("claude", extra=["--write"], cwd=wt)  # 書く子は審査に数えない（書く子の後は head を確かめず、null）
+        self.assertEqual((rec["status"], rec["head"], bool(rec["saw"])), ("ok", None, True), rec)
         self.assertNotIn("next", rec)
         body = {"conclusion": "c", "evidence": [{"what": "読んだ", "where": "a.txt:1"}], "unknowns": []}  # 実行の欄が無い報告
         rc, rec = self.run_launch("claude", cwd=wt, env_extra={"FAKE_TEXT": "```json\n" + json.dumps(body) + "\n```"})
@@ -3898,152 +3909,67 @@ class TestLaunch(unittest.TestCase):
         (repo / ".git" / "info" / "exclude").write_text("a.txt\n")  # 偽の子の報告が証拠に指すファイル
         return repo, wt
 
-    def test_a_child_tampering_git_runs_no_git_after_it(self):
-        # 子が Git の設定に命令を足して launcher が止めた後も、終わりの clean_head と cwd_residue が git を動かした（#64）
-        for mode in ("tamper-config", "tamper-submodule"):
-            with self.subTest(mode=mode):
-                _, wt = self.clean_worktree(mode + "-clean")
+    def test_a_write_child_planting_git_commands_does_not_get_them_run(self):
+        # 書く子が、git status・ls-files が走らせる命令を仕込んでも、launcher は走らせない（#64。git 2.43 で測った出どころごと）
+        git = ["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid"]
+        touch = "#!/bin/sh\ntouch @ARGS@.pwned\n"  # fsmonitor・hooks（入力を読まない）
+        clean = "#!/bin/sh\ntouch @ARGS@.pwned\ncat\n"  # filter の clean（入力をそのまま返す）
+        fsmonitor = "[core]\n\tfsmonitor = touch @ARGS@.pwned\n"
+        cases = {  # 段: (前からある利用者の設定 [(鍵, 値)]、無視させる名前、子が書くファイル、中身、子が書き換える追跡するファイル)
+            "config": ([], None, None, None, None),  # 偽の子の tamper-config が共通の config に足す
+            "include": ([("include.path", "@WT@/.gitcfg")], ".gitcfg", "@WT@/.gitcfg", fsmonitor, None),
+            "include-filter": ([("include.path", "@WT@/.gitcfg")], ".gitcfg", "@WT@/.gitcfg",
+                               "[filter \"x\"]\n\tclean = \"sh -c 'touch @ARGS@.pwned; cat'\"\n", "a.txt"),  # 設定ファイルの ; は注釈なので引用符で囲む
+            "worktree-config": ([("extensions.worktreeConfig", "true")], None, "@OWN@/config.worktree", fsmonitor, None),
+            "script": ([("core.fsmonitor", "./fsmon.sh")], "fsmon.sh", "@WT@/fsmon.sh", touch, None),
+            "filter": ([("filter.x.clean", "./clean.sh")], "clean.sh", "@WT@/clean.sh", clean, "a.txt"),
+            "hooks": ([("core.hooksPath", ".hk")], ".hk/", "@WT@/.hk/post-index-change", touch, "a.txt"),
+            "submodule": ([], None, None, None, None),  # 偽の子の tamper-submodule が入れ子のリポジトリを gitlink にする
+        }
+        for case, (settings, ignore, place, text, modify) in cases.items():
+            with self.subTest(case=case):
+                repo, wt = self.clean_worktree("plant-" + case)
+                own = Path(subprocess.run(["git", "-C", str(wt), "rev-parse", "--absolute-git-dir"], capture_output=True, text=True,
+                                          check=True).stdout.strip())
+                if case in ("include-filter", "filter"):  # a.txt を filter の対象にして commit しておく（子が書き換えると status が clean を走らせる）
+                    (wt / ".gitattributes").write_text("a.txt filter=x\n")
+                    subprocess.run(git + ["-C", str(wt), "add", "-f", ".gitattributes", "a.txt"], check=True)
+                    subprocess.run(git + ["-C", str(wt), "commit", "-q", "-m", "attr"], check=True)
+                if case == "hooks":
+                    subprocess.run(git + ["-C", str(wt), "add", "-f", "a.txt"], check=True)
+                    subprocess.run(git + ["-C", str(wt), "commit", "-q", "-m", "a"], check=True)
+                if ignore:
+                    with open(repo / ".git" / "info" / "exclude", "a") as f:
+                        f.write(ignore + "\n")
+                for key, value in settings:
+                    subprocess.run(["git", "-C", str(repo), "config", key, value.replace("@WT@", str(wt))], check=True)
+                if case.startswith("include"):
+                    (wt / ".gitcfg").write_text("")
+                env = {"FAKE_LEAVE_EMPTY": "1"}  # cwd_residue の ls-files も通す
+                if place:
+                    env.update(FAKE_APPEND_FILE=place.replace("@WT@", str(wt)).replace("@OWN@", str(own)), FAKE_APPEND_TEXT=text)
+                if modify:
+                    env["FAKE_MODIFY"] = modify
                 Path(str(self.args_file) + ".pwned").unlink(missing_ok=True)
-                rc, rec = self.run_launch("claude", mode, extra=["--write"], cwd=wt, env_extra={"FAKE_LEAVE_EMPTY": "1"})
-                self.assertEqual((rec["status"], "git" in rec["blocked"]), ("failed", True), rec)
-                self.assertIn("git を動かす前に", rec["problems"][0])
-                self.assertFalse(Path(str(self.args_file) + ".pwned").exists(), rec)  # 子が足した命令は走らない
-                self.assertEqual((rec["head"], rec["saw"] is not None), (None, True), rec)  # 起動の前は確かめ、終わりは確かめない
-                self.assertIn("管理情報を変えた", rec["head_lost"])
-                self.assertIn(str(wt.resolve() / "left-empty"), rec["cwd_residue"])  # 記録の道筋は解決したもの（macOS の一時の置き場は symlink の下）  # index と照らさず、残りとして返す
+                mode = {"config": "tamper-config", "submodule": "tamper-submodule-filter"}.get(case, "good")
+                rc, rec = self.run_launch("claude", mode, extra=["--write"], cwd=wt, env_extra=env)
+                self.assertIsNotNone(rec["saw"], rec)  # 起動の前はきれいな作業ツリー（終わりの clean_head が走る道を通す）
+                self.assertIsNone(rec["head"], rec)  # 書く子の後は確かめない
+                self.assertFalse(Path(str(self.args_file) + ".pwned").exists(), rec)
+                rc, review = self.run_launch("claude", cwd=wt)  # 書く子の後の作業場所で審査役を立てる（起動の前の clean_head）
+                self.assertFalse(Path(str(self.args_file) + ".pwned").exists(), (case, review))
+                # 仕込みが本物であることの確かめ: 素の git status は、その命令を走らせる（submodule・config 以外は）
+                if case not in ("config",):
+                    subprocess.run(["git", "-C", str(wt), "status", "--porcelain"], capture_output=True, stdin=subprocess.DEVNULL, timeout=60)
+                    self.assertTrue(Path(str(self.args_file) + ".pwned").exists(), (case, rec))
 
     def test_a_write_child_making_a_repository_in_a_target_outside_git_runs_no_git_after_it(self):
-        # Git でない対象では照合が無く、cwd_residue が子の作った .git の設定で ls-files を動かした（1 周目の条件 (5) の子）
+        # Git でない対象で子が git init して設定に命令を置いても、cwd_residue の ls-files は走らせない（1 周目の条件 (5) の子）
         Path(str(self.args_file) + ".pwned").unlink(missing_ok=True)
         rc, rec = self.run_launch("claude", "git-init-tamper", extra=["--write"], env_extra={"FAKE_LEAVE_EMPTY": "1"})
         self.assertTrue((self.cwd / ".git").is_dir(), rec)  # 偽の子が git init できた
         self.assertFalse(Path(str(self.args_file) + ".pwned").exists(), rec)
-        self.assertIn(str(self.cwd.resolve() / "left-empty"), rec["cwd_residue"], rec)  # index と照らさず、残りとして返す
-
-    def test_a_write_child_making_a_nested_repository_is_stopped(self):
-        _, wt = self.clean_worktree("nested")
-        rc, rec = self.run_launch("claude", "nested-untracked", extra=["--write"], cwd=wt)
-        self.assertEqual((rec["status"], "git" in rec["blocked"]), ("failed", True), rec)
-        self.assertTrue([p for p in rec["problems"] if p.startswith(str(wt.resolve() / "deep" / "x" / "nested")) and "入れ子のリポジトリ" in p], rec)
-
-    def test_a_write_child_changing_a_submodule_config_is_stopped(self):
-        # 前からある初期化した入れ子は、中の設定を子が書けるので、在れば止める（.git の形と --cwd の階層によらない）
-        git = ["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid"]
-        for mode, cwd_below in (("sub-config", False), ("sub2-config", False), ("sub-config", True), ("sub-link", False)):
-            with self.subTest(mode=mode, cwd_below=cwd_below):
-                tag = mode + ("-below" if cwd_below else "")
-                repo, wt = self.clean_worktree(tag)
-                if mode == "sub2-config":  # .git がファイル（gitdir: …）で、設定がその先にあるサブモジュール
-                    subprocess.run(["git", "init", "-q", "--separate-git-dir", str(wt / ".sub2git"), str(wt / "sub2")], check=True)
-                    with open(repo / ".git" / "info" / "exclude", "a") as f:
-                        f.write(".sub2git/\n")
-                    name = "sub2"
-                elif mode == "sub-link":  # .git が、作業場所の外の git dir への symlink
-                    outside = Path(self.tmp.name) / (tag + "-gitdir")
-                    subprocess.run(["git", "init", "-q", "--bare", str(outside)], check=True)
-                    subprocess.run(["git", "--git-dir", str(outside), "config", "core.bare", "false"], check=True)
-                    (wt / "sub").mkdir()
-                    (wt / "sub" / ".git").symlink_to(outside)
-                    name = "sub"
-                else:
-                    subprocess.run(["git", "init", "-q", str(wt / "sub")], check=True)
-                    name = "sub"
-                subprocess.run(git + ["-C", str(wt / name), "commit", "-q", "--allow-empty", "-m", "x"], check=True)
-                subprocess.run(git + ["-C", str(wt), "add", name], check=True, capture_output=True)
-                subprocess.run(git + ["-C", str(wt), "commit", "-q", "-m", "sub"], check=True)
-                (wt / "pkg").mkdir()
-                (wt / "pkg" / "a.txt").write_text("x\n")  # 下の階層の --cwd でも、偽の子の報告の証拠が在る
-                subprocess.run(git + ["-C", str(wt), "add", "-f", "pkg/a.txt"], check=True)  # a.txt は除外の規則に当たる
-                subprocess.run(git + ["-C", str(wt), "commit", "-q", "-m", "pkg"], check=True)
-                Path(str(self.args_file) + ".pwned").unlink(missing_ok=True)
-                rc, rec = self.run_launch("claude", "good" if mode == "sub-link" else mode, extra=["--write"],
-                                          cwd=wt / "pkg" if cwd_below else wt)
-                self.assertEqual((rec["status"], "git" in rec["blocked"]), ("failed", True), rec)
-                self.assertTrue([p for p in rec["problems"] if p.startswith(str(wt.resolve() / name)) and "入れ子のリポジトリ" in p], rec)
-                self.assertFalse(Path(str(self.args_file) + ".pwned").exists(), rec)
-
-    def test_a_write_child_changing_where_git_finds_commands_is_stopped(self):
-        # 測った表の出どころ: include の先・config.worktree・hooksPath の hooks。どれも書く子が書ける場所
-        fsmonitor = "[core]\n\tfsmonitor = touch @ARGS@.pwned\n"
-        for case in ("include", "hooks", "worktree-config"):
-            with self.subTest(case=case):
-                repo, wt = self.clean_worktree("where-" + case)
-                own = Path(subprocess.run(["git", "-C", str(wt), "rev-parse", "--absolute-git-dir"], capture_output=True, text=True,
-                                          check=True).stdout.strip())
-                if case == "include":
-                    (wt / ".gitcfg").write_text("")
-                    subprocess.run(["git", "-C", str(repo), "config", "include.path", str(wt / ".gitcfg")], check=True)
-                    place, text, exclude = str(wt / ".gitcfg"), fsmonitor, ".gitcfg"
-                elif case == "hooks":
-                    (wt / ".hk").mkdir()
-                    subprocess.run(["git", "-C", str(repo), "config", "core.hooksPath", ".hk"], check=True)
-                    place, text, exclude = str(wt / ".hk" / "post-index-change"), "#!/bin/sh\ntouch @ARGS@.pwned\n", ".hk/"
-                else:  # 書く子は自分の git dir（worktrees/<名>）に書ける
-                    subprocess.run(["git", "-C", str(repo), "config", "extensions.worktreeConfig", "true"], check=True)
-                    place, text, exclude = str(own / "config.worktree"), fsmonitor, None
-                if exclude:
-                    with open(repo / ".git" / "info" / "exclude", "a") as f:
-                        f.write(exclude + "\n")
-                Path(str(self.args_file) + ".pwned").unlink(missing_ok=True)
-                rc, rec = self.run_launch("claude", extra=["--write"], cwd=wt, env_extra={"FAKE_APPEND_FILE": place, "FAKE_APPEND_TEXT": text})
-                self.assertEqual((rec["status"], "git" in rec["blocked"]), ("failed", True), rec)
-                self.assertFalse(Path(str(self.args_file) + ".pwned").exists(), rec)
-
-    def test_a_write_child_is_stopped_when_git_sources_cannot_be_counted(self):
-        # 前も後も数えられないと、前後の差にならず通っていた（1 周目の審査）
-        _, wt = self.clean_worktree("uncounted")
-        patch = """
-            def broken(own):
-                return {"config": None, "hooks": {}, "nested": [], "errors": ["TimeoutExpired"]}
-            launch.git_trust = broken
-        """
-        rc, rec = self.launch_patched(patch, ["--host", "claude", "--cwd", str(wt), "--write"])
-        self.assertEqual((rec["status"], "git" in rec["blocked"]), ("failed", True), rec)
-        self.assertTrue([p for p in rec["problems"] if "数えられない" in p], rec)
-
-    def test_uninitialized_or_ignored_nested_repositories_do_not_stop_a_write_child(self):
-        git = ["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid"]
-        repo, wt = self.clean_worktree("quiet")
-        head = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"], capture_output=True, text=True, check=True).stdout.strip()
-        subprocess.run(["git", "-C", str(wt), "update-index", "--add", "--cacheinfo", f"160000,{head},vendor/lib"], check=True)  # 未初期化の gitlink
-        subprocess.run(git + ["-C", str(wt), "commit", "-q", "-m", "gitlink"], check=True)
-        with open(repo / ".git" / "info" / "exclude", "a") as f:
-            f.write("cache/\n")
-        subprocess.run(["git", "init", "-q", str(wt / "cache" / "pkg")], check=True)  # 無視するディレクトリの中の入れ子（status は入らない）
-        rc, rec = self.run_launch("claude", extra=["--write"], cwd=wt)
-        self.assertEqual((rec["status"], rec["blocked"]), ("ok", []), rec)
-
-    def test_git_trust_reads_only_the_scopes_a_child_can_write(self):
-        from unittest import mock
-        launch = load_launch()
-        repo, wt = self.worktree("scopes")
-        own = Path(subprocess.run(["git", "-C", str(wt), "rev-parse", "--absolute-git-dir"], capture_output=True, text=True, check=True).stdout.strip())
-        subprocess.run(["git", "-C", str(repo), "config", "extensions.worktreeConfig", "true"], check=True)
-        subprocess.run(["git", "-C", str(wt), "config", "--worktree", "user.name", "in-worktree"], check=True)
-        home = Path(self.tmp.name) / "scope-home"
-        home.mkdir()
-        (home / ".gitconfig").write_text("[user]\n\temail = someone@example.invalid\n")
-        with mock.patch.dict(os.environ, {"HOME": str(home), "XDG_CONFIG_HOME": str(home / ".config"), "GIT_CONFIG_GLOBAL": str(home / ".gitconfig")}):
-            rows = launch.git_trust(own)["config"]
-        self.assertTrue(rows and all(r.startswith((b"local\t", b"worktree\t")) for r in rows), rows)  # 利用者の global は子の外
-        self.assertTrue([r for r in rows if r.startswith(b"worktree\t")], rows)  # config.worktree は子が書ける
-
-    def test_git_trust_runs_no_command_from_where_git_finds_commands(self):
-        launch = load_launch()
-        repo, wt = self.worktree("quiet-trust")
-        own = Path(subprocess.run(["git", "-C", str(wt), "rev-parse", "--absolute-git-dir"], capture_output=True, text=True, check=True).stdout.strip())
-        marker = Path(self.tmp.name) / "trust-ran"
-        for key, value in (("core.fsmonitor", f"touch '{marker}'"), ("filter.x.clean", f"sh -c 'touch {marker}; cat'"), ("core.hooksPath", ".hk")):
-            subprocess.run(["git", "-C", str(repo), "config", key, value], check=True)
-        (wt / ".gitattributes").write_text("a.txt filter=x\n")
-        (wt / ".hk").mkdir()
-        (wt / ".hk" / "post-index-change").write_text(f"#!/bin/sh\ntouch '{marker}'\n")
-        (wt / ".hk" / "post-index-change").chmod(0o755)
-        subprocess.run(["git", "init", "-q", str(wt / "inner")], check=True)
-        found = launch.git_trust(own)
-        self.assertEqual((found["nested"], found["errors"]), ([str(wt.resolve() / "inner")], []), found)
-        self.assertIn(str(wt.resolve() / ".hk" / "post-index-change"), found["hooks"])
-        self.assertFalse(marker.exists(), found)  # 数えるための git は、どの出どころの命令も走らせない（素の status は走らせる）
+        self.assertIn(str(self.cwd.resolve() / "left-empty"), rec["cwd_residue"], rec)
 
     def test_write_child_may_commit_only_to_its_own_branch(self):
         _, wt = self.worktree("own")

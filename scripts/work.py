@@ -781,8 +781,22 @@ def contained(repo, commit, ref, look_only=False):
     return p.returncode == 0 and p.stdout.split()[0] == git(repo, 'rev-parse', ref + '^{tree}')
 
 
-def clean(d, ignored=False):
-    return not git(d, 'status', '--porcelain', '--untracked-files=all', *(['--ignored=matching'] if ignored else []))
+def quiet(d):
+    """書く子が書けた場所で動かす git に付ける -c。git status・worktree remove が設定から走らせる命令（core.fsmonitor と
+    filter の clean・smudge・process）を外す（コマンド行の -c は include・config.worktree の値より強く、中で起こす git にも伝わる。
+    git 2.43 で測った。#64）。filter の名前は、命令を走らせない git config で読む。launch.py の quiet_git と同じ。"""
+    p = subprocess.run(['git', '-C', str(d), 'config', '--name-only', '--get-regexp', r'^filter\..*\.(clean|smudge|process)$'],
+                       stdin=subprocess.DEVNULL, capture_output=True, text=True)
+    drivers = sorted({n.rsplit('.', 1)[0] for n in p.stdout.split()})
+    return ['-c', 'core.fsmonitor=false', *[c for x in drivers for k in ('clean', 'smudge', 'process') for c in ('-c', f'{x}.{k}=')]]
+
+
+def clean(d, ignored=False, child=False):
+    """未保存の変更が無いか。命令を走らせない形の status（quiet、hooks を走らせない --no-optional-locks）で見る。
+    child（書く子が書けた作業場所）では、入れ子のリポジトリの設定を読まないよう、サブモジュールに入らない
+    （初期化したサブモジュールのある作業場所は、worktree remove がもとより拒む）。"""
+    return not git(d, *quiet(d), '--no-optional-locks', 'status', '--porcelain', '--untracked-files=all',
+                   *(['--ignore-submodules=all'] if child else []), *(['--ignored=matching'] if ignored else []))
 
 
 class LeaseRefused(Exception):
@@ -1002,7 +1016,7 @@ def task_command(a):
             if git(a.dir, 'symbolic-ref', '--quiet', 'HEAD') != 'refs/heads/' + task['branch']:
                 raise ValueError('タスクのブランチが変更されている。元のブランチに戻して保存先を照合する')
             journal = settle_integration(rr, repo, own=str(a.dir.resolve()))
-            if not clean(a.dir, ignored=True) or pending(wr) or (journal and journal['dir'] == str(a.dir.resolve())):
+            if not clean(a.dir, ignored=True, child=True) or pending(wr) or (journal and journal['dir'] == str(a.dir.resolve())):
                 raise ValueError('未保存の変更・未完了の操作がある。作業場所を保持する')
             # 同じブランチ自身の名前を保存先として使うと、削除後に変更を失う。
             ref = git(repo, 'rev-parse', '--symbolic-full-name', a.saved)
@@ -1016,7 +1030,7 @@ def task_command(a):
                 raise ValueError(f'保存先 {ref} に、このタスクの変更が入っていない。統合してから片付ける')
             write(registry / (task['task'] + '.json'), {**task, 'cleanup': {'saved': ref, 'commit': head}})
             try:
-                git(repo, 'worktree', 'remove', str(a.dir.resolve()), fds=(rf, wf))
+                git(repo, *quiet(a.dir), 'worktree', 'remove', str(a.dir.resolve()), fds=(rf, wf))  # 中で status を起こす
             except ValueError:
                 if a.dir.exists():  # 拒否された（lock、初期化したサブモジュール）。片付けは始まっていない。--force で通さない（中身を失う）
                     write(registry / (task['task'] + '.json'), task)
@@ -1064,7 +1078,7 @@ def integrate(a):
             raise ValueError('別の統合が未完了か、統合先に未 commit の変更がある。task list の integration から担当と作業場所を調べ、先に照合する')
         if head != a.verified or target != a.expected:
             raise ValueError('検証した commit または統合先が変わった。最新の統合先を取り込み、再検証する')
-        if not clean(a.dir) or not clean(dest):
+        if not clean(a.dir, child=True) or not clean(dest):
             raise ValueError('作業場所か統合先に未 commit の変更がある。変更は保持する')
         if sh(['git', 'merge-base', '--is-ancestor', target, head], repo)[0]:
             raise ValueError('統合先が作業場所に入っていない。最新の統合先を取り込み、再検証する')

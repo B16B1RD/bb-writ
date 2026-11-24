@@ -3581,3 +3581,81 @@ class TestOpRun(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestQuietGit(unittest.TestCase):
+    """書く子が書けた作業場所で、work.py の git（task cleanup の status・worktree remove）は、子が仕込んだ設定・hooks・入れ子の
+    リポジトリの命令を走らせない（#64。git 2.43 で測った出どころごと）。仕込みが本物であることは、素の git status で確かめる。"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        t = Path(self.tmp.name).resolve()
+        self.repo, self.marker = t / "repo", t / "planted-ran"
+        env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+        self.env = {**env, "BB_WRIT_STATE_DIR": str(t / "state"), "HOME": str(t), "XDG_CONFIG_HOME": str(t / ".config"),
+                    "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}
+        self.repo.mkdir()
+        self.git("init", "-q", "-b", "main", cwd=self.repo)
+        (self.repo / "a.txt").write_text("a\n")
+        (self.repo / ".gitattributes").write_text("a.txt filter=x\n")
+        self.git("add", "a.txt", ".gitattributes", cwd=self.repo)
+        self.git("commit", "-q", "-m", "init", cwd=self.repo)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def git(self, *args, cwd):
+        return subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", *args], env=self.env, cwd=cwd, check=True,
+                              capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=60).stdout.strip()
+
+    def work(self, *args):
+        p = subprocess.run([sys.executable, str(WORK), *args], env=self.env, capture_output=True, text=True, timeout=120)
+        return p.returncode, json.loads(p.stdout)
+
+    def test_task_cleanup_runs_no_git_command_a_child_planted(self):
+        touch = f"#!/bin/sh\ntouch '{self.marker}'\n"
+        for case in ("script", "filter", "hooks", "submodule", "worktree-config"):
+            with self.subTest(case=case):
+                rc, started = self.work("task", "start", "--dir", str(self.repo), "--holder", "A")
+                wt, token = Path(started["dir"]), started["token"]
+                exclude = Path(self.git("rev-parse", "--path-format=absolute", "--git-common-dir", cwd=wt)) / "info" / "exclude"
+                exclude.parent.mkdir(exist_ok=True)
+                if case == "script":  # 前からある利用者の設定が作業場所の中のスクリプトを指し、子がそれを書き換える
+                    self.git("config", "core.fsmonitor", "./fsmon.sh", cwd=self.repo)
+                    exclude.write_text("fsmon.sh\n")
+                    (wt / "fsmon.sh").write_text(touch)
+                    (wt / "fsmon.sh").chmod(0o755)
+                elif case == "filter":
+                    self.git("config", "filter.x.clean", "./clean.sh", cwd=self.repo)
+                    exclude.write_text("clean.sh\n")
+                    (wt / "clean.sh").write_text(touch + "cat\n")
+                    (wt / "clean.sh").chmod(0o755)
+                elif case == "hooks":
+                    self.git("config", "core.hooksPath", ".hk", cwd=self.repo)
+                    exclude.write_text(".hk/\n")
+                    (wt / ".hk").mkdir()
+                    (wt / ".hk" / "post-index-change").write_text(touch)
+                    (wt / ".hk" / "post-index-change").chmod(0o755)
+                elif case == "submodule":  # 子が入れ子のリポジトリの設定に filter を置き、サブモジュールとして index に足す
+                    nested = wt / "nested"  # （fsmonitor=false の -c は入れ子にも伝わるが、入れ子の filter の名前は上書きしない）
+                    self.git("init", "-q", "nested", cwd=wt)
+                    (nested / "b.txt").write_text("b\n")
+                    (nested / ".gitattributes").write_text("b.txt filter=y\n")
+                    self.git("add", "b.txt", ".gitattributes", cwd=nested)
+                    self.git("commit", "-q", "-m", "x", cwd=nested)
+                    self.git("config", "filter.y.clean", f"sh -c 'touch {self.marker}; cat'", cwd=nested)
+                    self.git("add", "nested", cwd=wt)
+                    os.utime(nested / "b.txt", (time.time() + 5, time.time() + 5))
+                else:  # 子が自分の git dir の config.worktree に fsmonitor を置く（作業場所の外なので clean は通り、worktree remove まで進む）
+                    self.git("config", "extensions.worktreeConfig", "true", cwd=self.repo)
+                    own = Path(self.git("rev-parse", "--absolute-git-dir", cwd=wt))
+                    (own / "config.worktree").write_text(f"[core]\n\tfsmonitor = touch {self.marker}\n")
+                os.utime(wt / "a.txt", (time.time() + 5, time.time() + 5))  # 大きさは同じで更新時刻だけ進める（filter・index の書き直し）
+                self.marker.unlink(missing_ok=True)
+                self.work("task", "cleanup", "--dir", str(wt), "--token", token, "--saved", "main")
+                self.assertFalse(self.marker.exists(), case)
+                if wt.exists():  # 仕込みが本物であることの確かめ（片付けで作業場所が消えた段は、素の status を動かせない）
+                    subprocess.run(["git", "status", "--porcelain"], cwd=wt, env=self.env, capture_output=True, stdin=subprocess.DEVNULL, timeout=60)
+                    self.assertTrue(self.marker.exists(), case)
+                for key in ("core.fsmonitor", "filter.x.clean", "core.hooksPath", "extensions.worktreeConfig"):
+                    subprocess.run(["git", "config", "--unset", key], cwd=self.repo, env=self.env, capture_output=True)
