@@ -4638,6 +4638,24 @@ launch.claude_reads = claude_reads
             self.assertEqual(len(calls.read_text().splitlines()), 1, rec)  # 続きは起こさない
             self.assertEqual((rc, rec["status"], rec.get("stopped_by_signal"), "report_fix" in rec), (2, "invalid-report", int(signal.SIGTERM), False), rec)
             self.assertEqual((Path(rec["out"]) / "report.md").read_text(encoding="utf-8"), bad)  # 1 回目の報告を返す
+        with self.subTest("after reaping the first child, before building the fix"):
+            calls.unlink(missing_ok=True)
+            built = Path(str(self.args_file) + ".built")
+            built.unlink(missing_ok=True)
+            rc, rec = self.launch_patched(f"""
+                real_check, real_command = launch.check_report, launch.command
+                def check_report(*k, **kw):  # 1 回目の子を刈った後の照合の最中
+                    os.kill(os.getpid(), signal.SIGTERM)
+                    return real_check(*k, **kw)
+                def command(a, prompt, scratch):
+                    if a.resume:  # 続きを組んだ（Codex の排他の待ちや Grok の home の写しを含む）
+                        open({str(built)!r}, "a").write("x")
+                    return real_command(a, prompt, scratch)
+                launch.check_report, launch.command = check_report, command
+                """, ["--host", "claude", "--cwd", str(self.cwd), "--timeout", "30"], env_extra={"FAKE_TEXT": bad})
+            self.assertFalse(built.exists(), rec)  # 続きを組まない
+            self.assertEqual(len(calls.read_text().splitlines()), 1, rec)
+            self.assertEqual((rc, rec["status"], rec.get("stopped_by_signal"), "report_fix" in rec), (2, "invalid-report", int(signal.SIGTERM), False), rec)
         for name, extra, env, started in (("fix", [], {"FAKE_TEXT": bad}, "report_fix"),
                                           ("fallback", ["--model", "fable", "--effort", "high"], {"FAKE_MODE_1": "fable-unavailable"}, "model_fallback")):
             with self.subTest(f"right before starting ({name})"):

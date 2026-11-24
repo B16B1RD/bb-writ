@@ -2064,9 +2064,14 @@ def main() -> int:
                     (out_dir / "report.md").write_text(got["text"], encoding="utf-8", errors="backslashreplace")  # 単独のサロゲート
                 # 照合に落ちた報告は、同じ session の続きで 1 回だけ、落ちた点を名指しして直させる（照合は緩めない。続きの依頼文は
                 # fix_prompt）。止められた・止めきれない子孫が残った・続けさせない理由がある・期限が FIX_BUDGET より残っていない子は、
-                # 直させない。刈った後に受けたシグナルは、続きを起こす前（周の頭）に見る
+                # 直させない。刈った後に受けたシグナルは、続きを組む前（command() は Codex の排他の待ちや Grok の home の写しを含む）と、
+                # 組んでいる間に届いた分を続きを起こす前（周の頭）に見る
                 if (rec["status"] != "invalid-report" or "report_fix" in rec or not rec["session"] or budget < FIX_BUDGET
                         or blocked or left or exit_lost or "sig" in stop):
+                    break
+                if "late" in stop:
+                    rec["stopped_by_signal"] = stop.pop("late")
+                    rec["problems"] = rec["problems"] + [f"launcher がシグナル {rec['stopped_by_signal']} を受けたので、直させる続きを起こさなかった"]
                     break
                 if not a.resume:  # 続きの子が前に見たのは、この起動で確かめた commit（終わりの head の照合で、前の起動の head として使う）
                     a.prev_head = rec["head"]
