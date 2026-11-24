@@ -52,10 +52,10 @@ import time
 import uuid
 from pathlib import Path
 
-sys.dont_write_bytecode = True  # work.py の import で、プラグインの置き場に __pycache__ を作らない
+sys.dont_write_bytecode = True
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from work import root as work_record  # noqa: E402  作業場所ごとの記録の置き場（担当・記録・証拠）
-from work import claude_staging_only  # noqa: E402  Claude Code の空の置き場か（task cleanup と同じ見方）
+from work import root as work_record  # noqa: E402
+from work import claude_staging_only  # noqa: E402
 
 # 親が --model・--effort を省いたときの、役割ごとのモデルと effort（親が渡せば、それが勝つ）。表に無い組み合わせは --model と --effort を渡す。
 # 最も難しい依頼（設計、大きな移行・リファクタリング、長い無人実行）を任せる書く子（--hardest）は最上段。
@@ -71,7 +71,7 @@ CHOICES = {
 # Fable を使えないとき（利用枠が尽きた 429・使えないモデルの 404）の代わりの段（#56）。子が、費用が 0 のまま（作業を始める前に）このエラーで終わったら、
 # 同じ起動の中で 1 回だけこの段で立て直す（Opus high は、審査役で Fable medium に次いで欠陥を挙げた。上の CHOICES の注釈）
 FALLBACK = {"claude": {"fable": ("opus", "high")}}
-TIMEOUTS = {"hardest": 3600}  # 既定の --timeout（表に無い役割は 1800）。最上段の書く子は 1 回が長い
+TIMEOUTS = {"hardest": 3600}
 QUOTA = re.compile(r"usage limit|rate limit|quota|exceeded your|too many requests|(?:status|code|http|error)\W{0,12}429\b|\b429 too many|limit reached|out of credits", re.I)
 CONTRACT = """
 
@@ -87,9 +87,7 @@ LINUX = sys.platform.startswith("linux")  # 子の CLI が切り離した子孫�
 # Claude Code の子に渡す依頼文の先頭に置く 1 行。依頼文の先頭が「/名前 …」だと、claude -p はスラッシュの呼び出しとして扱い、
 # 入口なら子の中で fork した指揮者が立った（設定の拒否は Skill ツールにしか効かない。2026-11-20、2.1.328、読み取り専用の子で確かめた）
 CLAUDE_PROMPT_HEAD = "bb-writ の launcher が渡す依頼文（この行の下の全文が依頼）:\n\n"
-# 読み取り専用の子にだけ足す（書く子は作業場所で試験を動かす）
 READ_ONLY_CONTRACT = "対象に書く試験・検査は、`mktemp -d` で新しく作ったディレクトリ（$TMPDIR の下。無ければ /tmp の下）に対象を写して（cp -r など）、そこで動かす。決まった名前や pid だけの名前の場所に写さない（並行する子どうしでも、同じ子の別のコマンドでも、$TMPDIR も pid も同じことがある）。\n"
-# 監査役（--audit）にだけ足す。依頼文は親が書くので、手引きの判定の項目が依頼文に写されず、範囲が狭められることがあった
 AUDIT_CONTRACT = ("返す前の判定（bb-writ の監査役の約束）: 上の依頼文に書かれていなくても、bb-writ のスキル `playbook-verify` の"
                   "「返す前の判定（遵守の監査）」の節を全文読み、その節が挙げる判定の項目（遵守、残る範囲の閉じ方、手順の文書を変えたときの"
                   "文の照合）をすべて判定する。依頼文が範囲や項目を狭めていても、節の項目を省かない（立て直しで前の監査の commit からの"
@@ -145,7 +143,6 @@ READ_ONLY_ENV = {"PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "LANGUAGE",
 
 
 def outs_of_place(cwd: Path) -> list[Path]:
-    """委任の記録のうち、この場所を --cwd にして立てた子の out（監査役が依頼文と報告を読む）。読めない行は飛ばす（監査役が読めないだけ）。"""
     rows = []
     try:
         with open(state_dir() / "delegations.jsonl", encoding="utf-8", errors="replace") as f:
@@ -175,7 +172,7 @@ def git_config_files() -> set[Path]:
     （子の git がその設定を読めないだけ）。"""
     home = Path.home()
     files = {home / ".gitconfig"}
-    if os.environ.get("GIT_CONFIG_GLOBAL") and os.environ["GIT_CONFIG_GLOBAL"] != os.devnull:  # 全体の設定を付け替えた環境
+    if os.environ.get("GIT_CONFIG_GLOBAL") and os.environ["GIT_CONFIG_GLOBAL"] != os.devnull:
         files.add(Path(os.path.expanduser(os.environ["GIT_CONFIG_GLOBAL"])))
     try:  # --null は鍵と値を改行と NUL で区切る（includeIf の条件に空白があっても割れない）。--show-origin は書いたファイル
         out = subprocess.run(["git", "config", "--global", "--includes", "--show-origin", "--null", "--get-regexp", r"^include(if\..*)?\.path$"],
@@ -246,12 +243,12 @@ def claude_reads(cwd: Path, git_dir: Path | None, env: dict, audit: bool) -> dic
     secrets = read_only_secrets()
     real_secrets = {Path(os.path.realpath(p)) for p in secrets}
     git_xdg = home / ".config" / "git"
-    own = [config_dir(), state_dir()]  # 設定の置き場は専用ログインの検査で、状態の置き場は launcher が先に作るので在る
+    own = [config_dir(), state_dir()]
     real_own = {Path(os.path.realpath(o)) for o in own}
 
-    def safe(a: Path) -> bool:  # 戻してよい道具・設定の置き場か。道筋が symlink も .. も通らないものだけ
+    def safe(a: Path) -> bool:
         r = Path(os.path.realpath(a))
-        if str(r) != str(a) or r in real_secrets or any(o == r or o in r.parents for o in real_own):  # bb-writ の置き場とその中も戻さない
+        if str(r) != str(a) or r in real_secrets or any(o == r or o in r.parents for o in real_own):
             return False
         return a == git_xdg or not any(q in r.parents for q in real_secrets)
 
@@ -259,14 +256,14 @@ def claude_reads(cwd: Path, git_dir: Path | None, env: dict, audit: bool) -> dic
     tools = []
     for d in env.get("PATH", "").split(os.pathsep):
         q = Path(d)
-        if q.is_absolute() and home in q.parents and q.is_dir():  # ドットで始まるものは safe とドットのディレクトリの戻しで決まる
+        if q.is_absolute() and home in q.parents and q.is_dir():
             tools.append(q.parent if q.name == "bin" and q.parent != home else q)
-    gits = [f for f in git_config_files() if f.is_file()]  # Git の設定として戻すのは通常のファイルだけ（include.path=~ でホームを戻さない）
+    gits = [f for f in git_config_files() if f.is_file()]
     places = [a for a in [*dotdirs, *tools, *gits, git_xdg] if os.path.lexists(a) and safe(a)]
     extra = [work_record(cwd), Path(__file__).resolve().parents[1] / "skills", *outs_of_place(cwd)] if audit else []
-    links = [r for p in secrets if str(r := Path(os.path.realpath(p))) != str(p) and r.exists()]  # symlink を通る置き場の在る行き先
-    allow = [*places, cwd, *([git_dir] if git_dir else []), *extra]  # 対象・共通ディレクトリ・記録（work.root が作る）・スキル・子の out は在る
-    inner = [p for p in secrets if p.exists() and any(a in p.parents for a in allow)]  # 壊れた symlink の無い行き先は渡さない
+    links = [r for p in secrets if str(r := Path(os.path.realpath(p))) != str(p) and r.exists()]
+    allow = [*places, cwd, *([git_dir] if git_dir else []), *extra]
+    inner = [p for p in secrets if p.exists() and any(a in p.parents for a in allow)]
     deny = [home, *([real_home] if real_home != home else []), *inner, *links, *own, *(Path(os.path.realpath(o)) for o in own)]
     return {"denyRead": list(dict.fromkeys(str(p) for p in deny)), "allowRead": list(dict.fromkeys(str(p) for p in allow))}
 
@@ -280,7 +277,7 @@ def home_entries(skip: list[Path]) -> tuple[set[str], set[str], set[str]]:
     def scan(d: Path, depth: int):
         try:
             entries = list(os.scandir(d))
-        except PermissionError:  # 権限で読めない場所だけを数える（走査の途中で消えた一時ファイルは数えない）
+        except PermissionError:
             unreadable.add(str(d))
             return
         except OSError:
@@ -294,7 +291,7 @@ def home_entries(skip: list[Path]) -> tuple[set[str], set[str], set[str]]:
                 if e.is_symlink():
                     continue
                 if e.is_dir():
-                    with os.scandir(e.path) as it:  # 閉じないと ResourceWarning が出る
+                    with os.scandir(e.path) as it:
                         bare = not any(it)
                     if bare:
                         empty.add(e.path)
@@ -358,8 +355,7 @@ def cwd_residue(cwd: Path, before: set[str]) -> list[str]:
         return p.is_file() and p.stat().st_size == 0
     new = sorted(str(p) for p in cwd.iterdir() if str(p) not in before)
     left = [p for p in new if bare(Path(p)) and not claude_staging_only(p)]
-    if left and (cwd / ".git").exists():  # 追跡している（index にある）ものは子が意図して足したので数えない。
-        # 子が書けた設定の命令を走らせない形で（QUIET_GIT。子が git init した対象でも）
+    if left and (cwd / ".git").exists():
         out = subprocess.run([*QUIET_GIT, "-C", str(cwd), "ls-files", "-z", "--", *[Path(p).name for p in left]], capture_output=True, text=True, check=True, timeout=GIT_TIMEOUT)
         tracked = {cwd / n.split("/")[0] for n in out.stdout.split("\0") if n}
         left = [p for p in left if Path(p) not in tracked]
@@ -376,7 +372,6 @@ GIT_TIMEOUT = float(os.environ.get("BB_WRIT_GIT_TIMEOUT") or 60)  # 子が管理
 
 
 def grok_git_dir(cwd: Path) -> tuple[Path | None, str | None]:
-    """worktree の commit が書く Git の共通ディレクトリ。Git の外なら None。"""
     g = subprocess.run(["git", "-C", str(cwd), "rev-parse", "--git-common-dir"], capture_output=True, text=True, errors="surrogateescape", timeout=GIT_TIMEOUT)
     if g.returncode == 0:
         return (cwd / g.stdout.strip()).resolve(), None
@@ -386,7 +381,6 @@ def grok_git_dir(cwd: Path) -> tuple[Path | None, str | None]:
 
 
 def worktree_dirs(cwd: Path) -> tuple[Path | None, Path | None, str | None]:
-    """(その作業場所の管理ディレクトリ, 共通ディレクトリ, 理由)。Git の外なら (None, None, None)。"""
     g = subprocess.run(["git", "-C", str(cwd), "rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir"],
                        capture_output=True, text=True, errors="surrogateescape", timeout=GIT_TIMEOUT)
     if g.returncode == 0:
@@ -419,7 +413,7 @@ def read_child_file(f: Path, keep: int = 0):
         st = os.lstat(f)
     except FileNotFoundError:
         return None, b"", False
-    if stat.S_ISLNK(st.st_mode):  # 行き先と、行き先が通常のファイルならその中身の変化も差分にする（symlink の config は普段の使い方でありうる）
+    if stat.S_ISLNK(st.st_mode):
         try:
             fd = os.open(f, os.O_RDONLY | os.O_NONBLOCK)
         except OSError as e:
@@ -429,9 +423,9 @@ def read_child_file(f: Path, keep: int = 0):
             return f"symlink: {os.readlink(f)!r} " + (f"{stat.filemode(mode)} {digest_of(fd)}" if stat.S_ISREG(mode) else f"（{stat.filemode(mode)}）"), b"", False
         finally:
             os.close(fd)
-    fd = os.open(f, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)  # FIFO でも開くところで止まらない
+    fd = os.open(f, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     try:
-        mode = os.fstat(fd).st_mode  # 開いたものの種類（lstat の後に置き換えられても）
+        mode = os.fstat(fd).st_mode
         if not stat.S_ISREG(mode):
             return f"（通常のファイルでない: {stat.filemode(mode)}）", b"", False
         head = []
@@ -441,7 +435,6 @@ def read_child_file(f: Path, keep: int = 0):
 
 
 def digest_of(fd: int, keep: int = 0, head: list | None = None) -> str:
-    """開いた通常のファイルを区切って読み、ハッシュを返す（大きくてもメモリは一定）。head に先頭 keep バイトを足す。"""
     h, kept = hashlib.sha256(), 0
     while chunk := os.read(fd, 1 << 20):
         h.update(chunk)
@@ -456,14 +449,14 @@ def read_head(f: Path) -> str:
     digest, head, regular = read_child_file(f, 4097)
     if digest is None:
         return "（無い）"
-    if not regular:  # symlink・通常のファイルでない
+    if not regular:
         return digest
     return head.decode("utf-8", "surrogateescape") if len(head) <= 4096 else f"（4 KiB を超える。{digest}）"
 
 
 def git_snapshot(own: Path, common: Path, cwd: Path) -> dict:
     """書く子の前後で比べる Git の管理情報。子の書いた .git ファイルを読まないよう、共通ディレクトリを明示して読む。"""
-    for f in (common / "config", common / "packed-refs"):  # git が開いたまま止まる・尽きるもの（FIFO・デバイス）を渡さない
+    for f in (common / "config", common / "packed-refs"):
         try:
             mode = os.stat(f).st_mode  # git と同じく symlink はたどる（symlink の config は普段の使い方でありうる）
         except FileNotFoundError:
@@ -499,8 +492,7 @@ def git_changes(before: dict, after: dict, common: Path) -> list[str]:
 
 
 def grok_session_dir(old: Path, session: str) -> Path | None:
-    """前の home の、その session の記録（sessions/<対象>/<session>/）。1 つだけ、symlink を通らずに見つかったときだけ返す。"""
-    if not re.fullmatch(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}", session) or (old / "sessions").is_symlink():  # glob に記号を渡さない
+    if not re.fullmatch(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}", session) or (old / "sessions").is_symlink():
         return None
     found = [d for d in old.glob(f"sessions/*/{session}") if d.is_dir() and not d.is_symlink() and not d.parent.is_symlink()]
     return found[0] if len(found) == 1 else None
@@ -530,7 +522,7 @@ def grok_home(login: Path, extends: str, read_write: list[Path], deny: list[str]
     base = state_dir() / "grok-homes"
     base.mkdir(parents=True, exist_ok=True)
     home = Path(tempfile.mkdtemp(prefix=time.strftime("%Y%m%d-%H%M%S-"), dir=base))
-    held, lost = hold_place(home)  # 作った直後から、片付けに消させない（launcher が終わるまで持つ）
+    held, lost = hold_place(home)
     if held is not None:
         PLACES_HELD.append(held)
     elif lost != "unsupported":  # 排他を取れない環境では、片付けも消さないので、持たずに進む
@@ -561,17 +553,16 @@ def secret_denies(keep: list[Path], targets: list[Path] | None = None) -> list[s
 
     def add(d: Path):
         d = Path(os.path.realpath(d))
-        if any(k == d for k in keep) or d in seen:  # 残すものそのもの。祖先を指す symlink で同じ場所に戻ったとき
+        if any(k == d for k in keep) or d in seen:
             return
         seen.add(d)
-        if any(d in k.parents for k in keep):  # 残すものを含む: 中身を 1 つずつ
+        if any(d in k.parents for k in keep):
             for c in d.iterdir():
                 if os.path.exists(c):
                     add(c)
         else:
             places.add(d)
 
-    # targets の既定は、読み取り専用の子に読ませない一覧（残す Git の設定の中の Git の認証情報を含む）と、ホーム直下のドットのファイル
     for d in (targets if targets is not None else read_only_secrets() + home_dotfiles()) + [config_dir()]:
         if os.path.exists(d):
             add(d)
@@ -596,7 +587,7 @@ def codex_read_only(scratch: Path, cwd: Path) -> tuple[list[str], list[str]]:
             *([gitconf] if (g := Path(os.path.realpath(gitconf := Path.home() / ".config" / "git"))) not in roots and login not in g.parents else []),
             cwd, *([git_dir] if git_dir else [])]
     denies = secret_denies(keep)
-    scratch.mkdir(parents=True, exist_ok=True)  # 続きは前の起動と同じ一時ディレクトリ（子が写した対象に、続きでも書ける）
+    scratch.mkdir(parents=True, exist_ok=True)
     rules = {":tmpdir": "write", **{d: "deny" for d in denies}}
     # TOML の基本文字列（JSON と同じ逃がし方。BMP の外の文字は、TOML に無いサロゲート対の \\u にせず、そのまま書く）
     table = ", ".join(f"{json.dumps(k, ensure_ascii=False)}={json.dumps(v)}" for k, v in rules.items())
@@ -618,7 +609,7 @@ def codex_breach(turns: list, denies: list[str]) -> str | None:
     tmp = (":tmpdir",)
     homes = {str(config_dir().resolve() / "codex-home" / "tmp"), str(Path(os.path.abspath(config_dir())) / "codex-home" / "tmp")}
     arg0 = re.compile(r"arg0-[^/]+/codex-arg0[^/]*")  # 専用ログインの tmp/ の下の、この形の 1 ファイルだけ
-    for t in turns:  # どの turn も（合わせると、ある turn だけ書けないことが隠れる）
+    for t in turns:
         wide = [w for w in t["writable"] if w not in tmp]
         if wide or t["network"] != "restricted":
             return f"Codex の実効の権限が、読み取り専用の profile より広い（書ける場所: {wide[:5]}、ネットワーク: {t['network'][:50]}）"
@@ -627,12 +618,16 @@ def codex_breach(turns: list, denies: list[str]) -> str | None:
         recorded = {w for acc, w in t["rules"] if acc == "deny"}
         missing = [d for d in denies if d not in recorded]
         opened = [w for acc, w in t["rules"] if acc != "deny" and not w.startswith(":")
-                  and any(r == d or r.startswith(d + "/") for d in denies for r in (w, os.path.realpath(w)))  # 解く前の書き方でも
+                  and any(r == d or r.startswith(d + "/") for d in denies for r in (w, os.path.realpath(w)))
                   and not (acc == "read" and all(any(r.startswith(h + "/") and arg0.fullmatch(r[len(h) + 1:]) for h in homes)
-                                                for r in (w, os.path.realpath(w))))]  # 解く前も解いた後も（symlink で認証情報を指させない）
+                                                for r in (w, os.path.realpath(w))))]
         if missing or opened:
             return f"Codex の実効の権限で、認証情報の置き場を拒めていない（記録に無い deny: {missing[:5]}、その下で開いた場所: {opened[:5]}）"
     return None
+
+
+def is_bb_writ_copy(p: Path) -> bool:
+    return (p / "skills").is_dir()
 
 
 def codex_stale_copy(home: Path) -> tuple[str, str, str] | None:
@@ -650,7 +645,7 @@ def codex_stale_copy(home: Path) -> tuple[str, str, str] | None:
     root = Path(__file__).resolve().parents[1]
     mine = tree(root)
     for copy in sorted((home / "plugins" / "cache").glob("*/bb-writ/*")):
-        if not (copy / "skills").is_dir():
+        if not is_bb_writ_copy(copy):
             continue
         theirs = tree(copy)
         diff = sorted(k for k in mine.keys() | theirs.keys() if mine.get(k) != theirs.get(k))
@@ -667,7 +662,7 @@ def codex_stale_copy(home: Path) -> tuple[str, str, str] | None:
     return None
 
 
-CODEX_PLUGIN_TIMEOUT = float(os.environ.get("BB_WRIT_CODEX_PLUGIN_TIMEOUT") or 60)  # codex plugin …（一覧と add）の上限（環境変数は試験だけが使う）
+CODEX_PLUGIN_TIMEOUT = float(os.environ.get("BB_WRIT_CODEX_PLUGIN_TIMEOUT") or 60)  # 環境変数は試験だけが使う
 
 
 def codex_plugin(home: Path, *args: str) -> tuple[int | None, str, str, str]:
@@ -694,7 +689,7 @@ def codex_registration(home: Path, mp: str) -> tuple[bool, str]:
     .codex/config.toml の marketplace も並び、bb-writ が 2 つ並んだ。0.171.0）。"""
     code, out, err, result = codex_plugin(home, "marketplace", "list", "--json")
     try:
-        if code != 0:  # 上限で止めた・起動できなかった（None）も。それまでの標準出力は読まない
+        if code != 0:
             raise ValueError(result)
         items = json.loads(out)["marketplaces"]
         if not isinstance(items, list) or not all(isinstance(x, dict) for x in items):
@@ -745,7 +740,7 @@ def codex_refresh(a, home: Path) -> str | None:
     - macOS は偽の CLI の試験だけ。
     """
     fd, lost = None, None
-    try:  # 開く・取るの失敗は 1 つの枝（どちらでも、排他なしで比べる）
+    try:
         fd = os.open(home, os.O_RDONLY | os.O_DIRECTORY)
         fcntl.flock(fd, fcntl.LOCK_EX)
     except OSError as e:
@@ -763,30 +758,28 @@ def codex_refresh(a, home: Path) -> str | None:
         a.codex_plugin_add = {"marketplace": mp, "exit": None}
         code, out, err, result = codex_plugin(home, "add", f"bb-writ@{mp}")
         a.codex_plugin_add["exit"] = code
-        # add の後の状態は 3 つ: どれかの写しが違う／その marketplace の写しが無い（どちらも起動しない）／在って同じ（起動する）
         stale, place = codex_stale_copy(home), home / "plugins" / "cache" / mp / "bb-writ"
         tail = (out + err).strip()[-300:]  # 失敗の文は標準エラーに出るので、後につなぐ（末尾に残る）
         ran = f"launcher は CODEX_HOME={home} codex plugin add bb-writ@{mp} を実行したが（{result}）"
         if stale is not None:
             return f"{stale[1]}。{ran}、写しはまだ違う（add の出力の末尾: {tail or 'なし'}）"
-        if not any((v / "skills").is_dir() for v in place.glob("*")):  # codex_stale_copy が写しと数える形
+        if not any(is_bb_writ_copy(v) for v in place.glob("*")):
             return (f"{ran}、入れ直しの後に写しが無い（{place}）（add の出力の末尾: {tail or 'なし'}）。"
                     f"手で入れ直す: CODEX_HOME={home} codex plugin add bb-writ@{mp}")
         return None
     finally:
         if fd is not None:
-            os.close(fd)  # 排他を放す（子が動いている間は持たない）
+            os.close(fd)
 
 
-LOGIN_CHECK_TIMEOUT = float(os.environ.get("BB_WRIT_LOGIN_CHECK_TIMEOUT") or 60)  # 専用ログインの組織の確かめ（claude auth status と問い合わせ）の 1 回ごとの上限（環境変数は試験だけが使う）
+LOGIN_CHECK_TIMEOUT = float(os.environ.get("BB_WRIT_LOGIN_CHECK_TIMEOUT") or 60)  # 環境変数は試験だけが使う
 LOGIN_CHECK_PROMPT = "ok とだけ返して"
-UUID = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"  # 組織の ID の形（大文字・小文字は問わない）
+UUID = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
 # SDK の debug の記録の、ヘッダの行（Claude Code 2.1.330 の形: "anthropic-organization-id": "<uuid>",）。名前は後ろで合わせ、anthropic-organization-id" で終わる名前の行の値を読む
 LOGIN_ORG_HEADER = re.compile(rf'anthropic-organization-id"\s*:\s*"({UUID})"', re.I)
 CLAUDE_LOGIN_NOTE = ("専用ログインのトークン（CLAUDE_CODE_OAUTH_TOKEN）は、launcher を呼んだ環境の Claude Code のログインとは別の組織のもの。"
                      "子は、そのトークンのアカウントの利用枠で動く。Claude のアカウントを切り替えたのなら、`claude setup-token` から"
                      "トークンを作り直す（README の「任意機能の準備」の「Claude Code の専用ログイン」）。わざと別のアカウントにしているなら、そのままでよい。")
-# 問い合わせは終了コード 0 で終わったのに、ヘッダの値を 1 種類読めなかったときの案内（読み方は SDK の debug の出力の書式に頼り、版で変わりうる）
 CLAUDE_LOGIN_UNREAD_NOTE = ("専用ログインのトークンの組織を、問い合わせの出力から読めなかった（問い合わせは終了コード 0 で終わった）。Claude Code の版が変わって、"
                             "launcher の読み方が合わなくなった見込みがある。この確かめ（トークンとログインの組織の比べ）は、いま働いていない。"
                             "Claude のアカウントを切り替えたときは、`claude setup-token` からトークンを作り直す（README の「任意機能の準備」の"
@@ -849,7 +842,7 @@ def claude_login(cfg: Path) -> dict:
         env_sum = digest(env_file.read_bytes())
         try:
             known = json.loads(cache.read_text(encoding="utf-8"))
-        except (OSError, ValueError):  # 無い・読めない・JSON でないものは、無いものとして問い合わせ、書き直す
+        except (OSError, ValueError):
             known = None
         extra = {}
         if (isinstance(known, dict) and known.get("env") == env_sum and isinstance(known.get("org"), str)
@@ -863,14 +856,14 @@ def claude_login(cfg: Path) -> dict:
                  "--model", "haiku", "--output-format", "json", "--no-session-persistence", "--tools", "", "--restricted"], env, state_dir())
             found = {m.lower() for m in LOGIN_ORG_HEADER.findall((out + b"\n" + err).decode("utf-8", "replace"))}
             del out, err
-            if len(found) != 1:  # 上限で止めたときは出力を捨てるので 0 種類
+            if len(found) != 1:
                 return {"org": "unknown", "why": f"専用ログインの問い合わせの出力に、組織のヘッダ anthropic-organization-id の値が {len(found)} 種類（{result}）",
                         **({"note": CLAUDE_LOGIN_UNREAD_NOTE} if code == 0 else {})}
             token_org = digest(found.pop().encode())
-            try:  # モード 0600 で作る
+            try:
                 with os.fdopen(os.open(cache, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w", encoding="utf-8") as f:
                     json.dump({"env": env_sum, "org": token_org}, f)
-            except OSError as e:  # 覚えられなくても、結果は使う（次の起動でまた問い合わせる）
+            except OSError as e:
                 extra = {"cache": f"claude-login.json に覚えられなかった（{type(e).__name__}）。次の起動でまた問い合わせる"}
         if token_org == digest(org.lower().encode()):
             return {"org": "same", **extra}
@@ -880,7 +873,6 @@ def claude_login(cfg: Path) -> dict:
 
 
 def command(a, prompt: str, scratch: Path) -> tuple[list[str], dict, str | None]:
-    """起動するコマンドと環境。使えなければ (…, …, 理由)。scratch は読み取り専用の Codex に渡す一時ディレクトリ。"""
     cfg = config_dir()
     env = dict(os.environ)
     if a.host == "claude":
@@ -923,17 +915,14 @@ def command(a, prompt: str, scratch: Path) -> tuple[list[str], dict, str | None]
             git_dir, why = grok_git_dir(a.cwd)
             if why:
                 return [], env, why
-            if not os.environ.get("HOME") or Path.home().resolve() == Path("/"):  # ホームを丸ごと拒むと / を拒むことになる
+            if not os.environ.get("HOME") or Path.home().resolve() == Path("/"):
                 return [], env, "HOME が無いか / を指すので、読み取り専用の Claude Code の子の読みを絞れない"
-            if a.cwd == Path.home().resolve() or a.cwd in Path.home().resolve().parents:  # 対象を戻すと、ホームを丸ごと戻すことになる
+            if a.cwd == Path.home().resolve() or a.cwd in Path.home().resolve().parents:
                 return [], env, "対象がホームそのものかホームを含む場所なので、読み取り専用の Claude Code の子にホームの認証情報を拒めない"
-            if any(a.cwd == Path(os.path.realpath(p)) for p in read_only_secrets()):  # ~/.config を Git で管理する配置など
+            if any(a.cwd == Path(os.path.realpath(p)) for p in read_only_secrets()):
                 return [], env, f"対象 {a.cwd} が認証情報の置き場そのものなので、読み取り専用の Claude Code の子にその中の認証情報を拒めない"
             deny = [str(a.cwd), str(Path.home()), str(Path.home().resolve())] + ([str(git_dir), os.path.commonpath([a.cwd, git_dir])] if git_dir else [])
-            # 読みは claude_reads（ホームを丸ごと拒み、道具の置き場と対象を戻す）。監査役は、その場所の作業の記録・その場所で立てた
-            # 子の out（依頼文と報告）・bb-writ のスキルも読む（ほかの場所の記録は読ませない）
             reads = claude_reads(a.cwd, git_dir, env, a.audit)
-            # 子の Bash に渡す環境も最小限にする（読み取り専用の子は git と読むコマンドしか使わない）
             env = {k: v for k, v in env.items() if k in READ_ONLY_ENV or k.upper().endswith("_PROXY") or k.startswith("LC_")}
             env["CLAUDE_CONFIG_DIR"] = str(cfg / "claude-home")
             env["CLAUDE_CODE_DISABLE_BACKGROUND_TASKS"] = "1"
@@ -963,11 +952,10 @@ def command(a, prompt: str, scratch: Path) -> tuple[list[str], dict, str | None]
                 return [], env, why
             home, profile = grok_home(login, "workspace", [work_record(a.cwd), *(commit_dirs(own, common) if own else [])])
         else:
-            # 起動ごとの home は状態ディレクトリの下にできるので、それと重なる対象も止める
             for d in grok_ro_writable(state_dir() / "grok-homes"):
                 if a.cwd == d or d in a.cwd.parents or a.cwd in d.parents:
                     return [], env, f"対象と {d} が重なる。Grok の read-only の sandbox はそこへの書き込みを止めないので、読み取り専用にできない"
-            if not os.environ.get("HOME") or Path.home().resolve() == Path("/"):  # ホームの置き場の deny が 1 つも出ない（黙って開かない）
+            if not os.environ.get("HOME") or Path.home().resolve() == Path("/"):
                 return [], env, "HOME が無いか / を指すので、読み取り専用の Grok の子に認証情報の置き場を拒めない"
             # 読みは、読み取り専用の Codex の子と同じ一覧を secret_denies で拒む（#43）。~/.config・~/.grok を丸ごと拒むと Grok が起動しない
             # （「Not signed in」、bwrap の execvp の Permission denied。1.0.89）ので、Grok 本体・その bin・Git の設定・専用ログインの
@@ -982,7 +970,7 @@ def command(a, prompt: str, scratch: Path) -> tuple[list[str], dict, str | None]
             copy_grok_session(src, a.grok_home, home)
         # 親の GROK_*（GROK_AGENT・GROK_SANDBOX・GROK_CONFIG など）と API キーを渡さない。API キーがあるとログインの代わりに別料金の API へ落ちる
         env = {k: v for k, v in env.items() if not k.startswith("GROK_") and k not in ("XAI_API_KEY", "RUST_LOG")}
-        if not a.write:  # 読み取り専用の子の環境は、読み取り専用の Codex の子と同じ許可の一覧だけ（SSH_AUTH_SOCK・D-Bus・親のトークンが渡っていた。#43）
+        if not a.write:
             secret = {e["name"] for e in secret_env(env)["envVars"]}
             env = {k: v for k, v in env.items() if (k in READ_ONLY_ENV or k.upper().endswith("_PROXY") or k.startswith("LC_")) and k not in secret}
         env.update(GROK_HOME=str(home), GROK_MEMORY="0", **GROK_COMPAT_OFF)
@@ -1009,11 +997,11 @@ def command(a, prompt: str, scratch: Path) -> tuple[list[str], dict, str | None]
         for d in [work_record(a.cwd), *(commit_dirs(own, common) if own else [])]:
             mode += ["--add-dir", str(d)]
     else:
-        if not os.environ.get("HOME") or Path(os.environ["HOME"]).resolve() == Path("/"):  # ホームの置き場の deny が 1 つも出ない（黙って開かない）
+        if not os.environ.get("HOME") or Path(os.environ["HOME"]).resolve() == Path("/"):
             return [], env, "HOME が無いか / を指すので、読み取り専用の Codex の子に認証情報の置き場を拒めない"
         # 子に渡す環境は、読み取り専用の Claude Code の子と同じ許可の一覧だけ（Codex は既定で KEY・SECRET・TOKEN を含む変数も子の
         # コマンドに残す。SSH_AUTH_SOCK・DBUS_SESSION_BUS_ADDRESS・親の GIT_* も渡さない）
-        secret = {e["name"] for e in secret_env(env)["envVars"]}  # LC_ で始まる名前の認証情報も外す
+        secret = {e["name"] for e in secret_env(env)["envVars"]}
         env = {k: v for k, v in env.items() if (k in READ_ONLY_ENV or k.upper().endswith("_PROXY") or k.startswith("LC_")) and k not in secret}
         env["CODEX_HOME"] = str(home)
         mode, a.codex_denies = codex_read_only(scratch, a.cwd)
@@ -1025,7 +1013,6 @@ def command(a, prompt: str, scratch: Path) -> tuple[list[str], dict, str | None]
 
 
 def obj(v) -> dict:
-    """子の JSON の値。オブジェクトでなければ空として扱う（子の出力は外からの入力）。"""
     return v if isinstance(v, dict) else {}
 
 
@@ -1085,17 +1072,16 @@ def rollout_lines(f: Path, limit: int = 256 << 20):
         while line := fh.readline(1 << 20):
             read += len(line)
             if read > limit:
-                yield b'{"type": "turn_context", "payload": {}}'  # 上限を越えた。実効値は不明（各値を null にする）
+                yield b'{"type": "turn_context", "payload": {}}'
                 return
             yield line.rstrip(b"\n")
 
 
 def where_of(path) -> str:
-    """permission_profile の場所の表し。特別な場所は :tmpdir の形、ほかは絶対パス。読めない形は None。"""
     path = obj(path)
     if path.get("type") == "special" and text_of(obj(path.get("value")).get("kind")):
         return ":" + obj(path.get("value"))["kind"]
-    if path.get("type") == "path" and text_of(path.get("path")).startswith("/"):  # 絶対パスだけ（:tmpdir の形の文字列と取り違えない）
+    if path.get("type") == "path" and text_of(path.get("path")).startswith("/"):
         return path["path"]
     return None
 
@@ -1117,15 +1103,14 @@ def parse_codex(out: str) -> dict:
         elif e.get("type") in ("error", "turn.failed"):
             errors.append(str(e.get("message") or obj(e.get("error")).get("message") or "")[:300])
     eff, perms, files = None, [], []
-    # 実効値は記録の turn_context から（メタデータだけを読む）。session は UUID の形のときだけ探す（glob に記号を渡さず、別の記録の末尾に当たらない）
     if session and re.fullmatch(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}", session):
         files = list((config_dir() / "codex-home" / "sessions").glob(f"**/rollout-*-{session}.jsonl"))
         for f in files:
             for line in rollout_lines(f):
                 try:
                     e = obj(json.loads(line.decode("utf-8")))
-                except (ValueError, RecursionError):  # 書きかけの行、UTF-8 として読めない行（置き換えた文字を実効値にしない）。取れなければ null
-                    perms.append((None, None, None))  # turn_context だったかもしれない（1 MiB を超えて割れた行も）。権限は不明として閉じる
+                except (ValueError, RecursionError):
+                    perms.append((None, None, None))
                     continue
                 if e.get("type") == "turn_context":
                     p = obj(e.get("payload"))
@@ -1134,7 +1119,7 @@ def parse_codex(out: str) -> dict:
                     entries = fs.get("entries") if fs.get("type") == "restricted" and isinstance(fs.get("entries"), list) else None
                     if entries is not None and not all(isinstance(x, dict) and x.get("access") in ("read", "write", "deny")
                                                        and where_of(x.get("path")) is not None for x in entries):
-                        entries = None  # 読めない項目を「書ける場所ではない」と数えない（権限は不明）
+                        entries = None
                     eff = {"model": text_of(p.get("model")) or None, "effort": text_of(p.get("effort")) or None,
                            "sandbox": text_of(obj(p.get("sandbox_policy")).get("type")) or None}
                     # 書ける場所（特別な場所は :tmpdir の形）。0.163.0 の sandbox は、読み取り専用の profile でも workspace-write と記録される
@@ -1142,12 +1127,11 @@ def parse_codex(out: str) -> dict:
                     perms.append((None if entries is None else [w for x in entries if x["access"] == "write" and (w := where_of(x["path"])) not in denied],
                                   text_of(perm.get("network")) or None,
                                   None if entries is None else [(x["access"], where_of(x["path"])) for x in entries]))
-    if eff is not None:  # 判定は turn ごと（codex_breach）。writable・network は表示のために合わせる（どれかが読めなければ不明）
+    if eff is not None:
         eff["turns"] = [{"writable": w, "network": n} for w, n, _ in perms]
         eff["writable"] = None if any(w is None for w, _, _ in perms) else sorted({x for w, _, _ in perms for x in w})
         nets = {n for _, n, _ in perms}
         eff["network"] = None if None in nets else next((n for n in sorted(nets) if n != "restricted"), "restricted")
-    # 照合（codex_breach）に渡す turn ごとの権限（項目の全部は記録に書かない）
     turns = [{"writable": w, "network": n, "rules": r or []} for w, n, r in perms] if eff is not None else []
     return {"text": text, "session": session, "model_effective": eff, "usage": usage, "errors": errors, "permissions": turns,
             "rollouts": len(files)}
@@ -1190,9 +1174,9 @@ def check_report(text: str, cwd: Path, audit: bool = False) -> tuple[dict | None
     i = text.rfind("```json")
     if i < 0:
         return None, ["報告の JSON ブロックが無い"]
-    try:  # 閉じのフェンスが無くても、最後のブロックの JSON を読む
+    try:
         r, _ = json.JSONDecoder().raw_decode(text[i + len("```json"):].lstrip())
-    except (ValueError, RecursionError) as e:  # 深い入れ子も、読めない報告
+    except (ValueError, RecursionError) as e:
         return None, [f"報告の JSON が読めない: {e!r}"]
     if not isinstance(r, dict):
         return None, ["報告の JSON がオブジェクトでない"]
@@ -1212,7 +1196,7 @@ def check_report(text: str, cwd: Path, audit: bool = False) -> tuple[dict | None
         if not where:
             problems.append("where の無い証拠がある")
             continue
-        m = re.fullmatch(r"`?([^\s`:]+):(\d+)(?:[-–]\d+)?`?", where)  # 「ファイル:行」の引用だけは実在を確かめる
+        m = re.fullmatch(r"`?([^\s`:]+):(\d+)(?:[-–]\d+)?`?", where)
         if m and not m.group(1).startswith("http"):
             path = m.group(1)
             p = Path(path) if Path(path).is_absolute() else cwd / path
@@ -1223,7 +1207,7 @@ def check_report(text: str, cwd: Path, audit: bool = False) -> tuple[dict | None
             if not found:
                 problems.append(f"証拠のファイルが無い: {path[:300]}")
     problems += check_execution(r)[1]
-    if audit and r.get("deliver") not in ("yes", "no"):  # 監査役の判定。work.py は yes の記録だけを関門に数える
+    if audit and r.get("deliver") not in ("yes", "no"):
         problems.append("deliver が yes / no のどちらでもない（監査役の判定）")
     return r, problems
 
@@ -1255,32 +1239,34 @@ def clean_head(cwd: Path) -> str | None:
         # バイトで受ける（ファイル名は UTF-8 とは限らない）。index を書き直すロックを取らない（利用者の git と競わない）
         status = subprocess.run([*QUIET_GIT, "--no-optional-locks", "status", "--porcelain", "--untracked-files=normal", "--ignore-submodules=dirty"], cwd=cwd, env=env,
                                 capture_output=True, timeout=GIT_TIMEOUT)
-    except (OSError, subprocess.TimeoutExpired):  # git が無い・対象が無い・管理ファイルが FIFO で止まる
+    except (OSError, subprocess.TimeoutExpired):
         return None
     if local.returncode or head.returncode or status.returncode or status.stdout.strip():
         return None
     return head.stdout.strip()
 
 
+PR_SET_CHILD_SUBREAPER = 36
+
+
 def become_subreaper() -> None:
     """子の CLI が新しいセッションに切り離した子孫（Claude Code 2.1.309 の Bash）を、子が終わった後に自分の下へ付け替えさせる（Linux）。"""
     import ctypes
     libc = ctypes.CDLL(None, use_errno=True)
-    if libc.prctl(36, 1, 0, 0, 0) != 0:  # PR_SET_CHILD_SUBREAPER
+    if libc.prctl(PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) != 0:
         raise OSError(ctypes.get_errno(), "prctl(PR_SET_CHILD_SUBREAPER) が失敗した")
 
 
 def load_now() -> float | None:
-    """1 分平均の負荷（取れない OS では null）。"""
     try:
         return round(os.getloadavg()[0], 1)
     except (OSError, AttributeError):
         return None
 
 
-UNCHECKED = ("Codex の実効の権限を記録（", "続きの Codex の記録ファイルが")  # 権限を照らせなかった理由の文の先頭（理由の文の中にはパスが入るので、部分一致で見ない）
-UNSAFE = {"unsafe", "breach", "other-session", "left", "git"}  # 子が権限の外で動いた、別の session だった、かもしれない理由。この session はどの記録からも続けない（照らせなかっただけの理由は、前の記録から続けられる）
-STOP_GRACE = 30  # 子に TERM を送った後、子が片付けて終わるのを待つ秒数（シグナルで止めるときは --timeout の残りが短ければそちら）
+UNCHECKED = ("Codex の実効の権限を記録（", "続きの Codex の記録ファイルが")
+UNSAFE = {"unsafe", "breach", "other-session", "left", "git"}
+STOP_GRACE = 30
 # 照合に落ちた報告を直させる続きを起こすのに、--timeout の残りとして要る秒数（残りが少ないと、invalid-report を時間切れに変えるだけ）。
 # 実物の Claude Code の続き（1 ターンで直した）は、起こしてから終わるまで 5.4 秒（CLI の duration_ms は 3.6 秒）。その 3 倍余り
 # （Codex・Grok の続きは測っていない）
@@ -1311,11 +1297,11 @@ def wait_for_exit(child: subprocess.Popen, timeout: float, stop: dict) -> None:
             if r is not None and r.si_pid == child.pid:
                 return
             if r is not None:
-                os.waitpid(r.si_pid, 0)  # 終わったと報告されたものなので、すぐ返る
+                os.waitpid(r.si_pid, 0)
         elif child.poll() is not None:
             stop["reaped"] = True
             return
-        now = time.monotonic()  # 孤児が終わり続けても、期限は守る
+        now = time.monotonic()
         if "at" in stop:
             limit = stop["at"] + STOP_GRACE
             if now > (limit if stop.get("timed_out") else min(limit, deadline)):
@@ -1347,13 +1333,13 @@ def stop_descendants(group: int) -> tuple[list[str], list[str]]:
                     continue
                 with open(f"/proc/{d}/cmdline", "rb") as f:  # 主スレッドが終わると空になるので、そのときはコマンド名
                     args = (f.read().replace(b"\0", b" ").strip() or raw[raw.index(b"(") : raw.rindex(b")") + 1]).decode("utf-8", "replace")
-            except (FileNotFoundError, ProcessLookupError):  # 調べる間に終わって刈られた
+            except (FileNotFoundError, ProcessLookupError):
                 continue
             found[int(d)] = (f"{d} {args}"[:300], int(fields[2]) == group)
         return found
 
     stopped, denied = {}, {}
-    deadline = time.monotonic() + 5  # 止めるたびに、その下の子孫が 1 段ずつ上がってくる。大きなプロセスは終わるのに時間がかかる
+    deadline = time.monotonic() + 5
     while (left := children()) and time.monotonic() < deadline:
         for pid, (line, cli) in left.items():
             if not cli:
@@ -1362,7 +1348,7 @@ def stop_descendants(group: int) -> tuple[list[str], list[str]]:
                 os.kill(pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
-            except PermissionError as e:  # ほかの子孫は止め続ける
+            except PermissionError as e:
                 denied[pid] = f"{line}（{e!r}）"[:300]
             try:
                 os.waitpid(pid, os.WNOHANG)
@@ -1385,7 +1371,7 @@ def session_history(session: str) -> list[dict]:
             r = json.loads(line)
         except ValueError:
             continue
-        if isinstance(r, dict) and session in (r.get("session"), r.get("session_asked")):  # 別の session を返した続きも数える
+        if isinstance(r, dict) and session in (r.get("session"), r.get("session_asked")):
             found.append(r)
     return found
 
@@ -1403,8 +1389,8 @@ def hold_session(session: str):
     return f
 
 
-LEFTOVER_DAYS = 7  # 子の一時の置き場を、最後に使われてから残す日数（過ぎたら launcher が消し、その記録からは続きから起動できない）
-PLACES_HELD = []  # この launcher が使っている一時の置き場の排他。終わりまで持つ（launcher が終わると、KILL でも OS が放す）
+LEFTOVER_DAYS = 7
+PLACES_HELD = []
 
 
 def hold_place(p: Path):
@@ -1420,7 +1406,7 @@ def hold_place(p: Path):
     try:
         try:
             fd = os.open(p, flags)
-        except PermissionError:  # 子が、自分の置き場を読めない権限にして終わった
+        except PermissionError:
             if not stat.S_ISDIR(os.lstat(p).st_mode):
                 raise
             os.chmod(p, 0o700)
@@ -1432,7 +1418,7 @@ def hold_place(p: Path):
     except OSError as e:
         os.close(fd)
         return None, "busy" if e.errno in (errno.EWOULDBLOCK, errno.EAGAIN) else "unsupported"
-    try:  # 開いてから排他を取るまでの間に片付けられていないか（開いたディレクトリが、まだその名前にあるか）
+    try:
         same = os.path.samestat(os.fstat(fd), os.lstat(p))
     except OSError:
         same = False
@@ -1451,7 +1437,6 @@ def usable_time(t, now: float) -> bool:
 
 
 def stamp_time(name: str):
-    """置き場の名前の先頭の日時（launcher が付ける %Y%m%d-%H%M%S）。読めなければ None。"""
     try:
         return time.mktime(time.strptime(name[:15], "%Y%m%d-%H%M%S"))
     except (ValueError, OverflowError):
@@ -1498,7 +1483,7 @@ def remove_tree(p: Path):
     frames = []  # 降りている道。各段は [fd（閉じてあれば None）, 親の中での名前, これから降りる子ディレクトリの名前]
 
     def fd_of(i: int) -> int:
-        if frames[i][0] is None:  # 閉じてあった段を、上から 1 段ずつ開き直す。戻り道の近い段は、開いたまま持つ
+        if frames[i][0] is None:
             fd = os.dup(frames[0][0])
             try:
                 for j in range(1, i + 1):
@@ -1518,12 +1503,12 @@ def remove_tree(p: Path):
         frames.append([fd, name, []])
         os.fchmod(fd, stat.S_IMODE(os.fstat(fd).st_mode) | 0o700)
         with os.scandir(fd) as entries:
-            found = list(entries)  # 読み終えてから消す。消しながら読むと、残りを読み飛ばす実装がある（下の説明）
+            found = list(entries)
         for e in found:
             if e.is_dir(follow_symlinks=False):
                 frames[-1][2].append(e.name)
             else:
-                os.unlink(e.name, dir_fd=fd)  # symlink は、名前だけ消える
+                os.unlink(e.name, dir_fd=fd)
         held = [f for f in frames[1:] if f[0] is not None]
         if len(held) > KEEP:
             os.close(held[0][0])
@@ -1562,7 +1547,7 @@ def leftover_places(base: Path) -> tuple:
             continue
         try:
             entries = sorted(os.scandir(parent), key=lambda e: e.name)
-        except FileNotFoundError:  # まだ作っていない
+        except FileNotFoundError:
             continue
         except OSError as e:
             problems.append(f"{parent} の中を並べられないので、その下の一時の置き場は片付けない: {e!r}"[:300])
@@ -1577,7 +1562,6 @@ def leftover_places(base: Path) -> tuple:
 
 
 def leftover_uses(base: Path) -> dict:
-    """一時の置き場（解いた道筋）ごとの、それを指す委任の記録（delegations.jsonl）の行。"""
     uses = {}
     try:
         with open(base / "delegations.jsonl", encoding="utf-8", errors="replace") as f:
@@ -1595,7 +1579,7 @@ def leftover_uses(base: Path) -> dict:
                         except ValueError:  # 道筋にできない文字列
                             pass
     except OSError:
-        pass  # まだ委任していない・読めない: どの置き場も、記録の無いものとして名前の日時だけで決める
+        pass
     return uses
 
 
@@ -1643,10 +1627,10 @@ def sweep_leftovers(now: float, out: dict) -> None:
             continue
         lock, why = hold_place(p)
         if lock is None:
-            if why == "unsupported":  # 使っている置き場を見分けられないので、何も消さない
+            if why == "unsupported":
                 out["problems"].append(f"この環境では、置き場のディレクトリの排他（flock）を取れないので、一時の置き場を片付けない: {p}"[:300])
                 return
-            continue  # ほかの launcher が使っている・片付けた
+            continue
         try:
             if not leftover_due(p, name, leftover_uses(base), base, now):
                 continue
@@ -1657,14 +1641,13 @@ def sweep_leftovers(now: float, out: dict) -> None:
                     p.parent.rmdir()  # tmp だけだった置き場（--out をほかに渡した起動）は、空になったら外す。報告のある置き場は空でないので残る
                 except OSError:
                     pass
-        except (OSError, RecursionError, MemoryError) as e:  # 1 つの置き場の失敗で、ほかの置き場の片付けを止めない
+        except (OSError, RecursionError, MemoryError) as e:
             out["problems"].append(f"一時の置き場を片付けられない: {p}: {e!r}"[:300])
         finally:
             os.close(lock)
 
 
 def launcher_error(out_dir: Path) -> str:
-    """想定外の例外のトレースバックを out に残し、その場所を返す。"""
     import traceback
     f = out_dir / "launcher-error.log"
     try:
@@ -1691,9 +1674,8 @@ def main() -> int:
     ap.add_argument("--resume", type=Path, help="前の起動の out。同じ session・同じ権限で続きから起動する（host・cwd・model・effort・write・interrogate・audit と役割（hardest）は記録から取る）")
     a = ap.parse_args()
     a.session, a.grok_home, a.codex_turns, a.prev_head, a.scratch, a.history = None, None, 0, None, None, []
-    a.codex_plugin_add = None  # 起動の前に Codex の写しを入れ直したら、その marketplace と終了コード（codex_refresh）
+    a.codex_plugin_add = None
     if a.resume:
-        # 時間切れで止めた子を最初から起動し直すと、それまでの作業（会話記録には残っている）を捨てる。続きから起動する
         try:
             prev = obj(json.loads((a.resume / "record.json").read_text(encoding="utf-8")))
         except (OSError, ValueError) as e:
@@ -1712,7 +1694,7 @@ def main() -> int:
             ap.error(f"同じ session の続きが動いている。終わるのを待つ: {a.resume}")
         a.history = session_history(prev["session"])
         banned = [r for r in a.history if UNSAFE.intersection(r.get("blocked") or [])]
-        if banned:  # 権限の外で動いたかもしれない session は、どの記録からも続けない
+        if banned:
             ap.error(f"この session は続けない（{banned[-1].get('out')} の {'・'.join(sorted(UNSAFE.intersection(banned[-1]['blocked'])))}）。確かめて、最初から起動し直す: {a.resume}"[:600])
         left = sorted({f for r in [prev, *a.history] for k in ("cwd_residue", "home_residue") for f in r.get(k) or [] if os.path.lexists(f)})
         if left:  # 片付けずに続けると、続きの比較で「前からあるもの」になり、ok で見えなくなる
@@ -1735,7 +1717,7 @@ def main() -> int:
                 PLACES_HELD.append(held)
             elif lost == "busy":
                 ap.error(f"--resume の記録の{label}{busy_note}: {a.resume}")
-            elif lost == "gone" or place.is_symlink() or not place.is_dir():  # unsupported は、排他なしで続ける（その環境では片付けも消さない）
+            elif lost == "gone" or place.is_symlink() or not place.is_dir():
                 ap.error(f"--resume の記録の{label}が無い{why_needed}。{swept_note}: {a.resume}")
             if place_due(place):
                 ap.error(f"--resume の記録の{label}は、もう続きから起動できない。{swept_note}: {a.resume}")
@@ -1743,9 +1725,8 @@ def main() -> int:
         a.session, a.grok_home = prev["session"], prev.get("grok_home") and Path(prev["grok_home"])
         a.interrogate = prev.get("interrogate") is True
         a.audit = prev.get("audit") is True
-        a.role = prev.get("role") if prev.get("role") in CHOICES else None  # 表より前の記録には無い（時間の上限の既定だけに使う）。
+        a.role = prev.get("role") if prev.get("role") in CHOICES else None
         # 手で書き換えた記録の role が list・dict だと TypeError で止まる（launcher の書いた記録は文字列。守らない）
-        # 前の起動で照らし終えた turn の数（その turn は、その起動の deny で照らした）と、前の起動が見た commit
         a.codex_turns, a.prev_head, a.scratch = prev.get("codex_turns") or 0, prev.get("head"), prev.get("scratch")
     elif a.write and a.interrogate:
         ap.error("--interrogate は読み取り専用の審査役に付ける。--write と一緒に渡さない")
@@ -1773,7 +1754,7 @@ def main() -> int:
     scratch_at = Path(a.scratch) if a.scratch else state_dir() / "delegations" / stamp / "tmp"
     scratch = scratch_at.resolve()
     if a.host == "codex" and not a.write:  # 記録を作る前に（状態の置き場が対象の下だと、記録も対象の中にできた）
-        if a.cwd in scratch.parents:  # 子の書ける一時ディレクトリが対象の中にできる（scratch は毎回新しい名前で、対象と同じにはならない）
+        if a.cwd in scratch.parents:
             ap.error(f"bb-writ の状態の置き場 {state_dir()} が対象の中にある。読み取り専用の Codex は一時ディレクトリに書けるので、対象の外に置く")
         # Git の管理ディレクトリの中（.git の下、bare の形）なら、子がそこに ref を作れる。git は呼ばずに形で見る
         # 解く前の道筋でも見る（.git/refs を外への symlink にすると、解いた後の祖先から .git が消えた）
@@ -1781,9 +1762,9 @@ def main() -> int:
         if any(d.name == ".git" or all((d / n).exists() for n in ("HEAD", "objects", "refs")) for d in [*scratch.parents, *unresolved.parents]):
             ap.error(f"bb-writ の状態の置き場 {state_dir()} が Git の管理ディレクトリの中にある。読み取り専用の Codex は一時ディレクトリに書けるので、外に置く")
     swept = {"removed": [], "problems": []}
-    try:  # 自分の作った一時の置き場のうち、もう続きから起動されないものを消す。消せなくても子の起動は止めない（記録の swept に出す）
+    try:
         sweep_leftovers(time.time(), swept)
-    except Exception as e:  # 片付けの想定外の失敗も同じ（そこまでに消した場所は swept に残る）
+    except Exception as e:
         swept["problems"].append(f"一時の置き場の片付けが失敗した: {e!r}"[:300])
     try:  # --out を渡しても、子の読みの規則（claude_reads）を組む前に作る（無い置き場は拒みに入らなかった）
         state_dir().mkdir(parents=True, exist_ok=True)
@@ -1794,23 +1775,22 @@ def main() -> int:
         out_dir.mkdir(parents=True, exist_ok=False)
     except FileExistsError:
         ap.error(f"--out がもうある（前の起動の記録を上書きしない）: {out_dir}")
-    # 監査役（返す前の判定）が、記録の要約でなく、子に何を頼んだかを読めるように（依頼文の真偽は見ない）
     try:
         shutil.copyfile(a.prompt_file, out_dir / "prompt.md")
-    except OSError:  # 読めない依頼文は、子を起こす段で失敗として記録する
+    except OSError:
         pass
     rec = {"host": a.host, "cwd": str(a.cwd), "model_requested": a.model, "effort_requested": a.effort,
            **({"role": a.role} if a.role else {}), **({"chosen_by": a.chosen_by} if not a.resume else {}), "timeout_s": a.timeout,
            "write": a.write, "interrogate": a.interrogate, "audit": a.audit, "out": str(out_dir), "session_asked": a.session, **({"resumed_from": str(a.resume.resolve())} if a.resume else {}),
-           "load": {"cpus": os.cpu_count(), "start": load_now()},  # 時間切れが混雑によるかを後で見分ける材料
+           "load": {"cpus": os.cpu_count(), "start": load_now()},
            **({"swept": swept} if swept["removed"] or swept["problems"] else {})}
-    blocked = []  # 続きから起動させない理由（権限が分からない、プロセスを止めきれない、Git の管理情報が変わった、照合できない）
+    blocked = []
     rec["head"] = rec["saw"] = clean_head(a.cwd)  # 子を起こす前に（子が見る作業ツリー）。saw は、後で head を外しても残す
 
     snapshot, why, prep, login = None, None, None, None
     contract = (CONTRACT + ("" if a.write else READ_ONLY_CONTRACT) + (AUDIT_CONTRACT if a.audit else "")
-                + (CLAUDE_WRITE_CONTRACT if a.host == "claude" and a.write else ""))  # 依頼文に足す約束（報告を直させる続きにも）
-    try:  # 起動の前の準備も、前の子が残したもの（FIFO・権限・壊れた HEAD）に当たりうる。止まらず落ちずに記録して返す
+                + (CLAUDE_WRITE_CONTRACT if a.host == "claude" and a.write else ""))
+    try:
         if a.write:
             own, common, why = worktree_dirs(a.cwd)
             if not why and own and own == common:
@@ -1826,10 +1806,10 @@ def main() -> int:
                 held, lost = hold_place(scratch)
                 if held is not None:
                     PLACES_HELD.append(held)
-                elif lost != "unsupported":  # 排他を取れない環境では、片付けも消さないので、持たずに進む
+                elif lost != "unsupported":
                     why = f"一時ディレクトリ {scratch} の排他を取れない（{lost}）"
         if a.host == "grok" and not why:
-            rec["grok_home"] = env["GROK_HOME"]  # 再開（grok -r）はこの home で
+            rec["grok_home"] = env["GROK_HOME"]
         if not why:
             # Claude Code の子は、対象（子が cd した下の階層を含む）と（worktree なら）元の checkout に、設定を書くときの空の
             # .claude/.cc-writes を作る（2.1.302・2.1.330）。消さない（同じ場所の別のセッションも使い、消すと、その設定の書き込みが
@@ -1844,12 +1824,12 @@ def main() -> int:
             # 読み取り専用の子は書かず、同じ対象で並行する審査役の一時的な場所を数えてしまう。Claude Code の空の置き場だけの .claude は
             # 前からあるものに数えない（cwd_residue）
             cwd_before = {str(p) for p in a.cwd.iterdir() if not claude_staging_only(p)} if a.write else None
-            had_git = os.path.lexists(a.cwd / ".git")  # Git でない対象に、書く子がリポジトリを作ったかを見る（照合する snapshot が無い）
+            had_git = os.path.lexists(a.cwd / ".git")
             if LINUX:
                 become_subreaper()
     except Exception as e:
         prep = [f"起動の前の準備ができない: {e!r}"[:300], f"詳細: {launcher_error(out_dir)}"]
-    if a.codex_plugin_add is not None:  # 入れ直しの結果によらず（unavailable・failed でも）
+    if a.codex_plugin_add is not None:
         rec["codex_plugin_add"] = a.codex_plugin_add
     t0, stop = time.monotonic(), {}  # 所要時間は、時間切れの期限と同じ単調時計で測る（WSL2 の壁時計は約 35 秒ごとに約 2.3 秒飛び、所要時間が延びた）
     if prep:
@@ -1882,11 +1862,9 @@ def main() -> int:
                     signal.signal(s, forward)
             # 子が残した背景のプロセスが、終了後の照合の後に書き換えないよう、プロセスグループごと止める。子の CLI が新しいセッションに
             # 切り離した子孫（Claude Code の Bash）はグループの外なので、Linux では自分の下に来たものを残らなくなるまで止める
-            fixing = None  # 照合に落ちた報告を直させる続きの依頼文（組めたら、次の周で起こす）
-            # Fable を使えずに費用が 0 のまま（作業を始める前に）終わった子は代わりの段で（fable_unavailable）、照合に落ちた報告は同じ session の
-            # 続きで、それぞれ 1 回だけ起こし直す
+            fixing = None
             while True:
-                if fixing is not None and "late" in stop:  # 1 回目の子を刈った後、続きを起こす前に受けたシグナル。続きは起こさず、1 回目の報告を返す
+                if fixing is not None and "late" in stop:
                     rec["stopped_by_signal"] = stop.pop("late")
                     rec["problems"] = rec["problems"] + [f"launcher がシグナル {rec['stopped_by_signal']} を受けたので、直させる続きを起こさなかった"]
                     break
@@ -1907,11 +1885,11 @@ def main() -> int:
                     ask_to_stop(child, stop)
                 rec["session"] = a.session  # 後の照合で failed になっても、確かめた後に続きから起動できるように
                 output, readers = {"stdout": bytearray(), "stderr": bytearray()}, []
-                def read_all(k, f):  # 読めた分を残す（子孫が開いたままで終わらなくても、調べる材料になる）
+                def read_all(k, f):
                     while chunk := f.read1(65536):
                         output[k] += chunk
                 try:
-                    if fixing is not None:  # 続きを起こせた。1 回目の報告と出力は *-before-fix と report_fix に移し、今のものとして見せない
+                    if fixing is not None:
                         for name in ("report.md", "stdout.jsonl", "stderr.log"):
                             (out_dir / name).replace(out_dir / name.replace(".", "-before-fix.", 1))
                         (out_dir / "fix-prompt.md").write_text(fixing, encoding="utf-8", errors="backslashreplace")
@@ -1926,9 +1904,9 @@ def main() -> int:
                     # 出力が閉じるのでなく、子の CLI が終わるのを待つ（子孫が出力を開いたままでも）。起こし直した子には、残りの期限だけを渡す
                     try:
                         wait_for_exit(child, a.timeout - (time.monotonic() - t0), stop)
-                    except subprocess.TimeoutExpired:  # 止めた後も出力を読み、session を記録する（--resume で続きから起動できる）
+                    except subprocess.TimeoutExpired:
                         timed_out = True
-                    timed_out = timed_out or bool(stop.get("timed_out"))  # 時間切れの TERM で、子が片付けて終わった
+                    timed_out = timed_out or bool(stop.get("timed_out"))
                 finally:
                     try:
                         os.killpg(child.pid, signal.SIGKILL)  # Linux では、まだ刈っていない（番号は使い回されていない）
@@ -1940,17 +1918,17 @@ def main() -> int:
                             try:
                                 try:
                                     child.wait(timeout=10)
-                                except subprocess.TimeoutExpired:  # 止まらない子の CLI は、下で残りとして並ぶ（後で刈るので、終了コードは分からない）
+                                except subprocess.TimeoutExpired:
                                     exit_lost = True
                                 gone, left = stop_descendants(child.pid)
-                                rec["stopped_after_exit"] = rec.get("stopped_after_exit", []) + gone  # 起こし直す前の子の分も残す
+                                rec["stopped_after_exit"] = rec.get("stopped_after_exit", []) + gone
                             except Exception as e:
                                 rec.setdefault("stopped_after_exit", [])
                                 left = [f"子の残りを確かめられない: {e!r}"[:300], f"詳細: {launcher_error(out_dir)}"]
                 for t in readers:
-                    t.join(timeout=0 if left else 10)  # 開いていた子孫が止まれば閉じる（止めきれなかったものは、待っても閉じない）
+                    t.join(timeout=0 if left else 10)
                 stdout, stderr = bytes(output["stdout"]), bytes(output["stderr"])
-                (out_dir / "stdout.jsonl").write_bytes(stdout)  # 照合の材料は生のまま残す
+                (out_dir / "stdout.jsonl").write_bytes(stdout)
                 (out_dir / "stderr.log").write_bytes(stderr)
                 if any(t.is_alive() for t in readers):
                     raise RuntimeError("子の CLI が終わった後も、ほかのプロセスが子の出力を開いたまま")
@@ -1958,7 +1936,7 @@ def main() -> int:
                 got = {"claude": parse_claude, "codex": parse_codex, "grok": parse_grok}[a.host](p.stdout)
                 budget = a.timeout - (time.monotonic() - t0)
                 if "model_fallback" not in rec and budget > 0 and fable_unavailable(a, got, timed_out, stop, left):
-                    (out_dir / "stdout-first.jsonl").write_bytes(stdout)  # 最初の起動の出力も残す
+                    (out_dir / "stdout-first.jsonl").write_bytes(stdout)
                     (out_dir / "stderr-first.log").write_bytes(stderr)
                     to = FALLBACK[a.host][a.model]
                     rec["model_fallback"] = {"from": [a.model, a.effort], "to": list(to), "why": got["errors"][:1]}
@@ -1967,13 +1945,11 @@ def main() -> int:
                     cmd = [a.model if i and cmd[i - 1] == "--model" else a.effort if i and cmd[i - 1] == "--effort"
                            else a.session if i and cmd[i - 1] == "--session-id" else x for i, x in enumerate(cmd)]
                     continue
-                # 警告の行（sandbox の適用失敗、効かなかった引数）があれば、権限の約束どおりに動いたか分からないので結果を使わない
                 unsafe = [l for l in p.stderr.splitlines() if a.host == "grok" and GROK_WARNING.search(l)][-5:]
                 rec.update(exit_code=p.returncode, session=got["session"] or a.session, model_effective=got["model_effective"], usage=got["usage"])
                 asked = re.sub(r"\[.*\]$", "", a.model).lower()  # 「opus[1m]」の付記と大文字小文字は問わない
                 if a.host == "claude" and got["model_effective"] and not any(asked in m.lower() for m in got["model_effective"]):
-                    rec["model_substituted"] = True  # 頼んだモデルと違うモデルで動いた（組織の制限など。失敗にはしない。#56）
-                # 読み取り専用の Codex の実効の権限。続きでは、前の起動で照らし終えた turn（その起動の deny で照らした）を除く
+                    rec["model_substituted"] = True
                 breach = a.host == "codex" and not a.write and codex_breach(got.get("permissions", [])[a.codex_turns:], a.codex_denies)
                 if breach is None and a.codex_turns and got["rollouts"] != 1:  # 前の turn を除けるのは、同じ記録ファイルに足したときだけ（0.164.0 の実物）
                     breach = f"続きの Codex の記録ファイルが 1 つでない（{got['rollouts']} 個）。前の起動で照らした turn を除けず、実効の権限を確かめられない"
@@ -1988,21 +1964,20 @@ def main() -> int:
                 doubts = ((["Grok の sandbox が約束どおりに効いたか分からない（警告）"] + unsafe if unsafe else [])
                           + ([f"続きの子の session を確かめられないか、前と違う（{got['session']}）"] if other else []) + ([breach] if breach else []))
                 # 続けさせない理由は、選ばれた status の枝でなく、事実から決める（利用枠の枝が先に決まっても残す）
-                blocked += [k for k, fact in (("unsafe", unsafe), ("other-session" if got["session"] else "session", other),  # 照らせなかっただけなら、権限の外で動いた事実は無い
+                blocked += [k for k, fact in (("unsafe", unsafe), ("other-session" if got["session"] else "session", other),
                                               ("unchecked" if breach and breach.startswith(UNCHECKED) else "breach", breach)) if fact]
                 # 利用枠・権限の照合は、時間切れより先に見る（権限の約束どおりに動いたか分からない子を、続きから起動させない）。
                 # 利用枠の文言を照らすのは、子が成功しなかったときだけ（成功した子の報告を、stderr の「429」「rate limit」などの一語で捨てていた）
-                cli_failed = p.returncode != 0 or got.get("is_error") or not got["text"]  # 下の終了コードの枝と同じ条件
+                cli_failed = p.returncode != 0 or got.get("is_error") or not got["text"]
                 if (timed_out or cli_failed) and QUOTA.search(p.stderr[-4000:] + " ".join(got["errors"])):
                     rec.update(status="quota", problems=["利用枠の上限に当たった（別料金の API へは切り替えない）"] + doubts + ended + stopped)
-                elif unsafe or other or (timed_out and breach):  # 権限・続きの session が分からない子を、続きから起動させない
+                elif unsafe or other or (timed_out and breach):
                     rec.update(status="failed", problems=doubts + ended + stopped)
-                elif timed_out:  # 子の作業は会話記録に残っている。最初から起動し直さず、続きから起動する（案内は、続けられると決めた後に付ける）
+                elif timed_out:
                     rec.update(status="timeout", problems=stopped + ([] if rec["session"] else ["session が分からず、続きから起動できない"]))
                 elif cli_failed:
                     rec.update(status="failed", problems=(ended or [f"終了コード {p.returncode}"] + got["errors"] + tail) + doubts)
                 elif breach:
-                    # 対象の設定が profile を広げた・狭めた（読み取り専用の結果として使わない）。報告は report.md に残す
                     rec.update(status="failed", problems=[breach])
                     (out_dir / "report.md").write_text(got["text"], encoding="utf-8", errors="backslashreplace")
                 else:
@@ -2011,10 +1986,10 @@ def main() -> int:
                     rec.update(status="invalid-report" if problems else "ok", report=report, problems=problems, execution=ran)
                     if a.audit and not problems:
                         rec["deliver"] = report["deliver"]
-                    if not problems and ran in (None, "no") and not a.write:  # 読んだだけの報告。実行が要る審査では審査役に数えない（interrogate の 3）
+                    if not problems and ran in (None, "no") and not a.write:
                         rec.update(status="not-run", problems=["対象の試験・検査を実行できなかった（読んだだけの報告）" if ran == "no"
                                                                else "報告に実行の欄（execution）が無い（読んだだけの報告として扱う）"])
-                    (out_dir / "report.md").write_text(got["text"], encoding="utf-8", errors="backslashreplace")  # 単独のサロゲート
+                    (out_dir / "report.md").write_text(got["text"], encoding="utf-8", errors="backslashreplace")
                 # 照合に落ちた報告は、同じ session の続きで 1 回だけ、落ちた点を名指しして直させる（照合は緩めない。続きの依頼文は
                 # fix_prompt）。止められた・止めきれない子孫が残った・続けさせない理由がある・期限が FIX_BUDGET より残っていない子は、
                 # 直させない。刈った後に受けたシグナルは、続きを組む前（command() は Codex の排他の待ちや Grok の home の写しを含む）と、
@@ -2029,22 +2004,21 @@ def main() -> int:
                 if not a.resume:  # 続きの子が前に見たのは、この起動で確かめた commit（終わりの head の照合で、前の起動の head として使う）
                     a.prev_head = rec["head"]
                 a.resume, a.session, a.codex_turns = a.resume or out_dir, rec["session"], rec.get("codex_turns", a.codex_turns)
-                a.grok_home = Path(rec["grok_home"]) if a.host == "grok" else a.grok_home  # Grok は、いまの home の session の記録から続ける
+                a.grok_home = Path(rec["grok_home"]) if a.host == "grok" else a.grok_home
                 fixing = fix_prompt(rec["problems"], a.cwd)
                 cmd, env, why = command(a, fixing + contract, scratch)
-                if why:  # 続きを組めなければ、直させずに今の報告を返す
+                if why:
                     rec["problems"] = rec["problems"] + [f"launcher が続きで直させられない: {why}"[:600]]
                     break
-            if "report_fix" in rec and rec["status"] not in ("ok", "not-run"):  # 直させた後も使えない。1 回目の問題も並べる
+            if "report_fix" in rec and rec["status"] not in ("ok", "not-run"):
                 rec["problems"] = rec.get("problems", []) + ["launcher が同じ session の続きで直させる前の 1 回目の報告の問題: "
                                                              + " / ".join(rec["report_fix"]["asked"])[:2000]]
-        except Exception as e:  # 想定外。委任の記録は書き、失敗として返す（トレースバックは out に残す）
+        except Exception as e:
             what = "子を起動できない" if child is None else "子の結果を読めない"
             blocked.append("error")
             rec.update(status="failed", problems=[f"{what}: {e!r}"[:300], f"詳細: {launcher_error(out_dir)}"])
         finally:
-            # 後処理は、子が書き換えた場所を触る。どの段が失敗しても、記録は書き、失敗として返す
-            if left:  # 照合の後にも書き換えうる
+            if left:
                 blocked.append("left")
                 rec.update(status="failed", problems=["子の CLI が終わった後、子が起こしたプロセスを止められない。下のプロセスを確かめて止める"]
                            + left[:20] + rec.get("problems", []))
@@ -2063,7 +2037,7 @@ def main() -> int:
                             Path(f).unlink()
                     changed = git_changes(snapshot[2], git_snapshot(*snapshot[:2], a.cwd), snapshot[1])
                     headline = "子が、自分のブランチ以外の Git の管理情報を変えた。"
-                except Exception as e:  # 子が管理情報を壊したかもしれない。黙らず、照合できなかったことを返す
+                except Exception as e:
                     changed = [f"Git の管理情報を読めない（子が壊したかもしれない）: {e!r}"[:300], f"詳細: {launcher_error(out_dir)}"]
                     headline = "子の後に Git の管理情報を照合できない。"
                 if changed:
@@ -2076,7 +2050,6 @@ def main() -> int:
                 except Exception as e:
                     rec.setdefault("cwd_residue", [])
                     blocked.append("cwd")
-                    # 子が対象の場所を読めなくしたときは、先に並んだ理由（Git の管理情報を照合できない、など）を前に残す
                     rec.update(status="failed", problems=rec.get("problems", []) + [f"対象の残りを確かめられない: {e!r}"[:600],
                                                                                      f"詳細: {launcher_error(out_dir)}"])
                 if rec["cwd_residue"]:
@@ -2087,7 +2060,7 @@ def main() -> int:
             try:
                 _, empty, unreadable = home_entries(skip)
                 rec["home_residue"] = sorted(f for f in empty - home_before if not cli_place(Path(f)))
-                if unreadable - unreadable_before:  # 子が権限を落とした場所は、残りを確かめられない
+                if unreadable - unreadable_before:
                     raise PermissionError(f"読めない場所が増えた: {sorted(unreadable - unreadable_before)[:20]}")
             except Exception as e:
                 rec.setdefault("home_residue", [])
@@ -2098,14 +2071,13 @@ def main() -> int:
                 rec.update(status="failed", problems=["子の起動の後、ホームに空のファイル・ディレクトリが新しく残った。中身を確かめて消す"
                                                       "（空の ~/.bash_profile があると、ログインシェルが ~/.profile と ~/.bashrc を読まない）"]
                            + rec["home_residue"][:20] + rec.get("problems", []))
-    if rec["head"] and a.write:  # 書く子の後は、子が書けた設定で素の git status を動かさない。work.py は書く子の head を数えない
+    if rec["head"] and a.write:
         rec.update(head=None, head_lost="書く子の後は、HEAD と作業ツリーを確かめない（work.py は書く子の head を数えない）")
-    elif rec["head"] and clean_head(a.cwd) != rec["head"]:  # 確かめた後、子の終わりまでに作業ツリーが変わった（子が見たものが commit と違いうる）
+    elif rec["head"] and clean_head(a.cwd) != rec["head"]:
         rec.update(head=None, head_lost="子の起動の前に確かめた後、終わりまでに対象の HEAD か作業ツリーが変わったか、終わりに確かめられなかった")
     elif rec["head"] and a.resume and (seen := next((h for h in [a.prev_head, *(r["saw"] for r in a.history if "saw" in r)] if h != rec["head"]), rec["head"])) != rec["head"]:
-        # 続きの子は、前の起動で別の commit（か未 commit の変更）を見た。前の記録へ戻って続けたときも、その session が見たものを数える
         rec.update(head=None, head_lost=f"前の起動の head（{seen}）と違う。続きの子は前の起動で別のものを見た")
-    if rec["status"] == "ok" and not a.write and rec["head"]:  # work.py が審査に数える子。指摘が届いたその場で、次にすることを出す
+    if rec["status"] == "ok" and not a.write and rec["head"]:
         rec["next"] = ("審査の指摘なら、直す前に、作業の記録（claim の note.path）の「指摘の扱い」の欄に、指摘ごとに"
                        "対応する・記録のみ・退ける と理由を書く（入口の条件 (6)。push・pr はこの欄が空なら拒否される）"
                        + (("。監査役の判定は届けてよい（deliver: yes）。報告が挙げた整える点は、直して記録に書く（監査は立て直さない）"
@@ -2116,8 +2088,7 @@ def main() -> int:
                           "。監査役（--audit）は、扱いを書き、直しを commit し終えて HEAD を動かさないと決めてから立てる"
                           "（審査役と同じコマンドで続けて立てない）")
                        + "（`playbook-verify` の「返す前の判定」）")
-    elif rec["status"] == "not-run" and rec.get("execution") == "no" and rec["head"]:  # not-run は読み取り専用の子だけ
-        # 子が実行できなかった。関門は宣言（--not-run）が無ければ数えない。止まったその場で、関門の外で出さずに済む出口を出す（#39）
+    elif rec["status"] == "not-run" and rec.get("execution") == "no" and rec["head"]:
         rec["next"] = (("監査役の判定は差し戻し（deliver: no）。挙がった項目を閉じてから立て直す。" if rec.get("deliver") == "no" else "")
                        + "子が対象の試験・検査を実行できなかった。写し方（`mktemp -d` で作ったディレクトリに写して動かす）や依頼文の誤りなら、直して立て直す。"
                        "子の sandbox のせいで実行できない（headless Chrome・Node の子プロセス・127.0.0.1 など）なら、親が同じ commit で同じ試験を"
@@ -2126,7 +2097,6 @@ def main() -> int:
     rec["duration_s"] = round(time.monotonic() - t0, 1)
     rec["load"]["end"] = load_now()
     rec["at"] = round(time.time(), 3)  # 起動の終わり。一時の置き場を最後に使った時刻として、片付けの期限に使う（sweep_leftovers）
-    # 続きから起動してよいのは、session があり、権限・プロセス・Git・照合のどれにも当たらなかった起動だけ（空の残りは、片付けてから続けられる）
     if "sig" in stop:  # 止められた。ok で返った報告はそのまま使う（子が TERM の前に書き終えていた）
         rec["stopped_by_signal"] = stop["sig"]
         if rec["status"] != "ok":
@@ -2135,11 +2105,11 @@ def main() -> int:
     rec["resumable"] = bool(rec.get("session")) and not blocked
     try:
         json.dumps(rec, ensure_ascii=False, indent=1)
-    except (RecursionError, ValueError) as e:  # 子から来た値が深すぎる。外して、失敗として記録する（想定外の失敗なので続けさせない）
-        for d in (rec, rec.get("report_fix") or {}):  # 直させる前の子から写した値も
+    except (RecursionError, ValueError) as e:
+        for d in (rec, rec.get("report_fix") or {}):
             d.update({k: None for k in ("report", "usage", "model_effective") if k in d})
         rec.update(status="failed", resumable=False, problems=[f"子の結果を記録に書けない（外した）: {e!r}"[:300]] + rec.get("problems", []))
-        rec.pop("next", None)  # 審査に数えない子になった
+        rec.pop("next", None)
     if rec["resumable"] and rec["status"] != "ok":
         rec["problems"] = rec.get("problems", []) + [f"--resume {out_dir} で続きから起動できる"]
     body = json.dumps(rec, ensure_ascii=False, indent=1)
