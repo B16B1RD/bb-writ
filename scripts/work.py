@@ -26,7 +26,8 @@
   work.py task list --dir <checkout>                               → タスク、担当、未完了の統合
                      task start と task list は、担当のいない（解放済みか、期限が切れて 24 時間を過ぎた）タスクで作業場所が残っているものを
                      unclosed に並べる（切れて 24 時間以内のものは、持ち主が子を待っているだけかもしれないので並べない。commits は基点からの commit の数、landed は変更が統合先に入っているか）。片付けを呼ばれなかったタスクを見せるだけで、消さない
-  work.py task resume --dir <checkout> --task <識別子> --holder <誰か> → 作業場所を保持して担当を取得
+  work.py task resume --dir <checkout> --task <識別子> --holder <誰か> [--take-over] → 作業場所を保持して担当を取得。期限が切れて
+                     24 時間以内の担当は、--take-over（利用者にそのタスクの続きか、捨てることを頼まれたとき）が無ければ拒否（3）
   work.py integrate --dir <worktree> --token <t> --expected <統合先commit> --verified <検証済みcommit> → 排他・照合して fast-forward
   work.py task cleanup --dir <worktree> --token <t> --saved <別のブランチかタグ> → 変更が保存先に入っていれば片付け（squash・rebase の統合も可）
 
@@ -731,12 +732,17 @@ def pending_while(r: Path, held: str) -> list:
         raise RecordError(f"{e}。op run の外部操作がまだ動いている: {held}。終わってから直す") from None
 
 
-def claim_at(r, d, holder, minutes):
+def claim_at(r, d, holder, minutes, take_over=True):
+    """take_over が偽（task resume の既定）なら、unclosed_tasks と同じく、期限が切れて MAX_LEASE_MIN 以内の担当も取らない。
+    一覧でなく取る時に決めるので、古い一覧から、戻って延ばした後にまた切れた持ち主の担当を取らない。"""
     now = time.time()
     old = read(r / 'lease.json')
     if alive(old, now):
         return {'ok': False, 'reason': '生きた担当がいる。二重に書かない',
                 'holder': old['holder'], 'expires_in_s': round(float(old['expires_at']) - now)}, 3
+    if not take_over and maybe_waiting(old, now):
+        return {'ok': False, 'reason': '担当の期限が切れて 24 時間以内。持ち主は子を待っているだけかもしれないので、閉じ忘れの片付けでは取らない。'
+                '利用者にこのタスクの続きか、捨てることを頼まれたときだけ --take-over で取る', 'holder': old.get('holder')}, 3
     held = run_holder(r)
     if held:  # 担当の期限が切れても（手放されても）、op run のコマンドが動いている間は取らせない。取ると、終わっていない操作をやり直せる
         return {'ok': False, 'reason': f'op run の外部操作がまだ動いている: {held}。終わるのを待つ（終われば監督役が done を書く）',
@@ -1003,7 +1009,7 @@ def task_command(a):
             wr = root(dest)
             with locked(wr):
                 write(wr / 'task.json', task)
-                res, code = claim_at(wr, dest, a.holder, a.lease)
+                res, code = claim_at(wr, dest, a.holder, a.lease, take_over=a.take_over)
             return out({**task, **res, 'worktree_branch': actual_branch}, code)
         task = task_at(a.dir)
         wr = root(a.dir)
@@ -1635,6 +1641,8 @@ def main() -> int:
             s.add_argument('--target')
         if name == 'resume':
             s.add_argument('--task', required=True)
+            s.add_argument('--take-over', dest='take_over', action='store_true',
+                           help='期限が切れて 24 時間以内の担当も取る（利用者にこのタスクの続きか、捨てることを頼まれたときだけ。閉じ忘れの片付けでは付けない）')
         if name == 'cleanup':
             s.add_argument('--token', required=True)
             s.add_argument('--saved', required=True)

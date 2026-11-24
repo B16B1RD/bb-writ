@@ -80,6 +80,11 @@ REPLAYS = {
         "revert": [("            if alive(lease, now) or maybe_waiting(lease, now):", "            if alive(lease, now):")],
         "scenarios": ["test_parallel.TestParallel.test_a_task_whose_owner_may_still_be_waiting_is_not_offered_for_closing"],
     },
+    "stale-list": {  # #32 の直しの後、閉じる側が古い一覧から task resume し、戻って延ばした後にまた切れた持ち主の作業場所を消した
+        "models": [("test_task_model", "resume_refuses_waiting")],
+        "revert": [("    if not take_over and maybe_waiting(old, now):", "    if not take_over and False:")],
+        "scenarios": ["test_parallel.TestParallel.test_a_stale_list_does_not_take_the_task_of_an_owner_who_came_back"],
+    },
 }
 
 RUNNER = r"""
