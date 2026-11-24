@@ -2298,6 +2298,18 @@ class TestLaunch(unittest.TestCase):
             rc, rec = self.run_launch("claude", extra=["--write"], cwd=target("clean"))
             self.assertEqual((rc, rec["status"], rec["cwd_residue"]), (0, "ok", []), rec)
 
+    def test_empty_files_a_later_child_leaves_under_the_kept_claude_dir_fail(self):
+        # launcher は Claude Code の子が残した空の .claude/.cc-writes を消さない（#65）ので、後の子の前から .claude が在る。
+        # 後の書く子が時間切れでその下に残した 0 バイトのファイル（.claude/settings.json など）を見落とし、git add -A で commit に入った
+        d = self.worktree("kept")[1].resolve()
+        rc, rec = self.run_launch("claude", cwd=d)  # 前の子（審査役など）
+        self.assertEqual(rec["status"], "ok", rec)
+        self.assertTrue((d / ".claude" / ".cc-writes").is_dir())
+        rc, rec = self.run_launch("claude", extra=["--write"], cwd=d)  # ファイルを持たないままの .claude は、後の子の残りでもない
+        self.assertEqual((rec["status"], rec["cwd_residue"]), ("ok", []), rec)
+        rc, rec = self.run_launch("claude", "cwd-residue-hang", extra=["--write", "--timeout", "3"], cwd=d)
+        self.assertEqual((rec["status"], rec["cwd_residue"]), ("failed", [str(d / ".bashrc"), str(d / ".claude")]), rec)
+
     @unittest.skipUnless(sys.platform.startswith("linux"), "子の CLI が切り離した子孫を止めるのは Linux だけ（PR_SET_CHILD_SUBREAPER）")
     def test_processes_the_child_detached_do_not_outlive_it(self):
         # Claude Code 2.1.309 の Bash は、コマンドを新しいセッションで起こす。プロセスグループを止めるだけでは、子が終わった後も

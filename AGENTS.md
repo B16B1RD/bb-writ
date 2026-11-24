@@ -39,7 +39,7 @@ bb-writ は、CLI ハーネス（Claude Code・Codex。Grok Build も同じ SKIL
 | 規則 | 強制するもの |
 |---|---|
 | 子の起動の後、ホームに空のファイル・ディレクトリを残さない（空の `.bash_profile` でログインシェルが `.bashrc` を読まなくなった）。Claude Code の CLI が自分の置き場として作る `~/.claude` の直下の空のディレクトリと `~/.config/anthropic` だけは数えない | `scripts/launch.py` の `home_entries`。`test_child_leaving_empty_files_in_home_fails`・`test_empty_dirs_the_claude_cli_makes_in_its_own_places_are_not_residue` |
-| 書く子の起動の後、対象の直下に、空のファイル（とそれを持つディレクトリ）を残さない。ファイルを持たないディレクトリは数えない | `scripts/launch.py` の `cwd_residue`。`test_empty_places_the_child_leaves_in_the_target_fail` |
+| 書く子の起動の後、対象の直下に、空のファイル（とそれを持つディレクトリ）を残さない。ファイルを持たないディレクトリは数えない。起動の前にファイルを持たなかった場所は、新しくできたものと同じに見る（前の子が残した空の `.claude` の下の 0 バイトのファイルを見落とした） | `scripts/launch.py` の `cwd_residue`。`test_empty_places_the_child_leaves_in_the_target_fail`・`test_empty_files_a_later_child_leaves_under_the_kept_claude_dir_fail` |
 | 片付けで、別のプロセスが同時に使いうる空の置き場を消さない（launcher が消した空の `.claude/.cc-writes` で、並行するセッションの設定の書き込みが拒まれた。#65）。ファイルを持たないディレクトリは、片付けを止める理由に数えない | `scripts/work.py` の `clean`・`holds_no_file`。`test_cleanup_does_not_count_directories_that_hold_no_file`・`test_claude_staging_dirs_stay_for_the_sessions_that_share_them` |
 | 子の CLI が終わった後（時間切れを含む）、子が起こしたプロセスを残さない | Linux は `scripts/launch.py` が subreaper になって止める（Linux の外はプロセスグループだけ）。`test_processes_the_child_detached_do_not_outlive_it`・`test_a_child_the_launcher_cannot_stop_or_check_fails` |
 | 時間切れで止めた子を最初から起動し直さず、`--resume` で同じ session を続ける。続けてよいかは、1 つ前の記録でなく session の履歴で決める | `scripts/launch.py` の `session_history`・`hold_session`。`test_a_timed_out_child_continues_from_where_it_stopped`・`test_a_session_found_unsafe_cannot_be_continued_from_an_earlier_record` |
