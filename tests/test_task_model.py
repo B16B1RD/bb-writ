@@ -68,7 +68,7 @@ from model_tie import drift  # noqa: E402
 
 WORK = Path(__file__).resolve().parents[1] / "scripts" / "work.py"
 
-MODELED_AT = "5efee49"
+MODELED_AT = "2f5e310"
 MODELED = {
     "alive": "f1f9574a8ad75670",
     "maybe_waiting": "b5093f786995e028",
@@ -77,8 +77,8 @@ MODELED = {
     "current_lease": "647f2e51dedbbfd9",
     "claim_at": "d13a239d32440d08",
     "unclosed_tasks": "c1b08c620e752898",
-    "task_command": "322217d2c73c47d3",
-    "integrate": "4d9d8fd6a191c69d",
+    "task_command": "1be11aadcb159544",
+    "integrate": "be70176842d82a73",
     "dispatch": "7b2ce7ae7c39483f",
 }
 
