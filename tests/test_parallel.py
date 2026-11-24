@@ -746,6 +746,63 @@ class TestParallel(unittest.TestCase):
         self.w('task', 'cleanup', '--dir', a['dir'], '--token', a['token'], '--saved', 'main', code=6)
         self.assertEqual((Path(a['dir']) / '.env').read_text(), '試験用のローカル設定')
 
+    def test_cleanup_does_not_count_the_claude_staging_dir(self):
+        """Claude Code が設定を書くときの空の .claude/.cc-writes は、同じ場所の別のセッションも使う。task cleanup がそれを未保存の
+        変更に数えたので launcher が消し、並行するセッションの設定の書き込みが拒まれた（#65）。空の .cc-writes だけの .claude と、
+        .claude の中の空の .cc-writes は、無視されていてもいなくても数えない。"""
+        a = self.start()
+        d = Path(a['dir'])
+        (d / '.gitignore').write_text('/.claude/\n/日本 語/.claude/\n/kept/.claude/.cc-writes/\n')  # 下の sub/.claude は無視しない
+        (d / 'kept' / '.claude').mkdir(parents=True)
+        (d / 'kept' / '.claude' / 'settings.json').write_text('{}')  # 追跡する設定の隣の置き場
+        self.git(d, 'add', '.gitignore', 'kept')
+        self.git(d, 'commit', '-qm', '置き場を除外')
+        self.integrate(a, a['base'], self.git(d, 'rev-parse', 'HEAD'))
+        for place in ('.claude', '日本 語/.claude', 'kept/.claude', 'sub/.claude'):
+            (d / place / '.cc-writes').mkdir(parents=True)
+        listing = self.git(d, 'status', '--porcelain', '--untracked-files=all', '--ignored=matching').splitlines()
+        for line in ('!! .claude/', '!! "\\346\\227\\245\\346\\234\\254 \\350\\252\\236/.claude/"', '!! kept/.claude/.cc-writes/'):
+            self.assertIn(line, listing)  # 無視するものとして見える
+        self.w('task', 'cleanup', '--dir', a['dir'], '--token', a['token'], '--saved', 'main')
+        self.assertFalse(d.exists())
+
+    def test_cleanup_still_counts_other_ignored_places_that_hold_no_file(self):
+        """数えないのは Claude Code の空の置き場だけで、ほかの無視するディレクトリは、ファイルを持たなくても数えて作業場所を元のまま残す。
+        ファイルを持たないディレクトリをどれも数えずに通すと、書けない場所の下で git worktree remove が作業場所を途中まで消して止まり、
+        タスクを閉じられなくなった。"""
+        outside = Path(self.tmp.name) / 'outside'  # 作業場所の外の空のディレクトリ
+        outside.mkdir()
+        for name, ignore, dirs, files, locked in (
+                ('empty', '/build/\n', ['build/a/b'], [], None),
+                ('claude-alone', '/.claude/\n', ['.claude'], [], None),  # .cc-writes の無い空の .claude
+                ('claude-other', '/.claude/\n', ['.claude/.cc-writes', '.claude/agents'], [], None),  # 置き場の隣のもの
+                ('cc-nested', '/.claude/\n', ['.claude/.cc-writes/x'], [], None),  # 置き場の中のディレクトリ
+                ('cc-file', '/.claude/\n', ['.claude/.cc-writes'], ['.claude/.cc-writes/settings.local.json.tmp'], None),
+                ('cc-link', '/.claude/\n', ['.claude'], ['.claude/.cc-writes'], None),  # 外の空のディレクトリへの symlink
+                ('cc-outside', '/plain/\n', ['plain/.cc-writes'], [], None),  # .claude の外の同じ名前
+                ('locked-tree', '/ign/\n', ['ign/ro/x'], [], 'ign/ro'),  # 木の中のディレクトリが書けない
+                ('locked-grandparent', '/top/mid/in/\n', ['top/mid/in'], [], 'top')):  # 無視するディレクトリの祖父が書けない
+            with self.subTest(name):
+                a = self.start()
+                d = Path(a['dir'])
+                (d / '.gitignore').write_text(ignore)
+                self.git(d, 'add', '.gitignore')
+                self.git(d, 'commit', '-qm', '置き場を除外', '--allow-empty')  # 前の場合と同じ除外のときは、変更が無い
+                self.integrate(a, self.git(self.repo, 'rev-parse', 'main'), self.git(d, 'rev-parse', 'HEAD'))
+                for p in dirs:
+                    (d / p).mkdir(parents=True)
+                for p in files:
+                    if name == 'cc-link':
+                        (d / p).symlink_to(outside)
+                    else:
+                        (d / p).write_text('{}')
+                if locked:
+                    (d / locked).chmod(0o555)
+                    self.addCleanup(lambda p=d / locked: p.exists() and p.chmod(0o755))
+                before = sorted(map(str, d.rglob('*')))
+                self.w('task', 'cleanup', '--dir', a['dir'], '--token', a['token'], '--saved', 'main', code=6)
+                self.assertEqual(sorted(map(str, d.rglob('*'))), before)  # 作業場所の .git も残る
+
     def test_new_task_does_not_implicitly_include_another_task(self):
         a = self.start()
         self.change(a, 'other-task')
