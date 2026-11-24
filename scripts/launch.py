@@ -12,6 +12,7 @@ timeout は、時間切れで止め、ほかの照合に当たらなかったも
 --model・--effort を省くと、役割（--audit・--interrogate・読み取り専用・--write・--write --hardest）とホストから CHOICES の表で決める。
 JSON が返ったことを成功にしない: 結論が空、証拠が無い、証拠の where がファイルを指すのに存在しない、実行の欄の形が違う、は invalid-report。
 照合に落ちた報告は、同じ session の続きで 1 回だけ、落ちた点を名指しして直させる（fix_prompt。記録の report_fix）。照合は同じで、直らなければ invalid-report。
+--timeout の残りが FIX_BUDGET 秒より少なければ、直させずに 1 回目の報告を返す。
 読み取り専用の子で、実行の欄が無いか、対象の試験・検査を実行できなかったと書いた報告は not-run（起動して形の整った報告が返ったことと区別する）。
 実行の欄が無いものは読んだだけの報告で、実行できなかった（no）と書いたものは、work.py の --not-run の宣言があれば push・pr の関門に数える。
 書く子の実行の欄は記録するだけ（作業場所の試験は親が確かめる）。実行の欄の真偽（本当に動かしたか）は見ない。
@@ -1325,6 +1326,10 @@ def load_now() -> float | None:
 UNCHECKED = ("Codex の実効の権限を記録（", "続きの Codex の記録ファイルが")  # 権限を照らせなかった理由の文の先頭（理由の文の中にはパスが入るので、部分一致で見ない）
 UNSAFE = {"unsafe", "breach", "other-session", "left", "git"}  # 子が権限の外で動いた、別の session だった、かもしれない理由。この session はどの記録からも続けない（照らせなかっただけの理由は、前の記録から続けられる）
 STOP_GRACE = 30  # 子に TERM を送った後、子が片付けて終わるのを待つ秒数（シグナルで止めるときは --timeout の残りが短ければそちら）
+# 照合に落ちた報告を直させる続きを起こすのに、--timeout の残りとして要る秒数（残りが少ないと、invalid-report を時間切れに変えるだけ）。
+# 実物の Claude Code の続き（1 ターンで直した）は、起こしてから終わるまで 5.4 秒（CLI の duration_ms は 3.6 秒）。その 3 倍余り
+# （Codex・Grok の続きは測っていない）
+FIX_BUDGET = 20
 
 
 def ask_to_stop(child: subprocess.Popen, stop: dict) -> None:
@@ -2029,8 +2034,9 @@ def main() -> int:
                                                                else "報告に実行の欄（execution）が無い（読んだだけの報告として扱う）"])
                     (out_dir / "report.md").write_text(got["text"], encoding="utf-8", errors="backslashreplace")  # 単独のサロゲート
                 # 照合に落ちた報告は、同じ session の続きで 1 回だけ、落ちた点を名指しして直させる（照合は緩めない。続きの依頼文は
-                # fix_prompt）。止められた・止めきれない子孫が残った・続けさせない理由がある・期限が残っていない子は、直させない
-                if (rec["status"] != "invalid-report" or "report_fix" in rec or not rec["session"] or budget <= 0
+                # fix_prompt）。止められた・止めきれない子孫が残った・続けさせない理由がある・期限が FIX_BUDGET より残っていない子は、
+                # 直させない
+                if (rec["status"] != "invalid-report" or "report_fix" in rec or not rec["session"] or budget < FIX_BUDGET
                         or blocked or left or exit_lost or "sig" in stop or "late" in stop):
                     break
                 if not a.resume:  # 続きの子が前に見たのは、この起動で確かめた commit（終わりの head の照合で、前の起動の head として使う）

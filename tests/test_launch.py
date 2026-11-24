@@ -4618,6 +4618,18 @@ launch.claude_reads = claude_reads
         rc, rec = self.run_launch("claude", env_extra={"FAKE_TEXT": "結論だけ", "FAKE_RESUMED_TEXT": good})
         self.assertEqual((rec["status"], rec["head"]), ("ok", git("rev-parse", "HEAD").strip()), rec)  # 直させた子も、見た commit の審査に数える
 
+    def test_a_report_is_not_fixed_without_time_left(self):
+        """--timeout の残りが少なければ、直させずに 1 回目の報告を返す（続きが時間切れになって invalid-report を timeout に変え、TERM を
+        受けない子では --timeout を STOP_GRACE まで越えた）。"""
+        good = GOOD.encode().decode("unicode_escape")
+        bad = good.replace("a.txt:1", "other/a.txt:1")
+        calls = Path(str(self.args_file) + ".calls")
+        calls.unlink(missing_ok=True)
+        rc, rec = self.run_launch("claude", extra=["--timeout", "5"], env_extra={"FAKE_TEXT": bad, "FAKE_RESUMED_TEXT": good})
+        self.assertEqual(len(calls.read_text().splitlines()), 1, rec)
+        self.assertEqual((rc, rec["status"], "report_fix" in rec), (2, "invalid-report", False), rec)
+        self.assertEqual((Path(rec["out"]) / "report.md").read_text(encoding="utf-8"), bad)
+
     def test_absence_evidence_without_line_is_allowed(self):
         rc, rec = self.run_launch("codex", "absent")  # 「ファイルが無いこと」を示す証拠は不正でない
         self.assertEqual(rec["status"], "ok", rec)
