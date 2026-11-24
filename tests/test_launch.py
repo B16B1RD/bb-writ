@@ -723,6 +723,13 @@ class TestLaunch(unittest.TestCase):
         (self.bin / "fake_env.json").write_text(json.dumps({k: v for k, v in env.items() if k.startswith("FAKE_")}))
         return env
 
+    def repo_git(self):
+        """試験のリポジトリを動かす git。開発機の全体の除外（~/.config/git/ignore）と設定を読まない。"""
+        env = {**os.environ, "HOME": str(self.home), "XDG_CONFIG_HOME": str(self.home / ".config"),
+               "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}
+        return lambda *a, cwd=None: subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", *a], cwd=cwd or self.cwd,
+                                                   env=env, check=True, capture_output=True, text=True).stdout
+
     def run_launch(self, host, mode="good", extra=(), path=None, cwd=None, env_extra=None, proc_cwd=None, raw=False, stdin=None):
         self.orphans()  # 前の回が途中で落ちて読まれなかった偽の子孫を、上書きする前に片付けに回す
         env = self.launch_env(mode, path, env_extra)
