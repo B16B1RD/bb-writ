@@ -40,7 +40,9 @@ run_holder が外れたロックのファイルを消すのは、モデルでは
 （実コードの動きはモデルの動きに含まれ、写しすぎは不変条件を破る側にしか働かない）。
 照合に拒否された op run のコマンド（RunRefused。d5923ce を戻した版だけで起きる）は、鍵も記録も持たない 1 つの外部操作として写す。
 写さない経路（ハッシュも掛けない。変えても、この試験は落ちない）: task_command（task start・resume の claim、cleanup の
-担当の削除。タスクの持ち主と閉じる側の間は tests/test_task_model.py が写す）・current_lease・integrate の排他と照合、pending
+担当の削除。タスクの持ち主と閉じる側の間は tests/test_task_model.py が写す。claim_at の take_over が偽の拒否（--take-over の無い
+task resume が、期限が切れて MAX_LEASE_MIN 以内の担当を取らない）もそちらが写し、ここの Claim は dispatch の claim（take_over は真））・
+current_lease・integrate の排他と照合、pending
 （外れたロックの片付けは run_holder として写す）、main の振り分け、シグナルの中継（supervise の 2 回目の fork）、記録の形式と
 壊れた記録、出力のファイル、ロックを開けない・読めないとき、op begin（op run を通さない）。
 
@@ -58,7 +60,7 @@ from model_tie import body, drift, fingerprint  # noqa: E402
 
 WORK = Path(__file__).resolve().parents[1] / "scripts" / "work.py"
 
-MODELED_AT = "97a5c3c"
+MODELED_AT = "5efee49"
 TLC_STATES = 84981  # TLC と照らした版の状態数（TLC_FIELDS に写した数）
 MODELED_STATES = 222085
 MODELED_MODEL = "0bad1c49061cf3a4"
@@ -72,7 +74,7 @@ MODELED = {
     "alive": "f1f9574a8ad75670",
     "check_token": "6297f65bcd57f11c",
     "held_lease": "2e230a09eab2bcdd",
-    "claim_at": "5c4ad919e7f42cfd",
+    "claim_at": "d13a239d32440d08",
     "run_holder": "ed7f517a536e94fd",
     "keep_lease": "1ff486dd87b26989",
     "op_run": "ec713203b25a8d89",

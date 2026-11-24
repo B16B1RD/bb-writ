@@ -943,22 +943,42 @@ class TestParallel(unittest.TestCase):
         self.w('renew', '--dir', a['dir'], '--token', a['token'])  # 誰も取っていないので、持ち主は続けられる
         self.assertTrue(Path(a['dir']).is_dir())
 
-    def test_a_session_that_took_over_a_recently_expired_task_can_close_it(self):
-        """unclosed に出さないだけで、止まった持ち主の続きを task resume で引き受けたセッションは、期限が切れて間もなくても
-        task cleanup で閉じられる（取り直した担当の前の期限で拒否しない）。"""
+    def test_a_stale_list_does_not_take_the_task_of_an_owner_who_came_back(self):
+        """閉じる側が、持ち主の担当が切れて 24 時間を過ぎたときに取った一覧を、持ち主が戻って延ばし、また子を待つ間に切れた後に使っても、
+        task resume は担当を取らない（一覧と同じ 24 時間の段を、取る時に見る。tests/test_task_model.py の反例を実物で）。持ち主は
+        続けられる。切れて 24 時間を過ぎれば、閉じる側は取って閉じられる。"""
         a = self.start()
         self.integrate(a, self.git(self.repo, 'rev-parse', 'main'), self.change(a, 'a'))
+        self.expire(a, 24 * 3600 + 120)
+        stale = self.w('task', 'list', '--dir', self.repo)['unclosed']  # 閉じる側の一覧
+        self.assertEqual([(t['task'], t['landed']) for t in stale], [(a['task'], True)])
+        self.w('renew', '--dir', a['dir'], '--token', a['token'])  # 持ち主が戻り、また子を待つ
         self.expire(a)
+        refused = self.w('task', 'resume', '--dir', self.repo, '--task', a['task'], '--holder', 'Codex', code=3)
+        self.assertIn('--take-over', refused['reason'])
+        self.w('renew', '--dir', a['dir'], '--token', a['token'])
+        self.assertTrue(Path(a['dir']).is_dir())
+        self.expire(a, 24 * 3600 + 120)
         b = self.w('task', 'resume', '--dir', self.repo, '--task', a['task'], '--holder', 'Codex')
         self.w('task', 'cleanup', '--dir', a['dir'], '--token', b['token'], '--saved', 'main')
         self.assertFalse(Path(a['dir']).exists())
 
+    def test_a_session_that_took_over_a_recently_expired_task_can_close_it(self):
+        """unclosed に出さないだけで、止まった持ち主の続きを task resume --take-over で引き受けたセッションは、期限が切れて
+        間もなくても task cleanup で閉じられる（取り直した担当の前の期限で拒否しない）。"""
+        a = self.start()
+        self.integrate(a, self.git(self.repo, 'rev-parse', 'main'), self.change(a, 'a'))
+        self.expire(a)
+        b = self.w('task', 'resume', '--dir', self.repo, '--task', a['task'], '--holder', 'Codex', '--take-over')
+        self.w('task', 'cleanup', '--dir', a['dir'], '--token', b['token'], '--saved', 'main')
+        self.assertFalse(Path(a['dir']).exists())
+
     def test_an_expired_lease_taken_by_another_stops_the_old_token(self):
-        """期限の後に別の者が task resume で取ったら、元の token の integrate と task cleanup は 3 で拒否される。"""
+        """期限の後に別の者が task resume --take-over で取ったら、元の token の integrate と task cleanup は 3 で拒否される。"""
         a = self.start()
         head = self.change(a, 'a')
         self.expire(a)
-        self.w('task', 'resume', '--dir', self.repo, '--task', a['task'], '--holder', 'Codex')
+        self.w('task', 'resume', '--dir', self.repo, '--task', a['task'], '--holder', 'Codex', '--take-over')
         main = self.git(self.repo, 'rev-parse', 'main')
         self.integrate(a, main, head, code=3)
         self.w('task', 'cleanup', '--dir', a['dir'], '--token', a['token'], '--saved', 'main', code=3)
