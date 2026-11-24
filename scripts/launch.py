@@ -327,8 +327,10 @@ def cli_place(p: Path) -> bool:
 # status に --no-optional-locks を、入れ子の設定は --ignore-submodules（all・dirty）を、呼ぶ側が付ける。
 # 守らない範囲: filter（どこで定めたものも外さない。利用者の設定が作業場所の中のスクリプトを指すもの、子が書ける include の先・
 # config.worktree で定めたものも走る。LFS などの required の filter を外すと status が壊れるため。子が共通の config・config.worktree を
-# 変えたときと、Git でなかった対象にリポジトリを作ったときは、照合が止める）、git 2.43 で測っていない命令の出どころ、
-# 利用者・指揮者が後で動かす素の git。
+# 変えたときと、Git でなかった対象にリポジトリを作ったときは、照合が止める）、promisor の remote の取りに行き（利用者の設定が
+# include で作業場所の中のファイルを読み、子がそこに remote を定めると、参照の git も取りに行きの命令を走らせうる）、
+# 前から .git が在る Git でない対象（壊れた .git の中に子がリポジトリを作っても、照合は止めない）、git 2.43 で測っていない
+# 命令の出どころ、利用者・指揮者が後で動かす素の git。
 QUIET_GIT = ["git", "-c", "core.fsmonitor=false"]
 
 
@@ -2060,7 +2062,8 @@ def main() -> int:
                         pass
                 if lost:  # 黙って残すと、task cleanup が後で止まる
                     raise RuntimeError("子の後に git status で対象の下の階層を確かめられない。task cleanup の前に、"
-                                       "git status --porcelain --untracked-files=all --ignored=matching で空の .claude/.cc-writes を探して rmdir する")
+                                       "git -c core.fsmonitor=false --no-optional-locks status --porcelain --untracked-files=all --ignored=matching "
+                                       "--ignore-submodules=all で空の .claude/.cc-writes を探して rmdir する")
             except Exception as e:  # 子が権限を変えたなど。残ったものは task cleanup が未保存の変更とみなす
                 blocked.append("cleanup")
                 rec.update(status="failed", problems=[f"子の起動で作られた空の .claude を片付けられない: {e!r}"[:300],

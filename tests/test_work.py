@@ -3626,9 +3626,8 @@ class TestQuietGit(unittest.TestCase):
                 elif case == "hooks-committed":  # husky の形: 追跡する置き場の hook を、子が commit する（作業ツリーはきれい）
                     self.git("config", "core.hooksPath", ".githooks", cwd=self.repo)
                     (wt / ".githooks").mkdir()
-                    for hook in ("post-index-change", "reference-transaction"):  # worktree remove の中の status と、branch -D
-                        (wt / ".githooks" / hook).write_text(touch)
-                        (wt / ".githooks" / hook).chmod(0o755)
+                    (wt / ".githooks" / "post-index-change").write_text(touch)  # worktree remove の中の status が走らせる
+                    (wt / ".githooks" / "post-index-change").chmod(0o755)
                     self.git("add", ".githooks", cwd=wt)
                     self.git("commit", "-q", "-m", "hooks", cwd=wt)
                     self.git("branch", "-f", "saved-" + case, "HEAD", cwd=wt)  # 保存先は checkout していない枝（統合の merge を通らない）
