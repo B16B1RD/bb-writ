@@ -2906,58 +2906,45 @@ class TestOpRun(unittest.TestCase):
         self.assertEqual(self.w("op", "begin", "--dir", str(self.wt), "--token", tok, "--key", "local:" + "x" * 1019, "--what", "x")[0], 2)
 
     def test_the_trim_keeps_the_longest_tail_that_fits(self):
-        work, f = self.work_module(), Path(self.tmp.name) / "o.log"
-        f.write_text("".join(chr(0x3042 + i % 80) for i in range(5000)))
-        size = lambda s: len(json.dumps(s, ensure_ascii=False).encode()) - 2
-        for budget in (1000, 2047, 4096):
-            got = work.tail(f, budget=budget)
-            body = got.removeprefix("（先頭を省いた）")
-            self.assertLessEqual(size(got), budget)
-            longer = f.read_text()[-(len(body) + 1):]
-            self.assertGreater(size("（先頭を省いた）" + longer), budget)  # もう 1 字足すと超える
+        """改行の無い長い出力は、記録の result（exit の前置きを含む）が 8 KiB に収まる最も長い末尾になる（多バイトの文字でも、大きさは記録の形で数える）。"""
+        tok = self.claim()
+        text = "".join(chr(0x3042 + i % 80) for i in range(5000))
+        rc, res = self.run_op(tok, "push:feat@1", "--reviewed", self.head(), *self.script(f"import sys; sys.stdout.write({text!r})"))
+        result = res["op"]["result"]
+        size = lambda s: len(json.dumps(s, ensure_ascii=False).encode()) - 2  # ops.jsonl に書かれる形での大きさ
+        mark = "exit 0: （先頭を省いた）"
+        self.assertTrue(result.startswith(mark), result[:30])
+        body = result[len(mark):]
+        self.assertTrue(text.endswith(body))
+        self.assertLessEqual(size(result), 8 * 1024)
+        self.assertGreater(size(mark + text[-(len(body) + 1):]), 8 * 1024)  # もう 1 字足すと超える
 
     def test_tail_gives_up_after_16_mib_of_blank_lines(self):
-        work, f = self.work_module(), Path(self.tmp.name) / "blank.log"
-        f.write_bytes(b"A\n" + b"\n" * (16 * 1024 * 1024 + 30 * 1024))  # 16 MiB 遡った先の 64 KiB には A が入る
-        self.assertEqual(work.tail(f), "")  # 16 MiB で諦めたら、その先は読まない
+        tok = self.claim()
+        rec, _ = self.record_of(tok, "push:feat@1", f"import sys; sys.stdout.write('A\\n' + '\\n' * {16 * 1024 * 1024 + 30 * 1024})")
+        self.assertEqual(rec, "")  # 16 MiB 遡った先の 64 KiB には A が入るが、16 MiB で諦めたら、その先は読まない
 
     def test_the_record_drops_only_the_trailing_blank_part(self):
-        """出力の末尾の空白（改行を含む）は記録しない。行の中の空白と、行頭の空白は変えない。"""
-        work, f = self.work_module(), Path(self.tmp.name) / "sp.log"
-        for data, want in ((b"  first  \n  CODE  \n \n\t\n", "  first  \n  CODE"),
-                           (b"abc   ", "abc"),
-                           (b"  \n", ""), (b" \t \n\n", ""),
-                           (b" " * 100000, ""), (b" " * 100000 + b"\n", ""), (b"\t" * 70000 + b"\n\n", ""),  # 空白だけは空
-                           (b"ERROR: x" + b" " * 70000, "ERROR: x"),  # 行末の空白が 64 KiB を超えても中身を残す
-                           (b"abc" + b" " * (70 * 1024) + b"\n" + b" \n" * 40000, "abc")):
-            f.write_bytes(data)
-            self.assertEqual(work.tail(f, budget=10 ** 9), want, data[:20])
-        f.write_bytes(b"ab\n" * 30000)  # 64 KiB を超えるが、窓の先頭は行の頭で、21 行以上ある
-        self.assertEqual(work.tail(f), "\n".join(["ab"] * 20))
-        f.write_bytes(b"x" * 100000)  # 1 行が窓より長い
-        self.assertTrue(work.tail(f, budget=10 ** 9).startswith("（先頭を省いた）"))
-        f.write_bytes(b"x" * 100 + b"\n" + b"y" * (64 * 1024))  # 窓の先頭がちょうど行の頭
-        self.assertEqual(work.tail(f, budget=10 ** 9), "y" * (64 * 1024))
-        f.write_bytes(b"aaa " + b"y" * (64 * 1024))  # 1 バイト前が空白（改行ではない）なら、行の途中
-        self.assertTrue(work.tail(f, budget=10 ** 9).startswith("（先頭を省いた）y"))
-        for ch in ("あ", "\U0001F600"):  # 3 バイトと 4 バイトの文字
-            for pad in range(4):  # 窓の先頭が文字のどの位置でも、壊れた文字を出さない
-                f.write_bytes(ch.encode() * 30000 + b"x" * pad)
-                self.assertNotIn("\ufffd", work.tail(f, budget=10 ** 9), (ch, pad))
-        f.write_bytes("ok\u3000\u3000\n".encode())  # 全角の空白は残す（落とすのは ASCII の空白だけ）
-        self.assertEqual(work.tail(f), "ok\u3000\u3000")
-        f.write_bytes(b"\xff\xfeA\n")  # 壊れたバイトは黙って消さず、置き換えて残す
-        self.assertEqual(work.tail(f), "\ufffd\ufffdA")
-        f.write_bytes(b"A\n\n\nB\n")  # 間の空行は残す
-        self.assertEqual(work.tail(f), "A\n\n\nB")
-        f.write_bytes(b"x" * 100 + b"\r" + b"y" * (64 * 1024))  # \r は行の区切りではない
-        self.assertTrue(work.tail(f, budget=10 ** 9).startswith("（先頭を省いた）"))
-        line = b"z" * 3000
-        f.write_bytes(b"q" * 8000 + b"\n".join([line] * 20))  # 窓の中がちょうど 20 行で、先頭は行の途中
-        start = len(f.read_bytes()) - 64 * 1024
-        self.assertTrue(start > 0 and f.read_bytes()[start - 1:start] != b"\n")
-        got = work.tail(f, budget=10 ** 9)
-        self.assertTrue(got.startswith("（先頭を省いた）"), got[:12])
+        """出力の末尾の空白（改行を含む ASCII の空白）は記録しない。行の中の空白・行頭の空白・全角の空白・間の空行は変えず、壊れたバイトは
+        黙って消さず置き換えて残す。読む窓（64 KiB）の先頭の扱い（行の途中か・文字の途中か）は、記録の上限（8 KiB）で先頭が省かれるので、
+        記録には出ない（見ない）。"""
+        tok = self.claim()
+        for n, (data, want) in enumerate((("b'  first  \\n  CODE  \\n \\n\\t\\n'", "  first  \n  CODE"), ("b'abc   '", "abc"),
+                                          ("b'  \\n'", ""), ("b' \\t \\n\\n'", ""),
+                                          ("b' ' * 100000", ""), ("b' ' * 100000 + b'\\n'", ""), ("b'\\t' * 70000 + b'\\n\\n'", ""),  # 空白だけは空
+                                          ("b'ERROR: x' + b' ' * 70000", "ERROR: x"),  # 行末の空白が 64 KiB を超えても中身を残す
+                                          ("b'abc' + b' ' * (70 * 1024) + b'\\n' + b' \\n' * 40000", "abc"),
+                                          ("b'ab\\n' * 30000", "\n".join(["ab"] * 20)),
+                                          ("'ok\\u3000\\u3000\\n'.encode()", "ok\u3000\u3000"),  # 全角の空白は残す（落とすのは ASCII の空白だけ）
+                                          ("b'\\xff\\xfeA\\n'", "\ufffd\ufffdA"), ("b'A\\n\\n\\nB\\n'", "A\n\n\nB"))):
+            with self.subTest(data=data[:30]):
+                p = subprocess.run([sys.executable, str(WORK), *with_risk(self, (
+                    "op", "run", "--dir", str(self.wt), "--token", tok, "--key", f"push:feat@{n}", "--what", "x", "--from", str(self.repo),
+                    "--verified", self.head(), "--reviewed", self.head(), *self.script(f"import sys; sys.stdout.buffer.write({data})")))],
+                    env=self.env, capture_output=True, text=True, errors="replace")  # 表示する出力は UTF-8 とは限らない
+                self.assertEqual(json.loads(p.stdout)["op"]["result"], "exit 0: " + want)
+        rec, _ = self.record_of(tok, "push:feat@x", "import sys; sys.stdout.write('x' * 100000)")  # 1 行が上限より長い
+        self.assertTrue(rec.startswith("（先頭を省いた）"), rec[:12])
 
     def test_a_lock_file_that_vanishes_while_checking_is_skipped(self):
         work, r = self.work_module(), Path(self.tmp.name) / "rh"
@@ -3080,9 +3067,9 @@ class TestOpRun(unittest.TestCase):
         self.pid_gone(left)
 
     def test_tail_reads_back_exactly_16_mib(self):
-        work, f = self.work_module(), Path(self.tmp.name) / "b16.log"
-        f.write_bytes(b"A\n" + b"\n" * (16 * 1024 * 1024 - 32 * 1024))  # A は 16 MiB の内側
-        self.assertEqual(work.tail(f), "A")
+        tok = self.claim()
+        rec, _ = self.record_of(tok, "push:feat@1", f"import sys; sys.stdout.write('A\\n' + '\\n' * {16 * 1024 * 1024 - 32 * 1024})")
+        self.assertEqual(rec, "A")  # A は 16 MiB の内側
 
     @unittest.skipUnless(PERMISSIONS_BIND, "権限の制限が効かない（root など）")
     def test_output_that_cannot_be_removed_does_not_hold_the_lock_or_break_op_done(self):
