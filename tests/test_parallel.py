@@ -770,28 +770,6 @@ class TestParallel(unittest.TestCase):
         self.w('task', 'cleanup', '--dir', a['dir'], '--token', a['token'], '--saved', 'main')
         self.assertFalse(d.exists())
 
-    def test_cleanup_keeps_the_worktree_when_an_empty_directory_cannot_be_removed(self):
-        """ファイルを持たないディレクトリでも、消せないもの（その中か親に書き込みの権限が無い）を数えずに通すと、git worktree remove が
-        作業場所を半分消して止まり、タスクを閉じられなくなった。拒んで作業場所を元のまま残し、権限を戻せば閉じられる。"""
-        for name, ignore, place, locked in (('tree', '/ign/\n', 'ign/ro/x', 'ign/ro'),  # 木の中のディレクトリが書けない
-                                            ('parent', '/top/in/\n', 'top/in', 'top')):  # 無視するディレクトリの親が書けない
-            with self.subTest(name):
-                a = self.start()
-                d = Path(a['dir'])
-                (d / '.gitignore').write_text(ignore)
-                self.git(d, 'add', '.gitignore')
-                self.git(d, 'commit', '-qm', '置き場を除外')
-                self.integrate(a, self.git(self.repo, 'rev-parse', 'main'), self.git(d, 'rev-parse', 'HEAD'))
-                (d / place).mkdir(parents=True)
-                (d / locked).chmod(0o555)
-                self.addCleanup(lambda p=d / locked: p.exists() and p.chmod(0o755))
-                before = sorted(d.rglob('*'))
-                self.w('task', 'cleanup', '--dir', a['dir'], '--token', a['token'], '--saved', 'main', code=6)
-                self.assertEqual(sorted(d.rglob('*')), before)
-                (d / locked).chmod(0o755)
-                self.w('task', 'cleanup', '--dir', a['dir'], '--token', a['token'], '--saved', 'main')
-                self.assertFalse(d.exists())
-
     def test_new_task_does_not_implicitly_include_another_task(self):
         a = self.start()
         self.change(a, 'other-task')

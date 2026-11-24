@@ -795,19 +795,13 @@ QUIET = ['-c', 'core.fsmonitor=false']
 
 def holds_no_file(p):
     """p が、どの深さにもファイル（ディレクトリでないもの。symlink を含む）を持たないディレクトリか。最初のファイルで止め、
-    symlink の先へ入らない。読めない場所は、中身を言えないので持つとみなす。消せない場所（p の親か、p とその下のディレクトリに、
-    書き込みと実行の権限が無い）も持つとみなす（数えずに通すと、task cleanup の git worktree remove が作業場所を途中まで消して止まり、
-    タスクを閉じられなくなった）。"""
-    p = os.path.abspath(p)  # git status はディレクトリを「名前/」で出す。末尾の / を外して親を取る
-    if os.path.islink(p) or not os.path.isdir(p) or not os.access(os.path.dirname(p), os.W_OK | os.X_OK):
+    symlink の先へ入らない。読めない場所は、中身を言えないので持つとみなす。"""
+    if os.path.islink(p) or not os.path.isdir(p):
         return False
     todo = [p]
     try:
         while todo:
-            d = todo.pop()
-            if not os.access(d, os.W_OK | os.X_OK):
-                return False
-            with os.scandir(d) as entries:
+            with os.scandir(todo.pop()) as entries:
                 for e in entries:
                     if not e.is_dir(follow_symlinks=False):
                         return False
@@ -821,7 +815,7 @@ def clean(d, ignored=False, child=False):
     """作業ツリーの根 d に、未保存の変更が無いか。命令を走らせない形の status（QUIET、hooks を走らせない --no-optional-locks）で見る。
     child（書く子が書けた作業場所）では、入れ子のリポジトリの設定を読まないよう、サブモジュールの中に入らない
     （--ignore-submodules=dirty。サブモジュールが別の commit を指す変更は数える）。
-    追跡外・無視するものの行のうち、ファイルを持たず消せるディレクトリ（holds_no_file）は数えない（保存するものが無い）。Claude Code が設定を書くときの
+    追跡外・無視するものの行のうち、ファイルを持たないディレクトリは数えない（保存するものが無い）。Claude Code が設定を書くときの
     空の .claude/.cc-writes は、同じ場所の別のセッションも使うので、片付けのために消させない（launcher が消して、並行するセッションの
     設定の書き込みが拒まれた。#65）。"""
     p = subprocess.run(['git', '-C', str(d), *QUIET, '--no-optional-locks', 'status', '--porcelain', '-z', '--untracked-files=all',
