@@ -4618,6 +4618,86 @@ launch.claude_reads = claude_reads
         rc, rec = self.run_launch("claude", env_extra={"FAKE_TEXT": "結論だけ", "FAKE_RESUMED_TEXT": good})
         self.assertEqual((rec["status"], rec["head"]), ("ok", git("rev-parse", "HEAD").strip()), rec)  # 直させた子も、見た commit の審査に数える
 
+    def test_a_signal_after_deciding_to_start_another_child_is_not_lost(self):
+        """報告を直させる続き（と Fable の立て直し）を起こすと決めた後に受けたシグナル。続きを組む間に受けたら、続きを起こさずに 1 回目の
+        報告を返し、起こす間際に受けたら、起こした子に TERM を伝える。どちらも stopped_by_signal を残す（組む間に受けたものは捨てられて
+        続きが期限まで動き、間際に受けたものは刈った子の番号へ送られて、続きの子は TERM を受けずに期限か STOP_GRACE の後に KILL された）。"""
+        good = GOOD.encode().decode("unicode_escape")
+        bad = good.replace("a.txt:1", "other/a.txt:1")
+        calls = Path(str(self.args_file) + ".calls")
+        with self.subTest("while building the fix"):
+            calls.unlink(missing_ok=True)
+            rc, rec = self.launch_patched("""
+                real = launch.command
+                def command(a, prompt, scratch):
+                    if a.resume:  # 直させる続きを組む間
+                        os.kill(os.getpid(), signal.SIGTERM)
+                    return real(a, prompt, scratch)
+                launch.command = command
+                """, ["--host", "claude", "--cwd", str(self.cwd), "--timeout", "30"], env_extra={"FAKE_TEXT": bad, "FAKE_MODE_2": "stop"})
+            self.assertEqual(len(calls.read_text().splitlines()), 1, rec)  # 続きは起こさない
+            self.assertEqual((rc, rec["status"], rec.get("stopped_by_signal"), "report_fix" in rec), (2, "invalid-report", int(signal.SIGTERM), False), rec)
+            self.assertEqual((Path(rec["out"]) / "report.md").read_text(encoding="utf-8"), bad)  # 1 回目の報告を返す
+        for name, extra, env, started in (("fix", [], {"FAKE_TEXT": bad}, "report_fix"),
+                                          ("fallback", ["--model", "fable", "--effort", "high"], {"FAKE_MODE_1": "fable-unavailable"}, "model_fallback")):
+            with self.subTest(f"right before starting ({name})"):
+                calls.unlink(missing_ok=True)
+                t0 = time.monotonic()
+                rc, rec = self.launch_patched("""
+                    real = subprocess.Popen
+                    class Popen(real):
+                        def __init__(self, args, *k, **kw):  # 2 回目の子の CLI を起こす間際（1 回目の子は .calls に書いた）
+                            if kw.get("start_new_session") and "--settings" in args and os.path.exists(os.environ["FAKE_ARGS"] + ".calls"):
+                                os.kill(os.getpid(), signal.SIGTERM)
+                            super().__init__(args, *k, **kw)
+                    subprocess.Popen = Popen
+                    """, ["--host", "claude", "--cwd", str(self.cwd), *extra, "--timeout", "30"], env_extra={**env, "FAKE_MODE_2": "stop"})
+                self.assertEqual((started in rec, rec.get("stopped_by_signal")), (True, int(signal.SIGTERM)), rec)  # 2 回目の子を起こした
+                # その子が TERM を受けて終わった（終了コードは届いた時機で -15・143・241。伝えなければ KILL の -9）
+                self.assertNotIn(rec["exit_code"], (0, -int(signal.SIGKILL)), rec)
+                self.assertLess(time.monotonic() - t0, 15, rec)
+
+    def test_a_fix_that_cannot_start_keeps_the_first_report(self):
+        """続きを起こせない（依頼文に符号にできない文字がある、依頼文が引数に長すぎる）ときも、続きを組めないときと同じく、1 回目の報告を
+        invalid-report のまま report.md に残して返す（failed で続けられない記録になり、長すぎるときは report.md も消えていた）。"""
+        good = GOOD.encode().decode("unicode_escape")
+        # Linux は 1 つの引数が MAX_ARG_STRLEN（ページの 32 倍）を、ほかは引数と環境の合計が ARG_MAX を超えると E2BIG
+        size = os.sysconf("SC_PAGE_SIZE") * 32 if sys.platform.startswith("linux") else os.sysconf("SC_ARG_MAX")
+        many = ", ".join('{"what": "w", "where": "%s/%d.txt:1"}' % ("d" * 200, i) for i in range(size // 200 + 1))
+        calls = Path(str(self.args_file) + ".calls")
+        for name, first in (("surrogate", good.replace("a.txt:1", "b\\ud83d.txt:1")),
+                            ("too-long", good.replace('"where": "a.txt:1"}', '"where": "a.txt:1"}, ' + many))):
+            with self.subTest(name):
+                calls.unlink(missing_ok=True)
+                env = self.launch_env(env_extra={"FAKE_RESUMED_TEXT": good})
+                env.pop("FAKE_TEXT")  # 報告は偽の子にだけ渡す（大きな報告を launcher の環境に入れると、launcher の起動が E2BIG で落ちる）
+                (self.bin / "fake_env.json").write_text(json.dumps({**json.loads((self.bin / "fake_env.json").read_text()), "FAKE_TEXT": first}))
+                p = subprocess.run([sys.executable, str(LAUNCH), "--host", "claude", "--cwd", str(self.cwd), "--prompt-file", str(self.prompt)],
+                                   env=env, capture_output=True, text=True, timeout=120)
+                rec = json.loads(p.stdout)
+                self.assertEqual(len(calls.read_text().splitlines()), 1, rec)
+                self.assertEqual((p.returncode, rec["status"], rec["resumable"], rec["blocked"]), (2, "invalid-report", True, []), rec)
+                self.assertTrue([x for x in rec["problems"] if x.startswith("launcher が続きで直させられない")], rec["problems"][-3:])
+                self.assertEqual((Path(rec["out"]) / "report.md").read_text(encoding="utf-8"), first)
+                self.assertNotIn("report_fix", rec)
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "子の CLI が切り離した子孫を止めるのは Linux だけ（PR_SET_CHILD_SUBREAPER）")
+    def test_a_fix_keeps_what_the_first_run_left(self):
+        """直させる続きを起こしても、1 回目の子の生の出力（stdout-before-fix.jsonl・stderr-before-fix.log）と、1 回目の子の後に止めた
+        子孫（stopped_after_exit）を残す（続きの出力で上書きし、止めた子孫の一覧も続きの分だけになっていた）。"""
+        good = GOOD.encode().decode("unicode_escape")
+        rc, rec = self.run_launch("claude", env_extra={"FAKE_TEXT": good.replace("a.txt:1", "other/a.txt:1"), "FAKE_RESUMED_TEXT": good,
+                                                       "FAKE_MODE_1": "orphan", "FAKE_SLEEP": shutil.which("sleep")})
+        pids = self.orphans()
+        out = Path(rec["out"])
+        self.assertEqual((rec["status"], len(pids)), ("ok", 7), rec)
+        with self.subTest("stopped_after_exit"):
+            self.assertEqual(sorted(int(p.split()[0]) for p in rec["stopped_after_exit"]), sorted(pids), rec)
+        with self.subTest("raw output"):
+            self.assertTrue((out / "stdout-before-fix.jsonl").is_file() and (out / "stderr-before-fix.log").is_file(), sorted(out.iterdir()))
+            self.assertIn("other/a.txt", (out / "stdout-before-fix.jsonl").read_text())  # 1 回目の子の出力
+            self.assertNotIn("other/a.txt", (out / "stdout.jsonl").read_text())  # 続きの子の出力
+
     def test_a_report_is_not_fixed_without_time_left(self):
         """--timeout の残りが少なければ、直させずに 1 回目の報告を返す（続きが時間切れになって invalid-report を timeout に変え、TERM を
         受けない子では --timeout を STOP_GRACE まで越えた）。"""
@@ -4629,6 +4709,17 @@ launch.claude_reads = claude_reads
         self.assertEqual(len(calls.read_text().splitlines()), 1, rec)
         self.assertEqual((rc, rec["status"], "report_fix" in rec), (2, "invalid-report", False), rec)
         self.assertEqual((Path(rec["out"]) / "report.md").read_text(encoding="utf-8"), bad)
+
+    def test_a_fix_that_fails_does_not_show_the_first_report_as_current(self):
+        """直させる続きが失敗しても、記録は 1 回目の報告（report・execution）を今の報告として見せない（report.md は消えたのに、記録には
+        1 回目の報告と実行の欄が残っていた）。1 回目の報告は report-before-fix.md と report_fix に残る。"""
+        bad = GOOD.encode().decode("unicode_escape").replace("a.txt:1", "other/a.txt:1")
+        rc, rec = self.run_launch("claude", env_extra={"FAKE_TEXT": bad, "FAKE_EXIT_2": "1", "FAKE_ERROR_2": "boom"})
+        out = Path(rec["out"])
+        self.assertEqual((rc, rec["status"], rec["report_fix"]["asked"]), (2, "failed", ["証拠のファイルが無い: other/a.txt"]), rec)
+        self.assertEqual([k for k in ("report", "execution", "deliver") if k in rec], [], rec)
+        self.assertFalse((out / "report.md").exists())
+        self.assertEqual((out / "report-before-fix.md").read_text(encoding="utf-8"), bad)
 
     def test_absence_evidence_without_line_is_allowed(self):
         rc, rec = self.run_launch("codex", "absent")  # 「ファイルが無いこと」を示す証拠は不正でない

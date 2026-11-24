@@ -11,8 +11,8 @@ timeout は、時間切れで止め、ほかの照合に当たらなかったも
 子には、最後に ```json {"conclusion": ..., "evidence": [{"what": ..., "where": ...}], "unknowns": [...], "execution": {...}} ``` を書かせる。
 --model・--effort を省くと、役割（--audit・--interrogate・読み取り専用・--write・--write --hardest）とホストから CHOICES の表で決める。
 JSON が返ったことを成功にしない: 結論が空、証拠が無い、証拠の where がファイルを指すのに存在しない、実行の欄の形が違う、は invalid-report。
-照合に落ちた報告は、同じ session の続きで 1 回だけ、落ちた点を名指しして直させる（fix_prompt。記録の report_fix）。照合は同じで、直らなければ invalid-report。
---timeout の残りが FIX_BUDGET 秒より少なければ、直させずに 1 回目の報告を返す。
+照合に落ちた報告は、同じ session の続きで 1 回だけ、落ちた点を名指しして直させる（fix_prompt。記録の report_fix、out の *-before-fix）。照合は同じで、直らなければ invalid-report。
+--timeout の残りが FIX_BUDGET 秒より少ない・続きを組めない・起こせない・起こす前にシグナルを受けたときは、直させずに 1 回目の報告を返す。
 読み取り専用の子で、実行の欄が無いか、対象の試験・検査を実行できなかったと書いた報告は not-run（起動して形の整った報告が返ったことと区別する）。
 実行の欄が無いものは読んだだけの報告で、実行できなかった（no）と書いたものは、work.py の --not-run の宣言があれば push・pr の関門に数える。
 書く子の実行の欄は記録するだけ（作業場所の試験は親が確かめる）。実行の欄の真偽（本当に動かしたか）は見ない。
@@ -1082,10 +1082,10 @@ def fable_unavailable(a, got: dict, timed_out: bool, stop: dict, left: list) -> 
     """表の段（別名 fable）を頼んだ子が、費用が 0 のまま（作業を始める前に）、利用枠が尽きた（429）か使えないモデル（404）の API のエラーで終わった。
     ほかのエラー（過負荷・回線・認証）、途中まで進んだ子（費用が 0 でない）、続き、時間切れ、止められた子（子を刈った後に受けたシグナルも）、
     止めきれない子孫が残った子は、立て直さない（#56）。
-    守らない範囲: 立て直すと決めてから 2 回目の子が起き終わるまでの数ミリ秒に受けたシグナルは、捨てられるか 2 回目の子に届かない
-    （2 回目の子は期限か STOP_GRACE の後に止まる）。刈った後のシグナルで立て直しをやめた記録に、その事実は残らない。残りの期限が
+    立て直すと決めた後に受けたシグナルは、2 回目の子を起こした直後に、その子へ伝える（main の起こす周の頭）。
+    守らない範囲: 刈った後のシグナルで立て直しをやめた記録に、その事実は残らない。残りの期限が
     わずかでも 2 回目の子を起こす。表のキーとの比べは別名そのままで、「Fable」「fable[1m]」は立て直さない。model_substituted は、
-    日付つきの名前・別名でない名前（opusplan など）を頼むと誤って付く。試験は、間のシグナルと、404・401 の違い（偽の子は 429 と 529
+    日付つきの名前・別名でない名前（opusplan など）を頼むと誤って付く。試験は、404・401 の違い（偽の子は 429 と 529
     だけを返す）を見ない（404 で立て直すことは実物の CLI で 1 回確かめた）。時間切れ・止められた子・残った子孫・is_error・残りの期限が
     0 以下の条件も、試験は見ない（外しても試験は通る）。"""
     usage = got.get("usage") or {}
@@ -1910,10 +1910,13 @@ def main() -> int:
         try:
             # 子を待つ間に止められたら（中断・呼び出し側の時間の上限）、直下の子に TERM を伝え、子が片付けて終わるのを待ってから、
             # 照合して記録を書く（続きから起動できる。木ごと KILL すると、子の CLI が対象に空の置き場を残した）。子を刈った後に受けた
-            # シグナルは記録せず、記録を書き終えるまで待たせる（照合の間の Ctrl-C で後処理の git が止まると、head などが欠けうる）。
+            # シグナルでは、記録を書き終えるまで止まらない（照合の間の Ctrl-C で後処理の git が止まると、head などが欠けうる）。
             # 起動時に無視されていたシグナル（nohup の HUP）は無視のまま。受け手は Popen の前に置く（Popen の直後に受けたものも子に伝える）
             def forward(n, _frame):
-                if stop.get("reaped"):  # 刈った後のシグナルは子に伝えず記録もしないが、立て直しは止める（fable_unavailable）
+                # 刈った後のシグナルは、刈った子に伝えない。立て直すかを決める前なら立て直しをやめ（fable_unavailable）、起こし直すと
+                # 決めた後なら起こす周の頭で扱う（報告を直させる続きは起こさず、立て直した子と起こし終えていた続きには伝える）。
+                # どちらでもなければ記録もしない
+                if stop.get("reaped"):
                     stop.setdefault("late", n)
                     return
                 if "sig" in stop:
@@ -1926,10 +1929,27 @@ def main() -> int:
                     signal.signal(s, forward)
             # 子が残した背景のプロセスが、終了後の照合の後に書き換えないよう、プロセスグループごと止める。子の CLI が新しいセッションに
             # 切り離した子孫（Claude Code の Bash）はグループの外なので、Linux では自分の下に来たものを残らなくなるまで止める
-            budget = a.timeout  # 立て直した子には、残りの期限だけを渡す（1 回の起動は --timeout を越えない）
-            while True:  # Fable を使えずに 費用が 0 のまま（作業を始める前に）終わった子だけ、代わりの段で 1 回立て直す（fable_unavailable）
-                child = subprocess.Popen(cmd, cwd=a.cwd, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                         start_new_session=True)  # バイトで受ける（子の出力は UTF-8 とは限らない）
+            fixing = None  # 照合に落ちた報告を直させる続きの依頼文（組めたら、次の周で起こす）
+            # Fable を使えずに費用が 0 のまま（作業を始める前に）終わった子は代わりの段で（fable_unavailable）、照合に落ちた報告は同じ session の
+            # 続きで、それぞれ 1 回だけ起こし直す
+            while True:
+                if fixing is not None and "late" in stop:  # 1 回目の子を刈った後、続きを起こす前に受けたシグナル。続きは起こさず、1 回目の報告を返す
+                    rec["stopped_by_signal"] = stop.pop("late")
+                    rec["problems"] = rec["problems"] + [f"launcher がシグナル {rec['stopped_by_signal']} を受けたので、直させる続きを起こさなかった"]
+                    break
+                try:
+                    child = subprocess.Popen(cmd, cwd=a.cwd, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                             start_new_session=True)  # バイトで受ける（子の出力は UTF-8 とは限らない）
+                except (OSError, ValueError) as e:  # 続きを起こせない（引数が長すぎる・符号にできない文字）。組めないときと同じく、今の報告を返す
+                    if fixing is None:
+                        raise
+                    rec["problems"] = rec["problems"] + [f"launcher が続きで直させられない: {e!r}"[:600]]
+                    break
+                # 起こし直すと決めてからここまでは、前の子を刈ったままにして、受けたシグナルを前の子の番号へ伝えない。ここから伝え、
+                # その間に受けたもの（最初の子なら、受け手を置いてから起こすまでに受けたもの）も、この子に伝える
+                stop.pop("reaped", None)
+                if "late" in stop:
+                    stop.setdefault("sig", stop.pop("late"))
                 if "sig" in stop:
                     ask_to_stop(child, stop)
                 rec["session"] = a.session  # 後の照合で failed になっても、確かめた後に続きから起動できるように
@@ -1938,12 +1958,21 @@ def main() -> int:
                     while chunk := f.read1(65536):
                         output[k] += chunk
                 try:
+                    if fixing is not None:  # 続きを起こせた。1 回目の報告と出力は *-before-fix と report_fix に移し、今のものとして見せない
+                        for name in ("report.md", "stdout.jsonl", "stderr.log"):
+                            (out_dir / name).replace(out_dir / name.replace(".", "-before-fix.", 1))
+                        (out_dir / "fix-prompt.md").write_text(fixing, encoding="utf-8", errors="backslashreplace")
+                        first = {k: rec.pop(k) for k in ("report", "execution", "deliver", "exit_code", "model_effective", "usage") if k in rec}
+                        rec["report_fix"] = {"asked": rec["problems"], "prompt": str(out_dir / "fix-prompt.md"), "usage": first.get("usage")}
+                        if a.host == "grok":
+                            rec["grok_home"] = env["GROK_HOME"]
+                        fixing = None
                     for k, f in (("stdout", child.stdout), ("stderr", child.stderr)):
                         readers.append(threading.Thread(target=read_all, args=(k, f), daemon=True))
                         readers[-1].start()
-                    # 出力が閉じるのでなく、子の CLI が終わるのを待つ（子孫が出力を開いたままでも）
+                    # 出力が閉じるのでなく、子の CLI が終わるのを待つ（子孫が出力を開いたままでも）。起こし直した子には、残りの期限だけを渡す
                     try:
-                        wait_for_exit(child, budget, stop)
+                        wait_for_exit(child, a.timeout - (time.monotonic() - t0), stop)
                     except subprocess.TimeoutExpired:  # 止めた後も出力を読み、session を記録する（--resume で続きから起動できる）
                         timed_out = True
                     timed_out = timed_out or bool(stop.get("timed_out"))  # 時間切れの TERM で、子が片付けて終わった
@@ -1960,7 +1989,8 @@ def main() -> int:
                                     child.wait(timeout=10)
                                 except subprocess.TimeoutExpired:  # 止まらない子の CLI は、下で残りとして並ぶ（後で刈るので、終了コードは分からない）
                                     exit_lost = True
-                                rec["stopped_after_exit"], left = stop_descendants(child.pid)
+                                gone, left = stop_descendants(child.pid)
+                                rec["stopped_after_exit"] = rec.get("stopped_after_exit", []) + gone  # 起こし直す前の子の分も残す
                             except Exception as e:
                                 rec.setdefault("stopped_after_exit", [])
                                 left = [f"子の残りを確かめられない: {e!r}"[:300], f"詳細: {launcher_error(out_dir)}"]
@@ -1983,7 +2013,6 @@ def main() -> int:
                     rec.update(model_requested=a.model, effort_requested=a.effort, chosen_by="fallback", session=a.session)
                     cmd = [a.model if i and cmd[i - 1] == "--model" else a.effort if i and cmd[i - 1] == "--effort"
                            else a.session if i and cmd[i - 1] == "--session-id" else x for i, x in enumerate(cmd)]
-                    stop.pop("reaped", None)
                     continue
                 # 警告の行（sandbox の適用失敗、効かなかった引数）があれば、権限の約束どおりに動いたか分からないので結果を使わない
                 unsafe = [l for l in p.stderr.splitlines() if a.host == "grok" and GROK_WARNING.search(l)][-5:]
@@ -2035,25 +2064,19 @@ def main() -> int:
                     (out_dir / "report.md").write_text(got["text"], encoding="utf-8", errors="backslashreplace")  # 単独のサロゲート
                 # 照合に落ちた報告は、同じ session の続きで 1 回だけ、落ちた点を名指しして直させる（照合は緩めない。続きの依頼文は
                 # fix_prompt）。止められた・止めきれない子孫が残った・続けさせない理由がある・期限が FIX_BUDGET より残っていない子は、
-                # 直させない
+                # 直させない。刈った後に受けたシグナルは、続きを起こす前（周の頭）に見る
                 if (rec["status"] != "invalid-report" or "report_fix" in rec or not rec["session"] or budget < FIX_BUDGET
-                        or blocked or left or exit_lost or "sig" in stop or "late" in stop):
+                        or blocked or left or exit_lost or "sig" in stop):
                     break
                 if not a.resume:  # 続きの子が前に見たのは、この起動で確かめた commit（終わりの head の照合で、前の起動の head として使う）
                     a.prev_head = rec["head"]
                 a.resume, a.session, a.codex_turns = a.resume or out_dir, rec["session"], rec.get("codex_turns", a.codex_turns)
                 a.grok_home = Path(rec["grok_home"]) if a.host == "grok" else a.grok_home  # Grok は、いまの home の session の記録から続ける
-                fix = fix_prompt(rec["problems"], a.cwd)
-                cmd, env, why = command(a, fix + contract, scratch)
+                fixing = fix_prompt(rec["problems"], a.cwd)
+                cmd, env, why = command(a, fixing + contract, scratch)
                 if why:  # 続きを組めなければ、直させずに今の報告を返す
                     rec["problems"] = rec["problems"] + [f"launcher が続きで直させられない: {why}"[:600]]
                     break
-                (out_dir / "fix-prompt.md").write_text(fix, encoding="utf-8")
-                (out_dir / "report.md").replace(out_dir / "report-before-fix.md")
-                rec["report_fix"] = {"asked": rec["problems"], "prompt": str(out_dir / "fix-prompt.md"), "usage": rec["usage"]}
-                if a.host == "grok":
-                    rec["grok_home"] = env["GROK_HOME"]
-                stop.pop("reaped", None)
             if "report_fix" in rec and rec["status"] not in ("ok", "not-run"):  # 直させた後も使えない。1 回目の問題も並べる
                 rec["problems"] = rec.get("problems", []) + ["launcher が同じ session の続きで直させる前の 1 回目の報告の問題: "
                                                              + " / ".join(rec["report_fix"]["asked"])[:2000]]
