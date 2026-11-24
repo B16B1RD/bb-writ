@@ -9,6 +9,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import textwrap
 import time
 import unittest
 from pathlib import Path
@@ -2791,17 +2792,22 @@ class TestOpRun(unittest.TestCase):
         self.assertIn("SECRET-EVIDENCE", Path(pend[0]["output"]).read_text())  # 別のセッションの後任にも材料を残す
 
     def test_a_refused_op_done_keeps_the_output(self):
+        """記録されないままの出力（担当を失って done を書けなかった op run のもの）は、拒否された op done では消さず、閉じた op done で消す。"""
         tok = self.claim()
-        self.assertEqual(self.w("op", "begin", "--dir", str(self.wt), "--token", tok, "--key", "local:y", "--what", "x")[0], 0)
-        work = self.work_module()
-        log = work.run_log(self.lease_file().parent, "local:y")
-        log.write_text("evidence")
-        self.assertEqual(self.w("op", "done", "--dir", str(self.wt), "--token", "bad", "--key", "local:y", "--result", "x")[0], 3)
+        body = ("import json, os; f = " + repr(str(self.lease_file())) + "; print('evidence'); "
+                "open(f + '.t', 'w').write(json.dumps({**json.load(open(f)), 'token': 'other'})); os.replace(f + '.t', f)")
+        self.assertEqual(self.run_op(tok, "push:feat@1", "--reviewed", self.head(), *self.script(body))[0], 3)
+        log = Path(self.w("op", "pending", "--dir", str(self.wt))[1]["pending_ops"][0]["output"])
+        self.assertIn("evidence", log.read_text())
+        self.assertEqual(self.w("op", "done", "--dir", str(self.wt), "--token", "bad", "--key", "push:feat@1", "--result", "x")[0], 3)
         self.assertTrue(log.is_file())  # 拒否された done では消さない
-        self.assertEqual(self.w("op", "done", "--dir", str(self.wt), "--token", tok, "--key", "local:y", "--result", "x")[0], 0)
+        self.assertEqual(self.w("op", "done", "--dir", str(self.wt), "--token", "other", "--key", "push:feat@1", "--result", "x")[0], 0)
         self.assertFalse(log.is_file())
 
-    def test_the_gate_gives_up_after_a_while_and_ignores_a_missing_directory(self):
+    def test_the_gate_gives_up_after_a_while(self):
+        # 試験だけが使う止まり所は、開かれなければ 60 秒（偽の時計）で先へ進む。60 秒を待たずに確かめるので、関数と時計を名前で差し替える
+        # （gate・time の名前を変えたら、ここも直す）。無い場所・書けない場所では待たないことは
+        # test_a_gate_place_that_is_missing_or_unwritable_does_not_hold_op_run が op run で見る
         work = self.work_module()
         clock = iter(range(0, 10_000, 10))
         work.time = type("T", (), {"time": staticmethod(lambda: next(clock)), "sleep": staticmethod(lambda s: None)})
@@ -2812,21 +2818,23 @@ class TestOpRun(unittest.TestCase):
         work.gate("never")  # 60 秒（偽の時計）で先へ進む
         self.assertTrue((gate / "at-never").is_file())
         self.assertLessEqual(next(clock), 80)  # 60 秒を少し過ぎたところで諦めた
-        os.environ["BB_WRIT_SUPERVISE_GATE"] = str(gate / "missing")
-        work.gate("x")  # 無い場所なら、すぐ進む
 
-    @unittest.skipUnless(PERMISSIONS_BIND, "権限の制限が効かない（root など）")
-    def test_the_gate_skips_a_place_it_cannot_write(self):
-        work, gate = self.work_module(), Path(self.tmp.name) / "gate9"
+    def test_a_gate_place_that_is_missing_or_unwritable_does_not_hold_op_run(self):
+        """試験だけが使う止まり所の環境変数が、無い場所か書けない場所を指していても、op run は止まり所で待たずに終わる（待つと 1 か所 60 秒）。"""
+        tok = self.claim()
+        gate = Path(self.tmp.name) / "gate9"
         gate.mkdir()
+        places = [("missing", gate / "missing")] + ([("unwritable", gate)] if PERMISSIONS_BIND else [])
         os.chmod(gate, 0o555)
-        os.environ["BB_WRIT_SUPERVISE_GATE"] = str(gate)
         try:
-            t0 = time.monotonic()
-            work.gate("x")  # 書けなければ、止まらずに進む（例外を出さない）
-            self.assertLess(time.monotonic() - t0, 5)  # 待たない（待つと 60 秒かかる）
+            for n, (name, place) in enumerate(places):
+                with self.subTest(name):
+                    t0 = time.monotonic()
+                    p = self.start_run(tok, f"push:feat@{n}", "print('ran')", env={"BB_WRIT_SUPERVISE_GATE": str(place)})
+                    out = p.communicate(timeout=60)[0]
+                    self.assertEqual(p.returncode, 0, out)
+                    self.assertLess(time.monotonic() - t0, 30)
         finally:
-            os.environ.pop("BB_WRIT_SUPERVISE_GATE", None)
             os.chmod(gate, 0o755)
 
     def test_a_failed_command_with_a_recorded_result_leaves_no_output(self):
@@ -2884,12 +2892,14 @@ class TestOpRun(unittest.TestCase):
         self.assertEqual(rc, 3, r)  # 担当を失った（書くのをやめる）を「done を書けない」に化けさせない
 
     def test_a_lock_left_after_done_is_not_counted(self):
-        """done を書いた直後に監督役が殺され、ロックのファイルが残っても、その操作は終わっている。"""
+        """done を書いた直後に監督役が殺され、ロックのファイルが残っても（コマンドが残したものが持っていても）、その操作は終わっている。"""
         tok = self.claim()
-        self.assertEqual(self.run_op(tok, "push:feat@1", "--reviewed", self.head(), *self.script("print(1)"))[0], 0)
-        work = self.work_module()
-        lock = work.run_lock(self.lease_file().parent, "push:feat@1")
-        holder = subprocess.Popen([sys.executable, "-c", f"import fcntl, os, time; fd = os.open({str(lock)!r}, os.O_RDWR | os.O_CREAT); "
+        r = self.lease_file().parent
+        rc, res = self.run_op(tok, "push:feat@1", "--reviewed", self.head(),
+                              *self.script(f"import glob; print('LOCK', *glob.glob({str(r)!r} + '/running*.lock'))"))  # 動いている間のロック
+        self.assertEqual(rc, 0, res)
+        lock = res["op"]["result"].split("LOCK ")[1].split()[0]
+        holder = subprocess.Popen([sys.executable, "-c", f"import fcntl, os, time; fd = os.open({lock!r}, os.O_RDWR | os.O_CREAT); "
                                    "os.write(fd, b'push:feat@1'); fcntl.flock(fd, fcntl.LOCK_EX); print('held', flush=True); time.sleep(60)"],
                                   stdout=subprocess.PIPE, text=True)
         self.addCleanup(holder.stdout.close)
@@ -2947,17 +2957,30 @@ class TestOpRun(unittest.TestCase):
         self.assertTrue(rec.startswith("（先頭を省いた）"), rec[:12])
 
     def test_a_lock_file_that_vanishes_while_checking_is_skipped(self):
-        work, r = self.work_module(), Path(self.tmp.name) / "rh"
-        r.mkdir()
-        (r / "running-x.lock").write_text("push:x")
-        real = work.os.open
-
-        def vanish(path, *a, **kw):  # glob の後、開く前に監督役が消した
-            if str(path).endswith(".lock"):
-                raise FileNotFoundError(errno.ENOENT, "消えた", str(path))
-            return real(path, *a, **kw)
-        work.os = type("O", (), {**{k: getattr(os, k) for k in dir(os) if not k.startswith("__")}, "open": staticmethod(vanish)})
-        self.assertIsNone(work.run_holder(r))
+        """ロックを並べた後、開く前に監督役が消したロックは、動いているとみなさない（op run を止めない）。消える時機は、work.py のプロセスの
+        os.open が、試験の置いたロックを開くときに作る。"""
+        tok = self.claim()
+        lock = self.lease_file().parent / "running-x.lock"
+        lock.write_text("push:x")
+        site = Path(self.tmp.name) / "site-vanish"
+        site.mkdir()
+        (site / "sitecustomize.py").write_text(textwrap.dedent(f"""
+            import errno, os, sys
+            if os.path.basename(sys.argv[0]) == "work.py":
+                import pathlib  # Python 3.9 の pathlib は読み込むときに os.open を写して持つので、差し替えの前に読む
+                _real = os.open
+                def _vanish(path, *a, **kw):  # glob の後、開く前に消えた
+                    if str(path) == {str(lock)!r}:
+                        open({str(lock) + '.tried'!r}, "w").close()
+                        raise FileNotFoundError(errno.ENOENT, "消えた", str(path))
+                    return _real(path, *a, **kw)
+                os.open = _vanish
+        """))
+        p = subprocess.run([sys.executable, str(WORK), "op", "run", "--dir", str(self.wt), "--token", tok, "--key", "pr:feat", "--what", "x",
+                            "--from", str(self.repo), "--verified", self.head(), "--reviewed", "none:x", "--risk", "低:試験の外",
+                            *self.script("print(1)")], env={**self.env, "PYTHONPATH": str(site)}, capture_output=True, text=True)
+        self.assertTrue(Path(str(lock) + ".tried").exists(), "消える場面を作れなかった")
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr[-500:])
 
     @unittest.skipUnless(PERMISSIONS_BIND, "権限の制限が効かない（root など）")
     def test_the_supervisor_survives_when_neither_done_nor_the_lock_removal_works(self):
@@ -2973,9 +2996,14 @@ class TestOpRun(unittest.TestCase):
 
     def test_closing_an_already_finished_op_removes_its_output(self):
         tok = self.claim()
-        self.assertEqual(self.run_op(tok, "push:feat@1", "--reviewed", self.head(), *self.script("print(1)"))[0], 0)
-        log = self.work_module().run_log(self.lease_file().parent, "push:feat@1")
-        log.write_text("left by a stopped op run")
+        go = self.go_file("go-out")
+        p = self.start_run(tok, "push:feat@1", f"import os, time\nwhile not os.path.exists({str(go)!r}): time.sleep(0.05)")
+        self.wait_running("push:feat@1")
+        log = Path(next(o["output"] for o in self.w("op", "pending", "--dir", str(self.wt))[1]["pending_ops"] if o["key"] == "push:feat@1"))
+        go.write_text("")
+        p.wait()
+        self.wait_done("push:feat@1")
+        log.write_text("left by a stopped op run")  # 止められた op run が残した出力
         self.assertEqual(self.w("op", "done", "--dir", str(self.wt), "--token", tok, "--key", "push:feat@1", "--result", "x")[0], 4)
         self.assertFalse(log.is_file())  # 既に終わっていた。誰も消さない出力を残さない
 
@@ -3026,29 +3054,35 @@ class TestOpRun(unittest.TestCase):
             p.send_signal(signal.SIGCONT)
             p.wait()
 
-    @unittest.skipUnless(PERMISSIONS_BIND, "権限の制限が効かない（root など）")
     def test_a_lock_that_cannot_be_opened_or_read_counts_as_running(self):
+        """動いている op run のロックが読めなくなっても（権限を落とした・ディレクトリに替わった）、動いているとみなし、鍵は始めた記録から引く
+        （ファイル名でなく鍵で出す）。"""
         tok = self.claim()
-        work, r = self.work_module(), self.lease_file().parent
-        for key, broken in (("push:y", "chmod"), ("push:z", "dir")):
+        r = self.lease_file().parent
+        for n, broken in enumerate(("chmod", "dir")):
             with self.subTest(broken=broken):
-                self.assertEqual(self.w("op", "begin", "--dir", str(self.wt), "--token", tok, "--key", key, "--what", "x",
-                                        "--from", str(self.repo), "--verified", self.head(), "--reviewed", self.head())[0], 0)
-                lock = work.run_lock(r, key)
+                key, go = f"push:y{n}", self.go_file(f"go-lock{n}")
+                p = self.start_run(tok, key, f"import os, time\nwhile not os.path.exists({str(go)!r}): time.sleep(0.05)")
+                self.wait_running(key)
+                lock, = r.glob("running*.lock")
                 if broken == "chmod":
-                    lock.write_text(key)
                     lock.chmod(0)
-                else:
-                    lock.mkdir()  # 開けるが読めない
+                else:  # 開けるが読めない
+                    lock.rename(r / "held-elsewhere")
+                    lock.mkdir()
                 try:
-                    self.assertEqual(work.run_holder(r), key)  # ファイル名でなく鍵を返す
                     pend = {o["key"]: o.get("running") for o in self.w("op", "pending", "--dir", str(self.wt))[1]["pending_ops"]}
-                    self.assertTrue(pend[key])  # 鍵で「動いている」と出る
+                    self.assertEqual(pend, {key: True})  # 鍵で「動いている」と出る
                     self.assertEqual(self.w("op", "done", "--dir", str(self.wt), "--token", tok, "--key", key, "--result", "x")[0], 4)
                 finally:
-                    lock.chmod(0o644) if broken == "chmod" else None
-                    lock.unlink() if broken == "chmod" else lock.rmdir()
-                self.assertEqual(self.w("op", "done", "--dir", str(self.wt), "--token", tok, "--key", key, "--result", "x")[0], 0)
+                    if broken == "chmod":
+                        lock.chmod(0o644)
+                    else:
+                        lock.rmdir()
+                        (r / "held-elsewhere").rename(lock)
+                    go.write_text("")
+                p.wait()
+                self.assertEqual(self.wait_done(key)["by"], "supervise")
 
     @unittest.skipUnless(PERMISSIONS_BIND, "権限の制限が効かない（root など）")
     def test_a_failed_done_without_the_mutex_still_releases_the_lock_for_leftovers(self):
@@ -3075,14 +3109,14 @@ class TestOpRun(unittest.TestCase):
     def test_output_that_cannot_be_removed_does_not_hold_the_lock_or_break_op_done(self):
         tok = self.claim()
         d = self.lease_file().parent
-        work = self.work_module()
-        log = work.run_log(d, "push:feat@1")
         try:  # 出力を消せない（置き場に書けない）。ロックも消せないが、op_step の結果を保ち（done の失敗として報告しない）、次の操作は数えない
             rc, r = self.run_op(tok, "push:feat@1", "--reviewed", self.head(), *self.script(f"import os; print('x'); os.chmod({str(d)!r}, 0o555)"))
         finally:
             os.chmod(d, 0o755)
         self.assertEqual((rc, r["op"]["state"]), (0, "done"))
         self.assertIn("出力のファイルを消せない", (d / "supervise.err").read_text())
+        left = self.outputs()
+        self.assertEqual(len(left), 1, left)  # 消せなかった出力
         os.chmod(d, 0o555)
         try:  # 既に終わった操作の op done で、出力を消せなくても、4 と結果を返す
             rc, r = self.w("op", "done", "--dir", str(self.wt), "--token", tok, "--key", "push:feat@1", "--result", "x")
@@ -3090,12 +3124,12 @@ class TestOpRun(unittest.TestCase):
             os.chmod(d, 0o755)
         self.assertEqual(rc, 4)
         self.assertIn("消せない", r["warning"])
-        self.assertTrue(log.is_file())
+        self.assertEqual(self.outputs(), left)
 
     def test_an_output_file_that_cannot_be_made_closes_the_op(self):
+        """出力のファイルか監督役の置き場（supervise.err）を作れなければ、コマンドを走らせず、走っていないと記録して閉じる。"""
         tok = self.claim()
-        work = self.work_module()
-        work.run_log(self.lease_file().parent, "push:feat@1").mkdir()  # 出力のファイルを作れない
+        (self.lease_file().parent / "supervise.err").mkdir()  # 監督役の出力の置き場を開けない
         marker = Path(self.tmp.name) / "ran-o"
         rc, r = self.run_op(tok, "push:feat@1", "--reviewed", self.head(), *self.script(f"open({str(marker)!r}, 'w')"))
         self.assertEqual(rc, 127, r)
@@ -3174,27 +3208,41 @@ class TestOpRun(unittest.TestCase):
         self.assertLessEqual(len(os.listdir("/dev/fd")), before + 1)
 
     def test_an_unreadable_lock_of_a_done_op_is_not_counted(self):
+        """監督役がロックのファイルを消せずに done を書いた（ロックの場所がディレクトリに替わった）。読めないロックが残っても、鍵が done なら数えない。"""
         tok = self.claim()
-        self.assertEqual(self.run_op(tok, "push:feat@1", "--reviewed", self.head(), *self.script("print(1)"))[0], 0)
-        work = self.work_module()
-        work.run_lock(self.lease_file().parent, "push:feat@1").mkdir()  # 読めないロックが残った（鍵は done）
+        r = self.lease_file().parent
+        go = self.go_file("go-done")
+        p = self.start_run(tok, "push:feat@1", f"import os, time\nwhile not os.path.exists({str(go)!r}): time.sleep(0.05)")
+        self.wait_running("push:feat@1")
+        lock, = r.glob("running*.lock")
+        lock.rename(r / "held-elsewhere")
+        lock.mkdir()
+        self.addCleanup(lambda: lock.is_dir() and lock.rmdir())
+        go.write_text("")
+        p.wait()
+        self.wait_done("push:feat@1")
+        self.assertTrue(lock.is_dir())  # 読めないロックが残った（鍵は done）
         self.assertEqual(self.run_op(tok, "pr:feat", "--reviewed", "none:x", *self.script("print(2)"))[0], 0)
 
     def test_an_unreadable_lock_is_matched_to_its_own_key_among_several(self):
         tok = self.claim()
-        work = self.work_module()
-        for key in ("push:a", "push:b"):
-            self.assertEqual(self.w("op", "begin", "--dir", str(self.wt), "--token", tok, "--key", key, "--what", "x",
-                                    "--from", str(self.repo), "--verified", self.head(), "--reviewed", self.head())[0], 0)
-        lock = work.run_lock(self.lease_file().parent, "push:b")
-        lock.mkdir()  # push:b のロックだけが読めない
+        r = self.lease_file().parent
+        self.assertEqual(self.w("op", "begin", "--dir", str(self.wt), "--token", tok, "--key", "push:a", "--what", "x",
+                                "--from", str(self.repo), "--verified", self.head(), "--reviewed", self.head())[0], 0)
+        go = self.go_file("go-b")
+        p = self.start_run(tok, "push:b", f"import os, time\nwhile not os.path.exists({str(go)!r}): time.sleep(0.05)")
+        self.wait_running("push:b")
+        lock, = r.glob("running*.lock")
+        lock.chmod(0)  # push:b のロックだけが読めない
         try:
             pend = {o["key"]: o.get("running") for o in self.w("op", "pending", "--dir", str(self.wt))[1]["pending_ops"]}
             self.assertEqual(pend, {"push:a": None, "push:b": True})
             self.assertEqual(self.w("op", "done", "--dir", str(self.wt), "--token", tok, "--key", "push:b", "--result", "x")[0], 4)
             self.assertEqual(self.w("op", "done", "--dir", str(self.wt), "--token", tok, "--key", "push:a", "--result", "x")[0], 0)
         finally:
-            lock.rmdir()
+            lock.chmod(0o644)
+            go.write_text("")
+            p.wait()
 
     def test_an_unreadable_lock_without_a_record_still_counts(self):
         tok = self.claim()
@@ -3254,13 +3302,17 @@ class TestOpRun(unittest.TestCase):
         self.assertEqual(r["op"]["result"], "照合した: exit 0: 外部に出ていた")  # 記録を添える（途中の exit 0: は読まない）
 
     def test_locks_still_count_when_the_record_cannot_be_read(self):
-        work, r = self.work_module(), Path(self.tmp.name) / "rh4"
-        r.mkdir()
+        """記録（ops.jsonl）が壊れていても、読めないロックはファイル名で、取られているロックは中の鍵で、動いているとみなして op run を止める。"""
+        tok = self.claim()
+        r = self.lease_file().parent
+        run = lambda: self.run_op(tok, "pr:feat", "--reviewed", "none:x", *self.script("print(1)"))
         (r / "running-u.lock").mkdir()  # 読めないロック。鍵も引けない
         for bad in ("{broken\n", '{"x": 1}\n', "[1]\n", "null\n", '{"key": ["a"]}\n', '{"key": 1, "state": "begun"}\n', "[" * 200000 + "\n"):
-            (r / "ops.jsonl").write_text(bad)
-            self.assertEqual(work.run_holder(r), "running-u.lock", bad[:20])
-        (r / "ops.jsonl").write_text("{broken\n")
+            with self.subTest(bad=bad[:20]):
+                (r / "ops.jsonl").write_text(bad)
+                rc, res = run()
+                self.assertEqual(rc, 4, res)
+                self.assertIn("running-u.lock", res["reason"])
         (r / "running-u.lock").rmdir()
         lock = r / "running-h.lock"
         lock.write_text("push:h")
@@ -3269,7 +3321,9 @@ class TestOpRun(unittest.TestCase):
         self.addCleanup(holder.stdout.close)
         try:
             self.assertEqual(holder.stdout.readline().strip(), "held")
-            self.assertEqual(work.run_holder(r), "push:h")  # 取られているロックは、記録が読めなくても数える
+            rc, res = run()
+            self.assertEqual(rc, 4, res)
+            self.assertIn("push:h", res["reason"])  # 取られているロックは、記録が読めなくても数える
         finally:
             holder.kill()
             holder.wait()
