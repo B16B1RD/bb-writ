@@ -128,7 +128,7 @@ from pathlib import Path
 
 
 def state_dir() -> Path:
-    return Path(os.path.abspath(os.environ.get("BB_WRIT_STATE_DIR", Path.home() / ".local" / "state" / "bb-writ")))  # git -C の先でも同じ場所
+    return Path(os.path.abspath(os.environ.get("BB_WRIT_STATE_DIR", Path.home() / ".local" / "state" / "bb-writ")))
 
 
 def record_at(d: Path) -> Path:
@@ -145,7 +145,6 @@ def root(d: Path) -> Path:
 
 @contextmanager
 def locked(r: Path):
-    # 書く子は作業場所の記録に書けるので、リンクをたどらない。切り詰めない
     fd = os.open(r / ".mutex", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o644)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX)
@@ -168,35 +167,33 @@ def write(p: Path, obj):
 
 
 class RecordError(ValueError):
-    """記録（ops.jsonl）の行の形が違う。"""
+    pass
 
 
 def ops(r: Path) -> dict:
-    """鍵ごとに行を重ねた記録。形の違う行は、行番号を添えた RecordError で止める（手で直す材料）。"""
     out = {}
     f = r / "ops.jsonl"
     if f.is_file():
         # 区切りは書いた側の \n だけ。splitlines は出力に入った U+2028・U+0085 などでも行を割る
         rows = f.read_bytes().split(b"\n")
-        for n, line in enumerate(rows[:-1] if rows[-1] == b"" else rows, 1):  # 末尾の改行の後だけ除く。途中の空行は壊れた印
+        for n, line in enumerate(rows[:-1] if rows[-1] == b"" else rows, 1):
             try:
                 e = json.loads(line.decode("utf-8"))
-            except (ValueError, RecursionError) as x:  # UnicodeDecodeError も ValueError
+            except (ValueError, RecursionError) as x:
                 raise RecordError(f"記録 {f} の {n} 行目を読めない: {x}") from None
             if not isinstance(e, dict) or not isinstance(e.get("key"), str):
                 raise RecordError(f"記録 {f} の {n} 行目の形が違う（key が文字列のオブジェクトでない）")
             cur = out.setdefault(e["key"], {})
-            cur.pop("by", None)  # 誰が書いたかは、その行だけのこと（前の行の印を引き継がない）
+            cur.pop("by", None)
             cur.update(e)
     return out
 
 
 def changed_since_publish(r: Path, d: Path, head: str) -> str:
-    """最後に終えた push・pr で出した commit から HEAD までに変えたファイル。審査が要るかを決める材料で、保証ではない。"""
     done = [e for e in ops(r).values() if e.get("verified") and e.get("state") == "done" and e["key"].split(":")[0] in REVIEWED]
     if not done:
         return " この作業場所に、終えた push・pr の記録が無い"
-    prev = max(done, key=lambda e: e["at"])["verified"]  # 鍵の並びは begin の順なので、終えた時刻で選ぶ
+    prev = max(done, key=lambda e: e["at"])["verified"]
     rc, files, err = sh(["git", "diff", "--name-only", f"{prev}..{head}"], d)
     if rc:
         return f" 前回の push・pr（{prev}）からの差分を出せない: {err}"
@@ -230,25 +227,25 @@ def reviews_of(commit: str, cwd=None, not_run: bool = False) -> tuple:
     here = str(Path(cwd).resolve()) if cwd is not None else None
     done = lambda e: e.get("status") == "ok" or (not_run and e.get("status") == "not-run" and e.get("execution") == "no")
     match = lambda e: (isinstance(e, dict) and e.get("head") == commit and done(e) and e.get("write") is False
-                       and isinstance(e.get("out"), str) and os.path.isabs(e["out"])  # launcher は絶対パスを書く
+                       and isinstance(e.get("out"), str) and os.path.isabs(e["out"])
                        and (here is None or (isinstance(e.get("cwd"), str) and os.path.isabs(e["cwd"]) and str(Path(e["cwd"]).resolve()) == here)))
     f = state_dir() / "delegations.jsonl"
     found, judges, audits, broken = [], [], [], 0
     try:
         rows = read_regular(f).split(b"\n")
     except FileNotFoundError:
-        if not f.is_symlink():  # まだ委任していない（壊れた symlink は読めない形）
+        if not f.is_symlink():
             rows = []
         else:
             return [], [], [], f"委任の記録 {f} を読めない: 行き先が無い"
-    except OSError as x:  # 権限・形。拒否の理由に出す
+    except OSError as x:
         return [], [], [], f"委任の記録 {f} を読めない: {x}"
     for line in rows:
         if not line.strip():
             continue
         try:
             e = json.loads(line.decode("utf-8"))
-        except (ValueError, RecursionError):  # UnicodeDecodeError も ValueError
+        except (ValueError, RecursionError):
             broken += 1
             continue
         if not match(e):
@@ -258,10 +255,8 @@ def reviews_of(commit: str, cwd=None, not_run: bool = False) -> tuple:
         except (OSError, ValueError, RecursionError):
             broken += 1
             continue
-        # 行と record.json で status・execution も同じものだけ（launcher は同じ rec から両方を書くので、食い違うのは手で書き換えた記録）
         if match(rec) and rec["out"] == e["out"] and (rec.get("status"), rec.get("execution")) == (e.get("status"), e.get("execution")):
-            if e.get("audit") is True or rec.get("audit") is True:  # 片側でも監査役と言う記録は審査役に数えない
-                # 監査役が届けてよいと判定した（deliver: yes）記録だけ。差し戻した（no）記録と、deliver の無い更新前の記録は数えない
+            if e.get("audit") is True or rec.get("audit") is True:
                 if e.get("audit") is True and rec.get("audit") is True and e.get("deliver") == rec.get("deliver") == "yes":
                     audits.append(e["out"])
                 continue
@@ -276,7 +271,7 @@ def not_run_hint(commit: str, cwd=None, role: int = 0) -> str:
     数える記録が無いので空を返す）、
     その commit に、その役の子が実行できずに not-run で返った記録（execution が no）があれば、宣言のしかたを示す文。
     関門の外で出す（素の git push・gh pr create）道へ行かせないため。宣言しても通らない場面（ほかの役の not-run だけがある）では出さない。"""
-    found = reviews_of(commit, cwd, not_run=True)[role]  # 呼ぶのはその役の ok の記録が無いときだけなので、見つかるのは not-run の記録
+    found = reviews_of(commit, cwd, not_run=True)[role]
     if not found:
         return ""
     return ("。この commit には、子が対象の試験・検査を実行できずに not-run で返った記録がある"
@@ -348,10 +343,9 @@ def review_rounds(d: Path, not_run: bool = False) -> int:
 
 
 def pending(r: Path) -> list:
-    """始めたが終わりの記録が無い操作。op run の監督役がまだ動かしている操作には running: true を付ける。"""
     held = run_holder(r)
     return [{**e, **({"running": True} if e["key"] == held else {}),
-             **({"output": str(run_log(r, e["key"]))} if run_log(r, e["key"]).is_file() else {})}  # 照合の材料
+             **({"output": str(run_log(r, e["key"]))} if run_log(r, e["key"]).is_file() else {})}
             for e in ops(r).values() if e.get("state") == "begun"]
 
 
@@ -368,11 +362,11 @@ NOTE = """# 作業の記録
 - 次の一手:
 - ホストと session ID:
 """
-FIELDS = re.findall(r"^- (.+?):$", NOTE, re.M)  # 雛形の欄の名前
-REQUIRED = FIELDS[:3]  # 担当を取った場で知らせる欄。push・pr の前は、指摘の扱い（監査役をどの push・pr でも立てる）も空なら拒否する
+FIELDS = re.findall(r"^- (.+?):$", NOTE, re.M)
+REQUIRED = FIELDS[:3]
 TRIAGE = FIELDS[3]
 PREMISE = FIELDS[4]
-PREMISE_ROUNDS = 3  # 審査の周（review_rounds。この作業場所を --cwd にして ok で返った（--not-run の宣言では not-run で execution が no も）読み取り専用の子（審査役・確かめ役など。監査役は除く）の、互いに異なる commit の数）がこの数に達した後は、直しが仕組みに重なっていないかを確かめさせる（interrogate の 5 が前提を疑う 3 周目と同じ数。Important の有無は見ない）
+PREMISE_ROUNDS = 3  # skills/interrogate の 5 が前提を疑う「3 周目」と同じ数
 
 
 def field_line(name: str):
@@ -387,7 +381,7 @@ def field_line(name: str):
 
 
 FIELD_LINES = [field_line(f) for f in FIELDS]
-HEADING = re.compile(r"#+(\s|$)")  # Markdown の見出し（「#」だけの空の見出しも）。「#123 …」は見出しでない
+HEADING = re.compile(r"#+(\s|$)")
 
 
 def note_gaps(body: str, publish: bool, rounds: int = 0) -> list:
@@ -404,7 +398,6 @@ def note_gaps(body: str, publish: bool, rounds: int = 0) -> list:
 
 
 def field_texts(lines: list, name: str) -> list:
-    """欄の中身を、出てくる順にすべて。中身は、名前の行の ":" の後から、次の雛形の欄か見出しの行の前まで。"""
     pat, found = field_line(name), []
     for at, l in enumerate(lines):
         m = pat.match(l)
@@ -419,7 +412,7 @@ def field_texts(lines: list, name: str) -> list:
     return found
 
 
-STATE_FIELDS = [f for f in FIELDS if f.startswith(("今の状態", "次の一手"))]  # 操作の後に書き直すべき欄（ops_after_note が見る）
+STATE_FIELDS = [f for f in FIELDS if f.startswith(("今の状態", "次の一手"))]
 
 
 def note_state(body: str) -> str:
@@ -431,7 +424,6 @@ def note_state(body: str) -> str:
 
 
 def note_state_of(r: Path):
-    """操作を終えた時点の記録の note_state。記録を読めなければ None（done の記録は止めない）。"""
     try:
         return note_state(note_body(r / "note.md"))
     except (RecordError, OSError):
@@ -472,7 +464,6 @@ def ops_after_note(r: Path, f: Path, body: str) -> list:
         elif comparable and at <= written:
             continue
         result = e.get("result")
-        # 監督役が書いた記録（by が supervise）だけから終了コードを読む（手で閉じた記録の文は終了コードでない）
         m = re.match(r"exit ([0-9]{1,3}):", result) if isinstance(result, str) and e.get("by") == "supervise" else None
         rows.append({"key": e["key"], "what": e.get("what"), "exit": int(m.group(1)) if m else None, "at": at})
     return rows
@@ -489,8 +480,6 @@ def note(r: Path) -> dict:
     try:
         after = ops_after_note(r, f, body)
     except (RecordError, OSError):
-        # この欄は知らせで、関門でない。renew と、片付けを終えた後の note を、この欄のために止めない。記録（ops.jsonl）が読めないことは、
-        # claim・status・op・task cleanup が、これまでどおり 0 でない終了コードで止めて知らせる。片付けの途中からの task resume は、欄が無いまま返る
         after = []
     ev = r / "evidence"
     ev.mkdir(exist_ok=True)
@@ -499,10 +488,10 @@ def note(r: Path) -> dict:
             "evidence_dir": str(ev), **({"empty": gaps} if gaps else {}), **({"ops_after_note": after} if after else {})}
 
 
-EXTERNAL = {"push", "pr", "comment", "merge", "release", "issue"}  # GitHub に出る操作の種類（鍵の ":" の前）
-PUBLISH = {"push", "pr", "merge", "release"}  # 成果物を外に出す操作。検証した commit と一致させる
-REVIEWED = {"push", "pr"}  # 届ける前の審査を通した commit（か、要らない理由）を宣言させる操作
-NEEDS_WRITE = {"push", "merge", "release"}  # 書き込み権限が要る操作。comment・issue・pr（fork から）は読めれば出せる
+EXTERNAL = {"push", "pr", "comment", "merge", "release", "issue"}
+PUBLISH = {"push", "pr", "merge", "release"}
+REVIEWED = {"push", "pr"}
+NEEDS_WRITE = {"push", "merge", "release"}
 WRITE_OK = {"ADMIN", "MAINTAIN", "WRITE"}
 NO_GITHUB_REMOTE = r"none of the git remotes configured for this repository point to a known GitHub host|no git remotes found"  # gh 2.102.0
 
@@ -613,14 +602,14 @@ def account(at: Path, push: bool = False, key: bool = True) -> dict:
 
 def check(d: Path, frm: Path, kind: str = "push") -> tuple[dict, int]:
     c = checkout_of(d)
-    if checkout_or_none(frm) != c:  # 別の場所のアカウントで確かめて通さない
+    if checkout_or_none(frm) != c:
         return {"checkout": str(c), "ok": False, "reason": f"--from {frm} は元の checkout {c} と同じリポジトリでない。外部操作は元の checkout から実行する"}, 2
     write, push = kind in NEEDS_WRITE, kind == "push"
     here = account(frm, push)
     res = {"checkout": str(c), "from": here}
     if not here["github"]:
         return {**res, "ok": True, "skipped": ("origin の pushurl が github.com でない" if push else "gh が GitHub の remote を見つけられない") + "ので確かめを飛ばした"}, 0
-    if not here["login"]:  # 比べる相手が分からないまま通さない（gh api user だけが失敗する token）
+    if not here["login"]:  # gh api user だけが失敗する token がある
         return {**res, "ok": False, "reason": f"{frm} で gh のアカウントが分からない。gh auth status を確かめる"
                 + (f"（エラー: {here['error']}）" if here.get("error") else "")}, 5
     if not here["permission"] or (write and here["permission"] not in WRITE_OK):
@@ -728,7 +717,7 @@ def check_token(lease, token):
 def pending_while(r: Path, held: str) -> list:
     try:
         return pending(r)
-    except RecordError as e:  # 直すのは、監督役が記録に書き足し終えてから（書き戻しで done を消さない）
+    except RecordError as e:
         raise RecordError(f"{e}。op run の外部操作がまだ動いている: {held}。終わってから直す") from None
 
 
@@ -747,8 +736,8 @@ def claim_at(r, d, holder, minutes, take_over=True):
     if held:  # 担当の期限が切れても（手放されても）、op run のコマンドが動いている間は取らせない。取ると、終わっていない操作をやり直せる
         return {'ok': False, 'reason': f'op run の外部操作がまだ動いている: {held}。終わるのを待つ（終われば監督役が done を書く）',
                 'holder': old and old.get('holder'), 'pending_ops': pending_while(r, held)}, 3
-    waiting = pending(r)  # 記録が壊れていれば、担当を書く前に止める（書いた後に落ちると、誰も token を受け取らない担当が残る）
-    n = note(r)  # 作業の記録も同じ
+    waiting = pending(r)
+    n = note(r)
     new = {'token': secrets.token_hex(8), 'holder': holder, 'dir': str(d.resolve()),
            'claimed_at': now, 'expires_at': now + minutes * 60,
            'previous': old and {'holder': old.get('holder'), 'expired_at': old.get('expires_at')}}
@@ -821,7 +810,7 @@ def clean(d, ignored=False, child=False):
 
 
 class LeaseRefused(Exception):
-    """担当の拒否（終了コード 3）。OS が上げる PermissionError（記録を権限で読めない）と分ける（#60）。"""
+    pass
 
 
 def current_lease(r, token):
@@ -839,7 +828,6 @@ def tasks_at(repo):
 
 
 def registered_task(d):
-    # 作業場所の記録の task.json は書く子が書き換えうるので、識別子だけを使い、中身は親だけが書くタスクの一覧から読む。
     record = read(root(d) / 'task.json')
     ident = str(record.get('task')) if isinstance(record, dict) else ''
     task = read(tasks_at(checkout_of(d)) / (ident + '.json')) if re.fullmatch('[a-f0-9]{16}', ident) else None
@@ -875,12 +863,10 @@ def task_at(d):
 
 
 def task_dir(rr, ident):
-    """タスクの作業場所。状態ディレクトリの worktrees/ の下に、リポジトリと task 識別子から決まる。"""
     return rr.parent.parent / 'worktrees' / rr.name / ident
 
 
 def worktrees(repo):
-    # -z は空白・改行を含むパスも分割しない。
     result, entry = [], {}
     for field in git(repo, 'worktree', 'list', '--porcelain', '-z').split('\0'):
         if not field:
@@ -915,11 +901,11 @@ def unclosed_tasks(repo, rr, registry):
             continue
         entry = {'task': p.stem, 'dir': str(dest), 'target': None, 'lease': 'unreadable', 'commits': None, 'landed': None}
         try:
-            lease = read(record_at(dest) / 'lease.json')  # 記録の置き場は作らない（見るだけ）
+            lease = read(record_at(dest) / 'lease.json')
             if alive(lease, now) or maybe_waiting(lease, now):
                 continue
             entry['lease'] = 'released' if lease is None else 'expired'
-        except Exception:  # 深い入れ子・float にできない期限など。担当がいるとは言えないので、並べる
+        except Exception:
             pass
         try:
             task = read(p)
@@ -943,12 +929,12 @@ def task_command(a):
             tasks = []
             for p in sorted(registry.glob('*.json')):
                 task = read(p)
-                lease = read(record_at(Path(task['dir'])) / 'lease.json')  # 一覧は見るだけ（記録の置き場を作らない）
+                lease = read(record_at(Path(task['dir'])) / 'lease.json')
                 tasks.append({**task, 'lease': {k: v for k, v in lease.items() if k != 'token'} if lease else None})
             rest = unclosed_tasks(repo, rr, registry)
             return out({'ok': True, 'tasks': tasks, 'integration': read(rr / 'integration.json'), **({'unclosed': rest} if rest else {})})
         if a.action == 'start':
-            top = Path(git(a.dir, 'rev-parse', '--show-toplevel')).resolve()  # 作業場所の下の階層からでも、そのタスクの統合先を継ぐ
+            top = Path(git(a.dir, 'rev-parse', '--show-toplevel')).resolve()
             common = Path(git(a.dir, 'rev-parse', '--path-format=absolute', '--git-common-dir')).resolve()
             main_checkout = Path(git(a.dir, 'rev-parse', '--absolute-git-dir')).resolve() == common
             if sh(['git', 'config', '--file', str(common / 'config'), 'core.worktree'], a.dir)[0] and (
@@ -963,19 +949,16 @@ def task_command(a):
                 target = full.removeprefix('refs/heads/')
             git(repo, 'show-ref', '--verify', 'refs/heads/' + target)
             base = git(repo, 'rev-parse', '--verify', (a.base or 'refs/heads/' + target) + '^{commit}')
-            rest = unclosed_tasks(repo, rr, registry)  # 片付けを呼ばれなかったタスクを、始めるたびに見せる（新しいタスクを作る前に調べる）
+            rest = unclosed_tasks(repo, rr, registry)
             ident = secrets.token_hex(8)
             dest = task_dir(rr, ident)
             task = {'task': ident, 'dir': str(dest), 'branch': 'bb-writ/' + ident,
                     'base': base, 'target': target, 'checkout': str(repo)}
-            # 作成の途中で止まっても、一覧から作業場所とブランチを追える。
             write(registry / (ident + '.json'), task)
             dest.parent.mkdir(parents=True, exist_ok=True)
             try:
                 git(repo, 'worktree', 'add', '-b', task['branch'], '--', str(dest), base, fds=(rf,))
             except (ValueError, OSError):
-                # 終了済みの作成が何も残さなかった場合だけ記録を取り消す。
-                # プロセス中断や、ブランチ・ファイルの一部が残る失敗は記録を保持する。
                 if not dest.exists() and not commit_of(repo, 'refs/heads/' + task['branch']) and not any(
                         Path(w['worktree']).resolve() == dest.resolve() for w in worktrees(repo)):
                     (registry / (ident + '.json')).unlink()
@@ -991,7 +974,6 @@ def task_command(a):
             task = read(registry / (a.task + '.json'))
             if not task:
                 raise ValueError('そのタスクの記録が無い')
-            # 記録は書き換えられうるので、行き先・ブランチ・基点を task 識別子から決まる値と照合してから git に渡す。
             dest = task_dir(rr, a.task)
             if (task.get('task'), Path(str(task.get('dir'))).resolve(), task.get('branch')) != (a.task, dest.resolve(), 'bb-writ/' + a.task) or \
                     not re.fullmatch('[0-9a-f]{40}|[0-9a-f]{64}', str(task.get('base'))):
@@ -1003,7 +985,7 @@ def task_command(a):
                 branch = commit_of(repo, 'refs/heads/' + task['branch'])
                 if branch and branch != cleanup['commit']:
                     raise ValueError('片付けの途中の後にタスクのブランチが進んだ。記録と差分を照合する')
-                if branch:  # 作業場所を消した後、ブランチを消す前に止まった
+                if branch:
                     git(repo, 'branch', '-D', task['branch'], fds=(rf,))
                 wr = root(dest)
                 with locked(wr):
@@ -1039,7 +1021,6 @@ def task_command(a):
             journal = settle_integration(rr, repo, own=str(a.dir.resolve()))
             if not clean(a.dir, ignored=True, child=True) or pending(wr) or (journal and journal['dir'] == str(a.dir.resolve())):
                 raise ValueError('未保存の変更・未完了の操作がある。作業場所を保持する')
-            # 同じブランチ自身の名前を保存先として使うと、削除後に変更を失う。
             ref = git(repo, 'rev-parse', '--symbolic-full-name', a.saved)
             if not ref.startswith(('refs/heads/', 'refs/tags/')):
                 raise ValueError(f'保存先 {a.saved} の解決先 {ref or "（名前の付いた ref でない）"} は、ローカルのブランチかタグでない。'
@@ -1069,7 +1050,6 @@ def integrate(a):
     if rr == wr:
         raise ValueError('統合は task start で作った作業場所から実行する')
     # 全コマンドで repository → worktree の順に取り、検証後の反映を直列にする。
-    # 子の git に fd を渡す。親だけが停止しても、git の終了まで排他を保持する。
     with locked(rr) as rf, locked(wr) as wf:
         current_lease(wr, a.token)
         task = task_at(a.dir)
@@ -1084,14 +1064,13 @@ def integrate(a):
         if alive(target_lease, time.time()):  # この拒否を外す退行を落とす試験は無い（守らない範囲）
             raise ValueError('統合先の checkout に生きた担当がいる。書き換えず待つ')
         held = run_holder(rr)
-        if held:  # 担当の期限が切れても、動いているコマンドの足元で統合先を動かさない（claim と同じ）
+        if held:
             raise ValueError(f'統合先の checkout で op run の外部操作がまだ動いている: {held}。終わるのを待つ')
         if git(a.dir, 'symbolic-ref', '--quiet', 'HEAD') != 'refs/heads/' + task['branch']:
             raise ValueError('タスクのブランチが変更されている')
         journal_file = rr / 'integration.json'
         journal = read_journal(rr)
         head, target = git(a.dir, 'rev-parse', 'HEAD'), git(repo, 'rev-parse', ref)
-        # 反映直後の中断だけは Git の実物から完了を復元できる。
         if journal and journal['dir'] == str(a.dir.resolve()) and a.verified == journal['verified'] and a.expected == journal['expected'] and clean(dest) \
                 and subprocess.run(['git', '-C', str(repo), 'merge-base', '--is-ancestor', journal['verified'], target], capture_output=True).returncode == 0:
             journal_file.unlink()
@@ -1108,7 +1087,7 @@ def integrate(a):
         try:
             git(dest, 'merge', '--ff-only', '--no-overwrite-ignore', head, fds=(rf, wf))
         except (ValueError, OSError):
-            settle_integration(rr, repo)  # 統合先が別の commit へ進んで ff が拒まれても、書きかけが無ければ何も反映していない
+            settle_integration(rr, repo)
             raise
         if git(repo, 'rev-parse', ref) != head or not clean(dest):
             raise ValueError('統合後の実物が検証した commit と一致しない。記録と差分を照合する')
@@ -1126,7 +1105,6 @@ def op_step(a, r: Path, live, now: float, action: str):
     known = ops(r).get(a.key)
     acct = None
     kind = a.key.split(":")[0] if ":" in a.key else None
-    # 書き間違い・言い換えを列挙して止めると漏れる（push/…・pr#12・pull-request）ので、外部に出ない操作の記録を明示させる
     if action == "begin" and len(a.key.encode("utf-8")) > 1024:  # ロックの中身の鍵を読み切れるように
         return ({"ok": False, "reason": "鍵の長さは 1024 バイトまで"}, 2)
     if action == "begin" and kind not in EXTERNAL and kind != "local" and not (kind or "").startswith("local-"):
@@ -1168,7 +1146,6 @@ def op_step(a, r: Path, live, now: float, action: str):
             if a.delta is not None:
                 return ({"ok": False, "reason": "--delta は、審査を通した commit（--reviewed <commit>）から HEAD までの差分の宣言。none: とは並べない"}, 2)
         else:
-            # HEAD・ブランチ名のような動く参照は、審査した commit を書いた宣言と見分けられないので受けない
             if not re.fullmatch(r"[0-9a-f]{7,64}", a.reviewed):
                 return ({"ok": False, "reason": f"--reviewed {a.reviewed!r} は commit の ID（16 進）でも none:<理由> でもない。"
                             + changed_since_publish(r, a.dir, head)}, 2)
@@ -1200,7 +1177,6 @@ def op_step(a, r: Path, live, now: float, action: str):
                                 + ("（rebase・amend などで履歴から外れたか、確かめられない" + (f": {err}" if err else "") + "）" if rc == 1 else f"（確かめられない: {err}）")
                                 + "。HEAD で審査を通してから出す"}, 6)
                 base = task_place(Path(a.dir))[1]
-                # 基点とその前の審査は、このタスクの変更を見ていない。基点より後と確かめられたときだけ通す（確かめの失敗・shallow は拒否する）
                 if base is not None and (reviewed == base or is_ancestor(base, reviewed, a.dir)[0] != 0):
                     return ({"ok": False, "reason": f"審査を通した commit {reviewed} は、このタスクの基点 {base} より後と確かめられない"
                                 "（基点か、その前か、別の系統）。基点の審査はタスクの変更を見ていないので、HEAD で審査を通してから出す"}, 6)
@@ -1250,13 +1226,13 @@ def op_step(a, r: Path, live, now: float, action: str):
         return ({"ok": False, "reason": "同じ鍵の操作が既にある。外部の状態を照合してから進める（やり直さない）", "op": known}, 4)
     if action == "done" and not known:
         return ({"ok": False, "reason": "begin の記録が無い"}, 2)
-    if action == "done" and known.get("state") == "done":  # 記録した結果を、照合の文言で上書きしない
+    if action == "done" and known.get("state") == "done":
         return ({"ok": False, "reason": "この操作は既に終わりを記録している", "op": known}, 4)
     e = {"key": a.key, "state": "begun" if action == "begin" else "done", "at": now, "holder": live["holder"]}
     e.update({"what": a.what} if action == "begin" else {"result": a.result})
-    if action == "done":  # 書いた者の印。手で閉じた記録は None（監督役の記録の印を上書きして、終了コードと読まれないように）
+    if action == "done":
         e["by"] = getattr(a, "by", None)
-        state = note_state_of(r)  # 終えた時点の今の状態・次の一手（ops_after_note が比べる。読めなければ書かない）
+        state = note_state_of(r)
         if state:
             e["note_state"] = state
     if acct:
@@ -1284,7 +1260,6 @@ def op_step(a, r: Path, live, now: float, action: str):
 
 
 def run_lock(r: Path, key: str) -> Path:
-    """op run のロック。操作ごとに分ける。コマンドとそれが残したもの（シェルの & など）もこのロックを持つ。"""
     return r / f"running-{hashlib.sha256(key.encode('utf-8')).hexdigest()[:16]}.lock"
 
 
@@ -1300,24 +1275,24 @@ def run_holder(r: Path):
     held = None
     done = None
 
-    def records():  # 読めなければ空（鍵を引けず、done とも分からないので、動いているとみなす側に倒れる）
+    def records():
         try:
             return {k: e for k, e in ops(r).items() if isinstance(k, str) and isinstance(e, dict)}
-        except Exception:  # 手で壊した記録（形の違い、深い入れ子の RecursionError など）でも落ちない
+        except Exception:
             return {}
-    for f in sorted(r.glob("running*.lock")):  # running.lock は 0.11.12 の名前
+    for f in sorted(r.glob("running*.lock")):
         fd = None
         try:
             fd = os.open(f, os.O_RDONLY)
             text = os.read(fd, 4096).decode("utf-8", "replace")  # 鍵は 1024 バイトまで（op_step が拒否する）
-        except FileNotFoundError:  # 監督役が消した（開く前。開いた後に消えても読める）
+        except FileNotFoundError:
             continue
-        except OSError:  # 開けない・読めない。動いているかが分からないので、動いているとみなす。鍵は始めた記録から引く
+        except OSError:
             if fd is not None:
                 os.close(fd)
             done = records() if done is None else done
             if any(e.get("state") == "done" and run_lock(r, k).name == f.name for k, e in done.items()):
-                continue  # 鍵がもう done（flock で見るときと同じく数えない）
+                continue
             keys = [k for k, e in done.items() if e.get("state") == "begun" and run_lock(r, k).name == f.name]
             held = held or (keys[0] if keys else f.name)
             continue
@@ -1326,27 +1301,26 @@ def run_holder(r: Path):
                 fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
             except BlockingIOError:
                 done = records() if done is None else done
-                if held is None and done.get(text, {}).get("state") != "done":  # done を書いた直後に監督役が殺されたロックは数えない
-                    held = text or "?"  # 鍵はそのまま比べる（空白を落とすと、記録の鍵と食い違う）
+                if held is None and done.get(text, {}).get("state") != "done":
+                    held = text or "?"
                 continue
             try:
-                f.unlink(missing_ok=True)  # 外れたロック。記録されないままの出力は、照合に使えるよう残す（op done で閉じたら消す）
-            except OSError:  # 片付けなので、消せなくても続ける（外れているので数えない）
+                f.unlink(missing_ok=True)
+            except OSError:
                 pass
         finally:
             os.close(fd)
     return held
 
 
-STOP_SIGNALS = {signal.SIGTERM, signal.SIGHUP, signal.SIGINT}  # 監督役が受けてコマンドに伝えるシグナル
+STOP_SIGNALS = {signal.SIGTERM, signal.SIGHUP, signal.SIGINT}
 
 
 def run_log(r: Path, key: str) -> Path:
-    """op run の出力の置き場。操作ごとに分ける（作業場所に 1 つだと、次の実行が前の出力を上書きする）。"""
     return r / f"run-{hashlib.sha256(key.encode('utf-8')).hexdigest()[:16]}.log"
 
 
-MAX_TAIL = 8 * 1024  # 記録に残す出力の上限（バイト）。改行の無い大きな出力で ops.jsonl を膨らませない
+MAX_TAIL = 8 * 1024
 
 
 def tail(f: Path, lines: int = 20, budget: int = MAX_TAIL) -> str:
@@ -1362,16 +1336,16 @@ def tail(f: Path, lines: int = 20, budget: int = MAX_TAIL) -> str:
             fh.seek(start)
             block = fh.read(end - start)
             if block.strip():
-                end = start + len(block.rstrip())  # 最後の意味のある文字の後ろ
+                end = start + len(block.rstrip())
                 break
             if start == 0:
-                return ""  # 空白だけの出力
+                return ""
             end = start
         else:
             return ""
         start = max(0, end - 64 * 1024)
         partial = False
-        if start > 0:  # 窓の先頭が行の途中か（1 バイト前が改行でなければ途中）
+        if start > 0:
             fh.seek(start - 1)
             partial = fh.read(1) != b"\n"
         fh.seek(start)
@@ -1383,11 +1357,11 @@ def tail(f: Path, lines: int = 20, budget: int = MAX_TAIL) -> str:
             data = data[k:]
         rows = data.split(b"\n")  # 行は改行だけで数える（\r の進捗表示で行を割らない）
     text = b"\n".join(rows[-lines:]).decode("utf-8", "replace")
-    cut = partial and len(rows) <= lines  # 残す行の先頭が、行の途中から始まる
+    cut = partial and len(rows) <= lines
 
-    def size(s):  # ops.jsonl に書かれる形（ensure_ascii=False）での大きさ
+    def size(s):
         return len(json.dumps(("（先頭を省いた）" if cut else "") + s, ensure_ascii=False).encode()) - 2
-    if size(text) > budget:  # 上限に収まる最も長い末尾を探す（先頭から削る）
+    if size(text) > budget:
         cut, lo, hi = True, 0, len(text)
         while lo < hi:
             mid = (lo + hi) // 2
@@ -1400,15 +1374,12 @@ def tail(f: Path, lines: int = 20, budget: int = MAX_TAIL) -> str:
 
 
 def show(fh):
-    """開いた出力の全体を、少しずつ stderr に写す。"""
     for chunk in iter(lambda: fh.read(64 * 1024), b""):
         sys.stderr.buffer.write(chunk)
     sys.stderr.buffer.flush()
 
 
 def keep_lease(r: Path, token: str):
-    """コマンドが動いている間、担当の期限を 20 分先に保つ。引き継がれていれば触らない。
-    期限が切れていても、token が同じ（誰も取っていない）なら延ばす。コマンドはまだ動いているので。"""
     with locked(r):
         lease = read(r / "lease.json")
         now = time.time()
@@ -1437,9 +1408,9 @@ def op_run(a, r: Path, argv: list) -> int:
                 res, code = op_step(a, r, held_lease(lease, a.token), now, "begin")
             if not code:
                 fd = os.open(run_lock(r, a.key), os.O_RDWR | os.O_CREAT | os.O_TRUNC, 0o600)
-                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)  # 鍵ごとの新しいファイルなので取れる（同じ鍵は op_step が 4 で拒否する）
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 os.write(fd, a.key.encode("utf-8"))
-                if not alive(lease, now) or float(lease["expires_at"]) < now + 20 * 60:  # 切れた・壊れた期限も延ばす
+                if not alive(lease, now) or float(lease["expires_at"]) < now + 20 * 60:
                     lease["expires_at"] = now + 20 * 60
                     write(r / "lease.json", lease)
         if code:
@@ -1457,7 +1428,7 @@ def op_run(a, r: Path, argv: list) -> int:
             sup = subprocess.Popen([sys.executable, "-B", str(Path(__file__).resolve()), "_supervise", spec, "--", *argv],
                                    pass_fds=[fd], start_new_session=True, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                                    stderr=errf)
-        except OSError as e:  # 監督役を起こせなければ、コマンドも走っていない。そう記録して閉じる
+        except OSError as e:
             a.result = f"exit 127: 起動の準備ができない（出力のファイルか監督役。コマンドは走っていない）: {e}"
             with locked(r):
                 res, _ = op_step(a, r, read(r / "lease.json"), time.time(), "done")
@@ -1476,29 +1447,28 @@ def op_run(a, r: Path, argv: list) -> int:
     finally:
         if fd is not None:
             os.close(fd)  # ロックは監督役が持ち続ける
-    # 監督役は 2 回目の fork の先で動く（この op run の子孫から外れる）。結果は、その標準出力の 1 行目に終了コード、2 行目に JSON
     lines = sup.communicate()[0].decode("utf-8", "replace").strip().split("\n")  # 結果の JSON は 1 行。splitlines は出力の U+2028 などでも割る
-    with shown:  # 監督役が消していても、開いたファイルから読める
+    with shown:
         try:
             show(shown)
         except OSError as e:
             sys.stderr.write(f"（出力を読めない: {e!r}）\n")
     rec, unreadable = {}, ""
-    if len(lines) < 2:  # 監督役が結果を返さなかった。記録を読む（読めなければ、書けていないとみなす）
+    if len(lines) < 2:
         try:
             rec = ops(r).get(a.key, {})
-        except RecordError as e:  # 手で壊した記録（形の違い、深い入れ子など）でも落ちない
+        except RecordError as e:
             unreadable = f"{e}。その行を直してから、"
-        except Exception as e:  # 権限などで読めない
+        except Exception as e:
             unreadable = f"記録を読めない: {e!r}。読めるようにしてから、"
-    if len(lines) < 2 and rec.get("state") == "done":  # done を書いた後に監督役が居なくなった。結果は記録にある
+    if len(lines) < 2 and rec.get("state") == "done":
         result = rec.get("result")
-        m = re.match(r"exit ([0-9]{1,3}):", result) if isinstance(result, str) and rec.get("by") == "supervise" else None  # 監督役が書いた記録だけ
-        if not m or int(m.group(1)) > 255:  # 手で閉じた記録など。走ったかは記録の result で判断する
+        m = re.match(r"exit ([0-9]{1,3}):", result) if isinstance(result, str) and rec.get("by") == "supervise" else None
+        if not m or int(m.group(1)) > 255:
             return out({"ok": False, "exit": None, "op": rec, "reason": "監督役が結果を返さずに終わった。記録の result で判断する"}, 1)
         rc = int(m.group(1))
         return out({"ok": rc == 0, "exit": rc, "op": rec, "reason": "監督役が結果を返さずに終わったが、結果は記録済み"}, rc)
-    if len(lines) < 2:  # コマンドは走ったかもしれない（exit は分からない）。始めた記録があれば添える
+    if len(lines) < 2:
         return out({"ok": False, "exit": None, **({"op": rec} if rec else {}),
                     "reason": f"監督役が結果を返さずに終わった。{r / 'supervise.err'} を読み、{unreadable}"
                     "op pending の running が消えるのを待ってから、外部の状態で照合する"}, 1)
@@ -1521,17 +1491,15 @@ def gate(name: str):
         try:
             tmp = Path(d) / f".at-{name}.{os.getpid()}"
             tmp.write_text(str(os.getpid()))
-            os.replace(tmp, Path(d) / f"at-{name}")  # 試験が名前を見たときに、中身が揃っているように
-        except OSError:  # 置き場が消えた。止まらずに進む
+            os.replace(tmp, Path(d) / f"at-{name}")
+        except OSError:
             return
-        deadline = time.time() + 60  # 環境に残っていても、永久には待たない
+        deadline = time.time() + 60
         while not (Path(d) / name).exists() and time.time() < deadline:
             time.sleep(0.02)
 
 
 def supervise(spec: dict, argv: list) -> int:
-    """op run の監督役。コマンドを実行し、動いている間は担当を保ち、終わったら done を書いて結果を出す。
-    操作のロックは op run から受け継いだ fd で持ち、コマンドにも渡す。コマンドが終わったらロックのファイルを消す。"""
     # 2 回目の fork。op run の子孫の木から外れ、木ごと止めるハーネスに巻き込まれない。保留中のシグナルは fork の子に
     # 受け継がれないので、中継（親）が fork の後に見て、パイプで子に渡す。子はそれを受け取るまで起こさない。
     # ここが「起こす前」の決め所で、これより後に中継へ届いたものは、起こした後に op run を止めたのと同じ扱い（コマンドは続く）
@@ -1557,10 +1525,10 @@ def supervise(spec: dict, argv: list) -> int:
     p = None
     caught = []
 
-    def forward(sig, _frame):  # 監督役は止まらず、コマンドに伝えて終わりを待つ（止まるとロックが外れ、やり直しが通る）
+    def forward(sig, _frame):
         caught.append(sig)
         if p is not None and p.poll() is None:
-            p.send_signal(sig)  # 起こす前のシグナルは、起こさないことで受ける
+            p.send_signal(sig)
     for sig in STOP_SIGNALS:
         signal.signal(sig, forward)
     # op run が塞いで起こした。塞いだまま、起こす前に届いたかを見る。起こした後で外すので、その間に届いたものもコマンドに伝わる
@@ -1570,29 +1538,27 @@ def supervise(spec: dict, argv: list) -> int:
         caught.extend(sorted(early))
     warned = set()
 
-    def warn(msg):  # 同じ文言は 1 回だけ（毎秒の延長の失敗で育たない）
+    def warn(msg):
         if msg not in warned:
             warned.add(msg)
             sys.stderr.write(f"{spec['key']}: {msg}\n")
             sys.stderr.flush()
-    if caught:  # 起こす前に止めろと言われた。外部操作を始めない
+    if caught:
         signal.pthread_sigmask(signal.SIG_UNBLOCK, STOP_SIGNALS)
         rc, output = 128 + caught[0], "起動の前に止められた（コマンドは走っていない）"
     else:
         try:
             gate("before-start")
-            with open(run_log(r, spec["key"]), "ab") as logf:  # op run が作って開いたファイルに書く
+            with open(run_log(r, spec["key"]), "ab") as logf:
                 # 出力はファイルへ。op run が止められても、パイプの相手を失って書けなくならない
                 p = subprocess.Popen(argv, cwd=spec["cwd"], stdin=subprocess.DEVNULL, stdout=logf, stderr=subprocess.STDOUT,
                                      env={**{k: v for k, v in os.environ.items() if k != "BB_WRIT_SUPERVISE_GATE"}, "GIT_TERMINAL_PROMPT": "0"},
-                                     # ロックをコマンドにも持たせる。監督役が kill -9 されても、コマンド（とそれが残したもの）が
-                                     # 生きている間はロックが外れず、後任がやり直さない
                                      pass_fds=[spec["lock_fd"]],
-                                     preexec_fn=lambda: signal.pthread_sigmask(signal.SIG_UNBLOCK, STOP_SIGNALS))  # コマンドには塞がずに渡す
-        except OSError as e:  # 起動できない（走っていない）のはここだけ
+                                     preexec_fn=lambda: signal.pthread_sigmask(signal.SIG_UNBLOCK, STOP_SIGNALS))
+        except OSError as e:
             rc, output = 127, f"起動できない（コマンドは走っていない）: {e}"
         else:
-            signal.pthread_sigmask(signal.SIG_UNBLOCK, STOP_SIGNALS)  # 起こしてから外す。待っていたシグナルはここで伝わる
+            signal.pthread_sigmask(signal.SIG_UNBLOCK, STOP_SIGNALS)
             while True:
                 try:
                     p.wait(timeout=1)
@@ -1600,39 +1566,39 @@ def supervise(spec: dict, argv: list) -> int:
                 except subprocess.TimeoutExpired:
                     try:
                         keep_lease(r, spec["token"])
-                    except (OSError, ValueError, KeyError, TypeError, AttributeError) as e:  # 延ばせなくても止まらない
+                    except (OSError, ValueError, KeyError, TypeError, AttributeError) as e:
                         warn(f"担当の期限を延ばせない: {e!r}")
-            rc = p.returncode if p.returncode >= 0 else 128 - p.returncode  # シグナルで止まった。シェルと同じ 128+N にする
+            rc = p.returncode if p.returncode >= 0 else 128 - p.returncode
             try:
                 output = tail(run_log(r, spec["key"]), budget=MAX_TAIL - len(f"exit {rc}: ".encode()))
             except OSError as e:
                 output = f"（出力を読めない: {e!r}）"
     a = argparse.Namespace(key=spec["key"], token=spec["token"], dir=d, frm=None, verified=None, reviewed=None, what="",
-                           result=f"exit {rc}: " + output, by="supervise")  # output は tail で末尾 20 行・8 KiB にしてある
+                           result=f"exit {rc}: " + output, by="supervise")
     gate("before-done")
     code = None
     try:
         with locked(r):
-            res, code = op_step(a, r, read(r / "lease.json"), time.time(), "done")  # 期限が切れても、token が同じなら書く
-            if not code:  # 記録できた。全体の出力は残さない（秘密が出ていても、記録の末尾 20 行より長く残さない）
+            res, code = op_step(a, r, read(r / "lease.json"), time.time(), "done")
+            if not code:
                 try:
                     run_log(r, spec["key"]).unlink(missing_ok=True)
-                except OSError as e:  # 消せなくても、ロックは明け渡す
+                except OSError as e:
                     warn(f"出力のファイルを消せない: {e!r}")
             finish(r, spec)
-    except (OSError, ValueError, KeyError, TypeError, AttributeError) as e:  # 書けなくても結果は出す。begun は残るので照合で閉じる
-        if code is not None:  # op_step は終えた（done を書けた、または担当を失った）。ロックのファイルを消せなかっただけ
+    except (OSError, ValueError, KeyError, TypeError, AttributeError) as e:
+        if code is not None:
             warn(f"ロックのファイルを消せない: {e!r}")
         else:
             warn(f"done を書けない: {e!r}")
             res, code = {"ok": False, "reason": f"done を書けない: {e!r}"}, 1
             try:
-                finish(r, spec)  # 排他は取らない（取れないこともある）。コマンドは終わっていて、run_holder は消えたファイルを飛ばす
+                finish(r, spec)
             except OSError:
                 pass
     gate("before-print")
-    os.close(spec["lock_fd"])  # 記録を書いたら、すぐ次の担当・操作に明け渡す
-    if code:  # 実行の間に引き継がれた・解放された。begun のまま残るので、次の担当が照合する
+    os.close(spec["lock_fd"])
+    if code:
         res, rc = {**res, "exit": rc, "output": output[-2000:]}, code
     else:
         res = {"ok": rc == 0, "exit": rc, "op": res["op"]}
@@ -1698,9 +1664,9 @@ def main() -> int:
     c.add_argument("--dir", type=Path, required=True)
     c.add_argument("--from", dest="frm", type=Path, required=True)
     argv, run_argv = sys.argv[1:], []
-    if argv[:1] == ["_supervise"] and "--" in argv:  # op run が起こす監督役（直接は呼ばない）
+    if argv[:1] == ["_supervise"] and "--" in argv:
         return supervise(json.loads(argv[1]), argv[argv.index("--") + 1:])
-    if argv[:2] == ["op", "run"] and "--" in argv:  # op run は -- の後ろを、シェルを通さずに実行するコマンドとして受け取る
+    if argv[:2] == ["op", "run"] and "--" in argv:
         i = argv.index("--")
         argv, run_argv = argv[:i], argv[i + 1:]
     a = ap.parse_args(argv)
@@ -1709,9 +1675,9 @@ def main() -> int:
             return task_command(a) if a.cmd == 'task' else integrate(a)
         except LeaseRefused as e:
             return out({'ok': False, 'reason': str(e)}, 3)
-        except PermissionError as e:  # 記録の置き場を権限で読み書きできない。権限の誤りは、ほかのコマンドと同じ 2（担当の拒否の 3 でない）
+        except PermissionError as e:
             return out({'ok': False, 'reason': f"記録の置き場を読み書きできない: {e}"}, 2)
-        except RecordError as e:  # 形の違う記録は照合の拒否（6）でない
+        except RecordError as e:
             return out({'ok': False, 'reason': str(e)}, 1)
         except (ValueError, OSError) as e:
             return out({'ok': False, 'reason': str(e)}, 6)
@@ -1721,7 +1687,7 @@ def main() -> int:
     r = root(a.dir)
     try:
         return dispatch(a, r, run_argv)
-    except RecordError as e:  # 形の違う記録。黙って続けず、どこを直すかを返す
+    except RecordError as e:
         return out({"ok": False, "reason": str(e)}, 1)
 
 
@@ -1744,10 +1710,10 @@ def dispatch(a, r: Path, run_argv):
             if why:
                 return out({"ok": False, "reason": why, "holder": live and live["holder"]}, 3)
             held = run_holder(r) if a.cmd == "release" else None
-            if held:  # 手放すと、監督役が結果を記録できない
+            if held:
                 return out({"ok": False, "reason": f"op run の外部操作がまだ動いている: {held}。終わるのを待ってから手放す"}, 4)
             if a.cmd == "renew":
-                n = note(r)  # 単位ごとに呼ばれるので、空の欄をここで知らせる（拒否はしない）。読めなければ期限を書く前に止まる
+                n = note(r)
                 mine["expires_at"] = now + a.lease * 60
                 write(r / "lease.json", mine)
                 return out({"ok": True, **({"note": {"path": n["path"], "empty": n["empty"]}} if "empty" in n else {})})
@@ -1761,7 +1727,7 @@ def dispatch(a, r: Path, run_argv):
         res, code = op_step(a, r, held_lease(lease, a.token), now, a.action)
         if a.action == "done" and (not code or (code == 4 and res.get("op", {}).get("state") == "done")):
             try:
-                run_log(r, a.key).unlink(missing_ok=True)  # 閉じた（または既に終わっていた）。残しておいた出力はもう要らない
+                run_log(r, a.key).unlink(missing_ok=True)
             except OSError as e:
                 res = {**res, "warning": f"出力のファイルを消せない: {e!r}"}
         return out(res, code)
@@ -1770,5 +1736,5 @@ def dispatch(a, r: Path, run_argv):
 if __name__ == "__main__":
     try:
         sys.exit(main())
-    except OSError as e:  # 記録の置き場を開けない（ロックがリンクになっているなど）
+    except OSError as e:
         sys.exit(out({"ok": False, "reason": f"記録の置き場を読み書きできない: {e}"}, 2))

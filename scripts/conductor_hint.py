@@ -37,8 +37,7 @@ HINT = ("bb-writ: このセッションでは入口 bb-writ を呼んでいる�
         "指揮者にも渡さずに、同じ直接の返事のしかたを利用者に伝える（指揮者は、親を通した返事を、本人の選択と確かめられずに断ることがある）。"
         "別の用件のときと、指揮者がいないときは、そのまま自分で進める。ただし、失敗して終わった指揮者の依頼は、利用者が本体を名前で呼ぶ"
         "（/bb-writ:conduct <依頼>）か入口を呼び直すまで、自分で進めない。")
-ENTRY_SKILLS = {"bb-writ:bb-writ", "bb-writ"}  # 入口だけ（本体 bb-writ:conduct は数えない）
-# 入口の子（指揮者）が失敗して終わった知らせのターンには、いつもの案内の代わりにこれを足す（#57。親が関門を通さずに依頼を進めた）
+ENTRY_SKILLS = {"bb-writ:bb-writ", "bb-writ"}
 FAILED = ("bb-writ: 入口 bb-writ が立てた指揮者（背景の子）が、失敗して終わった（いま届いた知らせ）。指揮者に頼んであった依頼を、自分で引き継いで進めない"
           "（そのためにファイルを読まず、書き換えず、子も立てず、スキルも呼ばない）。利用者に、指揮者が失敗したことと理由（知らせの文）、"
           "依頼を自分では進めていないこと、次の手を伝えて止まる。次の手は 2 つ。(1) 本体を名前で呼ぶ（/bb-writ:conduct <依頼>）。"
@@ -59,7 +58,6 @@ def failed_children(prompt: str):
     return TASK_ID.findall(head.group(1)) if head and head.group(2) == "failed" else []
 
 
-# 探索の入口 unknowns も別の子として動く（#58）。印は入口と別に持つ（素の push の守りの「入口を呼んだセッション」に数えない）
 HINT_UNKNOWNS = ("bb-writ: このセッションでは探索の入口 unknowns を呼んでいる。unknowns が立てた子（背景の子）がいるなら、次のとおりにする。"
                  "(1) 子の質問・報告を利用者に伝えるときは、返事は子に直接打つよう添える（動いている間は画面下の一覧で ↓ を 2 回押して"
                  " Enter、終わった後は /tasks から子を開いて、入力欄に打つ）。"
@@ -67,11 +65,10 @@ HINT_UNKNOWNS = ("bb-writ: このセッションでは探索の入口 unknowns �
                  "同じ直接の返事のしかたを利用者に伝える。別の用件のときと、子がいないとき（子がモデルのエラーで失敗し、本体 explore を"
                  "名前で呼んで、このセッションで探索を続けているときを含む）は、そのまま自分で進める。")
 UNKNOWNS_NAMES = ("/bb-writ:unknowns", "/unknowns")
-SKIP_NAMES = UNKNOWNS_NAMES + ("/bb-writ:explore", "/bb-writ:conduct", "/conduct")  # この入力そのものには足さない（入口を呼ぶ入力と、失敗の後に本体を呼ぶ回避）
+SKIP_NAMES = UNKNOWNS_NAMES + ("/bb-writ:explore", "/bb-writ:conduct", "/conduct")
 
 
 def starts_with(text: str, names) -> bool:
-    """文が、どれかの名前で始まり、名前の直後が空白の類か文の終わりか（先頭の空白は削らない。入口の比べ方と同じ）。"""
     return isinstance(text, str) and any(text.startswith(n) and (len(text) == len(n) or text[len(n)].isspace()) for n in names)
 
 
@@ -87,7 +84,7 @@ def used_unknowns(path: str, push_guard) -> bool:
                 continue
             try:
                 d = json.loads(line)
-            except Exception:  # 形の違う行は飛ばし、後ろの行を読み続ける（used_entry と同じ）
+            except Exception:
                 continue
             if not isinstance(d, dict):
                 continue
@@ -113,7 +110,7 @@ def main() -> int:
         import push_guard
         d = json.load(sys.stdin)
         prompt = d.get("prompt")
-        calls_entry = isinstance(prompt, str) and (push_guard.slash_line(prompt) or starts_with(prompt, SKIP_NAMES))  # 入口・本体を呼ぶ入力
+        calls_entry = isinstance(prompt, str) and (push_guard.slash_line(prompt) or starts_with(prompt, SKIP_NAMES))
         if d.get("agent_id") or calls_entry:
             return 0
         failed = isinstance(prompt, str) and any(push_guard.entry_child(d["transcript_path"], a) for a in failed_children(prompt))
@@ -121,7 +118,7 @@ def main() -> int:
             [HINT_UNKNOWNS] if used_unknowns(d["transcript_path"], push_guard) else [])
         if not hints:
             return 0
-    except Exception:  # 判定できなければ何も足さない（入力を止めない）
+    except Exception:
         return 0
     # ensure_ascii（既定）: 出力の符号化が日本語を扱えない環境でも、書き出しで落ちて案内が消えないように
     print(json.dumps({"hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "additionalContext": "\n".join(hints)}}))

@@ -64,7 +64,7 @@ import sys
 # （本体は fork しないので、スラッシュで呼ぶと <command-name> の形の行が先に書かれる）
 ENTRY_SKILLS = {"bb-writ:bb-writ", "bb-writ", "bb-writ:conduct"}
 ENTRY_NAME = "/bb-writ:bb-writ"
-ENTRY_SLASHES = (ENTRY_NAME, "/bb-writ")  # 入口をスラッシュで呼ぶ名前（正式な名前と短い名前）。conductor_hint.py も使う
+ENTRY_SLASHES = (ENTRY_NAME, "/bb-writ")
 SLASH_NAMES = {ENTRY_NAME, "/bb-writ:conduct"}
 SLASH_HEADS = ("<command-message>", "<command-name>")
 
@@ -74,18 +74,16 @@ SLASH_HEADS = ("<command-message>", "<command-name>")
 # /clear の後は、新しいセッションの置き場にも同じ名前のファイルができる（続きの行だけ）。前のセッションの置き場のものは残り、
 # 先頭は入口の行のままなので、全部のセッションの置き場から探す。孫の先頭の行は入口の行でなく、同じ置き場の
 # agent-<孫の id>.meta.json の parentAgentId が指揮者の agent_id（指揮者の meta.json に parentAgentId は無い）。
-AGENT_ID = re.compile(r"[A-Za-z0-9_-]{1,64}")  # 置き場の探し方にそのまま使うので、glob の記号や / を含む id は使わない
+GLOB_SAFE_AGENT_ID = re.compile(r"[A-Za-z0-9_-]{1,64}")
 # 先頭の行を読む長さの上限。入口の行の content は、入口の本文の後ろに「ARGUMENTS: <依頼文>」を含むので、依頼が長いと行も長い
 # （約 26 万字を超える依頼で、262,144 字の上限では行が切れて読めなかった）。上限を超える行は、JSON として読めず、当たらなかったものとして通す
 FIRST_ROW_LIMIT = 16777216
 BASE_HEAD = "Base directory for this skill: "
-ENTRY_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "skills", "bb-writ")  # この置き場の入口（same_entry）
-ANCESTOR_LIMIT = 8  # parentAgentId をたどる段の数
+ENTRY_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "skills", "bb-writ")
+ANCESTOR_LIMIT = 8
 
-# 区切り（コマンドの境目）。( ) と ` と $( は文脈の出入りとして別に扱う
 SEPARATORS = set(";&|{}!\n")
 KEYWORDS = {"then", "else", "do", "elif", "if", "while", "until"}
-# 前に付いて、後ろのコマンドを起こす語と、その値を取る引数
 WRAPPERS = {"env": {"-u", "--unset", "-C", "--chdir", "-S", "--split-string"},
             "sudo": {"-u", "--user", "-g", "--group", "-C", "--close-from", "-h", "--host", "-p", "--prompt"},
             "nice": {"-n", "--adjustment"}, "time": {"-f", "--format", "-o", "--output"},
@@ -94,13 +92,12 @@ TIMEOUT_WITH_VALUE = {"-s", "--signal", "-k", "--kill-after"}
 GIT_WITH_VALUE = {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path", "--super-prefix", "--config-env",
                   "--attr-source"}
 GH_WITH_VALUE = {"-R", "--repo"}
-NOT_SENT = {"--dry-run", "-n", "--help", "-h"}  # git push で外へ何も出さない（試すだけ・使い方を見るだけ）
-PUSH_WITH_VALUE = {"-o", "--push-option", "--receive-pack", "--exec", "--repo"}  # 値が NOT_SENT の語でも、値として読む
+NOT_SENT = {"--dry-run", "-n", "--help", "-h"}
+PUSH_WITH_VALUE = {"-o", "--push-option", "--receive-pack", "--exec", "--repo"}
 HELP = {"--help", "-h"}  # git の大域の引数の使い方を見るだけの指定。gh は --help だけ（gh の -h は副コマンドによって値になる）
 
 
 def closing(command: str, i: int, open_: str, close: str) -> int:
-    """command[i] が open_ のとき、対応する close の次の位置（無ければ末尾）。${…}・$((…)) に使う。"""
     depth = 0
     for j in range(i, len(command)):
         if command[j] == open_:
@@ -124,7 +121,7 @@ def parse(command: str, i: int, until):
     （置き換えの入れ子が Python の再帰の上限を超えると例外になり、main が通す）。"""
     n = len(command)
     segs, words, word = [], [], []
-    started, in_dq, depth, heredocs = False, False, 0, []  # depth: until が ")" のときの、中の ( の深さ
+    started, in_dq, depth, heredocs = False, False, 0, []
 
     def flush():
         nonlocal started
@@ -178,7 +175,7 @@ def parse(command: str, i: int, until):
             if command[i + 1] != "\n":
                 word.append(command[i + 1])
             i += 2
-        elif ch == "#" and not word and not started:  # 注釈は行の終わりまで
+        elif ch == "#" and not word and not started:
             end = command.find("\n", i)
             i = n if end == -1 else end
         elif command.startswith("<<<", i):
@@ -214,7 +211,7 @@ def parse(command: str, i: int, until):
             i += 1
         elif ch == "\n" and heredocs:
             cut()
-            for delim, strip_tabs in heredocs:  # 本文の行を、終わりの行まで読み飛ばす（<<- だけ行頭のタブを外す）
+            for delim, strip_tabs in heredocs:
                 start = i + 1
                 while True:
                     end = command.find("\n", start)
@@ -249,11 +246,11 @@ def parse(command: str, i: int, until):
 def outward(command: str) -> bool:
     for w in segments(command):
         i, n = 0, len(w)
-        while i < n:  # 前に付く語（制御の語、環境変数の代入、向け直し、包むコマンドとその引数）を読み飛ばす
+        while i < n:
             head = w[i]
             if head in KEYWORDS or ("=" in head and head.split("=", 1)[0].isidentifier()):
                 i += 1
-            elif redirect(head):  # 向け直し（2>/dev/null、> f）
+            elif redirect(head):
                 i += redirect(head)
             elif head in WRAPPERS:
                 i += 1
@@ -263,8 +260,8 @@ def outward(command: str) -> bool:
                 i += 1
                 while i < n and w[i].startswith("-"):
                     i += 2 if w[i] in TIMEOUT_WITH_VALUE else 1
-                i += 1  # 時間
-            elif head == "dotenvx" and w[i + 1:i + 2] == ["run"]:  # dotenvx run …… -- <コマンド>
+                i += 1
+            elif head == "dotenvx" and w[i + 1:i + 2] == ["run"]:
                 i += 2
                 while i < n and w[i] != "--":
                     i += 1
@@ -282,7 +279,7 @@ def outward(command: str) -> bool:
             if w[i:i + 1] == ["push"] and not help_ and not dry_or_help(w[i + 1:]):
                 return True
         elif tool == "gh":
-            sub = []  # フラグ（-R・--repo は値も）を除いた語の並びの先頭 2 つ
+            sub = []
             while i < n and len(sub) < 2:
                 if w[i].startswith("-"):
                     i += 2 if w[i] in GH_WITH_VALUE else 1
@@ -295,7 +292,6 @@ def outward(command: str) -> bool:
 
 
 def redirect(word: str) -> int:
-    """向け直しの語なら、読み飛ばす語の数（演算子だけの語は次の語が行き先で 2、行き先が付いていれば 1）。ほかは 0。"""
     rest = word.lstrip("0123456789")
     if rest[:1] not in ("<", ">"):
         return 0
@@ -303,7 +299,6 @@ def redirect(word: str) -> int:
 
 
 def dry_or_help(args: list) -> bool:
-    """git push の引数に、外へ何も出さない指定があるか（値を取る引数の値は数えない）。"""
     k = 0
     while k < len(args):
         if args[k] in PUSH_WITH_VALUE:
@@ -321,7 +316,6 @@ REASON = ("bb-writ: 外に出す操作は、playbook-deliver のとおり work.p
 
 
 def used_entry(path: str, skills=ENTRY_SKILLS, slashes=SLASH_NAMES) -> bool:
-    """会話記録に、数える名前（skills は Skill ツールの名前、slashes はスラッシュの記録の名前）で呼んだ印があるか。"""
     with open(path, encoding="utf-8", errors="replace") as f:
         for line in f:
             if "bb-writ" not in line:
@@ -329,13 +323,12 @@ def used_entry(path: str, skills=ENTRY_SKILLS, slashes=SLASH_NAMES) -> bool:
             try:
                 if entry_in(json.loads(line), skills, slashes):
                     return True
-            except Exception:  # 形の違う行は飛ばし、後ろの行を読み続ける
+            except Exception:
                 continue
     return False
 
 
 def slash_name(text: str):
-    """利用者の行の本文の先頭がスラッシュの記録なら、その名前（<command-name> の中身）。"""
     if not text.lstrip().startswith(SLASH_HEADS):
         return None
     start = text.find("<command-name>")
@@ -356,8 +349,8 @@ def entry_in(row: dict, skills=ENTRY_SKILLS, slashes=SLASH_NAMES) -> bool:
     ほかのスラッシュの引数に写った印の文字列、文の途中に書かれた名前、先頭に空白・改行のある行、本体の名前で始まる素の行は数えない。
     skills・slashes は数える名前（既定は入口と本体。conductor_hint.py は入口だけを渡す）。slashes は <command-name> の記録の名前にだけ
     効き、行の先頭の素の名前（slash_line）は、いつも入口の 2 つの名前で比べる。"""
-    if row.get("type") == "queue-operation":  # 入力を受け付けた行
-        return slash_line(row["content"])  # 文字列でない形は、呼び出し側が飛ばす
+    if row.get("type") == "queue-operation":
+        return slash_line(row["content"])
     message = row.get("message") or {}
     content, by_user = message.get("content"), message.get("role") == "user"
     if isinstance(content, str):
@@ -371,7 +364,6 @@ def entry_in(row: dict, skills=ENTRY_SKILLS, slashes=SLASH_NAMES) -> bool:
 
 
 def first_row(path: str):
-    """ファイルの先頭の 1 行を JSON として読む（長さに上限を付ける）。"""
     with open(path, encoding="utf-8", errors="replace") as f:
         return json.loads(f.readline(FIRST_ROW_LIMIT))
 
@@ -392,13 +384,11 @@ def same_entry(base: str, entry: str) -> bool:
     base, entry = os.path.realpath(base), os.path.realpath(entry)
     if base == entry:
         return True
-    b, e = base.split(os.sep), entry.split(os.sep)  # realpath の後の道筋は絶対で正規化済み（区切りは os.sep だけ）
+    b, e = base.split(os.sep), entry.split(os.sep)
     return len(b) == len(e) >= 4 and b[-2:] == e[-2:] == ["skills", "bb-writ"] and b[:-3] == e[:-3]
 
 
 def entry_row(row) -> bool:
-    """行が、このプラグインの入口のスキルの本文を読み込んだ行か（content の文が Base directory … で始まり、その 1 行目の道筋が
-    このプラグインの skills/bb-writ と同じ入口。比べ方は same_entry）。"""
     content = row["message"]["content"]
     texts = [content] if isinstance(content, str) else [b.get("text") for b in content if b.get("type") == "text"]
     return any(isinstance(t, str) and t.startswith(BASE_HEAD)
@@ -417,7 +407,7 @@ def entry_child(transcript_path, agent_id) -> bool:
     for _ in range(ANCESTOR_LIMIT + 1):
         parents = []
         for aid in current:
-            if not isinstance(aid, str) or not AGENT_ID.fullmatch(aid) or aid in seen:
+            if not isinstance(aid, str) or not GLOB_SAFE_AGENT_ID.fullmatch(aid) or aid in seen:
                 continue
             seen.add(aid)
             for path in glob.glob(os.path.join(sessions, "*", "subagents", f"agent-{aid}.jsonl")):
@@ -447,12 +437,11 @@ def main() -> int:
         path = d.get("transcript_path")
         try:
             marked = used_entry(path)
-        except Exception:  # 親の会話記録が無い・読めない（/clear の直後など）ときは、印が無いものとして、子の会話記録を見る
+        except Exception:
             marked = False
-        # 子の会話記録は、外へ出すコマンドで、親の会話記録に印が無いときにだけ見る（ほかの Bash の呼び出しを遅くしない）
         if not (marked or entry_child(path, d.get("agent_id"))):
             return 0
-    except Exception:  # 判定できなければ通す（ほかの作業を止めない）
+    except Exception:
         return 0
     # ensure_ascii（既定）: 出力の符号化が日本語を扱えない環境でも、書き出しで落ちて拒否が消えないように
     print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
