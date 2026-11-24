@@ -916,13 +916,15 @@ class TestParallel(unittest.TestCase):
     def test_an_expired_lease_nobody_took_still_integrates_and_cleans_up(self):
         """期限が切れても、誰も取っていなければ、持ち主の integrate と task cleanup は通る（Issue #31。審査役を待つ間に切れ、
         integrate が 3 で拒否された）。"""
-        a = self.start()
-        head = self.change(a, 'a')
-        self.expire(a)
-        self.integrate(a, self.git(self.repo, 'rev-parse', 'main'), head)
-        self.expire(a)
-        self.w('task', 'cleanup', '--dir', a['dir'], '--token', a['token'], '--saved', 'main')
-        self.assertFalse(Path(a['dir']).exists())
+        for ago in (120, 24 * 3600 - 120):  # 切れて間もなくても、24 時間（担当の期限の上限）近く経っていても
+            with self.subTest(ago=ago):
+                a = self.start()
+                head = self.change(a, f'a{ago}')
+                self.expire(a, ago)
+                self.integrate(a, self.git(self.repo, 'rev-parse', 'main'), head)
+                self.expire(a, ago)
+                self.w('task', 'cleanup', '--dir', a['dir'], '--token', a['token'], '--saved', 'main')
+                self.assertFalse(Path(a['dir']).exists())
 
     def test_a_task_whose_owner_may_still_be_waiting_is_not_offered_for_closing(self):
         """統合を終えた持ち主が子を待つ間に担当の期限が切れても、切れてから 24 時間（担当の期限の上限）を過ぎるまでは、
@@ -953,9 +955,12 @@ class TestParallel(unittest.TestCase):
         stale = self.w('task', 'list', '--dir', self.repo)['unclosed']  # 閉じる側の一覧
         self.assertEqual([(t['task'], t['landed']) for t in stale], [(a['task'], True)])
         self.w('renew', '--dir', a['dir'], '--token', a['token'])  # 持ち主が戻り、また子を待つ
-        self.expire(a)
-        refused = self.w('task', 'resume', '--dir', self.repo, '--task', a['task'], '--holder', 'Codex', code=3)
-        self.assertIn('--take-over', refused['reason'])
+        for ago in (120, 24 * 3600 - 120):  # 切れて間もなくても、24 時間（担当の期限の上限）近く経っていても取らない
+            with self.subTest(ago=ago):
+                self.expire(a, ago)
+                refused = self.w('task', 'resume', '--dir', self.repo, '--task', a['task'], '--holder', 'Codex', code=3)
+                self.assertIn('--take-over', refused['reason'])
+                self.assertTrue(Path(a['dir']).is_dir())
         self.w('renew', '--dir', a['dir'], '--token', a['token'])
         self.assertTrue(Path(a['dir']).is_dir())
         self.expire(a, 24 * 3600 + 120)
