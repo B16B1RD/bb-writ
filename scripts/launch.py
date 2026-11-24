@@ -340,7 +340,7 @@ def cwd_residue(cwd: Path, before: set[str], use_git: bool = True) -> list[str]:
     new = sorted(str(p) for p in cwd.iterdir() if str(p) not in before)
     left = [p for p in new if bare(Path(p))]
     if left and use_git and (cwd / ".git").exists():  # 追跡している（index にある）ものは子が意図して足したので数えない。
-        # 子が Git の管理情報を変えた後は git を動かさず、照らさないまま全部を返す
+        # 照合していない（Git でなかった対象に子が git init した）か、子が Git の管理情報を変えた後は、git を動かさず全部を返す
         out = subprocess.run(["git", "-C", str(cwd), "ls-files", "-z", "--", *[Path(p).name for p in left]], capture_output=True, text=True, check=True, timeout=GIT_TIMEOUT)
         tracked = {cwd / n.split("/")[0] for n in out.stdout.split("\0") if n}
         left = [p for p in left if Path(p) not in tracked]
@@ -2088,7 +2088,7 @@ def main() -> int:
                                                       f"詳細: {launcher_error(out_dir)}"] + rec.get("problems", []))
             if cwd_before is not None:
                 try:
-                    rec["cwd_residue"] = cwd_residue(a.cwd, cwd_before, "git" not in blocked)
+                    rec["cwd_residue"] = cwd_residue(a.cwd, cwd_before, snapshot is not None and "git" not in blocked)
                 except Exception as e:
                     rec.setdefault("cwd_residue", [])
                     blocked.append("cwd")

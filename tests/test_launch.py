@@ -363,6 +363,10 @@ FAKE_CLAUDE = textwrap.dedent(r'''
         os.chmod(place, 0o755)
     if os.environ.get("FAKE_LEAVE_EMPTY"):  # 対象の直下に空のファイルを残す（cwd_residue が index と照らす道を通す）
         open("left-empty", "w").close()
+    if mode == "git-init-tamper":  # Git でない対象で git init し、設定に命令を置く（launcher は起動の前に照合する snapshot を持たない）
+        import shlex
+        subprocess.run(["git", "init", "-q"])
+        subprocess.run(["git", "config", "core.fsmonitor", "touch " + shlex.quote(os.environ["FAKE_ARGS"] + ".pwned")])
     if mode == "nested-untracked":  # 追跡外の入れ子のリポジトリを作る（git add -A で gitlink になる）
         subprocess.run(["git", "init", "-q", "deep/x/nested"])
     if mode in ("sub-config", "sub2-config"):  # 前からある初期化したサブモジュールの設定に命令を置く（.git ディレクトリ・.git ファイルの先）
@@ -3907,6 +3911,14 @@ class TestLaunch(unittest.TestCase):
                 self.assertEqual((rec["head"], rec["saw"] is not None), (None, True), rec)  # 起動の前は確かめ、終わりは確かめない
                 self.assertIn("管理情報を変えた", rec["head_lost"])
                 self.assertIn(str(wt.resolve() / "left-empty"), rec["cwd_residue"])  # 記録の道筋は解決したもの（macOS の一時の置き場は symlink の下）  # index と照らさず、残りとして返す
+
+    def test_a_write_child_making_a_repository_in_a_target_outside_git_runs_no_git_after_it(self):
+        # Git でない対象では照合が無く、cwd_residue が子の作った .git の設定で ls-files を動かした（1 周目の条件 (5) の子）
+        Path(str(self.args_file) + ".pwned").unlink(missing_ok=True)
+        rc, rec = self.run_launch("claude", "git-init-tamper", extra=["--write"], env_extra={"FAKE_LEAVE_EMPTY": "1"})
+        self.assertTrue((self.cwd / ".git").is_dir(), rec)  # 偽の子が git init できた
+        self.assertFalse(Path(str(self.args_file) + ".pwned").exists(), rec)
+        self.assertIn(str(self.cwd.resolve() / "left-empty"), rec["cwd_residue"], rec)  # index と照らさず、残りとして返す
 
     def test_a_write_child_making_a_nested_repository_is_stopped(self):
         _, wt = self.clean_worktree("nested")
