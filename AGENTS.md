@@ -65,7 +65,7 @@ bb-writ は、CLI ハーネス（Claude Code・Codex。Grok Build も同じ SKIL
 | 試験が PATH に置く偽のコマンドから本物を呼ぶときは、PATH を変える前に引いた絶対パスで呼ぶ（偽の git が自分を呼び続け、プロセスの上限を埋めた） | `tests/process_limit.py`。`test_tests_run_under_a_process_limit` |
 | 状態の置き場に置いたものの要否を、利用者に聞かない。置くものには、消す者と時を決める | `scripts/launch.py` の `sweep_leftovers`・`hold_place`、`scripts/work.py` の `unclosed_tasks`。`test_the_launcher_removes_its_leftovers_after_the_retention`・`test_a_place_in_use_is_kept_whatever_the_records_say`・`tests/test_sweep_model.py`（関数を変えたら、モデルが本文を写しているかを読み直す） |
 | 担当の期限が切れても、誰も取り直していなければ、持ち主の操作を拒否しない | `scripts/work.py` の `held_lease`。`test_an_expired_lease_nobody_took_stays_with_its_holder`・`test_an_expired_lease_nobody_took_still_integrates_and_cleans_up` |
-| 期限が切れて 24 時間以内のタスクを、閉じるタスクとして `unclosed` に出さない（待っている持ち主の作業場所が消された。#32） | `scripts/work.py` の `maybe_waiting`。`test_a_task_whose_owner_may_still_be_waiting_is_not_offered_for_closing` |
+| 期限が切れて 24 時間以内のタスクを、閉じるタスクとして `unclosed` に出さず、`--take-over` の無い `task resume` でも取らない（待っている持ち主の作業場所が消された。#32。その後も古い一覧から取れた） | `scripts/work.py` の `maybe_waiting`・`claim_at`。`test_a_task_whose_owner_may_still_be_waiting_is_not_offered_for_closing`・`test_a_stale_list_does_not_take_the_task_of_an_owner_who_came_back` |
 | `scripts/work.py` の op run・監督役・ロック・担当の約束を変えたら、`tests/test_oprun_model.py` のモデルを直して全探索を通し、照合した commit とハッシュを進める | `test_the_modeled_code_keeps_the_invariants_in_every_interleaving`・`test_each_reverted_fix_gives_a_counterexample`・`test_the_model_was_checked_against_the_current_code` |
 | この表の行は、短い規則（根拠の経緯は括弧で短く）と、強制するコード・試験の名前だけにする。実測の記録・確かめた回数・守らない範囲の細部は書かず、守らない範囲はそのコードの docstring と試験に置く（1 行が 8,000 字を超え、実装を変えるたびに文の照合の直しが続いた） | `test_rules_table_rows_stay_short`・`test_tests_named_in_the_rules_table_exist`（行の長さと、名指しした試験の実在だけを見る。実測を書いたかは見ない） |
 
