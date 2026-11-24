@@ -3468,10 +3468,14 @@ class TestOpRun(unittest.TestCase):
         got = {o["key"]: o.get("running") for o in self.w("op", "pending", "--dir", str(self.wt))[1]["pending_ops"]}
         self.assertEqual(got, {"local:old": None, "push:feat@1": True})  # 動いているのは監督役の操作だけ
         self.assertEqual(self.w("op", "begin", "--dir", str(self.wt), "--token", tok, "--key", "local:y", "--what", "x")[0], 0)
+        rc, r = self.w("op", "begin", "--dir", str(self.wt), "--token", tok, "--key", "comment:1", "--what", "x", "--from", str(self.repo))
+        self.assertEqual(rc, 4, r)  # 外部操作の begin は拒否する（動いていなければ通る begin。下で確かめる）
         self.assertEqual(self.w("op", "done", "--dir", str(self.wt), "--token", tok, "--key", "push:feat@1", "--result", "x")[0], 4)
         self.assertEqual(self.w("op", "done", "--dir", str(self.wt), "--token", tok, "--key", "local:old", "--result", "x")[0], 0)  # 動いていない操作は閉じてよい
         go.write_text("")
         p.wait()
+        rc, r = self.w("op", "begin", "--dir", str(self.wt), "--token", tok, "--key", "comment:1", "--what", "x", "--from", str(self.repo))
+        self.assertEqual(rc, 0, r)  # 終わった後は、同じ begin が通る（拒否は、動いている間だけ）
 
     def pid_gone(self, pid):
         for _ in range(100):  # ゾンビ（親が刈り取っていない）も終わったとみなす
