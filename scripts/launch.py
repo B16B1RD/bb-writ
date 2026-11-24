@@ -327,7 +327,8 @@ def cli_place(p: Path) -> bool:
 # status に --no-optional-locks を、入れ子の設定は --ignore-submodules（all・dirty）を、呼ぶ側が付ける。
 # 守らない範囲: filter（どこで定めたものも外さない。利用者の設定が作業場所の中のスクリプトを指すもの、子が書ける include の先・
 # config.worktree で定めたものも走る。LFS などの required の filter を外すと status が壊れるため。子が共通の config・config.worktree を
-# 変えたときと、Git でなかった対象にリポジトリを作ったときは、照合が止める）、promisor の remote の取りに行き（利用者の設定が
+# 変えたときと、Git でなかった対象に .git を作ったときは、照合が止める）、Git でなかった対象を .git の無い形のリポジトリにされる
+# こと（照合は .git の有無だけを見る）、統合の merge（元の checkout で利用者の設定の hooks・filter が走る）、promisor の remote の取りに行き（利用者の設定が
 # include で作業場所の中のファイルを読み、子がそこに remote を定めると、参照の git も取りに行きの命令を走らせうる）、
 # 前から .git が在る Git でない対象（壊れた .git の中に子がリポジトリを作っても、照合は止めない）、git 2.43 で測っていない
 # 命令の出どころ、利用者・指揮者が後で動かす素の git。
@@ -2097,7 +2098,7 @@ def main() -> int:
                                                       "（空の ~/.bash_profile があると、ログインシェルが ~/.profile と ~/.bashrc を読まない）"]
                            + rec["home_residue"][:20] + rec.get("problems", []))
     if rec["head"] and a.write:  # 書く子の後は、子が書けた設定で素の git status を動かさない。work.py は書く子の head を数えない
-        rec.update(head=None, head_lost="書く子の後は、HEAD と作業ツリーを確かめない（子が書けた設定の命令を走らせないため）")
+        rec.update(head=None, head_lost="書く子の後は、HEAD と作業ツリーを確かめない（work.py は書く子の head を数えない）")
     elif rec["head"] and clean_head(a.cwd) != rec["head"]:  # 確かめた後、子の終わりまでに作業ツリーが変わった（子が見たものが commit と違いうる）
         rec.update(head=None, head_lost="子の起動の前に確かめた後、終わりまでに対象の HEAD か作業ツリーが変わったか、終わりに確かめられなかった")
     elif rec["head"] and a.resume and (seen := next((h for h in [a.prev_head, *(r["saw"] for r in a.history if "saw" in r)] if h != rec["head"]), rec["head"])) != rec["head"]:

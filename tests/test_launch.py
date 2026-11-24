@@ -370,7 +370,7 @@ FAKE_CLAUDE = textwrap.dedent(r'''
         import shlex
         subprocess.run(["git", "init", "-q"])
         subprocess.run(["git", "config", "core.fsmonitor", "touch " + shlex.quote(os.environ["FAKE_ARGS"] + ".pwned")])
-    if mode == "tamper-submodule-filter":  # 入れ子のリポジトリの設定に filter を置き、サブモジュールとして index に足す（入れ子の filter の名前は上書きされない）
+    if mode == "tamper-submodule-filter":  # 入れ子のリポジトリの設定に filter を置き、サブモジュールとして index に足す（入れ子に入ると走る）
         import shlex, time as _t
         subprocess.run(["git", "init", "-q", "nested"])
         open("nested/b.txt", "w").write("b\n")
@@ -3922,7 +3922,7 @@ class TestLaunch(unittest.TestCase):
             "worktree-config": ([("extensions.worktreeConfig", "true")], None, "@OWN@/config.worktree", fsmonitor, None),
             "script": ([("core.fsmonitor", "./fsmon.sh")], "fsmon.sh", "@WT@/fsmon.sh", touch, None),
             "hooks": ([("core.hooksPath", ".hk")], ".hk/", "@WT@/.hk/post-index-change", touch, "a.txt"),
-            "submodule": ([], None, None, None, None),  # 偽の子の tamper-submodule が入れ子のリポジトリを gitlink にする
+            "submodule": ([], None, None, None, None),  # 偽の子の tamper-submodule-filter が入れ子のリポジトリを gitlink にする
         }
         for case, (settings, ignore, place, text, modify) in cases.items():
             with self.subTest(case=case):
@@ -3937,7 +3937,7 @@ class TestLaunch(unittest.TestCase):
                         f.write(ignore + "\n")
                 for key, value in settings:
                     subprocess.run(["git", "-C", str(repo), "config", key, value.replace("@WT@", str(wt))], check=True)
-                if case.startswith("include"):
+                if case == "include":
                     (wt / ".gitcfg").write_text("")
                 env = {"FAKE_LEAVE_EMPTY": "1"}  # cwd_residue の ls-files も通す
                 if place:
@@ -3950,7 +3950,7 @@ class TestLaunch(unittest.TestCase):
                 self.assertIsNotNone(rec["saw"], rec)  # 起動の前はきれいな作業ツリー（起動の前の clean_head が走る）
                 self.assertIsNone(rec["head"], rec)  # 書く子の後は確かめない
                 self.assertFalse(Path(str(self.args_file) + ".pwned").exists(), rec)
-                if case == "config":  # 共通の config の変化は照合が止め、止めた後は片付けの git（claude_places）も動かさない
+                if case in ("config", "worktree-config"):  # 共通の config・config.worktree の変化は照合が止め、片付けの git も動かさない
                     self.assertEqual((rec["status"], "git" in rec["blocked"]), ("failed", True), rec)
                 else:  # 止めない段は、書く子の後の作業場所で審査役を立てる（起動の前の clean_head）
                     rc, review = self.run_launch("claude", cwd=wt)

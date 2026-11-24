@@ -3579,7 +3579,6 @@ class TestOpRun(unittest.TestCase):
         self.assertIn(str(self.wt.resolve()), r["op"]["result"])
 
 
-
 class TestQuietGit(unittest.TestCase):
     """書く子が書けた作業場所で、work.py の git（task cleanup の status・worktree remove）は、子が仕込んだ設定・hooks・入れ子の
     リポジトリの命令を走らせない（#64。git 2.43 で測った出どころごと）。仕込みが本物であることは、素の git status で確かめる。"""
@@ -3638,7 +3637,7 @@ class TestQuietGit(unittest.TestCase):
                     (wt / ".hk" / "post-index-change").write_text(touch)
                     (wt / ".hk" / "post-index-change").chmod(0o755)
                 elif case == "submodule":  # 子が入れ子のリポジトリの設定に filter を置き、サブモジュールとして index に足す
-                    nested = wt / "nested"  # （fsmonitor=false の -c は入れ子にも伝わるが、入れ子の filter の名前は上書きしない）
+                    nested = wt / "nested"  # （fsmonitor=false の -c は入れ子にも伝わるので、入れ子に入るかは filter で見る）
                     self.git("init", "-q", "nested", cwd=wt)
                     (nested / "b.txt").write_text("b\n")
                     (nested / ".gitattributes").write_text("b.txt filter=y\n")
@@ -3665,7 +3664,6 @@ class TestQuietGit(unittest.TestCase):
                     for key in ("core.fsmonitor", "core.hooksPath", "extensions.worktreeConfig"):
                         subprocess.run(["git", "config", "--unset", key], cwd=self.repo, env=self.env, capture_output=True)
 
-
     def test_integrate_runs_no_git_command_from_a_nested_repository(self):
         # 統合の前の確かめ（clean(a.dir, child=True)）も、子が gitlink にした入れ子のリポジトリの設定を読まない
         rc, started = self.work("task", "start", "--dir", str(self.repo), "--holder", "A")
@@ -3690,4 +3688,3 @@ class TestQuietGit(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-
