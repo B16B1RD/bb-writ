@@ -752,6 +752,16 @@ class TestLaunch(unittest.TestCase):
         self.assertTrue(Path(str(self.args_file) + ".started").exists())
         return p
 
+    def launcher_site(self, body: str) -> dict:
+        """launcher のプロセスにだけ、外の世界（時計・ファイルシステム）の振る舞いを差し替える環境。launcher の関数の名前には触れない。
+        PYTHONPATH の sitecustomize が、起動したのが launch.py のときだけ body を動かす（偽の子の CLI には効かない）。"""
+        site = Path(tempfile.mkdtemp(dir=self.tmp.name, prefix="site-"))
+        # Python 3.9 の pathlib は、読み込むときに os.open などを写して持つ（差し替えた関数を後から読むと、メソッドとして呼ばれて落ちる）。
+        # launch.py と同じく、差し替えの前に読んでおく
+        (site / "sitecustomize.py").write_text("import os, sys\nif os.path.basename(sys.argv[0]) == 'launch.py':\n    import pathlib\n"
+                                               + textwrap.indent(textwrap.dedent(body), "    "))
+        return {"PYTHONPATH": str(site)}
+
     def launch_patched(self, patch, extra, mode="good", env_extra=None):
         """launch.py を import し、patch（Python の文）を当ててから main を動かす。起きる時機を決められない場面だけに使う。"""
         env = self.launch_env(mode, env_extra=env_extra)
@@ -915,42 +925,30 @@ class TestLaunch(unittest.TestCase):
         self.assertIsNone(again["head"], again)
         self.assertNotIn("next", again)
 
+    # 壁時計の飛びは、子の CLI が動き始めた後（偽の子が FAKE_ARGS を書いた後）に 100 秒進む時計で作る（launcher の待ち方には触れない）
+    WALL_CLOCK_JUMPS_ONCE_THE_CHILD_RUNS = """
+        import time
+        _real = time.time
+        time.time = lambda: _real() + (100 if os.path.exists(os.environ["FAKE_ARGS"]) else 0)
+    """
+
     def test_the_duration_does_not_follow_a_jump_of_the_wall_clock(self):
         """所要時間（duration_s）は、壁時計が飛んでも延びない。WSL2 の壁時計は約 35 秒ごとに約 2.3 秒進み、それに重なった時間切れの
-        起動の duration_s が 5 秒を超えた（単調時計では毎回約 3.8 秒。Issue #33）。子を待ち終えた後に、壁時計だけを 100 秒進める。"""
-        rc, rec = self.launch_patched("""
-            import time
-            real, ahead = time.time, [0]
-            time.time = lambda: real() + ahead[0]
-            wait = launch.wait_for_exit
-            def jump_after(*args, **kwargs):
-                try:
-                    return wait(*args, **kwargs)
-                finally:
-                    ahead[0] = 100
-            launch.wait_for_exit = jump_after
-        """, ["--host", "claude", "--cwd", str(self.cwd)])
+        起動の duration_s が 5 秒を超えた（単調時計では毎回約 3.8 秒。Issue #33）。子が動いている間に、壁時計だけを 100 秒進める。"""
+        rc, rec = self.run_launch("claude", env_extra=self.launcher_site(self.WALL_CLOCK_JUMPS_ONCE_THE_CHILD_RUNS))
         self.assertEqual((rc, rec["status"]), (0, "ok"), rec)
         self.assertGreaterEqual(rec["duration_s"], 0, rec)  # 始めと終わりで時計を混ぜると、どちらかの向きで外れる
         self.assertLess(rec["duration_s"], 50, rec)
         self.assertGreater(rec["at"], time.time() + 50, rec)  # 起動の終わりの時刻（片付けの期限に使う）は、壁時計のまま
 
     def test_a_jump_of_the_wall_clock_does_not_bring_the_timeout_forward(self):
-        """時間切れの期限も、壁時計が飛んでも早まらない（子を待ち始めてすぐ、壁時計だけを 100 秒進める）。進めるのは launcher の中で
-        最初に呼ばれた time.sleep（今は wait_for_exit の待ち）で、進んだ時機は確かめない。待ち方を time.sleep 以外に変えたり、期限を
-        決める前に time.sleep を呼んだりした上で期限を壁時計にすると、この試験は通る。期限と所要時間の両方を壁時計に戻した形も
-        この試験は通り、test_the_duration_does_not_follow_a_jump_of_the_wall_clock が落とす（守らない）。"""
-        rc, rec = self.launch_patched("""
-            import time
-            real, ahead, nap = time.time, [0], time.sleep
-            time.time = lambda: real() + ahead[0]
-            def jump_then_sleep(s):
-                ahead[0] = 100
-                nap(s)
-            time.sleep = jump_then_sleep
-        """, ["--host", "claude", "--cwd", str(self.cwd), "--timeout", "3"], env_extra={"FAKE_HANG": "1"})
+        """時間切れの期限も、壁時計が飛んでも早まらない（子が動き始めた後に、壁時計だけを 100 秒進める）。期限を子の起動の後に
+        壁時計で決め直す形は、この試験は通る（守らない）。期限と所要時間の両方を壁時計に戻した形もこの試験は通り、
+        test_the_duration_does_not_follow_a_jump_of_the_wall_clock が落とす。"""
+        rc, rec = self.run_launch("claude", extra=["--timeout", "3"],
+                                  env_extra={"FAKE_HANG": "1", **self.launcher_site(self.WALL_CLOCK_JUMPS_ONCE_THE_CHILD_RUNS)})
         self.assertEqual((rc, rec["status"], rec["problems"][:1]), (2, "timeout", ["3 秒で終わらなかった"]), rec)
-        self.assertGreaterEqual(rec["duration_s"], 2.9, rec)  # 期限を壁時計で見ると、最初の待ちで TERM を送って 1 秒も経たずに終わる
+        self.assertGreaterEqual(rec["duration_s"], 2.9, rec)  # 期限を壁時計で見ると、時計が飛んだ直後に TERM を送って 1 秒も経たずに終わる
 
     def test_a_timed_out_child_gets_a_term_and_time_to_clean_up(self):
         """時間切れも、まず TERM を送って子の片付けを待つ（いきなり KILL すると、子の CLI の置き場が残る）。"""
@@ -1044,7 +1042,8 @@ class TestLaunch(unittest.TestCase):
         起動の直後（受け手が子を知る前）に受けたシグナルを、起動の後で子へ伝えないと、子が止まらず落ちる。"""
         for sig in (signal.SIGTERM, signal.SIGINT):
             with self.subTest(sig=sig):
-                patch = f"""\
+                site = self.launcher_site(f"""
+                    import subprocess
                     real = subprocess.Popen
                     def started(*a, **k):
                         p = real(*a, **k)
@@ -1052,9 +1051,9 @@ class TestLaunch(unittest.TestCase):
                             os.kill(os.getpid(), {int(sig)})
                         return p
                     subprocess.Popen = started
-                    """
+                """)
                 t0 = time.monotonic()
-                rc, rec = self.launch_patched(patch, ["--host", "claude", "--cwd", str(self.cwd)], mode="stop")
+                rc, rec = self.run_launch("claude", "stop", env_extra=site)
                 self.assertEqual(rec["stopped_by_signal"], int(sig), rec)
                 self.assertTrue(rec["resumable"], rec)
                 # 子に TERM が届いて止まった（終了コードは、TERM が届いた時機で変わる: 偽の dotenvx が受け手を置く前に受ければ -15、子へ伝えて
@@ -1067,15 +1066,16 @@ class TestLaunch(unittest.TestCase):
     @unittest.skipUnless(sys.platform.startswith("linux"), "子を刈らずに待つのは Linux だけ")
     def test_a_child_reaped_late_does_not_read_as_exit_zero(self):
         """KILL の後も child.wait が切れ、子を別の場所で刈ると、poll が 0 を返した。終了コードは分からないと書く。"""
-        patch = """\
+        site = self.launcher_site("""
+            import subprocess
             real = subprocess.Popen.wait
             def wait(self, timeout=None):
                 if timeout == 10:
                     raise subprocess.TimeoutExpired(self.args, timeout)
                 return real(self, timeout)
             subprocess.Popen.wait = wait
-            """
-        rc, rec = self.launch_patched(patch, ["--host", "claude", "--cwd", str(self.cwd), "--timeout", "1"], env_extra={"FAKE_HANG": "1"})
+        """)
+        rc, rec = self.run_launch("claude", extra=["--timeout", "1"], env_extra={"FAKE_HANG": "1", **site})
         self.assertEqual(rec["status"], "timeout", rec)
         self.assertIsNone(rec["exit_code"], rec)
 
@@ -2602,28 +2602,28 @@ class TestLaunch(unittest.TestCase):
         self.assertTrue([p for p in rec["problems"] if "ホームの残りを確かめられない" in p], rec)
 
     def test_files_vanishing_during_the_home_scan_are_not_unreadable(self):
-        launch, home = load_launch(), Path(self.tmp.name) / "vanish"
-        (home / ".claude").mkdir(parents=True)
-        (home / ".claude" / "x").write_text("x")
-        real_scandir = os.scandir
-        for when in (1, 2):  # 空かを見るとき、降りるとき
+        """子の後のホームの走査の途中で、別のセッションが一時ディレクトリを消しても（走査の途中で無くなった）、読めない場所に数えず ok で返す。
+        消える時機は、launcher のプロセスの os.scandir が、子が動き始めた後に ~/.claude を開くときに作る（空かを見るとき、降りるとき）。"""
+        (self.home / ".claude").mkdir()
+        (self.home / ".claude" / "x").write_text("x")
+        for when in (1, 2):
             with self.subTest(when=when):
-                seen = []
-
-                def flaky(d):  # 別のセッションが一時ディレクトリを消した（走査の途中で無くなった）
-                    if str(d).endswith(".claude"):
-                        seen.append(d)
-                        if len(seen) == when:
-                            raise FileNotFoundError(d)
-                    return real_scandir(d)
-                old_home = os.environ.get("HOME")
-                os.environ["HOME"], launch.os.scandir = str(home), flaky
-                try:
-                    _, _, unreadable = launch.home_entries([])
-                finally:
-                    launch.os.scandir = real_scandir
-                    os.environ["HOME"] = old_home
-                self.assertEqual((len(seen), unreadable), (when, set()))
+                site = self.launcher_site(f"""
+                    _real, _seen = os.scandir, []
+                    def _flaky(d="."):
+                        if not isinstance(d, int) and str(d).endswith("/.claude") and os.path.exists(os.environ["FAKE_ARGS"]):
+                            _seen.append(d)
+                            if len(_seen) == {when}:
+                                open(os.environ["FAKE_ARGS"] + ".vanished", "w").close()
+                                raise FileNotFoundError(2, "消えた", str(d))
+                        return _real(d)
+                    os.scandir = _flaky
+                """)
+                self.args_file.unlink(missing_ok=True)
+                rc, rec = self.run_launch("claude", env_extra=site)
+                self.assertTrue(Path(str(self.args_file) + ".vanished").exists(), "消える場面を作れなかった")
+                Path(str(self.args_file) + ".vanished").unlink()
+                self.assertEqual((rc, rec["status"]), (0, "ok"), rec)
 
     def test_child_files_are_read_without_blocking_or_exhausting_memory(self):
         launch, d = load_launch(), Path(self.tmp.name) / "cf"
@@ -3402,8 +3402,8 @@ class TestLaunch(unittest.TestCase):
         finally:
             os.close(fd)
         after = self.leftover("tmp", self.stamp(9, "-b-after"), {"at": old})
-        patch = "import resource\nresource.setrlimit(resource.RLIMIT_NOFILE, (200, resource.getrlimit(resource.RLIMIT_NOFILE)[1]))"
-        rc, rec = self.launch_patched(patch, ["--host", "claude", "--cwd", str(self.cwd)])
+        rc, rec = self.run_launch("claude", env_extra=self.launcher_site(
+            "import resource\nresource.setrlimit(resource.RLIMIT_NOFILE, (200, resource.getrlimit(resource.RLIMIT_NOFILE)[1]))"))
         self.assertEqual((rc, rec["status"]), (0, "ok"), rec)
         self.assertEqual((sorted(rec["swept"]["removed"]), rec["swept"]["problems"]), (sorted([str(deep), str(after)]), []))
         self.assertFalse(os.path.lexists(deep) or os.path.lexists(after))
@@ -3430,7 +3430,7 @@ class TestLaunch(unittest.TestCase):
         place = self.leftover("tmp", self.stamp(9, "-skip"), {"at": time.time() - 8 * 86400})
         for i in range(40):
             (place / f"f{i:02d}").write_text("x")
-        patch = """
+        site = self.launcher_site("""
             import stat
             real_scandir = os.scandir
             class Entry:
@@ -3454,8 +3454,8 @@ class TestLaunch(unittest.TestCase):
                     self.pos += 1
                     return Entry(self.fd, names[self.pos - 1])
             os.scandir = lambda p=".": ByPosition(p) if isinstance(p, int) else real_scandir(p)
-        """
-        rc, rec = self.launch_patched(patch, ["--host", "claude", "--cwd", str(self.cwd)])
+        """)
+        rc, rec = self.run_launch("claude", env_extra=site)
         self.assertEqual((rc, rec["status"]), (0, "ok"), rec)
         self.assertFalse(os.path.lexists(place))
         self.assertEqual((rec["swept"]["removed"], rec["swept"]["problems"]), ([str(place)], []))
@@ -3497,7 +3497,7 @@ class TestLaunch(unittest.TestCase):
             (kept / "keep").write_text("x")
             shutil.rmtree(self.state / d, ignore_errors=True)
             (self.state / d).symlink_to(outside / d, target_is_directory=True)
-        rec = self.launch_patched("", ["--host", "claude", "--cwd", str(self.cwd), "--out", str(Path(self.tmp.name) / "out-linked")])[1]
+        rec = self.run_launch("claude", extra=["--out", str(Path(self.tmp.name) / "out-linked")])[1]
         self.assertEqual(rec["status"], "ok", rec)
         self.assertEqual(len(list(outside.rglob("keep"))), 2)
         self.assertEqual(rec["swept"]["removed"], [])
@@ -3573,12 +3573,17 @@ class TestLaunch(unittest.TestCase):
         place = self.leftover("tmp", self.stamp(9, "-swapped"), {"at": time.time() - 8 * 86400})
         (place / "victim").mkdir()
         (place / "victim" / "inner").write_text("x")
-        patch = ("import os as _os\n_real, _done = _os.open, []\ndef racing(path, flags, mode=0o777, *, dir_fd=None):\n"
-                 "    if path == 'victim' and dir_fd is not None and not _done:\n        _done.append(1)\n"
-                 "        _os.rename('victim', 'moved', src_dir_fd=dir_fd, dst_dir_fd=dir_fd)\n"
-                 f"        _os.symlink({str(outside)!r}, 'victim', dir_fd=dir_fd)\n"
-                 "    return _real(path, flags, mode, dir_fd=dir_fd)\n_os.open = racing")
-        rc, rec = self.launch_patched(patch, ["--host", "claude", "--cwd", str(self.cwd)])
+        site = self.launcher_site(f"""
+            _real, _done = os.open, []
+            def racing(path, flags, mode=0o777, *, dir_fd=None):
+                if path == 'victim' and dir_fd is not None and not _done:
+                    _done.append(1)
+                    os.rename('victim', 'moved', src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+                    os.symlink({str(outside)!r}, 'victim', dir_fd=dir_fd)
+                return _real(path, flags, mode, dir_fd=dir_fd)
+            os.open = racing
+        """)
+        rc, rec = self.run_launch("claude", env_extra=site)
         self.assertEqual((rc, rec["status"]), (0, "ok"), rec)
         self.assertTrue((outside / "keep").exists(), "差し替えた先の中が消えた")
         self.assertTrue((place / "victim").is_symlink())  # 差し替えは起きた
@@ -3592,11 +3597,17 @@ class TestLaunch(unittest.TestCase):
         rc, first = self.run_launch("codex", extra=["--timeout", "2"], env_extra={"FAKE_HANG": "1"})
         place = first["scratch"]
         self.args_file.unlink(missing_ok=True)
-        code = (f"import fcntl, os, shutil, stat, sys\nsys.path.insert(0, {str(LAUNCH.parent)!r})\nimport launch\nreal = fcntl.flock\n"
-                "def late(fd, op):\n    n = fd if isinstance(fd, int) else fd.fileno()\n    if stat.S_ISDIR(os.fstat(n).st_mode):\n"
-                f"        shutil.rmtree({place!r}, ignore_errors=True)\n    return real(fd, op)\nfcntl.flock = late\n"
-                f"sys.argv = ['launch.py', '--prompt-file', {str(self.prompt)!r}, '--resume', {first['out']!r}]\nsys.exit(launch.main())\n")
-        p = subprocess.run([sys.executable, "-B", "-c", code], env=self.launch_env(), capture_output=True, text=True, timeout=120)
+        site = self.launcher_site(f"""
+            import fcntl, shutil, stat
+            real = fcntl.flock
+            def late(fd, op):
+                n = fd if isinstance(fd, int) else fd.fileno()
+                if stat.S_ISDIR(os.fstat(n).st_mode):
+                    shutil.rmtree({place!r}, ignore_errors=True)
+                return real(fd, op)
+            fcntl.flock = late
+        """)
+        p = self.run_launch(None, extra=["--resume", first["out"]], env_extra=site, raw=True)
         self.assertEqual(p.returncode, 2, p.stdout + p.stderr)
         self.assertIn("一時ディレクトリ（scratch）が無い", p.stderr)
         self.assertFalse(self.args_file.exists())      # 子を起こさない
@@ -3629,10 +3640,17 @@ class TestLaunch(unittest.TestCase):
         最初の起動は、排他なしで進む。その環境を作るために、launcher の中の flock を、ディレクトリには使えない応答に差し替える。"""
         old = time.time() - 8 * 86400
         places = [self.leftover("tmp", self.stamp(9, "-one"), {"at": old}), self.leftover("home", self.stamp(9, "-two"), {"at": old})]
-        patch = ("import errno, fcntl, os, stat\nreal = fcntl.flock\ndef unsupported(fd, op):\n    n = fd if isinstance(fd, int) else fd.fileno()\n"
-                 "    if stat.S_ISDIR(os.fstat(n).st_mode):\n        raise OSError(errno.EOPNOTSUPP, 'ディレクトリの排他は使えない')\n    return real(fd, op)\n"
-                 "fcntl.flock = unsupported")
-        rc, rec = self.launch_patched(patch, ["--host", "codex", "--cwd", str(self.cwd)])
+        site = self.launcher_site("""
+            import errno, fcntl, stat
+            real = fcntl.flock
+            def unsupported(fd, op):
+                n = fd if isinstance(fd, int) else fd.fileno()
+                if stat.S_ISDIR(os.fstat(n).st_mode):
+                    raise OSError(errno.EOPNOTSUPP, 'ディレクトリの排他は使えない')
+                return real(fd, op)
+            fcntl.flock = unsupported
+        """)
+        rc, rec = self.run_launch("codex", env_extra=site)
         self.assertEqual((rc, rec["status"]), (0, "ok"), rec)  # 読み取り専用の Codex の子（自分の一時ディレクトリを持つ）も起動する
         self.assertEqual([p for p in places if not p.is_dir()], [])
         self.assertEqual((rec["swept"]["removed"], len(rec["swept"]["problems"])), ([], 1), rec["swept"])
@@ -4516,7 +4534,8 @@ launch.claude_reads = claude_reads
             with self.subTest(f"right before starting ({name})"):
                 calls.unlink(missing_ok=True)
                 t0 = time.monotonic()
-                rc, rec = self.launch_patched("""
+                site = self.launcher_site("""
+                    import signal, subprocess
                     real = subprocess.Popen
                     class Popen(real):
                         def __init__(self, args, *k, **kw):  # 2 回目の子の CLI を起こす間際（1 回目の子は .calls に書いた）
@@ -4524,7 +4543,8 @@ launch.claude_reads = claude_reads
                                 os.kill(os.getpid(), signal.SIGTERM)
                             super().__init__(args, *k, **kw)
                     subprocess.Popen = Popen
-                    """, ["--host", "claude", "--cwd", str(self.cwd), *extra, "--timeout", "30"], env_extra={**env, "FAKE_MODE_2": "stop"})
+                """)
+                rc, rec = self.run_launch("claude", extra=[*extra, "--timeout", "30"], env_extra={**env, "FAKE_MODE_2": "stop", **site})
                 self.assertEqual((started in rec, rec.get("stopped_by_signal")), (True, int(signal.SIGTERM)), rec)  # 2 回目の子を起こした
                 # その子が TERM を受けて終わった（終了コードは届いた時機で -15・143・241。伝えなければ KILL の -9）
                 self.assertNotIn(rec["exit_code"], (0, -int(signal.SIGKILL)), rec)
