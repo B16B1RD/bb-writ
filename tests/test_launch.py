@@ -3912,17 +3912,13 @@ class TestLaunch(unittest.TestCase):
     def test_a_write_child_planting_git_commands_does_not_get_them_run(self):
         # 書く子が、git status・ls-files が走らせる命令を仕込んでも、launcher は走らせない（#64。git 2.43 で測った出どころごと）
         git = ["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid"]
-        touch = "#!/bin/sh\ntouch @ARGS@.pwned\n"  # fsmonitor・hooks（入力を読まない）
-        clean = "#!/bin/sh\ntouch @ARGS@.pwned\ncat\n"  # filter の clean（入力をそのまま返す）
+        touch = "#!/bin/sh\ntouch @ARGS@.pwned\n"  # fsmonitor・hooks（入力を読まない）。filter は守らない（QUIET_GIT の注釈）
         fsmonitor = "[core]\n\tfsmonitor = touch @ARGS@.pwned\n"
         cases = {  # 段: (前からある利用者の設定 [(鍵, 値)]、無視させる名前、子が書くファイル、中身、子が書き換える追跡するファイル)
             "config": ([], None, None, None, None),  # 偽の子の tamper-config が共通の config に足す
             "include": ([("include.path", "@WT@/.gitcfg")], ".gitcfg", "@WT@/.gitcfg", fsmonitor, None),
-            "include-filter": ([("include.path", "@WT@/.gitcfg")], ".gitcfg", "@WT@/.gitcfg",
-                               "[filter \"x\"]\n\tclean = \"sh -c 'touch @ARGS@.pwned; cat'\"\n", "a.txt"),  # 設定ファイルの ; は注釈なので引用符で囲む
             "worktree-config": ([("extensions.worktreeConfig", "true")], None, "@OWN@/config.worktree", fsmonitor, None),
             "script": ([("core.fsmonitor", "./fsmon.sh")], "fsmon.sh", "@WT@/fsmon.sh", touch, None),
-            "filter": ([("filter.x.clean", "./clean.sh")], "clean.sh", "@WT@/clean.sh", clean, "a.txt"),
             "hooks": ([("core.hooksPath", ".hk")], ".hk/", "@WT@/.hk/post-index-change", touch, "a.txt"),
             "submodule": ([], None, None, None, None),  # 偽の子の tamper-submodule が入れ子のリポジトリを gitlink にする
         }
@@ -3931,10 +3927,6 @@ class TestLaunch(unittest.TestCase):
                 repo, wt = self.clean_worktree("plant-" + case)
                 own = Path(subprocess.run(["git", "-C", str(wt), "rev-parse", "--absolute-git-dir"], capture_output=True, text=True,
                                           check=True).stdout.strip())
-                if case in ("include-filter", "filter"):  # a.txt を filter の対象にして commit しておく（子が書き換えると status が clean を走らせる）
-                    (wt / ".gitattributes").write_text("a.txt filter=x\n")
-                    subprocess.run(git + ["-C", str(wt), "add", "-f", ".gitattributes", "a.txt"], check=True)
-                    subprocess.run(git + ["-C", str(wt), "commit", "-q", "-m", "attr"], check=True)
                 if case == "hooks":
                     subprocess.run(git + ["-C", str(wt), "add", "-f", "a.txt"], check=True)
                     subprocess.run(git + ["-C", str(wt), "commit", "-q", "-m", "a"], check=True)
@@ -3953,15 +3945,36 @@ class TestLaunch(unittest.TestCase):
                 Path(str(self.args_file) + ".pwned").unlink(missing_ok=True)
                 mode = {"config": "tamper-config", "submodule": "tamper-submodule-filter"}.get(case, "good")
                 rc, rec = self.run_launch("claude", mode, extra=["--write"], cwd=wt, env_extra=env)
-                self.assertIsNotNone(rec["saw"], rec)  # 起動の前はきれいな作業ツリー（終わりの clean_head が走る道を通す）
+                self.assertIsNotNone(rec["saw"], rec)  # 起動の前はきれいな作業ツリー（起動の前の clean_head が走る）
                 self.assertIsNone(rec["head"], rec)  # 書く子の後は確かめない
                 self.assertFalse(Path(str(self.args_file) + ".pwned").exists(), rec)
                 rc, review = self.run_launch("claude", cwd=wt)  # 書く子の後の作業場所で審査役を立てる（起動の前の clean_head）
                 self.assertFalse(Path(str(self.args_file) + ".pwned").exists(), (case, review))
-                # 仕込みが本物であることの確かめ: 素の git status は、その命令を走らせる（submodule・config 以外は）
+                # 仕込みが本物であることの確かめ: 素の git status は、その命令を走らせる（config の段は照合で止まるので除く）
                 if case not in ("config",):
                     subprocess.run(["git", "-C", str(wt), "status", "--porcelain"], capture_output=True, stdin=subprocess.DEVNULL, timeout=60)
                     self.assertTrue(Path(str(self.args_file) + ".pwned").exists(), (case, rec))
+
+    def test_a_required_filter_still_lets_the_review_head_be_recorded(self):
+        # filter を外すと、LFS などの required の filter のあるリポジトリで status が壊れ、審査役の head が付かなかった（3 周目の審査）
+        repo, wt = self.clean_worktree("required-filter")
+        tools = Path(self.tmp.name) / "filter-tools"  # 作業場所の外の、利用者の道具
+        tools.mkdir()
+        (tools / "clean").write_text("#!/bin/sh\nsed 's/^SMUDGED //'\n")
+        (tools / "smudge").write_text("#!/bin/sh\nsed 's/^/SMUDGED /'\n")
+        for f in ("clean", "smudge"):
+            (tools / f).chmod(0o755)
+        for key, value in (("filter.p.clean", str(tools / "clean")), ("filter.p.smudge", str(tools / "smudge")), ("filter.p.required", "true")):
+            subprocess.run(["git", "-C", str(repo), "config", key, value], check=True)
+        (wt / ".gitattributes").write_text("big.bin filter=p\n")
+        (wt / "big.bin").write_text("SMUDGED data\n")
+        git = ["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid", "-C", str(wt)]
+        subprocess.run(git + ["add", ".gitattributes", "big.bin"], check=True)
+        subprocess.run(git + ["commit", "-q", "-m", "p"], check=True)
+        os.utime(wt / "big.bin", (time.time() + 5, time.time() + 5))  # 中身を比べさせる（filter を通す）
+        rc, rec = self.run_launch("claude", cwd=wt)
+        head = subprocess.run(git + ["rev-parse", "HEAD"], capture_output=True, text=True, check=True).stdout.strip()
+        self.assertEqual((rec["status"], rec["head"]), ("ok", head), rec)
 
     def test_a_write_child_making_a_repository_in_a_target_outside_git_runs_no_git_after_it(self):
         # Git でない対象で子が git init して設定に命令を置いても、cwd_residue の ls-files は走らせない（1 周目の条件 (5) の子）

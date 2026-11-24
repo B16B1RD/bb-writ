@@ -3579,9 +3579,6 @@ class TestOpRun(unittest.TestCase):
         self.assertIn(str(self.wt.resolve()), r["op"]["result"])
 
 
-if __name__ == "__main__":
-    unittest.main()
-
 
 class TestQuietGit(unittest.TestCase):
     """書く子が書けた作業場所で、work.py の git（task cleanup の status・worktree remove）は、子が仕込んだ設定・hooks・入れ子の
@@ -3597,8 +3594,7 @@ class TestQuietGit(unittest.TestCase):
         self.repo.mkdir()
         self.git("init", "-q", "-b", "main", cwd=self.repo)
         (self.repo / "a.txt").write_text("a\n")
-        (self.repo / ".gitattributes").write_text("a.txt filter=x\n")
-        self.git("add", "a.txt", ".gitattributes", cwd=self.repo)
+        self.git("add", "a.txt", cwd=self.repo)
         self.git("commit", "-q", "-m", "init", cwd=self.repo)
 
     def tearDown(self):
@@ -3614,7 +3610,9 @@ class TestQuietGit(unittest.TestCase):
 
     def test_task_cleanup_runs_no_git_command_a_child_planted(self):
         touch = f"#!/bin/sh\ntouch '{self.marker}'\n"
-        for case in ("script", "filter", "hooks", "submodule", "worktree-config"):
+        # 段: 作業場所の片付けの結果（6 = 未保存の変更で拒む。0 = worktree remove まで進んで消す）
+        expected = {"script": 6, "hooks": 6, "hooks-committed": 0, "submodule": 6, "worktree-config": 0}
+        for case in expected:
             with self.subTest(case=case):
                 rc, started = self.work("task", "start", "--dir", str(self.repo), "--holder", "A")
                 wt, token = Path(started["dir"]), started["token"]
@@ -3625,11 +3623,15 @@ class TestQuietGit(unittest.TestCase):
                     exclude.write_text("fsmon.sh\n")
                     (wt / "fsmon.sh").write_text(touch)
                     (wt / "fsmon.sh").chmod(0o755)
-                elif case == "filter":
-                    self.git("config", "filter.x.clean", "./clean.sh", cwd=self.repo)
-                    exclude.write_text("clean.sh\n")
-                    (wt / "clean.sh").write_text(touch + "cat\n")
-                    (wt / "clean.sh").chmod(0o755)
+                elif case == "hooks-committed":  # husky の形: 追跡する置き場の hook を、子が commit する（作業ツリーはきれい）
+                    self.git("config", "core.hooksPath", ".githooks", cwd=self.repo)
+                    (wt / ".githooks").mkdir()
+                    for hook in ("post-index-change", "reference-transaction"):  # worktree remove の中の status と、branch -D
+                        (wt / ".githooks" / hook).write_text(touch)
+                        (wt / ".githooks" / hook).chmod(0o755)
+                    self.git("add", ".githooks", cwd=wt)
+                    self.git("commit", "-q", "-m", "hooks", cwd=wt)
+                    self.git("branch", "-f", "saved-" + case, "HEAD", cwd=wt)  # 保存先は checkout していない枝（統合の merge を通らない）
                 elif case == "hooks":
                     self.git("config", "core.hooksPath", ".hk", cwd=self.repo)
                     exclude.write_text(".hk/\n")
@@ -3652,10 +3654,39 @@ class TestQuietGit(unittest.TestCase):
                     (own / "config.worktree").write_text(f"[core]\n\tfsmonitor = touch {self.marker}\n")
                 os.utime(wt / "a.txt", (time.time() + 5, time.time() + 5))  # 大きさは同じで更新時刻だけ進める（filter・index の書き直し）
                 self.marker.unlink(missing_ok=True)
-                self.work("task", "cleanup", "--dir", str(wt), "--token", token, "--saved", "main")
-                self.assertFalse(self.marker.exists(), case)
+                saved = "saved-" + case if case == "hooks-committed" else "main"
+                rc, out = self.work("task", "cleanup", "--dir", str(wt), "--token", token, "--saved", saved)
+                self.assertEqual(rc, expected[case], (case, out))
+                self.assertFalse(self.marker.exists(), (case, out))
                 if wt.exists():  # 仕込みが本物であることの確かめ（片付けで作業場所が消えた段は、素の status を動かせない）
                     subprocess.run(["git", "status", "--porcelain"], cwd=wt, env=self.env, capture_output=True, stdin=subprocess.DEVNULL, timeout=60)
                     self.assertTrue(self.marker.exists(), case)
-                for key in ("core.fsmonitor", "filter.x.clean", "core.hooksPath", "extensions.worktreeConfig"):
+                for key in ("core.fsmonitor", "core.hooksPath", "extensions.worktreeConfig"):
                     subprocess.run(["git", "config", "--unset", key], cwd=self.repo, env=self.env, capture_output=True)
+
+
+    def test_integrate_runs_no_git_command_from_a_nested_repository(self):
+        # 統合の前の確かめ（clean(a.dir, child=True)）も、子が gitlink にした入れ子のリポジトリの設定を読まない
+        rc, started = self.work("task", "start", "--dir", str(self.repo), "--holder", "A")
+        wt, token = Path(started["dir"]), started["token"]
+        nested = wt / "nested"
+        self.git("init", "-q", "nested", cwd=wt)
+        (nested / "b.txt").write_text("b\n")
+        (nested / ".gitattributes").write_text("b.txt filter=y\n")
+        self.git("add", "b.txt", ".gitattributes", cwd=nested)
+        self.git("commit", "-q", "-m", "x", cwd=nested)
+        self.git("config", "filter.y.clean", f"sh -c 'touch {self.marker}; cat'", cwd=nested)
+        self.git("add", "nested", cwd=wt)
+        self.git("commit", "-q", "-m", "nested", cwd=wt)
+        os.utime(nested / "b.txt", (time.time() + 5, time.time() + 5))
+        self.marker.unlink(missing_ok=True)
+        head, target = self.git("rev-parse", "HEAD", cwd=wt), self.git("rev-parse", "main", cwd=self.repo)
+        rc, out = self.work("integrate", "--dir", str(wt), "--token", token, "--expected", target, "--verified", head)
+        self.assertEqual(rc, 0, out)  # 統合まで進んだ
+        self.assertFalse(self.marker.exists(), out)
+        subprocess.run(["git", "status", "--porcelain"], cwd=wt, env=self.env, capture_output=True, stdin=subprocess.DEVNULL, timeout=60)
+        self.assertTrue(self.marker.exists())  # 仕込みが本物であることの確かめ（素の status は走らせる）
+
+if __name__ == "__main__":
+    unittest.main()
+

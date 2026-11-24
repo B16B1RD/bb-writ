@@ -781,22 +781,18 @@ def contained(repo, commit, ref, look_only=False):
     return p.returncode == 0 and p.stdout.split()[0] == git(repo, 'rev-parse', ref + '^{tree}')
 
 
-def quiet(d):
-    """書く子が書けた場所で動かす git に付ける -c。git status・worktree remove が設定から走らせる命令（core.fsmonitor と
-    filter の clean・smudge・process）を外す（コマンド行の -c は include・config.worktree の値より強く、中で起こす git にも伝わる。
-    git 2.43 で測った。#64）。filter の名前は、命令を走らせない git config で読む。launch.py の quiet_git と同じ。"""
-    p = subprocess.run(['git', '-C', str(d), 'config', '--name-only', '--get-regexp', r'^filter\..*\.(clean|smudge|process)$'],
-                       stdin=subprocess.DEVNULL, capture_output=True, text=True)
-    drivers = sorted({n.rsplit('.', 1)[0] for n in p.stdout.split()})
-    return ['-c', 'core.fsmonitor=false', *[c for x in drivers for k in ('clean', 'smudge', 'process') for c in ('-c', f'{x}.{k}=')]]
+# 書く子が書けた作業場所で動かす git に付ける -c（launch.py の QUIET_GIT と同じ）。git status・worktree remove が設定から走らせる
+# core.fsmonitor を外す（コマンド行の -c は include・config.worktree の値より強く、中で起こす git にも伝わる。git 2.43 で測った。#64）。
+# filter は外さない（LFS などの required の filter を外すと status が壊れる。守らない範囲は launch.py の QUIET_GIT の注釈）。
+QUIET = ['-c', 'core.fsmonitor=false']
 
 
 def clean(d, ignored=False, child=False):
-    """未保存の変更が無いか。命令を走らせない形の status（quiet、hooks を走らせない --no-optional-locks）で見る。
-    child（書く子が書けた作業場所）では、入れ子のリポジトリの設定を読まないよう、サブモジュールに入らない
-    （初期化したサブモジュールのある作業場所は、worktree remove がもとより拒む）。"""
-    return not git(d, *quiet(d), '--no-optional-locks', 'status', '--porcelain', '--untracked-files=all',
-                   *(['--ignore-submodules=all'] if child else []), *(['--ignored=matching'] if ignored else []))
+    """未保存の変更が無いか。命令を走らせない形の status（QUIET、hooks を走らせない --no-optional-locks）で見る。
+    child（書く子が書けた作業場所）では、入れ子のリポジトリの設定を読まないよう、サブモジュールの中に入らない
+    （--ignore-submodules=dirty。サブモジュールが別の commit を指す変更は数える）。"""
+    return not git(d, *QUIET, '--no-optional-locks', 'status', '--porcelain', '--untracked-files=all',
+                   *(['--ignore-submodules=dirty'] if child else []), *(['--ignored=matching'] if ignored else []))
 
 
 class LeaseRefused(Exception):
@@ -1030,7 +1026,8 @@ def task_command(a):
                 raise ValueError(f'保存先 {ref} に、このタスクの変更が入っていない。統合してから片付ける')
             write(registry / (task['task'] + '.json'), {**task, 'cleanup': {'saved': ref, 'commit': head}})
             try:
-                git(repo, *quiet(a.dir), 'worktree', 'remove', str(a.dir.resolve()), fds=(rf, wf))  # 中で status を起こす
+                # 中で status を起こす。子が commit した hooks（core.hooksPath が作業場所の中の置き場のとき）も走らせない（-c は中の status に伝わる）
+                git(repo, *QUIET, '-c', 'core.hooksPath=/dev/null', 'worktree', 'remove', str(a.dir.resolve()), fds=(rf, wf))
             except ValueError:
                 if a.dir.exists():  # 拒否された（lock、初期化したサブモジュール）。片付けは始まっていない。--force で通さない（中身を失う）
                     write(registry / (task['task'] + '.json'), task)

@@ -322,16 +322,12 @@ def cli_place(p: Path) -> bool:
     return p.parent == home / ".claude" or p == home / ".config" / "anthropic"
 
 
-def quiet_git(cwd: Path, env: dict | None = None) -> list[str]:
-    """書く子が書けた作業場所で動かす git の頭。git status・worktree remove が設定から走らせる命令（core.fsmonitor と、filter の
-    clean・smudge・process）を外す（コマンド行の -c は、include・config.worktree の値より強く、中で起こす git にも伝わる。
-    git 2.43 で測った。#64）。filter の名前は、命令を走らせない git config で読む。hooks（post-index-change）は status に
-    --no-optional-locks を、入れ子の設定は --ignore-submodules=all を、呼ぶ側が付ける。
-    守らない範囲: git 2.43 で測っていない命令の出どころ、利用者・指揮者が後で動かす素の git。"""
-    names = subprocess.run(["git", "config", "--name-only", "--get-regexp", r"^filter\..*\.(clean|smudge|process)$"], cwd=cwd, env=env,
-                           capture_output=True, text=True, errors="surrogateescape", timeout=GIT_TIMEOUT).stdout.split()
-    drivers = sorted({n.rsplit(".", 1)[0] for n in names})
-    return ["git", "-c", "core.fsmonitor=false", *[c for d in drivers for k in ("clean", "smudge", "process") for c in ("-c", f"{d}.{k}=")]]
+# 書く子が書けた作業場所で動かす git の頭。git status・ls-files が設定から走らせる core.fsmonitor を外す（コマンド行の -c は、
+# include・config.worktree の値より強く、中で起こす git にも伝わる。git 2.43 で測った。#64）。hooks（post-index-change）は
+# status に --no-optional-locks を、入れ子の設定は --ignore-submodules（all・dirty）を、呼ぶ側が付ける。
+# 守らない範囲: filter（利用者の設定が作業場所の中のスクリプトを指すと、子が書き換えたものが走る。LFS などの required の filter を
+# 外すと status が壊れるので外さない）、git 2.43 で測っていない命令の出どころ、利用者・指揮者が後で動かす素の git。
+QUIET_GIT = ["git", "-c", "core.fsmonitor=false"]
 
 
 def cwd_residue(cwd: Path, before: set[str]) -> list[str]:
@@ -352,8 +348,8 @@ def cwd_residue(cwd: Path, before: set[str]) -> list[str]:
     new = sorted(str(p) for p in cwd.iterdir() if str(p) not in before)
     left = [p for p in new if bare(Path(p))]
     if left and (cwd / ".git").exists():  # 追跡している（index にある）ものは子が意図して足したので数えない。
-        # 子が書けた設定の命令を走らせない形で（quiet_git。子が git init した対象でも）
-        out = subprocess.run([*quiet_git(cwd), "-C", str(cwd), "ls-files", "-z", "--", *[Path(p).name for p in left]], capture_output=True, text=True, check=True, timeout=GIT_TIMEOUT)
+        # 子が書けた設定の命令を走らせない形で（QUIET_GIT。子が git init した対象でも）
+        out = subprocess.run([*QUIET_GIT, "-C", str(cwd), "ls-files", "-z", "--", *[Path(p).name for p in left]], capture_output=True, text=True, check=True, timeout=GIT_TIMEOUT)
         tracked = {cwd / n.split("/")[0] for n in out.stdout.split("\0") if n}
         left = [p for p in left if Path(p) not in tracked]
     return left
@@ -373,7 +369,7 @@ def claude_places(cwd: Path, checkout: Path | None, use_git: bool = True) -> tup
     子が読めなくした場所の下（残る）、前に読めなかった場所の下の前からの空の置き場（一緒に消す）、
     起動の前の git が失敗・時間切れのときと、子が Git の管理情報を変えた後の下の階層（残る。status は前者で ok、後者で failed）、
     候補を得た後に別のプロセスが .claude を symlink に置き換えた場合（先の空の .cc-writes を消しうる）。
-    ここで動かす git は、子が書けた設定・hooks・入れ子のリポジトリの命令を走らせない（quiet_git）。"""
+    ここで動かす git は、子が書けた設定・hooks・入れ子のリポジトリの命令を走らせない（QUIET_GIT。filter は守らない）。"""
     found, ignored_cc = {top / ".claude" for top in (cwd, checkout) if top is not None}, set()
     if not use_git:  # 子が Git の管理情報を変えた後などは、git を動かさない（偽の設定が sandbox の外で動きうる）
         return found_places(found), False
@@ -384,7 +380,7 @@ def claude_places(cwd: Path, checkout: Path | None, use_git: bool = True) -> tup
         # 追跡外のディレクトリは --untracked-files=all では行に出ない。空の置き場が出るのは、無視するもの（!!）としてだけ。
         # サブモジュールの中では git を起動しない（子が index に足した入れ子のリポジトリの設定が、sandbox の外で動く。中の無視するものは
         # もとより行に出ない）
-        status = subprocess.run([*quiet_git(cwd, env), "--no-optional-locks", "status", "--porcelain", "-z", "--untracked-files=all", "--ignored=matching",
+        status = subprocess.run([*QUIET_GIT, "--no-optional-locks", "status", "--porcelain", "-z", "--untracked-files=all", "--ignored=matching",
                                  "--ignore-submodules=all", "--", "."],
                                 cwd=cwd, env=env, capture_output=True, timeout=GIT_TIMEOUT)
     except (OSError, subprocess.TimeoutExpired):  # git が無い・管理ファイルが FIFO で止まる。直下だけを見る
@@ -1275,7 +1271,7 @@ def clean_head(cwd: Path) -> str | None:
     子が見たものを commit に結び付け、work.py の --reviewed がこの記録と照らす（Issue #14）。
     親の GIT_DIR・GIT_WORK_TREE など（git rev-parse --local-env-vars）は外す（別の場所を見て、対象の変更を見落とす）。
     追跡外のファイルと、サブモジュールが別の commit を指す変更は、設定（status.showUntrackedFiles=no、diff.ignoreSubmodules・
-    submodule.<名>.ignore）に関わらず数える。書く子の後の作業場所でも動くので、子が書けた設定の命令を走らせない形で見る（quiet_git、
+    submodule.<名>.ignore）に関わらず数える。書く子の後の作業場所でも動くので、子が書けた設定の命令を走らせない形で見る（QUIET_GIT、
     --no-optional-locks。サブモジュールの中には入らず、中の未 commit の変更は数えない。#64）。
     assume-unchanged・skip-worktree で隠した変更は見分けない。"""
     try:
@@ -1283,7 +1279,7 @@ def clean_head(cwd: Path) -> str | None:
         env = {k: v for k, v in os.environ.items() if k not in local.stdout.split()}
         head = subprocess.run(["git", "rev-parse", "--verify", "HEAD^{commit}"], cwd=cwd, env=env, capture_output=True, text=True, errors="surrogateescape", timeout=GIT_TIMEOUT)
         # バイトで受ける（ファイル名は UTF-8 とは限らない）。index を書き直すロックを取らない（利用者の git と競わない）
-        status = subprocess.run([*quiet_git(cwd, env), "--no-optional-locks", "status", "--porcelain", "--untracked-files=normal", "--ignore-submodules=dirty"], cwd=cwd, env=env,
+        status = subprocess.run([*QUIET_GIT, "--no-optional-locks", "status", "--porcelain", "--untracked-files=normal", "--ignore-submodules=dirty"], cwd=cwd, env=env,
                                 capture_output=True, timeout=GIT_TIMEOUT)
     except (OSError, subprocess.TimeoutExpired):  # git が無い・対象が無い・管理ファイルが FIFO で止まる
         return None
