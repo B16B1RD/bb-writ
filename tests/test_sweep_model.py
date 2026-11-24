@@ -82,7 +82,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent)); import process_limit  
 from model_tie import drift  # noqa: E402
 
 LAUNCH = Path(__file__).resolve().parents[1] / "scripts" / "launch.py"
-MODELED_AT = "97a5c3c"
+MODELED_AT = "3b02eed"
 MODELED = {
     "hold_place": "05ae4d26d63c4eb0",
     "leftover_places": "67b771a89516a70e",
