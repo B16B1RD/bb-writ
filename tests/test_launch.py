@@ -109,6 +109,8 @@ FAKE_CODEX = textwrap.dedent(r'''
         sys.exit(1 if _how == "replace-fail" else 0)
     open(os.environ["FAKE_ARGS"] + ".allenv", "w").write(json.dumps(sorted(k for k in os.environ if not k.startswith("FAKE_"))))
     open(os.environ["FAKE_ARGS"], "w").write(json.dumps(sys.argv[1:]))
+    open(os.environ["FAKE_ARGS"] + ".calls", "a").write(json.dumps(sys.argv[1:]) + "\n")  # 起動ごとに 1 行
+    resumed = "resume" in sys.argv[1:]
     mode = os.environ.get("FAKE_MODE", "good")
     if os.environ.get("FAKE_STDERR"):  # 作業の途中で出す行（利用枠の文言など）
         print(os.environ["FAKE_STDERR"], file=sys.stderr, flush=True)
@@ -125,6 +127,8 @@ FAKE_CODEX = textwrap.dedent(r'''
     text = {"good": os.environ["FAKE_TEXT"], "nojson": "結論だけ", "badpath": os.environ["FAKE_TEXT"].replace("a.txt", "missing.txt"),
             "absent": os.environ["FAKE_TEXT"].replace("a.txt:1", "missing.txt"),
             "nofence": os.environ["FAKE_TEXT"].rstrip("`").rstrip()}.get(mode, os.environ["FAKE_TEXT"])
+    if resumed and os.environ.get("FAKE_RESUMED_TEXT"):  # 続きでは、報告を直して返す
+        text = os.environ["FAKE_RESUMED_TEXT"]
     raw = not os.environ.get("FAKE_RAW")  # 本物の CLI は U+2028 などをエスケープせずに出す
     if mode == "blockout":  # 結果の置き場をふさぐ（launcher の想定外の失敗を起こす）
         os.makedirs(os.path.join(os.environ["FAKE_OUT"], "stdout.jsonl"))
@@ -215,7 +219,7 @@ FAKE_CODEX = textwrap.dedent(r'''
         turns = {"undenied-then-ok": [undenied, perm], "ok-then-undenied": [perm, undenied], "big-wide-line": [perm, {**big, "file_system": wide["file_system"]}], "net-open-then-ok": [net_open, perm], "ok-then-net-open": [perm, net_open], "wide-then-ok": [wide, perm], "ok-then-wide": [perm, wide], "narrow-then-ok": [narrow, perm], "ok-then-narrow": [perm, narrow],
                  "fs-unknown-then-ok": [fs_unknown, perm], "net-unknown-then-ok": [net_unknown, perm]}.get(mode, [perm])
         # 本物の exec resume は、同じ session の記録に turn を足す（FAKE_ROLLOUT_APPEND）
-        open(os.path.join(sessions, "fake", f"rollout-1-{thread}.jsonl"), "a" if os.environ.get("FAKE_ROLLOUT_APPEND") else "w", errors="surrogateescape").write("".join(turn(x) for x in turns) + (bad or ""))
+        open(os.path.join(sessions, "fake", f"rollout-1-{thread}.jsonl"), "a" if os.environ.get("FAKE_ROLLOUT_APPEND") or resumed else "w", errors="surrogateescape").write("".join(turn(x) for x in turns) + (bad or ""))
     if mode == "parent-moves-git":  # 子の実行中に、親や並行するタスクが ref と設定を正当に動かす（子は何もしない）
         import subprocess
         subprocess.run(["git", "branch", "parent-work"], check=True)
@@ -474,6 +478,9 @@ FAKE_CLAUDE = textwrap.dedent(r'''
         os.makedirs(os.path.join(os.environ["FAKE_OUT"], "stdout.jsonl"))
     result = os.environ["FAKE_TEXT"]
     argv = sys.argv[1:]
+    open(os.environ["FAKE_ARGS"] + ".calls", "a").write(json.dumps(argv) + "\n")  # 起動ごとに 1 行
+    if "--resume" in argv and os.environ.get("FAKE_RESUMED_TEXT"):  # 続きでは、報告を直して返す
+        result = os.environ["FAKE_RESUMED_TEXT"]
     sid = os.environ.get("FAKE_SID") or next((argv[i + 1] for i, x in enumerate(argv[:-1]) if x in ("--session-id", "--resume")), "s-1")  # 本物は渡した session を返す
     if mode in ("stop", "stop-deaf"):  # 動く間だけ対象に一時の置き場を持ち、TERM で片付けて終わる（Claude Code 2.1.310 の .claude/.cc-writes）
         import signal, time
@@ -537,6 +544,7 @@ FAKE_GROK = textwrap.dedent(r'''
     open(os.environ["FAKE_ARGS"] + ".allenv", "w").write(json.dumps(sorted(k for k in os.environ if not k.startswith("FAKE_"))))
     env = {k: v for k, v in os.environ.items() if k.startswith("GROK_") or k in ("XAI_API_KEY", "RUST_LOG")}
     open(os.environ["FAKE_ARGS"], "w").write(json.dumps(sys.argv[1:] + ["ENV=" + json.dumps(env, sort_keys=True)]))
+    open(os.environ["FAKE_ARGS"] + ".calls", "a").write(json.dumps(sys.argv[1:]) + "\n")  # 起動ごとに 1 行
     mode = os.environ.get("FAKE_MODE", "good")
     if os.environ.get("FAKE_STDERR"):  # 作業の途中で出す行（利用枠の文言など）
         print(os.environ["FAKE_STDERR"], file=sys.stderr, flush=True)
@@ -565,7 +573,8 @@ FAKE_GROK = textwrap.dedent(r'''
     if os.environ.get("FAKE_HANG"):  # 時間切れ（本物の -p --output-format json は、終わるまで何も出さない）
         import time
         sys.stderr.flush(); time.sleep(60)
-    print(json.dumps({"text": os.environ["FAKE_TEXT"], "stopReason": "end_turn", "sessionId": sid,
+    text = os.environ["FAKE_RESUMED_TEXT"] if "-r" in sys.argv and os.environ.get("FAKE_RESUMED_TEXT") else os.environ["FAKE_TEXT"]  # 続きでは直して返す
+    print(json.dumps({"text": text, "stopReason": "end_turn", "sessionId": sid,
                       "modelUsage": "x" if mode == "shapes" else {"grok-4.7-build": {}}, "total_cost_usd": 0.02, "num_turns": 3,
                       **({"sessionId": ["g"]} if mode == "shapes" else {})}))
 ''').lstrip()
@@ -4555,6 +4564,43 @@ launch.claude_reads = claude_reads
         rc, rec = self.run_launch("codex", "badpath")
         self.assertEqual(rec["status"], "invalid-report")
         self.assertIn("証拠のファイルが無い: missing.txt", rec["problems"])
+
+    def test_a_report_that_fails_the_check_is_fixed_once_in_the_same_session(self):
+        """照合に落ちた報告（証拠の where が対象からの相対でない・JSON ブロックが無い）は、launcher が同じ session の続きで 1 回だけ、
+        落ちた点と launcher の読み方を名指しして直させる。直れば ok、直らなければ（存在しないファイルを引き続けるなど）invalid-report で、
+        問題には 2 回分が並ぶ。直させたことは記録の report_fix に残り、3 回目は起こさない。照合は緩めない。"""
+        good = GOOD.encode().decode("unicode_escape")
+        resumed = {"claude": lambda argv: argv[argv.index("--resume") + 1], "codex": lambda argv: argv[argv.index("resume") + 1],
+                   "grok": lambda argv: argv[argv.index("-r") + 1]}
+        prompt_of = {"claude": lambda argv: argv[argv.index("-p") + 1], "codex": lambda argv: argv[-1], "grok": lambda argv: argv[argv.index("-p") + 1]}
+        for host in ("claude", "codex", "grok"):
+            cwd = self.grok_target() if host == "grok" else self.cwd
+            for first, problem in ((good.replace("a.txt:1", "other/a.txt:1"), "証拠のファイルが無い: other/a.txt"),
+                                   ("結論だけ", "報告の JSON ブロックが無い")):
+                for fixed in (True, False):
+                    with self.subTest(host=host, problem=problem, fixed=fixed):
+                        calls = Path(str(self.args_file) + ".calls")
+                        calls.unlink(missing_ok=True)
+                        rc, rec = self.run_launch(host, cwd=cwd, env_extra={"FAKE_TEXT": first, **({"FAKE_RESUMED_TEXT": good} if fixed else {})})
+                        argvs = [json.loads(x) for x in calls.read_text().splitlines()]
+                        self.assertEqual(len(argvs), 2, rec)  # 最初の起動と、直させる続きの 1 回だけ
+                        self.assertEqual(resumed[host](argvs[1]), rec["session"], argvs[1])  # 同じ session の続き
+                        asked = prompt_of[host](argvs[1])
+                        self.assertIn(problem, asked)  # 落ちた点を名指しする
+                        self.assertIn(f"対象 {cwd.resolve()} からの相対パス", asked)  # launcher がどう読んだか
+                        self.assertIn("```json", asked)  # 報告の形の約束も
+                        self.assertEqual(rec["report_fix"]["asked"], [problem], rec)
+                        self.assertEqual((Path(rec["out"]) / "report-before-fix.md").read_text(encoding="utf-8"), first)
+                        if fixed:
+                            self.assertEqual((rc, rec["status"], rec["problems"]), (0, "ok", []), rec)
+                        else:
+                            self.assertEqual((rc, rec["status"]), (2, "invalid-report"), rec)
+                            self.assertIn(problem, rec["problems"])  # 2 回目の問題と
+                            self.assertTrue(any(problem in x and "1 回目" in x for x in rec["problems"]), rec)  # 1 回目の問題
+        git = self.repo_git()
+        git("init", "-q"); git("add", "a.txt"); git("commit", "-q", "-m", "a")
+        rc, rec = self.run_launch("claude", env_extra={"FAKE_TEXT": "結論だけ", "FAKE_RESUMED_TEXT": good})
+        self.assertEqual((rec["status"], rec["head"]), ("ok", git("rev-parse", "HEAD").strip()), rec)  # 直させた子も、見た commit の審査に数える
 
     def test_absence_evidence_without_line_is_allowed(self):
         rc, rec = self.run_launch("codex", "absent")  # 「ファイルが無いこと」を示す証拠は不正でない
