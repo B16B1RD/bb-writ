@@ -2171,8 +2171,9 @@ def main() -> int:
     try:
         json.dumps(rec, ensure_ascii=False, indent=1)
     except (RecursionError, ValueError) as e:  # 子から来た値が深すぎる。外して、失敗として記録する（想定外の失敗なので続けさせない）
-        rec.update({k: None for k in ("report", "usage", "model_effective") if k in rec}, status="failed", resumable=False,
-                   problems=[f"子の結果を記録に書けない（外した）: {e!r}"[:300]] + rec.get("problems", []))
+        for d in (rec, rec.get("report_fix") or {}):  # 直させる前の子から写した値も
+            d.update({k: None for k in ("report", "usage", "model_effective") if k in d})
+        rec.update(status="failed", resumable=False, problems=[f"子の結果を記録に書けない（外した）: {e!r}"[:300]] + rec.get("problems", []))
         rec.pop("next", None)  # 審査に数えない子になった
     if rec["resumable"] and rec["status"] != "ok":
         rec["problems"] = rec.get("problems", []) + [f"--resume {out_dir} で続きから起動できる"]

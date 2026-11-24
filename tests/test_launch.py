@@ -111,6 +111,8 @@ FAKE_CODEX = textwrap.dedent(r'''
     open(os.environ["FAKE_ARGS"], "w").write(json.dumps(sys.argv[1:]))
     open(os.environ["FAKE_ARGS"] + ".calls", "a").write(json.dumps(sys.argv[1:]) + "\n")  # 起動ごとに 1 行
     resumed = "resume" in sys.argv[1:]
+    _n = len(open(os.environ["FAKE_ARGS"] + ".calls").read().splitlines())  # FAKE_<名>_<n> は、n 回目の起動だけの FAKE_<名>
+    os.environ.update({k[:-len(f"_{_n}")]: v for k, v in list(os.environ.items()) if k.startswith("FAKE_") and k.endswith(f"_{_n}")})
     mode = os.environ.get("FAKE_MODE", "good")
     if os.environ.get("FAKE_STDERR"):  # 作業の途中で出す行（利用枠の文言など）
         print(os.environ["FAKE_STDERR"], file=sys.stderr, flush=True)
@@ -323,6 +325,9 @@ FAKE_CLAUDE = textwrap.dedent(r'''
     open(os.environ["FAKE_ARGS"] + ".env", "w").write(json.dumps({k: v for k, v in sorted(os.environ.items()) if k.startswith(("CLAUDE", "ANTHROPIC_"))}))
     os.makedirs(".claude/.cc-writes", exist_ok=True)  # 2.1.302 の --restricted が対象に作る空のディレクトリ
     import subprocess
+    _calls = os.environ["FAKE_ARGS"] + ".calls"  # FAKE_<名>_<n> は、n 回目の起動（この起動は .calls の行の数 + 1 回目）だけの FAKE_<名>
+    _n = (len(open(_calls).read().splitlines()) if os.path.exists(_calls) else 0) + 1
+    os.environ.update({k[:-len(f"_{_n}")]: v for k, v in list(os.environ.items()) if k.startswith("FAKE_") and k.endswith(f"_{_n}")})
     mode = os.environ.get("FAKE_MODE")
     if mode == "home-claude-only":  # 空の .claude だけを作る
         os.makedirs(os.path.join(os.environ["HOME"], ".claude"))
@@ -1321,6 +1326,17 @@ class TestLaunch(unittest.TestCase):
                     self.assertEqual((rec["resumable"], [p for p in rec["problems"] if "--resume" in p]), (False, []), rec)
                 self.assertTrue((Path(rec["out"]) / "record.json").is_file())
                 self.assertIn(rec["out"], (self.state / "delegations.jsonl").read_text())
+        with self.subTest("the first run of a fix"):  # 報告を直させる前の子の値（記録の report_fix に写したもの）
+            good = GOOD.encode().decode("unicode_escape")
+            before = set((self.state / "delegations").iterdir())
+            p = self.run_launch("codex", mode="unwritable-usage", raw=True, env_extra={
+                "PYTHONPATH": str(site), "FAKE_TEXT": good.replace("a.txt:1", "other/a.txt:1"), "FAKE_RESUMED_TEXT": good, "FAKE_MODE_2": "good"})
+            outs = set((self.state / "delegations").iterdir()) - before
+            self.assertEqual([(d / "record.json").is_file() for d in outs], [True], p.stderr[-2000:])
+            rec = json.loads(p.stdout)
+            self.assertEqual((rec["status"], rec["resumable"], rec["report_fix"]["usage"]), ("failed", False, None), rec)
+            self.assertTrue([x for x in rec["problems"] if "子の結果を記録に書けない" in x], rec)
+            self.assertIn(rec["out"], (self.state / "delegations.jsonl").read_text())
 
     def test_a_write_child_breaking_its_head_is_reported(self):
         for mode in ("bad-head", "head-space", "head-fifo", "head-dir", "head-zero", "lock-git-dir", "packed-fifo", "config-fifo",
