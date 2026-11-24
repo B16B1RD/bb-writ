@@ -66,8 +66,12 @@ test_a_resume_waits_while_another_launcher_holds_its_place）、開いた後に�
 起きない分岐（nochild）を外すと、モデルは実物より多くの動き（実物では起きない子）を許すだけで、正直な範囲の合否は変わらない。
 
 対象の関数: hold_place・leftover_places・leftover_uses・leftover_due・place_due・sweep_leftovers・remove_tree・grok_home と、main の
---resume の置き場の照合・最初の起動の排他・記録を書く段。これらを変えたら、このモデル（step）が今の本文を写しているかを読み直す
-（機械では検出しない）。
+--resume の置き場の照合・最初の起動の排他・記録を書く段。これらを変えたら、このモデル（step）が今の本文を写しているかを読み直す。
+名前を挙げた 8 つの関数は、本文のハッシュ（MODELED。tests/model_tie.py）で結ぶ。変えると test_the_model_was_checked_against_the_current_code が
+落ちるので、モデルを読み直してから、ハッシュと MODELED_AT を書き換える。main の段と、関数が呼ぶ補助（stamp_time・usable_time・
+task_worktree_gone）はハッシュを掛けない（変えても落ちない）。結ぶ前は機械で検出せず、モデルの最後の見直し（9cd3ec5）の後に、
+be74135（sweep_leftovers の例外の受けに MemoryError）と 74c963a（grok_home の sandbox.toml の deny）が写す関数を変えていた。
+2026-11-24 に 2 つを読み、モデルの写す段（置き場ごとの判定と排他、mkdtemp の直後の hold_place）を変えないことを確かめて結んだ。
 """
 
 import sys
@@ -75,6 +79,20 @@ import unittest
 from collections import deque
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent)); import process_limit  # noqa: E402,F401  試験に上限を掛ける（直に走らせても）
+from model_tie import drift  # noqa: E402
+
+LAUNCH = Path(__file__).resolve().parents[1] / "scripts" / "launch.py"
+MODELED_AT = "97a5c3c"
+MODELED = {
+    "hold_place": "05ae4d26d63c4eb0",
+    "leftover_places": "67b771a89516a70e",
+    "leftover_uses": "a3542e8665e17da1",
+    "leftover_due": "008b9fa9c2d2214a",
+    "place_due": "a76dc2f2f15a5ed8",
+    "sweep_leftovers": "632b214b1130c1e3",
+    "remove_tree": "800a3fbc100fd010",
+    "grok_home": "2fc4969a8a9d184f",
+}
 
 D = 1  # 期限（刻み）。実物は LEFTOVER_DAYS 日
 TOP = {"existing": 2, "fresh": D}  # 時計の上限。fresh は、作ってから排他を取るまでに期限が過ぎることを写さない
@@ -337,6 +355,13 @@ class TestSweepModel(unittest.TestCase):
                 self.assertLessEqual({"A2", "H"}, set(found))
         _, found = explore("fresh", "W", env=("forge",))
         self.assertIn("E", found)
+
+    def test_the_model_was_checked_against_the_current_code(self):
+        changed = drift(LAUNCH.read_text(encoding="utf-8"), MODELED)
+        if changed:
+            self.fail(f"scripts/launch.py のモデルが写す関数が、照合した commit {MODELED_AT} から変わった。"
+                      "モデル（step）が今の本文を写しているかを読み直して、照合した commit（MODELED_AT）とハッシュを進める"
+                      "（tests/test_sweep_model.py の冒頭）:\n" + "\n".join(changed))
 
 
 if __name__ == "__main__":
