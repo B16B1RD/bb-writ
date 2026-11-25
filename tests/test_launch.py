@@ -1083,30 +1083,34 @@ class TestLaunch(unittest.TestCase):
         self.assertEqual(rec["status"], "timeout", rec)
         self.assertIsNone(rec["exit_code"], rec)
 
-    def test_the_reviewers_of_one_place_stop_at_two_heads(self):
-        """1 つの作業場所で --interrogate の審査役を立てるのは、2 つの HEAD まで。同じ HEAD の立て直しと、別の作業場所は数えない。"""
-        git = lambda *a: subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", *a], cwd=self.cwd, check=True,
-                                        capture_output=True, text=True).stdout.strip()
+    def test_a_reviewer_on_a_new_head_waits_for_the_revisit_of_the_fixes(self):
+        """前の HEAD で審査役を立てた作業場所で、別の HEAD に審査役を立てるのは、作業の記録の「直しの見直し」の欄を書いてから。
+        同じ HEAD の立て直し、最初の審査役、監査役、別の作業場所は止めない。"""
+        git = lambda *a, cwd=self.cwd: subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", *a], cwd=cwd, check=True,
+                                                      capture_output=True, text=True).stdout.strip()
         git("init", "-q")
         git("add", "a.txt")
         git("commit", "-q", "-m", "1")
-        for _ in range(2):  # 同じ HEAD の立て直しは 1 つに数える
+        claim = subprocess.run([sys.executable, "-B", str(ROOT / "scripts" / "work.py"), "claim", "--dir", str(self.cwd), "--holder", "t"],
+                               env=self.launch_env("good"), capture_output=True, text=True, check=True)
+        note = Path(json.loads(claim.stdout)["note"]["path"])
+        for _ in range(2):  # 最初の HEAD と、その立て直し
             rc, rec = self.run_launch("claude", extra=["--interrogate"])
             self.assertEqual((rc, rec["status"]), (0, "ok"), rec)
         git("commit", "-q", "--allow-empty", "-m", "2")
-        rc, rec = self.run_launch("claude", extra=["--interrogate"])
-        self.assertEqual((rc, rec["status"]), (0, "ok"), rec)
-        git("commit", "-q", "--allow-empty", "-m", "3")
         p = self.run_launch("claude", extra=["--interrogate"], raw=True)
         self.assertEqual(p.returncode, 2, p.stdout)
-        self.assertIn("次の周は立てない", p.stderr)
-        rc, rec = self.run_launch("claude", extra=["--audit"])  # 監査役と、ほかの読み取り専用の子は数えない
-        self.assertEqual((rc, rec["status"]), (0, "ok"), rec)
-        rc, rec = self.run_launch("claude")
+        self.assertIn("直しの見直し", p.stderr)
+        rc, rec = self.run_launch("claude", extra=["--audit"])  # 監査役は止めない
         self.assertEqual((rc, rec["status"]), (0, "ok"), rec)
         other = Path(self.tmp.name) / "other"
         shutil.copytree(self.cwd, other)
-        rc, rec = self.run_launch("claude", extra=["--interrogate"], cwd=other)
+        rc, rec = self.run_launch("claude", extra=["--interrogate"], cwd=other)  # 別の作業場所は数えない
+        self.assertEqual((rc, rec["status"]), (0, "ok"), rec)
+        body = note.read_text(encoding="utf-8")
+        line = next(l for l in body.splitlines() if l.startswith("- 直しの見直し"))
+        note.write_text(body.replace(line, line + " 同じ形の文を grep で探し、2 か所を直した"), encoding="utf-8")
+        rc, rec = self.run_launch("claude", extra=["--interrogate"])
         self.assertEqual((rc, rec["status"]), (0, "ok"), rec)
 
     def test_launch_leaves_no_bytecode_in_the_plugin(self):

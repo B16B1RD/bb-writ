@@ -55,7 +55,7 @@ from pathlib import Path
 sys.dont_write_bytecode = True
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from work import root as work_record  # noqa: E402
-from work import claude_staging_only  # noqa: E402
+from work import claude_staging_only, field_texts, REVISIT  # noqa: E402
 
 # 親が --model・--effort を省いたときの、役割ごとのモデルと effort（親が渡せば、それが勝つ）。表に無い組み合わせは --model と --effort を渡す。
 # 最も難しい依頼（設計、大きな移行・リファクタリング、長い無人実行）を任せる書く子（--hardest）は最上段。
@@ -73,9 +73,6 @@ CHOICES = {
 # 同じ起動の中で 1 回だけこの段で立て直す（Opus high は、審査役で Fable medium に次いで欠陥を挙げた。上の CHOICES の注釈）
 FALLBACK = {"claude": {"fable": ("opus", "high")}}
 TIMEOUTS = {"hardest": 3600}
-# 1 つの作業場所で --interrogate の審査役を立ててよい HEAD の数。周に上限が無く、審査役が文の変更に毎周指摘を出して、
-# 利用者の Fable の週の枠を 1 日で使い切った（2026-11）。上限に着いた後の扱いは interrogate の 5
-INTERROGATE_HEADS = 2
 QUOTA = re.compile(r"usage limit|rate limit|quota|exceeded your|too many requests|(?:status|code|http|error)\W{0,12}429\b|\b429 too many|limit reached|out of credits", re.I)
 CONTRACT = """
 
@@ -1246,6 +1243,27 @@ def interrogated_heads(cwd: Path) -> list:
     return heads
 
 
+def unrevisited(cwd: Path) -> str:
+    """前の HEAD で審査役を立てた作業場所で、別の HEAD に次の審査役を立てるのに、作業の記録の「直しの見直し」の欄が空なら、その理由。
+    指摘の箇所だけを直して次の周に出し、直しの隣の抜けと直しが持ち込んだ矛盾が周ごとに出て、周が収束しなかった（2026-11）。
+    守らない範囲: 欄の中身の真偽と、どの周の見直しかは見ない。作業の記録が無い場所（claim していない）は見ない。前の審査役は、同じ道筋を
+    --cwd にして ok で返ったものだけを数える（下の階層を --cwd にしたもの・not-run・記録の読めない行は数えない）。"""
+    seen = interrogated_heads(cwd)
+    if not seen or clean_head(cwd) in seen:
+        return ""
+    note = work_record(cwd) / "note.md"
+    try:
+        body = note.read_text(encoding="utf-8")
+    except OSError:
+        return ""
+    found = field_texts(body.splitlines(), REVISIT)
+    if found and found[0].strip():
+        return ""
+    return (f"この作業場所は前の HEAD（{', '.join(h[:7] for h in seen)}）で審査役を立てた。次の審査の前に、作業の記録 {note} の"
+            f"「{REVISIT.split('（')[0]}」の欄に、指摘ごとに同じ性質の箇所・直しが前提を変えた箇所・変えた節の全体の矛盾を探した方法と結果を書く"
+            f"（欄の行が無ければ雛形の行を足す。interrogate の 5）")
+
+
 def clean_head(cwd: Path) -> str | None:
     """対象の HEAD の commit。Git の作業ツリーでないか、未 commit の変更（staged・追跡外のファイルを含む。無視するものは除く）があれば None。
     子が見たものを commit に結び付け、work.py の --reviewed がこの記録と照らす（Issue #14）。
@@ -1772,11 +1790,9 @@ def main() -> int:
     a.timeout = a.timeout or TIMEOUTS.get(a.role, 1800)
     a.cwd = a.cwd.resolve()
     if a.interrogate and not a.resume:
-        seen = interrogated_heads(a.cwd)
-        now = clean_head(a.cwd)
-        if now not in seen and len(seen) >= INTERROGATE_HEADS:
-            ap.error(f"この作業場所は、もう {len(seen)} つの HEAD（{', '.join(h[:7] for h in seen)}）で審査役を立てた。"
-                     f"次の周は立てない。残る指摘は interrogate の 5 の「周の上限に着いたら」のとおり扱う")
+        why = unrevisited(a.cwd)
+        if why:
+            ap.error(why)
     stamp = time.strftime("%Y%m%d-%H%M%S") + '-' + secrets.token_hex(8)
     # 読み取り専用の Codex の子が書ける一時ディレクトリは、--out でなく bb-writ の状態の置き場に置く（--out は呼び出し側が選ぶので、
     # その下に置くと、対象のリポジトリや Git の管理ディレクトリの中かを判定し続けることになり、判定の穴が尽きなかった）
