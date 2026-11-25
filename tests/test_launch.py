@@ -1123,6 +1123,9 @@ class TestLaunch(unittest.TestCase):
         note.write_text(body.replace(line, line + " 同じ形の文を grep で探し、2 か所を直した"), encoding="utf-8")
         rc, rec = self.run_launch("claude", extra=["--interrogate"])
         self.assertEqual((rc, rec["status"]), (0, "ok"), rec)
+        self.assertIn("直しの見直し", rec["next"])  # 審査役が返ったその場で、次の周の前に書く欄を出す
+        rc, cont = self.run_launch(None, extra=["--resume", rec["out"]])  # 続きの記録にも、次の周が比べる印を残す
+        self.assertEqual((rc, cont["status"], cont.get("revisit")), (0, "ok", rec["revisit"]), cont)
         git("commit", "-q", "--allow-empty", "-m", "3")  # 次の周は、前の審査役のときから書き足すまで止める
         p = self.run_launch("claude", extra=["--interrogate"], raw=True)
         self.assertEqual(p.returncode, 2, p.stdout)
@@ -1149,7 +1152,27 @@ class TestLaunch(unittest.TestCase):
         git("commit", "-q", "-m", "1", cwd=parent / "repo")
         subprocess.run([sys.executable, "-B", str(ROOT / "scripts" / "work.py"), "claim", "--dir", str(parent / "repo"), "--holder", "t"],
                        env=self.launch_env("good"), capture_output=True, text=True, check=True)
+        (parent / "repo" / "dirty.txt").write_text("x\n")  # 未 commit の変更があったときの審査役（head が無い）は周に数えない
         rc, rec = self.run_launch("claude", extra=["--interrogate"], cwd=parent / "repo")
+        self.assertEqual((rc, rec["status"], rec["head"]), (0, "ok", None), rec)
+        (parent / "repo" / "dirty.txt").unlink()
+        git("commit", "-q", "--allow-empty", "-m", "2", cwd=parent / "repo")
+        rc, rec = self.run_launch("claude", extra=["--interrogate"], cwd=parent / "repo")
+        self.assertEqual((rc, rec["status"]), (0, "ok"), rec)
+        outer = parent / "outer"  # 作業ツリーの中に置いた別の worktree の審査役は、外の作業ツリーの周に数えない
+        outer.mkdir()
+        shutil.copy(self.cwd / "a.txt", outer / "a.txt")
+        git("init", "-q", cwd=outer)
+        (outer / ".git" / "info" / "exclude").write_text(".wt\n")
+        git("add", "a.txt", cwd=outer)
+        git("commit", "-q", "-m", "1", cwd=outer)
+        git("worktree", "add", "-q", "--detach", ".wt", cwd=outer)
+        subprocess.run([sys.executable, "-B", str(ROOT / "scripts" / "work.py"), "claim", "--dir", str(outer), "--holder", "t"],
+                       env=self.launch_env("good"), capture_output=True, text=True, check=True)
+        rc, rec = self.run_launch("claude", extra=["--interrogate"], cwd=outer / ".wt")
+        self.assertEqual((rc, rec["status"]), (0, "ok"), rec)
+        git("commit", "-q", "--allow-empty", "-m", "2", cwd=outer)
+        rc, rec = self.run_launch("claude", extra=["--interrogate"], cwd=outer)
         self.assertEqual((rc, rec["status"]), (0, "ok"), rec)
 
     def test_launch_leaves_no_bytecode_in_the_plugin(self):

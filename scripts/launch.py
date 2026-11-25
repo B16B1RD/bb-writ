@@ -1251,7 +1251,9 @@ def interrogated(cwd: Path) -> list:
                 if not (isinstance(e, dict) and e.get("interrogate") is True and e.get("status") == "ok" and isinstance(e.get("cwd"), str)):
                     continue
                 c = Path(e["cwd"])
-                if c == top or top in c.parents:
+                # head の無い記録（未 commit の変更があった・途中で HEAD が変わった）は周に数えない。作業ツリーの中に置いた別の
+                # worktree（.worktrees/ など）の記録は、その worktree の根が違うので数えない
+                if isinstance(e.get("head"), str) and (c == top or top in c.parents) and (c == top or worktree_top(c) == top):
                     found.append(e)
     except OSError:
         pass
@@ -1279,7 +1281,9 @@ def unrevisited(cwd: Path) -> str:
     指摘の箇所だけを直して次の周に出し、直しの隣の抜けと直しが持ち込んだ矛盾が周ごとに出て、周が収束しなかった（2026-11）。
     守らない範囲: 欄の中身の真偽と、書き足したのがどの指摘の見直しかは見ない。作業の記録が無い場所（claim していない）と、
     未 commit の変更がある作業場所（審査役の記録の head が無く、周に数えない）は見ない。前の審査役は ok で返ったものだけを数える
-    （not-run と記録の読めない行は数えない）。"""
+    （not-run と記録の読めない行は数えない）。周ごとに新しい作業場所を --cwd にすると掛からない。作業の記録は --cwd から上へ
+    たどるので、根を --cwd にして下の階層で claim した記録は見ない。同じ場所を別の仕事に使い回すと、前の仕事の審査役も数える
+    （task start の作業場所は毎回新しい）。"""
     prior = interrogated(cwd)
     now = clean_head(cwd)
     if not prior or now is None or any(e.get("head") == now for e in prior):
@@ -1294,7 +1298,8 @@ def unrevisited(cwd: Path) -> str:
                 f"指摘ごとに同じ性質の箇所・直しが前提を変えた箇所・変えた節の全体の矛盾を探した方法と結果を書く（欄の行が無ければ雛形の行を足す。interrogate の 5）")
     if h == prior[-1].get("revisit"):
         return (f"作業の記録 {note} の「{name}」の欄が、前の審査役を立てたときから変わっていない。前の周の指摘の直しについて、"
-                f"同じ性質の箇所・直しが前提を変えた箇所・変えた節の全体の矛盾を探した方法と結果を書き足す（interrogate の 5）")
+                f"同じ性質の箇所・直しが前提を変えた箇所・変えた節の全体の矛盾を探した方法と結果を書き足す（直しが無く、rebase・amend だけで"
+                f" HEAD が変わったなら、そう 1 行書き足す。interrogate の 5）")
     return ""
 
 
@@ -1800,6 +1805,7 @@ def main() -> int:
         a.session, a.grok_home = prev["session"], prev.get("grok_home") and Path(prev["grok_home"])
         a.interrogate = prev.get("interrogate") is True
         a.audit = prev.get("audit") is True
+        a.revisit = prev.get("revisit") if isinstance(prev.get("revisit"), str) else None  # 続きの記録にも、次の周の関門が比べる印を残す
         a.role = prev.get("role") if prev.get("role") in CHOICES else None
         # 手で書き換えた記録の role が list・dict だと TypeError で止まる（launcher の書いた記録は文字列。守らない）
         a.codex_turns, a.prev_head, a.scratch = prev.get("codex_turns") or 0, prev.get("head"), prev.get("scratch")
@@ -2165,6 +2171,8 @@ def main() -> int:
                            "。監査役の判定は差し戻し（deliver: no。push・pr の関門に数えない）。直して監査役を立て直すときは、前の監査の項目と、"
                            "前の監査の commit から HEAD までの差分だけを判定させる（手順の文書の文の照合だけは、毎回、変えた文書の全体）")
                           if a.audit else
+                          "。直した後、次の審査役の前に「直しの見直し」の欄へ、同じ性質の箇所・直しが前提を変えた箇所・変えた節の全体の矛盾を"
+                          "探した方法と結果を書き足す（interrogate の 5）"
                           "。監査役（--audit）は、扱いを書き、直しを commit し終えて HEAD を動かさないと決めてから立てる"
                           "（審査役と同じコマンドで続けて立てない）")
                        + "（`playbook-verify` の「返す前の判定」）")
