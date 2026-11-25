@@ -583,30 +583,37 @@ class TestParallel(unittest.TestCase):
 
     def test_task_resume_keeps_a_registered_worktree_with_a_cleanup_mark_and_its_uncommitted_changes(self):
         """task resume が残りを消すのは、Git の登録が消えたときだけ。片付けの途中の記録があっても、登録が残る作業場所（片付けが記録を
-        書いた直後に止められた形）は消さず、ふつうの再開として担当を返し、未 commit の変更・追跡外のファイル・ブランチ・登録を残す。"""
-        a = self.start()
-        head = self.change(a, 'a')
-        self.integrate(a, self.git(self.repo, 'rev-parse', 'main'), head)  # 照合は通る（保存先に入り、ブランチは記録の commit のまま）
-        reg = next(Path(self.tmp.name, 'state').rglob(a['task'] + '.json'))
-        reg.write_text(json.dumps({**json.loads(reg.read_text()), 'cleanup': {'saved': 'refs/heads/main', 'commit': head}}))
-        self.w('release', '--dir', a['dir'], '--token', a['token'])
-        d = Path(a['dir'])
-        (d / 'a').write_text('書き換えた\n')
-        (d / 'untracked').write_text('追跡外\n')
-        self.assertTrue(self.registered(a))
-        self.assertIn('cleanup', self.w('task', 'list', '--dir', self.repo)['tasks'][0])
-        p = subprocess.run([sys.executable, '-B', str(WORK), 'task', 'resume', '--dir', str(self.repo), '--task', a['task'], '--holder', 'x'],
-                           env=self.env, capture_output=True, text=True)
-        # 消えたものを先に見る（終了コードより先に。消した後で別の理由で失敗しても、消したことを失敗の理由に出す）
-        self.assertTrue((d / 'a').exists() and (d / 'untracked').exists(), '登録の残る作業場所の中身を消した: ' + p.stdout + p.stderr)
-        self.assertEqual((d / 'a').read_text(), '書き換えた\n')
-        self.assertEqual((d / 'untracked').read_text(), '追跡外\n')
-        self.assertTrue(self.is_worktree_of_task(a), '作業場所が Git の作業ツリーでなくなった')  # Git の登録もブランチも残る
-        self.assertEqual(self.git(self.repo, 'rev-parse', a['branch']), head)
-        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
-        got = json.loads(p.stdout)
-        self.assertNotIn('completed', got)  # ふつうの再開として担当を返す
-        self.assertTrue(got.get('token'), got)
+        書いた直後に止められた形）は消さず、ふつうの再開として担当を返し、未 commit の変更・追跡外のファイル・ブランチ・登録を残す。
+        登録が消えた残りの印（removal_stopped）の付いた場面は、ふつうには起きない（task cleanup がこの印を書くのは、登録が消えたのを
+        見たときだけ）が、印があっても、登録の残る作業場所を消さないことを守る。"""
+        for name, extra in (('a mark without removal_stopped', {}), ('a mark with removal_stopped', {'removal_stopped': True})):
+            with self.subTest(name):
+                a = self.start()
+                committed = 'with-mark' if extra else 'without-mark'
+                head = self.change(a, committed)
+                self.integrate(a, self.git(self.repo, 'rev-parse', 'main'), head)  # 照合は通る（保存先に入り、ブランチは記録の commit のまま）
+                reg = next(Path(self.tmp.name, 'state').rglob(a['task'] + '.json'))
+                mark = {'saved': 'refs/heads/main', 'commit': head, **extra}
+                reg.write_text(json.dumps({**json.loads(reg.read_text()), 'cleanup': mark}))
+                self.w('release', '--dir', a['dir'], '--token', a['token'])
+                d = Path(a['dir'])
+                (d / committed).write_text('書き換えた\n')
+                (d / 'untracked').write_text('追跡外\n')
+                self.assertTrue(self.registered(a))
+                record = next(t for t in self.w('task', 'list', '--dir', self.repo)['tasks'] if t['task'] == a['task'])
+                self.assertEqual(record['cleanup'], mark)
+                p = subprocess.run([sys.executable, '-B', str(WORK), 'task', 'resume', '--dir', str(self.repo), '--task', a['task'], '--holder', 'x'],
+                                   env=self.env, capture_output=True, text=True)
+                # 消えたものを先に見る（終了コードより先に。消した後で別の理由で失敗しても、消したことを失敗の理由に出す）
+                self.assertTrue((d / committed).exists() and (d / 'untracked').exists(), '登録の残る作業場所の中身を消した: ' + p.stdout + p.stderr)
+                self.assertEqual((d / committed).read_text(), '書き換えた\n')
+                self.assertEqual((d / 'untracked').read_text(), '追跡外\n')
+                self.assertTrue(self.is_worktree_of_task(a), '作業場所が Git の作業ツリーでなくなった')  # Git の登録もブランチも残る
+                self.assertEqual(self.git(self.repo, 'rev-parse', a['branch']), head)
+                self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+                got = json.loads(p.stdout)
+                self.assertNotIn('completed', got)  # ふつうの再開として担当を返す
+                self.assertTrue(got.get('token'), got)
 
     def test_task_resume_keeps_an_unregistered_worktree_whose_cleanup_stopped_before_removing_anything(self):
         """片付けが git worktree remove を呼ぶ前に止まると（記録を書いた直後の Ctrl-C など）、片付けの途中の記録が残り、作業は続きうる。
