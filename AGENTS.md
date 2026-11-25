@@ -70,6 +70,9 @@ bb-writ は、CLI ハーネス（Claude Code・Codex。Grok Build も同じ SKIL
 | 担当の期限が切れても、誰も取り直していなければ、持ち主の操作を拒否しない | `scripts/work.py` の `held_lease`。`test_an_expired_lease_nobody_took_stays_with_its_holder`・`test_an_expired_lease_nobody_took_still_integrates_and_cleans_up` |
 | 期限が切れて 24 時間以内のタスクを、閉じるタスクとして `unclosed` に出さず、`--take-over` の無い `task resume` でも取らない（待っている持ち主の作業場所が消された。#32。その後も古い一覧から取れた） | `scripts/work.py` の `maybe_waiting`・`claim_at`。`test_a_task_whose_owner_may_still_be_waiting_is_not_offered_for_closing`・`test_a_stale_list_does_not_take_the_task_of_an_owner_who_came_back` |
 | `scripts/work.py` の op run・監督役・ロック・担当の約束を変えたら、`tests/test_oprun_model.py` のモデルを直して全探索を通し、照合した commit とハッシュを進める | `test_the_modeled_code_keeps_the_invariants_in_every_interleaving`・`test_each_reverted_fix_gives_a_counterexample`・`test_the_model_was_checked_against_the_current_code` |
+| 審査の後に commit だけが変わった（bot の作り直し・rebase・amend で中身が同じ）なら、審査をやり直さない（bot が PR のブランチを作り直し、同じ中身の審査をやり直した） | `scripts/work.py` の `tree_twin`。`test_a_review_carries_over_when_only_the_commits_are_rebuilt` |
+| 書く子の実行中に動いたリモート追跡の ref（`refs/remotes/`）を、子の失敗に数えない（指揮者の fetch で、git を動かしていない書く子が failed になった） | `scripts/launch.py` の `git_changes`。`test_write_child_may_commit_only_to_its_own_branch` |
+| 前例を写して値だけを進める変更は、成果物の検証役と条件 (5) の子を立てず、監査役に前例との照合を任せる。依頼の範囲の外で見つけたことは差分に入れずに返答に書き、範囲の外に足した文への指摘は削って閉じる（前例どおりの版の固定 1 件に、子 9 人と 62 分を使った） | 無い（`conduct`・`playbook-verify` の文だけ） |
 | この表の行は、短い規則（根拠の経緯は括弧で短く）と、強制するコード・試験の名前だけにする。実測の記録・確かめた回数・守らない範囲の細部は書かず、守らない範囲はそのコードの docstring と試験に置く（1 行が 8,000 字を超え、実装を変えるたびに文の照合の直しが続いた） | `test_rules_table_rows_stay_short`・`test_tests_named_in_the_rules_table_exist`（行の長さと、名指しした試験の実在だけを見る。実測を書いたかは見ない） |
 
 ## commit
