@@ -489,9 +489,10 @@ class TestParallel(unittest.TestCase):
                 self.w('task', 'cleanup', '--dir', a['dir'], '--token', a['token'], '--saved', 'main')
                 self.assert_closed(a)
 
-    def stopped_cleanup(self, mode=0o555, name='src'):
-        """片付けの前の確かめの後に、作業場所の項目を消せなくなった片付け。PATH の先頭の偽の git が、git worktree remove の直前に、
-        作業場所の追跡するディレクトリ name の権限を mode にしてから、本物（PATH を変える前に引いた絶対パス）を呼ぶ。
+    def stopped_cleanup(self, mode=0o555, name='src', prepare=lambda d: None):
+        """片付けの前の確かめの後に、作業場所の項目を消せなくなった片付け。prepare(作業場所) が足したものも一緒に追跡して統合する。
+        PATH の先頭の偽の git が、git worktree remove の直前に、作業場所の追跡するディレクトリ name の権限を mode にしてから、
+        本物（PATH を変える前に引いた絶対パス）を呼ぶ。
         git は作業場所を途中まで消して止まり、Git の登録を消す。止まった task cleanup の出力と、タスク・保存した commit を返す。"""
         self.skip_unless_permissions_hold()
         a = self.start()
@@ -501,6 +502,7 @@ class TestParallel(unittest.TestCase):
         except OSError:
             self.skipTest('このファイルシステムは UTF-8 でない名前を作らせない')
         (d / name / 'f').write_text('f\n')
+        prepare(d)
         self.git(d, 'add', '.')
         self.git(d, 'commit', '-qm', '追跡するディレクトリ')
         head = self.git(d, 'rev-parse', 'HEAD')
@@ -612,6 +614,28 @@ class TestParallel(unittest.TestCase):
         r = self.w('task', 'resume', '--dir', self.repo, '--task', a['task'], '--holder', 'x', code=6)
         self.assertEqual(r['reason'], '作業場所の作成が未完了か、登録と実物が異なる。記録と git worktree list を照合する')
         self.assertEqual((d / 'data.txt').read_text(), 'important\n')
+
+    def test_task_resume_does_not_follow_a_link_in_what_a_stopped_cleanup_left(self):
+        """task resume は、片付けの途中の残りを消すとき、残りの中の symlink の先（作業場所の外）へ入らず、symlink だけを消す。
+        外のディレクトリとその中のファイルは、中身ごと残る。"""
+        outside = Path(self.tmp.name) / 'outside'  # 作業場所の外
+        outside.mkdir()
+        (outside / 'data.txt').write_text('important\n')
+        a, _, _ = self.stopped_cleanup(prepare=lambda d: (d / 'link').symlink_to(outside))
+        d = Path(a['dir'])
+        if not os.path.lexists(d / 'link'):  # git が止まる前に消していたら（消す順は git と環境しだい）、残りに置き直す
+            (d / 'link').symlink_to(outside)
+        self.assertTrue(os.path.islink(d / 'link'), '残りの中に symlink が無い（作りたい状態にならなかった）')
+        (d / 'src').chmod(0o755)
+        p = subprocess.run([sys.executable, '-B', str(WORK), 'task', 'resume', '--dir', str(self.repo), '--task', a['task'], '--holder', 'x'],
+                           env=self.env, capture_output=True, text=True)
+        # 消えたものを先に見る（終了コードより先に。外を消した後で別の理由で失敗しても、外を消したことを失敗の理由に出す）
+        self.assertTrue((outside / 'data.txt').exists(), '残りの中の symlink の先（作業場所の外）を消した: ' + p.stdout + p.stderr)
+        self.assertEqual((outside / 'data.txt').read_text(), 'important\n')
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        got = json.loads(p.stdout)
+        self.assertTrue(got.get('completed'), got)
+        self.assertFalse(os.path.lexists(d), '残りが消えていない')
 
     def assert_resume_keeps_what_a_stopped_cleanup_left(self, change):
         """片付けの途中で、Git の登録が消えて残りが在るタスクに change(タスク, 片付けの commit) を当て、task resume が change の返す
