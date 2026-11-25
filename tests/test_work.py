@@ -1256,6 +1256,28 @@ class TestReviewedCommit(unittest.TestCase):
         self.assertEqual(rc, 2)
         self.assertIn("祖先でない", r["reason"])
 
+    def test_a_review_carries_over_when_only_the_commits_are_rebuilt(self):
+        # 審査の後に bot が PR のブランチを作り直し（ツリーは同じ）、祖先の照合が切れて、同じ中身の審査をやり直した
+        tok = self.claim()
+        self.commit("docs.md")
+        old = self.head()
+        self.git("commit", "-q", "--amend", "-m", "rebuilt")  # 中身は同じで、commit だけが変わる
+        self.assertNotEqual(self.head(), old)
+        self.assertEqual(self.publish(tok, "push:feat@1", "--reviewed", old)[0], 0)
+        self.assertEqual(self.publish(tok, "push:feat@2", "--reviewed", old, "--delta", "低:文だけ")[0], 0)  # 差分の無い --delta も通る
+        self.commit("after.md")  # 作り直した commit の上の、文だけの直し
+        self.assertEqual(self.publish(tok, "push:feat@3", "--reviewed", old, "--delta", "低:文だけ")[0], 0)
+        self.git("reset", "-q", "--hard", "HEAD~2")
+        (self.wt / "docs.md").write_text("other", encoding="utf-8")  # 中身の違う作り直しは引き継がない
+        self.git("add", "docs.md")
+        self.git("commit", "-q", "-m", "docs")
+        rc, r = self.publish(tok, "push:feat@4", "--reviewed", old, "--delta", "低:文だけ")
+        self.assertEqual(rc, 6)
+        self.assertIn("祖先でない", r["reason"])
+        rc, r = self.publish(tok, "push:feat@5", "--reviewed", old)
+        self.assertEqual(rc, 6)
+        self.assertIn("審査の後に変えた", r["reason"])
+
     def test_no_review_needs_a_reason_and_is_recorded(self):
         tok = self.claim()
         for key in ("push:feat@empty", "pr:feat-empty"):
@@ -2184,7 +2206,9 @@ class TestOpRun(unittest.TestCase):
         """op run の照合は op begin と同じ。拒否の理由を手で選んで試すと、試していない拒否の後だけコマンドを走らせる退行が通った。"""
         tok = self.claim()
         old = self.head()
-        subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "after"],
+        (self.wt / "after.txt").write_text("after", encoding="utf-8")  # 中身を変える（中身が同じ commit の審査は引き継ぐので、拒否にならない）
+        subprocess.run(["git", "add", "after.txt"], env=self.env, cwd=self.wt, check=True)
+        subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "after"],
                        env=self.env, cwd=self.wt, check=True)
         h = self.head()
         other = Path(self.tmp.name).resolve() / "personal" / "other"

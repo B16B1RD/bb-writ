@@ -321,6 +321,22 @@ def is_ancestor(older: str, newer: str, d: Path) -> tuple:
     return rc, err
 
 
+def tree_twin(commit: str, head: str, d: Path):
+    """commit と同じツリー（中身）を持つ、HEAD から近い順で最初の祖先（HEAD を含む）。無ければ None。
+    審査の後に、bot がブランチを作り直す・rebase・amend で commit だけが変わった（中身は審査したものと同じ）ときに、審査を中身で引き継ぐ
+    （Dependabot が PR のブランチを作り直し、ツリーの同じ履歴で審査をやり直した）。基点が変わってツリーが変わったものは引き継がない。
+    見るのは HEAD から 1,000 個まで。is_ancestor と同じく、置き換え・grafts・commit-graph を外す。"""
+    env = {**os.environ, "GIT_NO_REPLACE_OBJECTS": "1", "GIT_GRAFT_FILE": os.devnull}
+    rc, tree, _ = sh(["git", "rev-parse", "--verify", "-q", commit + "^{tree}"], d, env=env)
+    if rc or not tree:
+        return None
+    rc, out, _ = sh(["git", "-c", "core.commitGraph=false", "-c", "advice.graftFileDeprecated=false",
+                     "log", "--format=%H %T", "-n", "1000", head], d, env=env)
+    if rc:
+        return None
+    return next((c for c, t in (line.split() for line in out.splitlines() if " " in line) if t == tree), None)
+
+
 def review_rounds(d: Path, not_run: bool = False) -> int:
     """審査の周の数。委任の記録のうち、この作業場所（その下の階層を含む）を --cwd にして ok で返った読み取り専用の子の head（launcher が書く完全な ID）の、
     互いに異なるものの数（タスクの基点そのものの審査は除く）。審査役も条件 (5) の確かめ役も数え、監査役（--audit）は数えない。amend・rebase で前の周の commit が
@@ -1332,8 +1348,11 @@ def op_step(a, r: Path, live, now: float, action: str):
                             + changed_since_publish(r, a.dir, head)}, 2)
             if reviewed == head and a.delta is not None:
                 return ({"ok": False, "reason": "--delta は、審査を通した commit が HEAD と違うときの、その後の差分の宣言。HEAD を審査したなら付けない"}, 2)
-            if reviewed != head:
-                rc, files, err = sh(["git", "diff", "--name-only", f"{reviewed}..{head}"], a.dir)
+            # 審査の後に commit だけが変わった（bot の作り直し・rebase・amend で、中身は同じ）なら、同じツリーの祖先を審査の位置として照らす
+            # （HEAD と中身が同じなら --delta は要らない。付けたなら、差分の無い --delta として照らす）
+            anchor = (tree_twin(reviewed, head, a.dir) or reviewed) if reviewed != head else head
+            if reviewed != head and (anchor != head or a.delta is not None):
+                rc, files, err = sh(["git", "diff", "--name-only", f"{anchor}..{head}"], a.dir)
                 after = (", ".join(files.splitlines()) or "なし") if rc == 0 else f"（差分を出せない: {err}）"
                 if a.delta is None:
                     return ({"ok": False, "reason": f"審査を通した commit {reviewed} と作業場所の HEAD {head} が違う。"
@@ -1346,13 +1365,13 @@ def op_step(a, r: Path, live, now: float, action: str):
                 if d.group(1) != "低":
                     return ({"ok": False, "reason": f"審査の後の差分の危険度が{d.group(1)}なら、HEAD で審査を通してから出す（--reviewed に HEAD の commit）。"
                                 f"審査の後に変えたファイル: {after}"}, 2)
-                rc, err = is_ancestor(reviewed, head, a.dir)
+                rc, err = is_ancestor(anchor, head, a.dir)
                 if rc:
                     return ({"ok": False, "reason": f"審査を通した commit {reviewed} は HEAD {head} の祖先でない"
                                 + ("（rebase・amend などで履歴から外れたか、確かめられない" + (f": {err}" if err else "") + "）" if rc == 1 else f"（確かめられない: {err}）")
                                 + "。HEAD で審査を通してから出す"}, 6)
                 base = task_place(Path(a.dir))[1]
-                if base is not None and (reviewed == base or is_ancestor(base, reviewed, a.dir)[0] != 0):
+                if base is not None and (anchor == base or is_ancestor(base, anchor, a.dir)[0] != 0):
                     return ({"ok": False, "reason": f"審査を通した commit {reviewed} は、このタスクの基点 {base} より後と確かめられない"
                                 "（基点か、その前か、別の系統）。基点の審査はタスクの変更を見ていないので、HEAD で審査を通してから出す"}, 6)
                 delta = "低: " + d.group(2).strip()
