@@ -1230,10 +1230,10 @@ class TestParallel(unittest.TestCase):
                     self.assertEqual(mark.read_text(), '', '片付けの間に hook が走った')
                     self.assertEqual(d.exists(), changed)
 
-    def stat_matching_rewrite(self, name, before, flags, tag):
+    def stat_matching_rewrite(self, name, before, flags, tag, P=None):
         """場面ごとの新しい元の checkout（before の後に core.trustctime=false）で task start し、作業場所に追跡ファイル n を、更新時刻が
-        過去の秒 P のまま add・commit・統合して、flags を付け（flag_of が tag になる）、同じ大きさの別の中身に書き換えて、更新時刻を P に
-        戻す（stat が index の覚えた値と同じまま、中身だけが違う）。タスクと作業場所と P を返す。"""
+        P（ナノ秒。既定は 1000 秒前の秒の頭）のまま add・commit・統合して、flags を付け（flag_of が tag になる）、同じ大きさの別の中身に
+        書き換えて、更新時刻を P に戻す（stat が index の覚えた値と同じまま、中身だけが違う）。タスクと作業場所と P を返す。"""
         def prepare(r):
             if before:
                 before(r)
@@ -1242,7 +1242,8 @@ class TestParallel(unittest.TestCase):
         a = self.start()
         d = Path(a['dir'])
         at = d / 'n'
-        P = (int(time.time()) - 1000) * 10**9
+        if P is None:
+            P = (int(time.time()) - 1000) * 10**9
         at.write_text('n\n')
         os.utime(at, ns=(P, P))  # add の前に（index が更新時刻 P を覚える）
         self.git(d, 'add', 'n')
@@ -1259,6 +1260,7 @@ class TestParallel(unittest.TestCase):
         """フラグが付いている間、git はその項目の stat の記録を更新しないので、記録は当てにならない。フラグ付きのファイルを、stat が index の
         覚えた値と同じまま（同じ更新時刻・同じ大きさ）中身だけ書き換えると、フラグを外して stat で見ても変更なしに見え、片付けが作業場所ごと
         消した。素の git status が index を書き直した後（index の更新時刻だけが進み、同じ秒の項目を中身で比べる git の守りが外れる）も同じ。
+        index が覚えた更新時刻の秒が 0 の項目（更新時刻 0 秒のファイルを add したもの）でも同じ。
         片付けは、フラグの付いた実物のあるファイルを、stat を信じずに中身で比べて拒む。core.trustctime=false は、試験を時計に依らなく
         するための設定（ctime は書き換えのたびに「いま」になり、戻せない）。更新時刻は待たずに、過去の秒に置いて作る。"""
         def config(k, v):
@@ -1278,6 +1280,15 @@ class TestParallel(unittest.TestCase):
                     self.assertEqual((os.stat(d / 'n').st_mtime_ns, os.stat(d / 'n').st_size), (P, len('n\n')),
                                      'ファイルの更新時刻か大きさが、index の覚えた値と違う')
                     self.assert_cleanup_keeps_the_hidden_change(a, 'n', 'n')  # index のバイト列は、片付けの直前と直後で比べる
+        for form, before, flags, tag in (
+                ('a skip-worktree file', None, ['--skip-worktree'], 'S'),
+                ('an assume-unchanged file', None, ['--assume-unchanged'], 'h'),
+                ('a tracked file with core.ignoreStat on', config('core.ignoreStat', 'true'), [], 'h')):
+            with self.subTest(f'{form} whose modification time the index recorded as 0 seconds, then nothing'):
+                a, d, P = self.stat_matching_rewrite(f"repo-stat-zero-{form.replace(' ', '-')}", before, flags, tag, P=0)
+                self.assertEqual((os.stat(d / 'n').st_mtime_ns, os.stat(d / 'n').st_size), (0, len('n\n')),
+                                 'ファイルの更新時刻か大きさが、index の覚えた値と違う')
+                self.assert_cleanup_keeps_the_hidden_change(a, 'n', 'n')
 
     def test_cleanup_still_ignores_a_change_git_does_not_see_in_a_file_with_no_flag(self):
         """フラグの無いファイルは、前と同じく、片付けの見方の status だけで判定する（守らない範囲: stat が index の覚えた値と同じまま中身だけ
@@ -1300,6 +1311,62 @@ class TestParallel(unittest.TestCase):
         self.assertEqual(self.handbook_status(d), '')
         self.w('task', 'cleanup', '--dir', a['dir'], '--token', a['token'], '--saved', 'main')
         self.assertFalse(d.exists())
+
+    def test_cleanup_runs_no_filter_on_files_with_no_flag_while_it_checks_flagged_files(self):
+        """片付けがフラグの付いたファイルを中身で比べる間、フラグの無い追跡ファイルの中身の比べ（clean フィルタ）を起こさない（フラグ付きの
+        ファイルが 1 つあるだけで、フラグの無いファイルの全部にフィルタが走り、その required のフィルタが失敗すると片付けが拒まれた）。
+        フラグ付きのファイルは、フィルタを通した中身で比べる。走ったファイルの名前は、フィルタが作業場所の外の記録に書く。index と同じ秒の
+        項目は素の git status でも中身を比べるので、.bin は add の前に更新時刻を過去の秒に置く（待たずに毎回同じ結果にする）。"""
+        self.fresh_repo('repo-filter-runs')
+        a = self.start()
+        d = Path(a['dir'])
+        log = Path(self.tmp.name) / 'filter-ran'
+        self.git(self.repo, 'config', 'filter.note.clean', f"""sh -c 'echo "$1" >> "$0"; cat' {shlex.quote(str(log))} %f""")
+        self.git(self.repo, 'config', 'filter.note.smudge', 'cat')
+        (d / '.gitattributes').write_text('*.bin filter=note\n')
+        P = (int(time.time()) - 1000) * 10**9
+        names = ('u0.bin', 'u1.bin', 'u2.bin', 'a.bin')
+        for name in names:
+            (d / name).write_text(name + '\n')
+            os.utime(d / name, ns=(P, P))
+        self.git(d, 'add', '.gitattributes', *names)
+        self.git(d, 'commit', '-qm', 'フィルタを通すファイル')
+        self.integrate(a, self.git(self.repo, 'rev-parse', 'main'), self.git(d, 'rev-parse', 'HEAD'))
+        self.git(d, 'update-index', '--skip-worktree', 'a.bin')
+        ran = lambda: set(log.read_text().split()) if log.exists() else set()  # noqa: E731
+        self.assertTrue(ran() >= set(names), f'add で、フィルタが .bin に走っていない（試験の準備の失敗）: {sorted(ran())}')
+        log.write_text('')
+        self.assertEqual(self.handbook_status(d), '')
+        self.assertEqual(ran(), set(), '手引きの status の見方で、フィルタが走った（試験の準備の失敗）')
+        self.w('task', 'cleanup', '--dir', a['dir'], '--token', a['token'], '--saved', 'main')
+        self.assertFalse(d.exists())
+        self.assertEqual(ran(), {'a.bin'}, f'片付けの間にフィルタが走ったファイル: {sorted(ran())}')
+
+    def test_cleanup_keeps_a_flagged_file_whose_only_change_is_its_line_endings(self):
+        """core.autocrlf=input で、フラグ付きのファイルの改行だけを LF から CRLF に書き換えた作業場所は、拒む。この書き換えは git add しても
+        index が変わらないが、大きさが変わるので、フラグの無いファイルなら git status は変更と出す。フラグ付きのファイルも同じに扱う
+        （stat の記録の無い項目として中身だけで比べると、index と同じ中身になって見逃す）。"""
+        def config(*pairs):
+            return lambda r: [self.git(r, 'config', k, v) for k, v in pairs]
+        crlf = ('core.autocrlf', 'input')
+        for form, before, flags, tag in (
+                ('a skip-worktree file', config(crlf), ['--skip-worktree'], 'S'),
+                ('an assume-unchanged file', config(crlf), ['--assume-unchanged'], 'h'),
+                ('a file with both flags', config(crlf), ['--skip-worktree', '--assume-unchanged'], 's'),
+                ('a tracked file with core.ignoreStat on', config(crlf, ('core.ignoreStat', 'true')), [], 'h')):
+            with self.subTest(form):
+                self.fresh_repo('repo-crlf-' + form.replace(' ', '-'), before)
+                a = self.start()
+                d = Path(a['dir'])
+                (d / 'n').write_bytes(b'n\n')
+                self.git(d, 'add', 'n')
+                self.git(d, 'commit', '-qm', '追跡するファイル')
+                self.integrate(a, self.git(self.repo, 'rev-parse', 'main'), self.git(d, 'rev-parse', 'HEAD'))
+                for f in flags:
+                    self.git(d, 'update-index', f, 'n')
+                self.assertEqual(self.flag_of(d, 'n'), tag)
+                (d / 'n').write_bytes(b'n\r\n')
+                self.assert_cleanup_keeps_the_hidden_change(a, 'n', 'n')  # 手引きの status の見方で何も出ないことも確かめる
 
     def test_integrate_passes_with_a_change_a_flag_hides_in_the_checkout_it_lands_in(self):
         """統合先の checkout（元の checkout）に、フラグで隠した変更があっても、統合はデータを消さないので通り、隠した変更とフラグが残る
