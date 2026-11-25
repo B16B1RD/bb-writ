@@ -42,8 +42,9 @@ renew が 3 で拒否された。直し（d7cb680）は、期限が切れて MAX
 - claim（作業場所を名指しして取る。書く子と、子の後の親が使い、期限の切れた担当を取る）で、閉じるタスクを取ること（手引きの片付けは
   task resume を使う）。
 - 未保存の変更・終わっていない操作・書き込めないディレクトリによる task cleanup の拒否（消し始める前に拒み、何も変えない）、統合先が動くこと、読めない担当の記録（unreadable）、統合の記録。
-- 持ち主が自分のタスクを task resume で取り直すこと、途中で止まった task cleanup（片付けの途中の記録が残り、task resume が
-  担当を照らさずに仕上げる。task cleanup が、Git の登録が消えた作業場所の残りだと記録に書いていれば、task resume が残りを消す）。
+- 持ち主が自分のタスクを task resume で取り直すこと、途中で止まった task cleanup（片付けの途中の記録が残り、作業場所が無いか、
+  task cleanup が Git の登録が消えた作業場所の残りだと記録に書いていれば、task resume が担当を照らさずに仕上げる。後者は、いまも
+  登録が無ければ残りを消してから。Git の登録が残る作業場所は、ふつうの再開になる）。
 
 実物との突き合わせ（2026-11-24、本物の git と work.py）: モデルの分岐は、tests/test_parallel.py の次の試験が実物で通る。一覧は、手放した・
 切れて 24 時間を過ぎたタスクを出し、切れて間もないタスクを出さない（test_a_task_whose_owner_may_still_be_waiting_is_not_offered_for_closing・
