@@ -1108,7 +1108,7 @@ class TestLaunch(unittest.TestCase):
         rc, rec = self.run_launch("claude", extra=["--interrogate"], cwd=other)  # 別の作業場所は数えない
         self.assertEqual((rc, rec["status"]), (0, "ok"), rec)
         (self.cwd / "sub").mkdir()
-        (self.cwd / "sub" / "keep.txt").write_text("x\n")
+        shutil.copy(self.cwd / "a.txt", self.cwd / "sub" / "a.txt")  # 偽の子の報告が証拠に指すファイル
         git("add", "sub")
         git("commit", "-q", "-m", "sub")
         p = self.run_launch("claude", extra=["--interrogate"], cwd=self.cwd / "sub", raw=True)  # 下の階層を --cwd にしても抜けない
@@ -1129,6 +1129,27 @@ class TestLaunch(unittest.TestCase):
         self.assertIn("変わっていない", p.stderr)
         note.write_text(note.read_text(encoding="utf-8").replace("2 か所を直した", "2 か所を直した。3 周目の直しの隣も探した"), encoding="utf-8")
         rc, rec = self.run_launch("claude", extra=["--interrogate"])
+        self.assertEqual((rc, rec["status"]), (0, "ok"), rec)
+        git("commit", "-q", "--allow-empty", "-m", "4")  # 下の階層を --cwd にした審査役も、同じ作業ツリーの周に数える
+        note.write_text(note.read_text(encoding="utf-8").replace("隣も探した", "隣も探した。4 周目も探した"), encoding="utf-8")
+        rc, rec = self.run_launch("claude", extra=["--interrogate"], cwd=self.cwd / "sub")
+        self.assertEqual((rc, rec["status"]), (0, "ok"), rec)
+        git("commit", "-q", "--allow-empty", "-m", "5")
+        p = self.run_launch("claude", extra=["--interrogate"], raw=True)
+        self.assertEqual(p.returncode, 2, p.stdout)
+        self.assertIn("変わっていない", p.stderr)
+        parent = Path(self.tmp.name) / "parent"  # 作業ツリーの外（親のディレクトリ）の審査役は、その下の別のリポジトリを止めない
+        (parent / "repo").mkdir(parents=True)
+        shutil.copy(self.cwd / "a.txt", parent / "a.txt")
+        rc, rec = self.run_launch("claude", extra=["--interrogate"], cwd=parent)
+        self.assertEqual((rc, rec["status"]), (0, "ok"), rec)
+        shutil.copy(self.cwd / "a.txt", parent / "repo" / "a.txt")
+        git("init", "-q", cwd=parent / "repo")
+        git("add", "a.txt", cwd=parent / "repo")
+        git("commit", "-q", "-m", "1", cwd=parent / "repo")
+        subprocess.run([sys.executable, "-B", str(ROOT / "scripts" / "work.py"), "claim", "--dir", str(parent / "repo"), "--holder", "t"],
+                       env=self.launch_env("good"), capture_output=True, text=True, check=True)
+        rc, rec = self.run_launch("claude", extra=["--interrogate"], cwd=parent / "repo")
         self.assertEqual((rc, rec["status"]), (0, "ok"), rec)
 
     def test_launch_leaves_no_bytecode_in_the_plugin(self):

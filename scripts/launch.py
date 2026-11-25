@@ -1225,9 +1225,22 @@ def fix_prompt(problems: list[str], cwd: Path) -> str:
             "存在しないファイルを証拠にしない（無いことが分かったなら、それを what に書き、確かめたコマンドを where に書く）。\n")
 
 
+def worktree_top(cwd: Path):
+    """cwd を含む Git の作業ツリーの根（無ければ None）。子が書けた設定の命令を走らせない形で見る。"""
+    try:
+        g = subprocess.run([*QUIET_GIT, "rev-parse", "--show-toplevel"], cwd=cwd, capture_output=True, text=True, timeout=GIT_TIMEOUT)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return Path(g.stdout.strip()).resolve() if g.returncode == 0 and g.stdout.strip() else None
+
+
 def interrogated(cwd: Path) -> list:
-    """cwd か、その上・下の道筋を --cwd にして --interrogate で立て、ok で返った審査役の記録（記録の順）。読めない行は数えない。"""
+    """cwd と同じ Git の作業ツリーの中（根とその下の道筋）を --cwd にして --interrogate で立て、ok で返った審査役の記録（記録の順）。
+    作業ツリーの外（親のディレクトリなど）の記録と、読めない行は数えない。"""
     found = []
+    top = worktree_top(cwd)
+    if top is None:
+        return found
     try:
         with open(state_dir() / "delegations.jsonl", encoding="utf-8", errors="replace") as f:
             for line in f:
@@ -1238,7 +1251,7 @@ def interrogated(cwd: Path) -> list:
                 if not (isinstance(e, dict) and e.get("interrogate") is True and e.get("status") == "ok" and isinstance(e.get("cwd"), str)):
                     continue
                 c = Path(e["cwd"])
-                if c == cwd or c in cwd.parents or cwd in c.parents:
+                if c == top or top in c.parents:
                     found.append(e)
     except OSError:
         pass
@@ -1248,8 +1261,9 @@ def interrogated(cwd: Path) -> list:
 def revisit_of(cwd: Path) -> tuple:
     """(作業の記録の「直しの見直し」の欄の中身の SHA-256 の先頭 16 桁（空なら ""）, 記録の道筋)。記録は cwd から上へたどって最初に在るもの。
     無ければ (None, 道筋)。作らない。"""
-    notes = [record_at(d) / "note.md" for d in (cwd, *cwd.parents)]
-    note = next((n for n in notes if n.is_file()), notes[0])  # 下の階層を --cwd にしても、作業場所の記録を見る
+    top = worktree_top(cwd) or cwd
+    notes = [record_at(d) / "note.md" for d in (cwd, *(p for p in cwd.parents if p == top or top in p.parents))]
+    note = next((n for n in notes if n.is_file()), notes[0])  # 下の階層を --cwd にしても、作業ツリーの根までの記録を見る
     try:
         body = note.read_text(encoding="utf-8")
     except OSError:
