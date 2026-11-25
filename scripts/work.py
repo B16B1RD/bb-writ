@@ -28,12 +28,14 @@
                      unclosed に並べる（切れて 24 時間以内のものは、持ち主が子を待っているだけかもしれないので並べない。commits は基点からの commit の数、landed は変更が統合先に入っているか）。片付けを呼ばれなかったタスクを見せるだけで、消さない
   work.py task resume --dir <checkout> --task <識別子> --holder <誰か> [--take-over] → 作業場所を保持して担当を取得。期限が切れて
                      24 時間以内の担当は、--take-over（利用者にそのタスクの続きか、捨てることを頼まれたとき）が無ければ拒否（3）。
-                     片付けの途中で止まったタスクは、保存先を照合し直してから片付けを仕上げる（completed: true）。Git の登録が消えて作業場所の
-                     残りが在れば、照合の後に残りを消す（止まった後に残りへ書かれたものも、確かめずに消す）。消せなければ、その道筋を出して拒否（6）
+                     片付けの途中で止まったタスクは、保存先を照合し直してから片付けを仕上げる（completed: true。前の担当が生きていても）。
+                     task cleanup が、Git の登録が消えた作業場所の残りだと記録に書いていれば、照合の後に残りを消す（止まった後に残りへ書かれた
+                     ものも、確かめずに消す）。消せなければ、最初に消せなかった項目の道筋を出して拒否（6）
   work.py integrate --dir <worktree> --token <t> --expected <統合先commit> --verified <検証済みcommit> → 排他・照合して fast-forward
   work.py task cleanup --dir <worktree> --token <t> --saved <別のブランチかタグ> → 変更が保存先に入っていれば片付け（squash・rebase の統合も可）。
                      項目を持つのに書き込めないディレクトリがあれば、消し始める前に、その道筋を出して拒否（6）。git worktree remove が
-                     作業場所を途中まで消して Git の登録だけを消したら、片付けの途中の記録を残して拒否し（6）、task resume で仕上げるよう案内する
+                     作業場所を途中まで消して Git の登録だけを消したら、片付けの途中の記録に、登録が消えた残りだと書いて拒否し（6）、task resume で
+                     仕上げるよう案内する
 
 task と integrate の照合拒否は終了コード 6、担当の拒否は 3、記録の置き場を権限で読み書きできなければ 2（担当の拒否と見分ける。#60）。記録（ops.jsonl）の行が読めないか形が違えば 1 で、何行目かを示す。
 統合のロックは期限では奪わず、子の Git にも渡す。
@@ -823,7 +825,8 @@ def unremovable_dir(d):
     （d そのものなら「.」）。無ければ None。git worktree remove は、作業場所を消し切れなくても Git の登録を消すので（戻す道具が無い。#77）、
     消し始める前に見る。空のディレクトリと読み取り専用のファイルは数えない（親に書ければ消せる）。
     権限のビットは読まず os.access で確かめる（持ち主が違うディレクトリも同じ条件で見える）。symlink の先へは入らない。
-    再帰しない（unopened_dir と同じ理由）。一覧できない・中へ入れないディレクトリは、先に unopened_dir が拒んでいる。
+    見るのは d の木の中だけ（d の親に書けず d そのものを消せない場合は見ない。そのときは git worktree remove が止まり、task resume で
+    仕上げる形になる）。再帰しない（unopened_dir と同じ理由）。一覧できない・中へ入れないディレクトリは、先に unopened_dir が拒んでいる。
     権限のほかの理由で消せないもの（変更できないファイル、消している間に書き足すプロセス）は見えない（task_command の cleanup の注釈）。"""
     stack = ['']
     while stack:
@@ -835,6 +838,23 @@ def unremovable_dir(d):
             return rel or '.'
         stack.extend(os.path.join(rel, e.name) for e in found if e.is_dir(follow_symlinks=False))
     return None
+
+
+class RemoveFailed(Exception):
+    """remove_tree が最初に消せなかった項目の道筋 path と、OS の誤り error。OSError にしない（OSError を上げると、3.12 からの
+    shutil.rmtree は外側の段でもう一度受け口を呼び、道筋が親のディレクトリに替わる）。"""
+
+    def __init__(self, path, error):
+        super().__init__(path, error)
+        self.path, self.error = path, error
+
+
+def remove_tree(d):
+    """d を消す（symlink の先へは入らない）。最初に消せなかった項目で止まり、RemoveFailed を上げる。受け口の引数は、
+    3.12 からは onexc（3 つ目は例外）、その前は onerror（3 つ目は sys.exc_info()）。どちらも 2 つ目が、その項目の道筋。"""
+    def failed(function, path, info):
+        raise RemoveFailed(path, info if isinstance(info, BaseException) else info[1])
+    shutil.rmtree(d, **({'onexc': failed} if sys.version_info >= (3, 12) else {'onerror': failed}))
 
 
 def clean(d, ignored=False, child=False):
@@ -936,7 +956,7 @@ def worktrees(repo):
 
 def unclosed_tasks(repo, rr, registry):
     """担当のいない（解放済みか、期限が切れて MAX_LEASE_MIN を過ぎた）タスクのうち、作業場所が残っているもの。期限が切れて間もない
-    タスクは、持ち主が子を待っているだけかもしれないので並べない（maybe_waiting）。作業場所は task cleanup だけが消すので、
+    タスクは、持ち主が子を待っているだけかもしれないので並べない（maybe_waiting）。作業場所は task cleanup と、片付けの途中で止まったタスクを仕上げる task resume だけが消すので、
     呼ばれなかったタスクは残り続ける。それを、次の task start と task list で見えるようにする。見るだけで、何も消さず、
     リポジトリにも状態の置き場にも何も書かない（統合の照合の object は一時の置き場に書かせ、記録の置き場は作らずに読む。
     一時の置き場は tempfile の決める場所で、TMPDIR を状態の置き場やリポジトリの中に向けた場合は、そこに書いて消す）。
@@ -1034,8 +1054,10 @@ def task_command(a):
                     not re.fullmatch('[0-9a-f]{40}|[0-9a-f]{64}', str(task.get('base'))):
                 raise ValueError('タスクの記録が task start の作った値と合わない。記録を照合する')
             cleanup = task.get('cleanup')
-            # task cleanup の git worktree remove が作業場所を途中まで消して止まり、Git の登録だけが消えた残り（#77）
-            leftover = bool(cleanup) and dest.exists() and not any(Path(w['worktree']).resolve() == dest.resolve() for w in worktrees(repo))
+            # task cleanup の git worktree remove が作業場所を途中まで消して止まり、Git の登録だけが消えた残り（#77）。task cleanup が
+            # そう見て記録に書いたもの（removal_stopped）だけ。git worktree remove を呼ぶ前に止まった片付けの印は、作業が続きうるので数えない
+            leftover = bool(cleanup) and cleanup.get('removal_stopped') is True and dest.exists() and not any(
+                Path(w['worktree']).resolve() == dest.resolve() for w in worktrees(repo))
             if cleanup and (leftover or not dest.exists()):
                 if not contained(repo, cleanup['commit'], cleanup['saved']):
                     raise ValueError(f"片付けの途中の保存先 {cleanup['saved']} に、このタスクの変更が入っていない。記録と差分を照合する")
@@ -1043,17 +1065,15 @@ def task_command(a):
                 if branch and branch != cleanup['commit']:
                     raise ValueError('片付けの途中の後にタスクのブランチが進んだ。記録と差分を照合する')
                 if leftover:
-                    # 消すと戻せないので、上の照合の後に消す。残りは、片付けの前に未保存の変更が無いと確かめたもの。止まった後に残りへ
-                    # 書かれたものは、確かめずに消す（git worktree remove が止まらなかったら消していたものと同じ扱い。守らない範囲）
+                    # 消すと戻せないので、上の照合の後に消す。removal_stopped の残りは、task cleanup が消し始める前に未保存の変更が無いと
+                    # 確かめたもの。止まった後に残りへ書かれたものは、確かめずに消す（git worktree remove が止まらなかったら消していたものと
+                    # 同じ扱い。守らない範囲）。最初に消せなかった項目で止まる（どこまで消えるかは、読む順しだい）
                     try:
-                        shutil.rmtree(dest)
-                    except OSError as e:  # 素通しにしない（main は PermissionError を、記録の置き場を読み書きできない（2）と読む）
-                        # 道筋は残りの木から決める（e.filename の形は Python の版で違うので読まない）。unremovable_dir は開けない
-                        # ディレクトリで例外を上げるので、unopened_dir を先に見る。どちらも無ければ（権限のほかの理由）残りの根
-                        rel = unopened_dir(dest) or unremovable_dir(dest) or '.'
-                        where = os.fsencode(dest if rel == '.' else os.path.join(dest, rel)).decode('utf-8', 'backslashreplace')
-                        raise ValueError(f"片付けの途中の残りを消せない: {where}: {e.strerror or e}。"
-                                         f"原因を直してから、もう一度 task resume --task {task['task']}") from e
+                        remove_tree(dest)
+                    except RemoveFailed as e:  # OSError で素通しにしない（main は PermissionError を、記録の置き場を読み書きできない（2）と読む）
+                        where = os.fsencode(e.path).decode('utf-8', 'backslashreplace')
+                        raise ValueError(f"片付けの途中の残りを消せない: {where}: {e.error.strerror or e.error}。"
+                                         f"原因を直してから、もう一度 task resume --task {task['task']}") from e.error
                 if branch:
                     git(repo, 'branch', '-D', task['branch'], fds=(rf,))
                 wr = root(dest)
@@ -1113,7 +1133,8 @@ def task_command(a):
                 registered = any(Path(w['worktree']).resolve() == a.dir.resolve() for w in worktrees(repo))
                 if registered and a.dir.exists():  # 拒否された（lock、初期化したサブモジュール、status の拒否）。片付けは始まっていない。--force で通さない（中身を失う）
                     write(registry / (task['task'] + '.json'), task)
-                elif a.dir.exists():  # 片付けの途中の記録を残す。残りは task resume が消して仕上げる
+                elif a.dir.exists():  # 片付けの途中の記録に、登録が消えた残りだと書く。残りは task resume が消して仕上げる
+                    write(registry / (task['task'] + '.json'), {**task, 'cleanup': {'saved': ref, 'commit': head, 'removal_stopped': True}})
                     raise ValueError(f"作業場所を消している途中で止まった（{e}）。Git の登録は消えた。未保存の変更は無かった。"
                                      f"消せない原因を直してから、task resume --task {task['task']} で片付けを仕上げる") from e
                 raise
