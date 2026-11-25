@@ -551,6 +551,7 @@ class TestParallel(unittest.TestCase):
         r = self.w('task', 'resume', '--dir', self.repo, '--task', a['task'], '--holder', 'x', code=6)
         self.assertTrue(r['reason'].startswith('片付けの途中の残りを消せない: '), r['reason'])
         self.assertIn(str(d / 'src' / 'f') + ': ', r['reason'])  # 書き込めないディレクトリの中の、消せなかったファイル
+        self.assertIn(f"もう一度 task resume --task {a['task']}", r['reason'])
         self.assertTrue((d / 'src' / 'f').exists())
         self.assertEqual(self.w('task', 'list', '--dir', self.repo)['tasks'][0]['cleanup'],
                          {'saved': 'refs/heads/main', 'commit': head, 'removal_stopped': True})
