@@ -28,14 +28,16 @@
                      unclosed に並べる（切れて 24 時間以内のものは、持ち主が子を待っているだけかもしれないので並べない。commits は基点からの commit の数、landed は変更が統合先に入っているか）。片付けを呼ばれなかったタスクを見せるだけで、消さない
   work.py task resume --dir <checkout> --task <識別子> --holder <誰か> [--take-over] → 作業場所を保持して担当を取得。期限が切れて
                      24 時間以内の担当は、--take-over（利用者にそのタスクの続きか、捨てることを頼まれたとき）が無ければ拒否（3）。
-                     片付けの途中で止まったタスクは、保存先を照合し直してから片付けを仕上げる（completed: true。前の担当が生きていても）。
+                     片付けの途中で止まったタスクのうち、作業場所がもう無いものと、下の残りのものは、保存先を照合し直してから片付けを
+                     仕上げる（completed: true。前の担当が生きていても）。それ以外の片付けの印（Git の登録が残る作業場所と、登録が消えた残りだと
+                     記録に書いていない残り）は、仕上げない（登録が残れば、ふつうの再開として担当を返す。残っていなければ拒否（6））。
                      task cleanup が、Git の登録が消えた作業場所の残りだと記録に書いていて、いまも Git の登録が無ければ、照合の後に、
                      作業場所の道筋に在るものを消す（止まった後にそこへ書かれたものも、消して置き直したものも、確かめずに消す）。
                      消せなければ、最初に消せなかった項目の道筋を出して拒否（6）
   work.py integrate --dir <worktree> --token <t> --expected <統合先commit> --verified <検証済みcommit> → 排他・照合して fast-forward
   work.py task cleanup --dir <worktree> --token <t> --saved <別のブランチかタグ> → 変更が保存先に入っていれば片付け（squash・rebase の統合も可）。
                      項目を持つのに書き込めないディレクトリがあれば、消し始める前に、その道筋を出して拒否（6）。git worktree remove が
-                     作業場所を途中まで消して Git の登録だけを消したら、片付けの途中の記録に、登録が消えた残りだと書いて拒否し（6）、task resume で
+                     作業場所を消している途中で止まり、Git の登録だけを消したら、片付けの途中の記録に、登録が消えた残りだと書いて拒否し（6）、task resume で
                      仕上げるよう案内する
 
 task と integrate の照合拒否は終了コード 6、担当の拒否は 3、記録の置き場を権限で読み書きできなければ 2（担当の拒否と見分ける。#60）。記録（ops.jsonl）の行が読めないか形が違えば 1 で、何行目かを示す。
@@ -1122,7 +1124,7 @@ def task_command(a):
                     not re.fullmatch('[0-9a-f]{40}|[0-9a-f]{64}', str(task.get('base'))):
                 raise ValueError('タスクの記録が task start の作った値と合わない。記録を照合する')
             cleanup = task.get('cleanup')
-            # task cleanup の git worktree remove が作業場所を途中まで消して止まり、Git の登録だけが消えた残り（#77）。task cleanup が
+            # task cleanup の git worktree remove が作業場所を消している途中で止まり、Git の登録だけが消えた残り（#77）。task cleanup が
             # そう見て記録に書いたもの（removal_stopped）だけ。git worktree remove を呼ぶ前に止まった片付けの印は、作業が続きうるので数えない
             leftover = bool(cleanup) and cleanup.get('removal_stopped') is True and dest.exists() and not any(
                 Path(w['worktree']).resolve() == dest.resolve() for w in worktrees(repo))
