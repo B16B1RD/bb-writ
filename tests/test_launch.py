@@ -2341,6 +2341,30 @@ class TestLaunch(unittest.TestCase):
             rc, rec = self.run_launch("claude", extra=["--write"], cwd=target("clean"))
             self.assertEqual((rc, rec["status"], rec["cwd_residue"]), (0, "ok", []), rec)
 
+    def test_a_resume_goes_on_after_the_empty_files_are_cleaned_and_the_staging_dir_is_kept(self):
+        """時間切れの書く子が前からある .claude の下に残した 0 バイトのファイルを片付け、Claude Code の置き場（.cc-writes）は #65 のとおり
+        残すと、--resume で続けられる（置き場まで消さないと続けられなかった）。"""
+        import shutil
+        d = self.worktree("kept")[1].resolve()
+        rc, rec = self.run_launch("claude", cwd=d)
+        self.assertEqual(rec["status"], "ok", rec)
+        rc, rec = self.run_launch("claude", "cwd-residue-hang", extra=["--write", "--timeout", "3"], cwd=d)
+        self.assertIn(str(d / ".claude"), rec["cwd_residue"], rec)
+        for r in map(Path, rec["cwd_residue"]):
+            if r.name == ".claude":  # 空の残りは消し、置き場（.cc-writes）は残す
+                for f in r.iterdir():
+                    if f.name != ".cc-writes":
+                        shutil.rmtree(f) if f.is_dir() else f.unlink()
+            elif r.is_dir():
+                shutil.rmtree(r)
+            else:
+                r.unlink()
+        self.assertTrue((d / ".claude" / ".cc-writes").is_dir())
+        self.args_file.unlink()
+        p = self.run_launch(None, extra=["--resume", rec["out"]], raw=True)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertTrue((d / ".claude" / ".cc-writes").is_dir())
+
     def test_empty_files_a_later_child_leaves_under_the_kept_claude_dir_fail(self):
         # launcher は Claude Code の子が残した空の .claude/.cc-writes を消さない（#65）ので、後の子の前から .claude が在る。
         # 後の書く子が時間切れでその下に残した 0 バイトのファイル（.claude/settings.json など）を見落とし、git add -A で commit に入った

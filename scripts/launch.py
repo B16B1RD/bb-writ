@@ -1696,8 +1696,9 @@ def main() -> int:
         banned = [r for r in a.history if UNSAFE.intersection(r.get("blocked") or [])]
         if banned:
             ap.error(f"この session は続けない（{banned[-1].get('out')} の {'・'.join(sorted(UNSAFE.intersection(banned[-1]['blocked'])))}）。確かめて、最初から起動し直す: {a.resume}"[:600])
-        left = sorted({f for r in [prev, *a.history] for k in ("cwd_residue", "home_residue") for f in r.get(k) or [] if os.path.lexists(f)})
-        if left:  # 片付けずに続けると、続きの比較で「前からあるもの」になり、ok で見えなくなる
+        left = sorted({f for r in [prev, *a.history] for k in ("cwd_residue", "home_residue") for f in r.get(k) or []
+                       if os.path.lexists(f) and not claude_staging_only(f)})
+        if left:  # 片付けずに続けると、続きの比較で「前からあるもの」になり、ok で見えなくなる。Claude Code の置き場だけの .claude は残す（#65）
             ap.error(f"これまでの起動の空の残りを確かめて片付けてから続ける: {left[:20]}"[:600])
         swept_note = (f"launcher は、最後に使われてから {LEFTOVER_DAYS} 日を過ぎた子の一時の置き場と、もう無いタスクの作業場所だけを見ていた子の一時の置き場を消す。"
                       "続きからでなく、新しく起動する")
