@@ -1236,7 +1236,10 @@ def worktree_top(cwd: Path):
 
 def interrogated(cwd: Path) -> list:
     """cwd と同じ Git の作業ツリーの中（根とその下の道筋）を --cwd にして --interrogate で立て、ok で返った審査役の記録（記録の順）。
-    作業ツリーの外（親のディレクトリなど）の記録と、読めない行は数えない。"""
+    作業ツリーの外（親のディレクトリなど）の記録、head の無い記録（未 commit の変更があった・途中で HEAD が変わった）、作業ツリーの
+    中に置いた別の worktree の記録、読めない行は数えない。守らない範囲: 記録の --cwd が消えた下の階層だと、作業ツリーの根を
+    確かめられず数えない。head の無い記録は、次の周が比べる印の相手からも外れる（未 commit のまま審査役を立て、その直しを commit
+    した後は、前のきれいな HEAD の審査役の印と比べる）。"""
     found = []
     top = worktree_top(cwd)
     if top is None:
@@ -1295,7 +1298,8 @@ def unrevisited(cwd: Path) -> str:
     heads = ", ".join(dict.fromkeys(e["head"][:7] for e in prior if isinstance(e.get("head"), str)))
     if not h:
         return (f"この作業場所は前の HEAD（{heads}）で審査役を立てた。次の審査の前に、作業の記録 {note} の「{name}」の欄に、"
-                f"指摘ごとに同じ性質の箇所・直しが前提を変えた箇所・変えた節の全体の矛盾を探した方法と結果を書く（欄の行が無ければ雛形の行を足す。interrogate の 5）")
+                f"指摘ごとに同じ性質の箇所・直しが前提を変えた箇所・変えた節の全体の矛盾を探した方法と結果を書く（欄の行が無ければ雛形の行を足す。"
+                f"直しが無く、rebase・amend だけで HEAD が変わったなら、そう 1 行書く。interrogate の 5）")
     if h == prior[-1].get("revisit"):
         return (f"作業の記録 {note} の「{name}」の欄が、前の審査役を立てたときから変わっていない。前の周の指摘の直しについて、"
                 f"同じ性質の箇所・直しが前提を変えた箇所・変えた節の全体の矛盾を探した方法と結果を書き足す（直しが無く、rebase・amend だけで"
