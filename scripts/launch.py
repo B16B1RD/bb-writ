@@ -477,13 +477,15 @@ def git_snapshot(own: Path, common: Path, cwd: Path) -> dict:
 
 def git_changes(before: dict, after: dict, common: Path) -> list[str]:
     """子が変えてよいのは、起動時に checkout していたブランチの ref と、その作業場所の HEAD・index だけ。
-    ref は前後の値と戻すコマンドを添える（自動では戻さない。子の実行中に親や別のタスクが正当に動かしたかもしれない）。"""
+    ref は前後の値と戻すコマンドを添える（自動では戻さない。子の実行中に親や別のタスクが正当に動かしたかもしれない）。
+    リモート追跡の ref（refs/remotes/）は数えない。git fetch が書く場所で、共有の .git では、子の実行中に親が流した fetch でも動く
+    （指揮者の fetch を、書く子の失敗に数えた）。work.py も launcher も、統合・CI の判定にリモート追跡の ref を使わない。"""
     head = before["head"].strip()
     mine = head[len("ref: "):] if head.startswith("ref: ") else None
     out = []
     for r in sorted(set(before["refs"]) | set(after["refs"])):
         old, new = before["refs"].get(r), after["refs"].get(r)
-        if r != mine and old != new:
+        if r != mine and old != new and not r.startswith("refs/remotes/"):
             undo = f"git --git-dir {common} update-ref {r} {old}" if old else f"git --git-dir {common} update-ref -d {r}"
             out.append(f"{r}: {old or '(無し)'} → {new or '(削除)'}（戻すなら: {undo}）")
     out += sorted(f for f in set(before["files"]) | set(after["files"]) if before["files"].get(f) != after["files"].get(f))

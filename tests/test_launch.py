@@ -362,6 +362,9 @@ FAKE_CLAUDE = textwrap.dedent(r'''
         gd = subprocess.run(["git", "rev-parse", "--path-format=absolute", "--git-dir"], capture_output=True, text=True).stdout.strip()
         open(os.path.join(gd, "config.worktree"), "w").close()
         open("b.txt", "w").write("b"); subprocess.run(git + ["add", "b.txt"]); subprocess.run(git + ["commit", "-qm", "b"])
+    if mode == "move-remote":  # 親が子の実行中に fetch したのと同じく、リモート追跡の ref が動く
+        subprocess.run(git + ["update-ref", "refs/remotes/origin/feat", subprocess.run(git + ["commit-tree", "-m", "x", "HEAD^{tree}"],
+                       capture_output=True, text=True).stdout.strip()])
     if mode == "tamper-main":  # 統合先を動かす
         evil = subprocess.run(git + ["commit-tree", "-m", "x", "HEAD^{tree}"], capture_output=True, text=True).stdout.strip()
         subprocess.run(git + ["update-ref", "refs/heads/main", evil])
@@ -4031,6 +4034,9 @@ class TestLaunch(unittest.TestCase):
     def test_write_child_may_commit_only_to_its_own_branch(self):
         _, wt = self.worktree("own")
         rc, rec = self.run_launch("claude", "own-commit", extra=["--write"], cwd=wt)
+        self.assertEqual(rec["status"], "ok", rec)
+        _, wt = self.worktree("move-remote")  # リモート追跡の ref は、子の実行中に親の fetch でも動くので数えない
+        rc, rec = self.run_launch("claude", "move-remote", extra=["--write"], cwd=wt)
         self.assertEqual(rec["status"], "ok", rec)
         self.assertEqual(list((self.cwd / "own" / ".git" / "worktrees").glob("*/config.worktree")), [])
         for mode in ("tamper-main", "tamper-config", "tamper-gitfile"):  # 統合先の ref、親の git で動く設定、作業場所の .git
