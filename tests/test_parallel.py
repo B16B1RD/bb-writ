@@ -1262,7 +1262,8 @@ class TestParallel(unittest.TestCase):
         消した。素の git status が index を書き直した後（index の更新時刻だけが進み、同じ秒の項目を中身で比べる git の守りが外れる）も同じ。
         index が覚えた更新時刻の秒が 0 の項目（更新時刻 0 秒のファイルを add したもの）でも同じ。
         片付けは、フラグの付いた実物のあるファイルを、stat を信じずに中身で比べて拒む。core.trustctime=false は、試験を時計に依らなく
-        するための設定（ctime は書き換えのたびに「いま」になり、戻せない）。更新時刻は待たずに、過去の秒に置いて作る。"""
+        するための設定（ctime は書き換えのたびに「いま」になり、戻せない）。更新時刻は待たずに、過去の秒に置いて作る。
+        名前の形（改行の入った名前など）は、この試験の場面に置いていない。"""
         def config(k, v):
             return lambda r: self.git(r, 'config', k, v)
         for form, before, flags, tag in (
@@ -1279,7 +1280,7 @@ class TestParallel(unittest.TestCase):
                         self.git(d, 'status')  # --no-optional-locks を付けない（index を書き直す）
                     self.assertEqual((os.stat(d / 'n').st_mtime_ns, os.stat(d / 'n').st_size), (P, len('n\n')),
                                      'ファイルの更新時刻か大きさが、index の覚えた値と違う')
-                    self.assert_cleanup_keeps_the_hidden_change(a, 'n', 'n')  # index のバイト列は、片付けの直前と直後で比べる
+                    self.assert_cleanup_keeps_the_hidden_change(a, 'n', 'n')
         for form, before, flags, tag in (
                 ('a skip-worktree file', None, ['--skip-worktree'], 'S'),
                 ('an assume-unchanged file', None, ['--assume-unchanged'], 'h'),
@@ -1366,7 +1367,7 @@ class TestParallel(unittest.TestCase):
                     self.git(d, 'update-index', f, 'n')
                 self.assertEqual(self.flag_of(d, 'n'), tag)
                 (d / 'n').write_bytes(b'n\r\n')
-                self.assert_cleanup_keeps_the_hidden_change(a, 'n', 'n')  # 手引きの status の見方で何も出ないことも確かめる
+                self.assert_cleanup_keeps_the_hidden_change(a, 'n', 'n')
 
     def test_integrate_passes_with_a_change_a_flag_hides_in_the_checkout_it_lands_in(self):
         """統合先の checkout（元の checkout）に、フラグで隠した変更があっても、統合はデータを消さないので通り、隠した変更とフラグが残る
@@ -1407,7 +1408,8 @@ class TestParallel(unittest.TestCase):
         """フラグを外して見る git（ls-files、index の写しに当てる update-index、写しで比べる status）のどれかが失敗したら、隠れた変更を
         確かめられないので、片付けは git の文を理由に出して拒み、作業場所と変更を残す（失敗を通すと、変更を見つけないまま作業場所ごと消す）。
         PATH の先頭の偽の git が、狙った 1 つの呼び出しだけを失敗させ、印を残す（ほかは本物を呼ぶ）。比べる status は、GIT_INDEX_FILE の
-        付いた status で見分ける（片付けの最初の status には付いていない）。"""
+        付いた status で見分ける（片付けの最初の status には付いていない）。場面の書き換えは、どれも 1 つ目の見方（フラグだけを外す）で
+        決まる。2 つ目の見方（stat の記録の無い項目に入れ直す）は同じ呼び出しを通るので、2 つ目の見方だけの失敗の場面は置いていない。"""
         real = shlex.quote(shutil.which('git'))  # PATH を変える前に引く（偽の git が自分を呼び続けない）
         plain_env = dict(self.env)
         for sub, only_with_index_file in (('ls-files', False), ('update-index', False), ('status', True)):
