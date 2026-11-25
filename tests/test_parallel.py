@@ -430,7 +430,8 @@ class TestParallel(unittest.TestCase):
                 ('a tracked directory that can be read but not written', lambda d: None, [], 'src'),
                 ('an untracked read-only directory holding an empty directory', lambda d: None, ['u/s'], 'u'),
                 ('one read-only tracked directory among many tracked directories and files', tracked_many, [], 'd5'),
-                ('a read-only tracked directory below a writable one', tracked_nested, [], 'x/y')):
+                ('a read-only tracked directory below a writable one', tracked_nested, [], 'x/y'),
+                ('the worktree itself is read-only', lambda d: None, [], '.')):
             with self.subTest(name):
                 a = self.start()
                 d = Path(a['dir'])
@@ -500,7 +501,11 @@ class TestParallel(unittest.TestCase):
         try:
             (d / name).mkdir()
         except OSError:
-            self.skipTest('このファイルシステムは UTF-8 でない名前を作らせない')
+            try:
+                name.encode('utf-8')
+            except UnicodeEncodeError:
+                self.skipTest('このファイルシステムは UTF-8 でない名前を作らせない')
+            raise
         (d / name / 'f').write_text('f\n')
         prepare(d)
         self.git(d, 'add', '.')
@@ -534,19 +539,21 @@ class TestParallel(unittest.TestCase):
         self.assertTrue(r['reason'].startswith('作業場所を消している途中で止まった（'), r['reason'])
         self.assertIn(f"task resume --task {a['task']}", r['reason'])
         self.assertTrue((Path(a['dir']) / 'src' / 'f').exists())
-        self.assertEqual(self.w('task', 'list', '--dir', self.repo)['tasks'][0]['cleanup'], {'saved': 'refs/heads/main', 'commit': head})
+        self.assertEqual(self.w('task', 'list', '--dir', self.repo)['tasks'][0]['cleanup'],
+                         {'saved': 'refs/heads/main', 'commit': head, 'removal_stopped': True})
 
     def test_task_resume_removes_what_a_stopped_cleanup_left_once_the_cause_is_fixed(self):
         """片付けの途中で、Git の登録が消えて作業場所の残りが在るとき、task resume は残りを消してから片付けを仕上げる。残りを消せなければ、
-        消せない道筋を理由に出して拒み、消せないものと片付けの途中の記録とブランチを残す（消せるものは消える。片付けの前に、未保存の
-        変更が無いと確かめたもの）。原因を直せば、同じ task resume で閉じる。"""
+        最初に消せなかった項目で止まり、その項目の道筋を理由に出して拒み、消せないものと片付けの途中の記録とブランチを残す。
+        原因を直せば、同じ task resume で閉じる。"""
         a, head, _ = self.stopped_cleanup()
         d = Path(a['dir'])
         r = self.w('task', 'resume', '--dir', self.repo, '--task', a['task'], '--holder', 'x', code=6)
         self.assertTrue(r['reason'].startswith('片付けの途中の残りを消せない: '), r['reason'])
-        self.assertIn(str(d / 'src'), r['reason'])
+        self.assertIn(str(d / 'src' / 'f') + ': ', r['reason'])  # 書き込めないディレクトリの中の、消せなかったファイル
         self.assertTrue((d / 'src' / 'f').exists())
-        self.assertEqual(self.w('task', 'list', '--dir', self.repo)['tasks'][0]['cleanup'], {'saved': 'refs/heads/main', 'commit': head})
+        self.assertEqual(self.w('task', 'list', '--dir', self.repo)['tasks'][0]['cleanup'],
+                         {'saved': 'refs/heads/main', 'commit': head, 'removal_stopped': True})
         self.assertEqual(self.git(self.repo, 'rev-parse', a['branch']), head)
         (d / 'src').chmod(0o755)
         got = self.w('task', 'resume', '--dir', self.repo, '--task', a['task'], '--holder', 'x')
@@ -559,7 +566,7 @@ class TestParallel(unittest.TestCase):
         a, _, _ = self.stopped_cleanup(mode=0)
         r = self.w('task', 'resume', '--dir', self.repo, '--task', a['task'], '--holder', 'x', code=6)
         self.assertTrue(r['reason'].startswith('片付けの途中の残りを消せない: '), r['reason'])
-        self.assertIn(os.path.join(a['dir'], 'src') + ': ', r['reason'])
+        self.assertIn(os.path.join(a['dir'], 'src') + ': ', r['reason'])  # 開けなかったディレクトリそのもの
         (Path(a['dir']) / 'src').chmod(0o755)
         got = self.w('task', 'resume', '--dir', self.repo, '--task', a['task'], '--holder', 'x')
         self.assertTrue(got.get('completed'), got)
@@ -567,12 +574,12 @@ class TestParallel(unittest.TestCase):
 
     def test_task_resume_names_a_directory_it_cannot_remove_whose_name_is_not_utf8(self):
         """片付けの途中の残りの、消せないディレクトリの名前が UTF-8 として読めなくても、UTF-8 の出力で落ちない形（読めないバイトは \\xe9）の
-        絶対の道筋を理由に出して拒む。"""
+        消せなかった項目の絶対の道筋を理由に出して拒む。"""
         a, _, _ = self.stopped_cleanup(name=os.fsdecode(b'caf\xe9'))
         self.env['PYTHONIOENCODING'] = 'utf-8:strict'  # UTF-8 のロケールの出力と同じ
         r = self.w('task', 'resume', '--dir', self.repo, '--task', a['task'], '--holder', 'x', code=6)
         self.assertTrue(r['reason'].startswith('片付けの途中の残りを消せない: '), r['reason'])
-        self.assertIn(os.path.join(a['dir'], 'caf\\xe9') + ': ', r['reason'])
+        self.assertIn(os.path.join(a['dir'], 'caf\\xe9', 'f') + ': ', r['reason'])  # 書き込めないディレクトリの中の、消せなかったファイル
 
     def test_task_resume_keeps_a_registered_worktree_with_a_cleanup_mark_and_its_uncommitted_changes(self):
         """task resume が残りを消すのは、Git の登録が消えたときだけ。片付けの途中の記録があっても、登録が残る作業場所（片付けが記録を
@@ -600,6 +607,37 @@ class TestParallel(unittest.TestCase):
         got = json.loads(p.stdout)
         self.assertNotIn('completed', got)  # ふつうの再開として担当を返す
         self.assertTrue(got.get('token'), got)
+
+    def test_task_resume_keeps_an_unregistered_worktree_whose_cleanup_stopped_before_removing_anything(self):
+        """片付けが git worktree remove を呼ぶ前に止まると（記録を書いた直後の Ctrl-C など）、片付けの途中の記録が残り、作業は続きうる。
+        その後に Git の登録だけが消えても（作業場所が見えない間の git worktree prune）、task resume は作業場所を消さない。消すのは、
+        task cleanup が、登録が消えた残りだと見て記録に書いたものだけ。この印しか無い作業場所は、今の理由で拒み、未 commit の変更・
+        追跡外のファイル・印・ブランチを残す。"""
+        a = self.start()
+        head = self.change(a, 'a')
+        self.integrate(a, self.git(self.repo, 'rev-parse', 'main'), head)  # 照合は通る（保存先に入り、ブランチは記録の commit のまま）
+        reg = next(Path(self.tmp.name, 'state').rglob(a['task'] + '.json'))
+        reg.write_text(json.dumps({**json.loads(reg.read_text()), 'cleanup': {'saved': 'refs/heads/main', 'commit': head}}))
+        self.w('release', '--dir', a['dir'], '--token', a['token'])
+        d = Path(a['dir'])
+        (d / 'a').write_text('書き換えた\n')
+        (d / 'untracked').write_text('追跡外\n')
+        away = d.with_name(d.name + '-away')
+        d.rename(away)  # 作業場所が見えない間に、登録が消える
+        self.git(self.repo, 'worktree', 'prune')
+        away.rename(d)
+        self.assertFalse(self.registered(a), 'Git の登録が残った（作りたい状態にならなかった）')
+        self.assertEqual(self.w('task', 'list', '--dir', self.repo)['tasks'][0]['cleanup'], {'saved': 'refs/heads/main', 'commit': head})
+        p = subprocess.run([sys.executable, '-B', str(WORK), 'task', 'resume', '--dir', str(self.repo), '--task', a['task'], '--holder', 'x'],
+                           env=self.env, capture_output=True, text=True)
+        # 消えたものを先に見る（終了コードより先に）
+        self.assertTrue((d / 'a').exists() and (d / 'untracked').exists(), '片付けを始める前に止まった作業場所の中身を消した: ' + p.stdout + p.stderr)
+        self.assertEqual((d / 'a').read_text(), '書き換えた\n')
+        self.assertEqual((d / 'untracked').read_text(), '追跡外\n')
+        self.assertEqual(self.git(self.repo, 'rev-parse', a['branch']), head)
+        self.assertEqual(self.w('task', 'list', '--dir', self.repo)['tasks'][0]['cleanup'], {'saved': 'refs/heads/main', 'commit': head})
+        self.assertEqual(p.returncode, 6, p.stdout + p.stderr)
+        self.assertEqual(json.loads(p.stdout)['reason'], '作業場所の作成が未完了か、登録と実物が異なる。記録と git worktree list を照合する')
 
     def test_task_resume_keeps_an_unregistered_directory_without_a_cleanup_mark(self):
         """片付けの途中の記録が無ければ、Git の登録の無い作業場所のディレクトリを、task resume は消さず、今の理由で拒む。"""
@@ -665,7 +703,8 @@ class TestParallel(unittest.TestCase):
         def unsaved(a, head):
             self.git(self.repo, 'branch', 'old', a['base'])
             reg = next(Path(self.tmp.name, 'state').rglob(a['task'] + '.json'))
-            reg.write_text(json.dumps({**json.loads(reg.read_text()), 'cleanup': {'saved': 'refs/heads/old', 'commit': head}}))
+            record = json.loads(reg.read_text())
+            reg.write_text(json.dumps({**record, 'cleanup': {**record['cleanup'], 'saved': 'refs/heads/old'}}))  # 登録が消えた残りの印は残す
             return '片付けの途中の保存先 refs/heads/old に、このタスクの変更が入っていない。記録と差分を照合する'
         self.assert_resume_keeps_what_a_stopped_cleanup_left(unsaved)
 
