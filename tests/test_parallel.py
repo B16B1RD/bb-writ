@@ -494,7 +494,7 @@ class TestParallel(unittest.TestCase):
         """片付けの前の確かめの後に、作業場所の項目を消せなくなった片付け。prepare(作業場所) が足したものも一緒に追跡して統合する。
         PATH の先頭の偽の git が、git worktree remove の直前に、作業場所の追跡するディレクトリ name の権限を mode にしてから、
         本物（PATH を変える前に引いた絶対パス）を呼ぶ。
-        git は作業場所を途中まで消して止まり、Git の登録を消す。止まった task cleanup の出力と、タスク・保存した commit を返す。"""
+        git は作業場所を消している途中で止まり、Git の登録を消す。止まった task cleanup の出力と、タスク・保存した commit を返す。"""
         self.skip_unless_permissions_hold()
         a = self.start()
         d = Path(a['dir'])
@@ -532,7 +532,7 @@ class TestParallel(unittest.TestCase):
         return a, head, r
 
     def test_a_cleanup_that_stopped_while_removing_the_worktree_keeps_its_record_for_task_resume(self):
-        """git worktree remove が作業場所を途中まで消して止まり、Git の登録だけが消えたら、片付けは始まっている。task cleanup は、
+        """git worktree remove が作業場所を消している途中で止まり、Git の登録だけが消えたら、片付けは始まっている。task cleanup は、
         片付けの途中の記録を消さずに残し、task resume で仕上げるよう理由に出す（記録を消して、task cleanup でも task resume でも
         閉じられなくなった。#77）。"""
         a, head, r = self.stopped_cleanup()
