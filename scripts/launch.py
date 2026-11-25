@@ -55,7 +55,7 @@ from pathlib import Path
 sys.dont_write_bytecode = True
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from work import root as work_record  # noqa: E402
-from work import claude_staging_only, field_texts, REVISIT  # noqa: E402
+from work import claude_staging_only, field_texts, record_at, REVISIT  # noqa: E402
 
 # 親が --model・--effort を省いたときの、役割ごとのモデルと effort（親が渡せば、それが勝つ）。表に無い組み合わせは --model と --effort を渡す。
 # 最も難しい依頼（設計、大きな移行・リファクタリング、長い無人実行）を任せる書く子（--hardest）は最上段。
@@ -1225,9 +1225,9 @@ def fix_prompt(problems: list[str], cwd: Path) -> str:
             "存在しないファイルを証拠にしない（無いことが分かったなら、それを what に書き、確かめたコマンドを where に書く）。\n")
 
 
-def interrogated_heads(cwd: Path) -> list:
-    """cwd を --cwd にして --interrogate で立て、ok で返った審査役の HEAD（記録の順、重なりなし）。読めない行は数えない。"""
-    heads = []
+def interrogated(cwd: Path) -> list:
+    """cwd か、その上・下の道筋を --cwd にして --interrogate で立て、ok で返った審査役の記録（記録の順）。読めない行は数えない。"""
+    found = []
     try:
         with open(state_dir() / "delegations.jsonl", encoding="utf-8", errors="replace") as f:
             for line in f:
@@ -1235,33 +1235,53 @@ def interrogated_heads(cwd: Path) -> list:
                     e = json.loads(line)
                 except ValueError:
                     continue
-                if (isinstance(e, dict) and e.get("interrogate") is True and e.get("status") == "ok" and e.get("cwd") == str(cwd)
-                        and isinstance(e.get("head"), str) and e["head"] not in heads):
-                    heads.append(e["head"])
+                if not (isinstance(e, dict) and e.get("interrogate") is True and e.get("status") == "ok" and isinstance(e.get("cwd"), str)):
+                    continue
+                c = Path(e["cwd"])
+                if c == cwd or c in cwd.parents or cwd in c.parents:
+                    found.append(e)
     except OSError:
         pass
-    return heads
+    return found
 
 
-def unrevisited(cwd: Path) -> str:
-    """前の HEAD で審査役を立てた作業場所で、別の HEAD に次の審査役を立てるのに、作業の記録の「直しの見直し」の欄が空なら、その理由。
-    指摘の箇所だけを直して次の周に出し、直しの隣の抜けと直しが持ち込んだ矛盾が周ごとに出て、周が収束しなかった（2026-11）。
-    守らない範囲: 欄の中身の真偽と、どの周の見直しかは見ない。作業の記録が無い場所（claim していない）は見ない。前の審査役は、同じ道筋を
-    --cwd にして ok で返ったものだけを数える（下の階層を --cwd にしたもの・not-run・記録の読めない行は数えない）。"""
-    seen = interrogated_heads(cwd)
-    if not seen or clean_head(cwd) in seen:
-        return ""
-    note = work_record(cwd) / "note.md"
+def revisit_of(cwd: Path) -> tuple:
+    """(作業の記録の「直しの見直し」の欄の中身の SHA-256 の先頭 16 桁（空なら ""）, 記録の道筋)。記録は cwd から上へたどって最初に在るもの。
+    無ければ (None, 道筋)。作らない。"""
+    notes = [record_at(d) / "note.md" for d in (cwd, *cwd.parents)]
+    note = next((n for n in notes if n.is_file()), notes[0])  # 下の階層を --cwd にしても、作業場所の記録を見る
     try:
         body = note.read_text(encoding="utf-8")
     except OSError:
-        return ""
+        return None, note
     found = field_texts(body.splitlines(), REVISIT)
-    if found and found[0].strip():
+    text = found[0].strip() if found else ""
+    return (hashlib.sha256(text.encode()).hexdigest()[:16] if text else ""), note
+
+
+def unrevisited(cwd: Path) -> str:
+    """前の HEAD で審査役を立てた作業場所で、別の HEAD に次の審査役を立てるのに、作業の記録の「直しの見直し」の欄が空か、
+    前の審査役を立てたときから書き足していなければ、その理由。
+    指摘の箇所だけを直して次の周に出し、直しの隣の抜けと直しが持ち込んだ矛盾が周ごとに出て、周が収束しなかった（2026-11）。
+    守らない範囲: 欄の中身の真偽と、書き足したのがどの指摘の見直しかは見ない。作業の記録が無い場所（claim していない）と、
+    未 commit の変更がある作業場所（審査役の記録の head が無く、周に数えない）は見ない。前の審査役は ok で返ったものだけを数える
+    （not-run と記録の読めない行は数えない）。"""
+    prior = interrogated(cwd)
+    now = clean_head(cwd)
+    if not prior or now is None or any(e.get("head") == now for e in prior):
         return ""
-    return (f"この作業場所は前の HEAD（{', '.join(h[:7] for h in seen)}）で審査役を立てた。次の審査の前に、作業の記録 {note} の"
-            f"「{REVISIT.split('（')[0]}」の欄に、指摘ごとに同じ性質の箇所・直しが前提を変えた箇所・変えた節の全体の矛盾を探した方法と結果を書く"
-            f"（欄の行が無ければ雛形の行を足す。interrogate の 5）")
+    h, note = revisit_of(cwd)
+    if h is None:
+        return ""
+    name = REVISIT.split("（")[0]
+    heads = ", ".join(dict.fromkeys(e["head"][:7] for e in prior if isinstance(e.get("head"), str)))
+    if not h:
+        return (f"この作業場所は前の HEAD（{heads}）で審査役を立てた。次の審査の前に、作業の記録 {note} の「{name}」の欄に、"
+                f"指摘ごとに同じ性質の箇所・直しが前提を変えた箇所・変えた節の全体の矛盾を探した方法と結果を書く（欄の行が無ければ雛形の行を足す。interrogate の 5）")
+    if h == prior[-1].get("revisit"):
+        return (f"作業の記録 {note} の「{name}」の欄が、前の審査役を立てたときから変わっていない。前の周の指摘の直しについて、"
+                f"同じ性質の箇所・直しが前提を変えた箇所・変えた節の全体の矛盾を探した方法と結果を書き足す（interrogate の 5）")
+    return ""
 
 
 def clean_head(cwd: Path) -> str | None:
@@ -1793,6 +1813,7 @@ def main() -> int:
         why = unrevisited(a.cwd)
         if why:
             ap.error(why)
+        a.revisit = revisit_of(a.cwd)[0]
     stamp = time.strftime("%Y%m%d-%H%M%S") + '-' + secrets.token_hex(8)
     # 読み取り専用の Codex の子が書ける一時ディレクトリは、--out でなく bb-writ の状態の置き場に置く（--out は呼び出し側が選ぶので、
     # その下に置くと、対象のリポジトリや Git の管理ディレクトリの中かを判定し続けることになり、判定の穴が尽きなかった）
@@ -1826,7 +1847,7 @@ def main() -> int:
         pass
     rec = {"host": a.host, "cwd": str(a.cwd), "model_requested": a.model, "effort_requested": a.effort,
            **({"role": a.role} if a.role else {}), **({"chosen_by": a.chosen_by} if not a.resume else {}), "timeout_s": a.timeout,
-           "write": a.write, "interrogate": a.interrogate, "audit": a.audit, "out": str(out_dir), "session_asked": a.session, **({"resumed_from": str(a.resume.resolve())} if a.resume else {}),
+           "write": a.write, "interrogate": a.interrogate, "audit": a.audit, **({"revisit": a.revisit} if getattr(a, "revisit", None) else {}), "out": str(out_dir), "session_asked": a.session, **({"resumed_from": str(a.resume.resolve())} if a.resume else {}),
            "load": {"cpus": os.cpu_count(), "start": load_now()},
            **({"swept": swept} if swept["removed"] or swept["problems"] else {})}
     blocked = []

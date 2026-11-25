@@ -1084,8 +1084,8 @@ class TestLaunch(unittest.TestCase):
         self.assertIsNone(rec["exit_code"], rec)
 
     def test_a_reviewer_on_a_new_head_waits_for_the_revisit_of_the_fixes(self):
-        """前の HEAD で審査役を立てた作業場所で、別の HEAD に審査役を立てるのは、作業の記録の「直しの見直し」の欄を書いてから。
-        同じ HEAD の立て直し、最初の審査役、監査役、別の作業場所は止めない。"""
+        """前の HEAD で審査役を立てた作業場所で、別の HEAD に審査役を立てるのは、作業の記録の「直しの見直し」の欄を、前の審査役のときから
+        書き足してから。下の階層を --cwd にしても同じ。同じ HEAD の立て直し、最初の審査役、監査役、別の作業場所、未 commit の変更がある作業場所は止めない。"""
         git = lambda *a, cwd=self.cwd: subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", *a], cwd=cwd, check=True,
                                                       capture_output=True, text=True).stdout.strip()
         git("init", "-q")
@@ -1107,9 +1107,27 @@ class TestLaunch(unittest.TestCase):
         shutil.copytree(self.cwd, other)
         rc, rec = self.run_launch("claude", extra=["--interrogate"], cwd=other)  # 別の作業場所は数えない
         self.assertEqual((rc, rec["status"]), (0, "ok"), rec)
+        (self.cwd / "sub").mkdir()
+        (self.cwd / "sub" / "keep.txt").write_text("x\n")
+        git("add", "sub")
+        git("commit", "-q", "-m", "sub")
+        p = self.run_launch("claude", extra=["--interrogate"], cwd=self.cwd / "sub", raw=True)  # 下の階層を --cwd にしても抜けない
+        self.assertEqual(p.returncode, 2, p.stdout)
+        self.assertIn("直しの見直し", p.stderr)
+        (self.cwd / "untracked.txt").write_text("x\n")  # 未 commit の変更がある作業場所は周に数えないので止めない
+        rc, rec = self.run_launch("claude", extra=["--interrogate"])
+        self.assertEqual((rc, rec["status"]), (0, "ok"), rec)
+        (self.cwd / "untracked.txt").unlink()
         body = note.read_text(encoding="utf-8")
         line = next(l for l in body.splitlines() if l.startswith("- 直しの見直し"))
         note.write_text(body.replace(line, line + " 同じ形の文を grep で探し、2 か所を直した"), encoding="utf-8")
+        rc, rec = self.run_launch("claude", extra=["--interrogate"])
+        self.assertEqual((rc, rec["status"]), (0, "ok"), rec)
+        git("commit", "-q", "--allow-empty", "-m", "3")  # 次の周は、前の審査役のときから書き足すまで止める
+        p = self.run_launch("claude", extra=["--interrogate"], raw=True)
+        self.assertEqual(p.returncode, 2, p.stdout)
+        self.assertIn("変わっていない", p.stderr)
+        note.write_text(note.read_text(encoding="utf-8").replace("2 か所を直した", "2 か所を直した。3 周目の直しの隣も探した"), encoding="utf-8")
         rc, rec = self.run_launch("claude", extra=["--interrogate"])
         self.assertEqual((rc, rec["status"]), (0, "ok"), rec)
 
