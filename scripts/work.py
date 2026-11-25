@@ -796,9 +796,10 @@ def claude_staging_only(p):
 
 
 def unopened_dir(d):
-    """d の下で、一覧できないか中へ入れない（中の項目を調べられない）最初のディレクトリの、d からの相対の道筋（d そのものなら「.」）。無ければ None。
+    """d の下で、一覧できないか中へ入れない（中の項目を調べられない）ディレクトリのどれか 1 つの、d からの相対の道筋（d そのものなら「.」）。無ければ None。
     権限のビットは読まず、一覧と、中の「.」の lstat を試して確かめる。symlink の先へは入らない。
-    再帰しない（Python 3.11 以下の os.walk は再帰で歩き、深い木で落ちる）。"""
+    再帰しない（os.walk で歩いた版は、Python 3.9 で 1100 段の木を歩いて RecursionError で落ちた）。これを確かめる試験は無い
+    （その深さの木は、開けるファイルの数の上限が 1024 以下の環境では、git 自身が歩けず、片付けが通らない）。"""
     stack = ['']
     while stack:
         rel = stack.pop()
@@ -821,7 +822,7 @@ def clean(d, ignored=False, child=False):
     空でも、中身を確かめられないので、その道筋（UTF-8 として読めないバイトは \\xe9 の形）を入れた理由（ValueError）で拒む（git status はそこを飛ばし、標準エラーに警告を
     出すか、何も出さないだけなので、片付けが git worktree remove まで進んだ。#68）。git の警告の文は読まない。統合の見方は数えない
     （データを消さず、利用者の checkout に root の持つ置き場などがありうる）。
-    数えないもの: 無視しない空のディレクトリ・FIFO やソケットだけのディレクトリ（status に出ず、保存するデータが無い）、
+    数えないもの: 開ける、無視しない空のディレクトリ・FIFO やソケットだけのディレクトリ（status に出ず、保存するデータが無い）、
     skip-worktree や assume-unchanged の付いた追跡ファイルの変更（git に見ないよう指示したもので、別の原因）。"""
     p = subprocess.run(['git', '-C', str(d), *QUIET, '--no-optional-locks', 'status', '--porcelain', '-z', '--untracked-files=all',
                         *(['--ignore-submodules=dirty'] if child else []), *(['--ignored=matching'] if ignored else [])],
@@ -834,7 +835,7 @@ def clean(d, ignored=False, child=False):
     # status に Claude Code の空の置き場しか出ないので、歩く木に無視する大きな置き場は無い（初期化したサブモジュールの中は除く。その中の無視するものも歩く）
     rel = unopened_dir(d) if ignored else None
     if rel is not None:
-        # どのロケールでも出力できるよう、UTF-8 として読めないバイトは \xe9 の形にする
+        # UTF-8 の出力で落ちないよう、UTF-8 として読めないバイトは \xe9 の形にする
         raise ValueError(f"開けないディレクトリがある: {os.fsencode(rel).decode('utf-8', 'backslashreplace')}。中身を確かめられないので、作業場所を保持する")
     return True
 

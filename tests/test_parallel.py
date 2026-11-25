@@ -830,7 +830,8 @@ class TestParallel(unittest.TestCase):
         """git status は、開けないディレクトリを出力に出さず飛ばす（標準エラーに警告を出すか、何も出さない）。task cleanup はそれを見逃し、
         git worktree remove が Git の登録を消してから削除に失敗して、タスクを閉じられなくなった（空なら中身を確かめずに消した。#68）。
         一覧できないか中へ入れないディレクトリは、空かどうかにかかわらず、その道筋を理由に出して拒み、作業場所を Git の作業ツリーの
-        まま残す。権限を戻して中身を片付ければ、同じ片付けが通る。"""
+        まま残す。権限を戻して中身を片付ければ、同じ片付けが通る。試験が作るのは自分の持つ場所だけ（ほかの利用者が持つ開けない場所を作るには
+        root が要る）。"""
         self.skip_unless_permissions_hold()
 
         def remove(p):
@@ -896,7 +897,7 @@ class TestParallel(unittest.TestCase):
         self.assertTrue(self.is_worktree_of_task(t), '作業場所が Git の作業ツリーでなくなった')
 
     def test_cleanup_names_a_directory_it_cannot_open_whose_name_is_not_utf8(self):
-        """UTF-8 として読めない名前の開けないディレクトリでも、どのロケールでも出力できる形（読めないバイトは \\xe9）の道筋を
+        """UTF-8 として読めない名前の開けないディレクトリでも、UTF-8 の出力で落ちない形（読めないバイトは \\xe9）の道筋を
         理由に出して拒み、作業場所を Git の作業ツリーのまま残す（読めないバイトのまま出すと、UTF-8 の出力で落ちた）。"""
         self.skip_unless_permissions_hold()
         a = self.start()
