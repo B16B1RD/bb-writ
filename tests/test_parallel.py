@@ -561,6 +561,23 @@ class TestParallel(unittest.TestCase):
         self.assertTrue(got.get('completed'), got)
         self.assert_closed(a)
 
+    def test_task_resume_finishes_once_the_branch_can_be_deleted_after_it_removed_the_leftover(self):
+        """task resume が片付けの途中の残りを消した後に、タスクのブランチの削除で拒まれても（元の checkout がそのブランチを
+        checkout している）、片付けの途中の記録とブランチは残り、原因を直せば、同じ task resume で閉じる（残りがもう無いことで止まらない）。"""
+        a, head, _ = self.stopped_cleanup()
+        d = Path(a['dir'])
+        (d / 'src').chmod(0o755)
+        self.git(self.repo, 'checkout', '-q', a['branch'])  # git branch -D が拒む
+        self.w('task', 'resume', '--dir', self.repo, '--task', a['task'], '--holder', 'x', code=6)
+        self.assertFalse(os.path.lexists(d))  # 残りは消えている
+        self.assertEqual(self.w('task', 'list', '--dir', self.repo)['tasks'][0]['cleanup'],
+                         {'saved': 'refs/heads/main', 'commit': head, 'removal_stopped': True})
+        self.assertEqual(self.git(self.repo, 'rev-parse', a['branch']), head)
+        self.git(self.repo, 'checkout', '-q', 'main')
+        got = self.w('task', 'resume', '--dir', self.repo, '--task', a['task'], '--holder', 'x')
+        self.assertTrue(got.get('completed'), got)
+        self.assert_closed(a)
+
     def test_task_resume_names_a_directory_it_cannot_open_in_what_a_stopped_cleanup_left(self):
         """片付けの途中の残りに、一覧できず中へも入れないディレクトリがあれば、task resume はその絶対の道筋を理由に出して拒む
         （記録の置き場を読み書きできない、の終了コード 2 にしない）。権限を戻せば、同じ task resume で閉じる。"""
