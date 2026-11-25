@@ -783,8 +783,8 @@ def contained(repo, commit, ref, look_only=False):
     return p.returncode == 0 and p.stdout.split()[0] == git(repo, 'rev-parse', ref + '^{tree}')
 
 
-# 書く子が書けた作業場所で動かす git に付ける -c（launch.py の QUIET_GIT と同じ）。git status・worktree remove が設定から走らせる
-# core.fsmonitor を外す（コマンド行の -c は include・config.worktree の値より強く、中で起こす git にも伝わる。git 2.43 で測った。#64）。
+# 書く子が書けた作業場所で動かす git に付ける -c（launch.py の QUIET_GIT と同じ）。git status・ls-files・index の写しを書く update-index・
+# worktree remove が設定から走らせる core.fsmonitor を外す（コマンド行の -c は include・config.worktree の値より強く、中で起こす git にも伝わる。git 2.43 で測った。#64）。
 # filter は外さない（どこで定めたものも。LFS などの required の filter を外すと status が壊れる。守らない範囲は launch.py の QUIET_GIT の注釈）。
 QUIET = ['-c', 'core.fsmonitor=false']
 
@@ -866,8 +866,15 @@ def clean(d, ignored=False, child=False):
     空でも、中身を確かめられないので、その道筋（UTF-8 として読めないバイトは \\xe9 の形）を入れた理由（ValueError）で拒む（git status はそこを飛ばし、標準エラーに警告を
     出すか、何も出さないだけなので、片付けが git worktree remove まで進んだ。#68）。git の警告の文は読まない。統合の見方は数えない
     （データを消さず、利用者の checkout に root の持つ置き場などがありうる）。
+    ignored では、さらに、skip-worktree か assume-unchanged の付いた、作業場所に実物のある追跡ファイルを、index の写しの上でフラグを
+    外して比べ（hidden_change。stat の記録を信じない見方も含む）、変更があれば、その道筋を入れた理由（ValueError）で拒む（git はその
+    変更を status に出さないので、片付けが書き換えた中身ごと消した。#76）。フラグは、人が付けるほか、core.ignoreStat=true では git が
+    index を更新した項目に付け（task start の作業場所は checkout したてなので、追跡ファイルの全部に付く）、
+    sparse.expectFilesOutsideOfPatterns=true の sparse-checkout では cone の外の実物に残る。フラグがあるだけでは拒まない
+    （core.ignoreStat=true の作業場所で、片付けが通らなくなる）。統合の見方は見ない。
+    フラグの付いた追跡ファイルを消して、同じ名前の空のディレクトリを置いた作業場所は拒む（フラグを外した status に削除として出る）。
     数えないもの: 開ける、無視しない空のディレクトリ・FIFO やソケットだけのディレクトリ（status に出ず、保存するデータが無い）、
-    skip-worktree や assume-unchanged の付いた追跡ファイルの変更（git に見ないよう指示したもので、別の原因）。"""
+    フラグの付いた追跡ファイルを消しただけのもの（実物が無く、失うデータが無い）。"""
     p = subprocess.run(['git', '-C', str(d), *QUIET, '--no-optional-locks', 'status', '--porcelain', '-z', '--untracked-files=all',
                         *(['--ignore-submodules=dirty'] if child else []), *(['--ignored=matching'] if ignored else [])],
                        stdin=subprocess.DEVNULL, capture_output=True)
@@ -881,7 +888,67 @@ def clean(d, ignored=False, child=False):
     if rel is not None:
         # UTF-8 の出力で落ちないよう、UTF-8 として読めないバイトは \xe9 の形にする
         raise ValueError(f"開けないディレクトリがある: {os.fsencode(rel).decode('utf-8', 'backslashreplace')}。中身を確かめられないので、作業場所を保持する")
+    hidden = hidden_change(d, child) if ignored else None
+    if hidden is not None:
+        raise ValueError('skip-worktree か assume-unchanged の付いた追跡ファイルに、status に出ない変更がある: '
+                         f"{hidden.decode('utf-8', 'backslashreplace')}。作業場所を保持する")
     return True
+
+
+def hidden_change(d, child):
+    """作業ツリーの根 d で、skip-worktree か assume-unchanged の付いた、作業場所に実物のある追跡ファイルのうち、変更のあるものの
+    どれか 1 つの、根からの道筋（バイト列）。無ければ None。index の写しの上で、2 つの見方の status（clean と同じく命令を走らせない
+    形で、追跡外・無視するものは見ない）を順に流し、先に出た最初の道筋を返す（status に出た道筋を絞らないので、確かめの間に
+    書き換わった、フラグの無いファイルの道筋が出ることがある）。
+    見方 1: それらのフラグだけを外す（index の覚えた stat と実物が食い違い、git が変更と見るものが出る。git add しても index が
+    変わらない書き換えでも、大きさが変わっていれば出る）。
+    見方 2: それらの項目を stat の記録の無い項目として入れ直し（update-index --index-info）、フラグを外す。git は stat の記録の無い
+    項目の実物の中身を比べるので、index の覚えた stat が実物と同じでも、中身が違えば出る（フラグが付いている間、git は項目の stat の
+    記録を更新しないので、記録は当てにならない）。
+    フラグの無い項目は、写しの上でも元のままにする。元の index とフラグは書き換えない。写しを書く update-index は hooks を走らせない
+    （post-index-change が走った）。
+    守らない範囲: フラグの無いファイルは、前と同じく、clean の片付けの見方の status だけで判定する（git が見ない形の変更は見ない）。
+    git が変更に数えないものは見つけない: core.fileMode=false での実行ビットだけの変更。改行の変換やフィルタを通すと index と同じ
+    中身になり、大きさも変わらない書き換え（フラグの無いファイルでも、git status は出さない）。"""
+    p = subprocess.run(['git', '-C', str(d), *QUIET, 'ls-files', '-v', '-s', '-z'], stdin=subprocess.DEVNULL, capture_output=True)
+    if p.returncode:
+        raise ValueError(os.fsdecode(p.stderr).strip() or 'git が失敗した')
+    # 1 欄は「字 SP モード SP オブジェクト SP 段 TAB 道筋」。S・s は skip-worktree、h・s は assume-unchanged（s は両方）。
+    # 字と空白を除いた残りが、そのまま update-index --index-info の 1 欄になる
+    flagged = [e[2:] for e in p.stdout.split(b'\0') if e[:1] in (b'S', b's', b'h')
+               and os.path.lexists(os.path.join(os.fsencode(d), e.partition(b'\t')[2]))]
+    if not flagged:
+        return None
+    paths = [e.partition(b'\t')[2] for e in flagged]
+    index = git(d, 'rev-parse', '--path-format=absolute', '--git-path', 'index')
+    with tempfile.TemporaryDirectory() as scratch:
+        env = {**os.environ, 'GIT_INDEX_FILE': os.path.join(scratch, 'index')}
+        with open(index, 'rb') as src, open(env['GIT_INDEX_FILE'], 'wb') as dst:
+            dst.write(src.read())
+
+        def update(*args, entries):
+            p = subprocess.run(['git', '-C', str(d), *QUIET, '-c', 'core.hooksPath=/dev/null', 'update-index', *args],
+                               input=b''.join(e + b'\0' for e in entries), capture_output=True, env=env)
+            if p.returncode:
+                raise ValueError(os.fsdecode(p.stderr).strip() or 'git が失敗した')
+
+        def changed():
+            p = subprocess.run(['git', '-C', str(d), *QUIET, '--no-optional-locks', 'status', '--porcelain', '-z', '--untracked-files=no',
+                                *(['--ignore-submodules=dirty'] if child else [])], stdin=subprocess.DEVNULL, capture_output=True, env=env)
+            if p.returncode:
+                raise ValueError(os.fsdecode(p.stderr).strip() or 'git が失敗した')
+            # 1 欄は「XY 道筋」
+            return next((e[3:] for e in p.stdout.split(b'\0') if e), None)
+        # 見方 1。1 回の呼び出しに 2 つのフラグを書くと、assume-unchanged しか外れない
+        for flag in ('--no-skip-worktree', '--no-assume-unchanged'):
+            update(flag, '-z', '--stdin', entries=paths)
+        found = changed()
+        if found is None:
+            # 見方 2。core.ignoreStat=true では、git が入れ直した項目に assume-unchanged をまた付けるので、外し直す
+            update('-z', '--index-info', entries=flagged)
+            update('--no-assume-unchanged', '-z', '--stdin', entries=paths)
+            found = changed()
+    return found
 
 
 class LeaseRefused(Exception):
