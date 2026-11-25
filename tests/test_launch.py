@@ -1083,6 +1083,32 @@ class TestLaunch(unittest.TestCase):
         self.assertEqual(rec["status"], "timeout", rec)
         self.assertIsNone(rec["exit_code"], rec)
 
+    def test_the_reviewers_of_one_place_stop_at_two_heads(self):
+        """1 つの作業場所で --interrogate の審査役を立てるのは、2 つの HEAD まで。同じ HEAD の立て直しと、別の作業場所は数えない。"""
+        git = lambda *a: subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", *a], cwd=self.cwd, check=True,
+                                        capture_output=True, text=True).stdout.strip()
+        git("init", "-q")
+        git("add", "a.txt")
+        git("commit", "-q", "-m", "1")
+        for _ in range(2):  # 同じ HEAD の立て直しは 1 つに数える
+            rc, rec = self.run_launch("claude", extra=["--interrogate"])
+            self.assertEqual((rc, rec["status"]), (0, "ok"), rec)
+        git("commit", "-q", "--allow-empty", "-m", "2")
+        rc, rec = self.run_launch("claude", extra=["--interrogate"])
+        self.assertEqual((rc, rec["status"]), (0, "ok"), rec)
+        git("commit", "-q", "--allow-empty", "-m", "3")
+        p = self.run_launch("claude", extra=["--interrogate"], raw=True)
+        self.assertEqual(p.returncode, 2, p.stdout)
+        self.assertIn("次の周は立てない", p.stderr)
+        rc, rec = self.run_launch("claude", extra=["--audit"])  # 監査役と、ほかの読み取り専用の子は数えない
+        self.assertEqual((rc, rec["status"]), (0, "ok"), rec)
+        rc, rec = self.run_launch("claude")
+        self.assertEqual((rc, rec["status"]), (0, "ok"), rec)
+        other = Path(self.tmp.name) / "other"
+        shutil.copytree(self.cwd, other)
+        rc, rec = self.run_launch("claude", extra=["--interrogate"], cwd=other)
+        self.assertEqual((rc, rec["status"]), (0, "ok"), rec)
+
     def test_launch_leaves_no_bytecode_in_the_plugin(self):
         subprocess.run(["rm", "-rf", str(ROOT / "scripts" / "__pycache__")], check=True)
         self.run_launch("codex")  # 試験の外と同じく -B なしで起動する
@@ -2207,7 +2233,7 @@ class TestLaunch(unittest.TestCase):
     def test_the_model_comes_from_the_role_unless_the_parent_gives_one(self):
         # 親が --model・--effort を省くと、役割とホストの表で決める（親が毎回手で選ぶと、同じ審査役が Opus high と Sonnet medium に割れた）
         flags = {"read": [], "audit": ["--audit"], "interrogate": ["--interrogate"], "write": ["--write"], "hardest": ["--write", "--hardest"]}
-        table = {("claude", "read"): ("sonnet", "medium"), ("claude", "audit"): ("opus", "high"), ("claude", "interrogate"): ("fable", "medium"),
+        table = {("claude", "read"): ("sonnet", "medium"), ("claude", "audit"): ("opus", "high"), ("claude", "interrogate"): ("opus", "high"),
                  ("claude", "write"): ("opus", "high"), ("claude", "hardest"): ("fable", "medium"),
                  ("codex", "read"): ("gpt-6-sol", "medium"), ("codex", "audit"): ("gpt-6-sol", "medium"), ("codex", "interrogate"): ("gpt-6-sol", "medium"),
                  ("codex", "write"): ("gpt-6-sol", "medium"), ("codex", "hardest"): ("gpt-6.1-sol", "high"),

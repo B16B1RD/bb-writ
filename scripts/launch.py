@@ -59,11 +59,12 @@ from work import claude_staging_only  # noqa: E402
 
 # 親が --model・--effort を省いたときの、役割ごとのモデルと effort（親が渡せば、それが勝つ）。表に無い組み合わせは --model と --effort を渡す。
 # 最も難しい依頼（設計、大きな移行・リファクタリング、長い無人実行）を任せる書く子（--hardest）は最上段。
-# Haiku は報告の形を守れないことが多いので入れない。Claude の審査役は Fable medium（欠陥のある変更 3 つを各 2 回審査させ、Opus high より多くを挙げた。揺れは測っていない）。
+# Haiku は報告の形を守れないことが多いので入れない。Claude の審査役は Opus high（Fable medium は欠陥のある変更 3 つを各 2 回審査させて Opus high より多くを挙げたが、
+# 周ごとに文の指摘を出し続け、利用者の Fable の週の枠を使い切った。2026-11）。
 # 監査役は Opus high（Opus medium は見落とした）。Claude の書く子は Opus high（指揮者は fork した Fable で、成果物は書く子が書く）。
 CHOICES = {
     "audit": {"claude": ("opus", "high"), "codex": ("gpt-6-sol", "medium"), "grok": ("grok-4.7", "medium")},
-    "interrogate": {"claude": ("fable", "medium"), "codex": ("gpt-6-sol", "medium"), "grok": ("grok-4.7", "medium")},
+    "interrogate": {"claude": ("opus", "high"), "codex": ("gpt-6-sol", "medium"), "grok": ("grok-4.7", "medium")},
     "read": {"claude": ("sonnet", "medium"), "codex": ("gpt-6-sol", "medium"), "grok": ("grok-4.7", "medium")},
     "write": {"claude": ("opus", "high"), "codex": ("gpt-6-sol", "medium"), "grok": ("grok-4.7", "medium")},
     "hardest": {"claude": ("fable", "medium"), "codex": ("gpt-6.1-sol", "high")},
@@ -72,6 +73,9 @@ CHOICES = {
 # 同じ起動の中で 1 回だけこの段で立て直す（Opus high は、審査役で Fable medium に次いで欠陥を挙げた。上の CHOICES の注釈）
 FALLBACK = {"claude": {"fable": ("opus", "high")}}
 TIMEOUTS = {"hardest": 3600}
+# 1 つの作業場所で --interrogate の審査役を立ててよい HEAD の数。周に上限が無く、審査役が文の変更に毎周指摘を出して、
+# 利用者の Fable の週の枠を 1 日で使い切った（2026-11）。上限に着いた後の扱いは interrogate の 5
+INTERROGATE_HEADS = 2
 QUOTA = re.compile(r"usage limit|rate limit|quota|exceeded your|too many requests|(?:status|code|http|error)\W{0,12}429\b|\b429 too many|limit reached|out of credits", re.I)
 CONTRACT = """
 
@@ -1224,6 +1228,24 @@ def fix_prompt(problems: list[str], cwd: Path) -> str:
             "存在しないファイルを証拠にしない（無いことが分かったなら、それを what に書き、確かめたコマンドを where に書く）。\n")
 
 
+def interrogated_heads(cwd: Path) -> list:
+    """cwd を --cwd にして --interrogate で立て、ok で返った審査役の HEAD（記録の順、重なりなし）。読めない行は数えない。"""
+    heads = []
+    try:
+        with open(state_dir() / "delegations.jsonl", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                try:
+                    e = json.loads(line)
+                except ValueError:
+                    continue
+                if (isinstance(e, dict) and e.get("interrogate") is True and e.get("status") == "ok" and e.get("cwd") == str(cwd)
+                        and isinstance(e.get("head"), str) and e["head"] not in heads):
+                    heads.append(e["head"])
+    except OSError:
+        pass
+    return heads
+
+
 def clean_head(cwd: Path) -> str | None:
     """対象の HEAD の commit。Git の作業ツリーでないか、未 commit の変更（staged・追跡外のファイルを含む。無視するものは除く）があれば None。
     子が見たものを commit に結び付け、work.py の --reviewed がこの記録と照らす（Issue #14）。
@@ -1749,6 +1771,12 @@ def main() -> int:
         a.effort = a.effort or chosen[1]
     a.timeout = a.timeout or TIMEOUTS.get(a.role, 1800)
     a.cwd = a.cwd.resolve()
+    if a.interrogate and not a.resume:
+        seen = interrogated_heads(a.cwd)
+        now = clean_head(a.cwd)
+        if now not in seen and len(seen) >= INTERROGATE_HEADS:
+            ap.error(f"この作業場所は、もう {len(seen)} つの HEAD（{', '.join(h[:7] for h in seen)}）で審査役を立てた。"
+                     f"次の周は立てない。残る指摘は interrogate の 5 の「周の上限に着いたら」のとおり扱う")
     stamp = time.strftime("%Y%m%d-%H%M%S") + '-' + secrets.token_hex(8)
     # 読み取り専用の Codex の子が書ける一時ディレクトリは、--out でなく bb-writ の状態の置き場に置く（--out は呼び出し側が選ぶので、
     # その下に置くと、対象のリポジトリや Git の管理ディレクトリの中かを判定し続けることになり、判定の穴が尽きなかった）
