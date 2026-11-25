@@ -24,7 +24,7 @@ jobs:
       - name: 試験だけの依存
         run: python3 -m pip install -r tests/requirements.txt
       - name: 単体試験
-        run: python3 -B -m unittest discover -s tests -t . -v
+        run: python3 -B tests/run.py
   # 一時の置き場を symlink の下に置いて全試験を回す（macOS の一時ディレクトリ /var/folders は /private/var への symlink の下にある）。
   # 解く前の道筋と解いた道筋を比べる試験の誤りが、macOS の CI で何度か落ち（0.24.0 など）、0.28.0 の前にも手元で同じ形を作って見つかった。
   # Linux で同じ形を作れば先に落ちる。全試験をもう 1 回回すので、上の job の時間を延ばさないよう別の job にする
@@ -43,4 +43,4 @@ jobs:
         run: |
           mkdir -p "$RUNNER_TEMP/real-tmp"
           ln -s "$RUNNER_TEMP/real-tmp" "$RUNNER_TEMP/link-tmp"
-          TMPDIR="$RUNNER_TEMP/link-tmp" python3 -B -m unittest discover -s tests -t .
+          TMPDIR="$RUNNER_TEMP/link-tmp" python3 -B tests/run.py

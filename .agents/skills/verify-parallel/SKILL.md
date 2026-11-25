@@ -17,7 +17,7 @@ description: bb-writ の worktree 分離、再開、直列統合、片付けを�
 
 ## 操作
 
-1. `python3 -B -m unittest discover -s tests -t . -v`。作業分離、古い検証拒否、変更保存、未完了操作、親プロセス停止、動作中の期限切れ、片付けの試験を実行する。
+1. `python3 -B tests/run.py`。作業分離、古い検証拒否、変更保存、未完了操作、親プロセス停止、動作中の期限切れ、片付けの試験を実行する。
 2. `python3 -B tests/verify_parallel_live.py --out <note.evidence_dir の下の新しいディレクトリ>`。数分かかる。両方の組み合わせで `result: passed` が出て、`result.json` の `status` が `passed` になること。
 3. `<out>/repo` の main に `0-a.txt`・`0-b.txt`・`2-a.txt`・`2-b.txt` があり、それぞれファイル名から `.txt` を取った一行であること。`remaining-tasks.json` の tasks は空、`git -C <out>/repo status --porcelain` は空であること。
 
