@@ -41,8 +41,9 @@ renew が 3 で拒否された。直し（d7cb680）は、期限が切れて MAX
   task resume --take-over で、期限が切れて間もないタスクでも取る（取ってよい）。
 - claim（作業場所を名指しして取る。書く子と、子の後の親が使い、期限の切れた担当を取る）で、閉じるタスクを取ること（手引きの片付けは
   task resume を使う）。
-- 未保存の変更・終わっていない操作による task cleanup の拒否、統合先が動くこと、読めない担当の記録（unreadable）、統合の記録。
-- 持ち主が自分のタスクを task resume で取り直すこと、途中で止まった task cleanup（task resume が仕上げる）。
+- 未保存の変更・終わっていない操作・書き込めないディレクトリによる task cleanup の拒否（消し始める前に拒み、何も変えない）、統合先が動くこと、読めない担当の記録（unreadable）、統合の記録。
+- 持ち主が自分のタスクを task resume で取り直すこと、途中で止まった task cleanup（片付けの途中の記録が残り、task resume が
+  担当を照らさずに仕上げる。Git の登録が消えて作業場所の残りが在れば、task resume が残りを消す）。
 
 実物との突き合わせ（2026-11-24、本物の git と work.py）: モデルの分岐は、tests/test_parallel.py の次の試験が実物で通る。一覧は、手放した・
 切れて 24 時間を過ぎたタスクを出し、切れて間もないタスクを出さない（test_a_task_whose_owner_may_still_be_waiting_is_not_offered_for_closing・
@@ -68,7 +69,7 @@ from model_tie import drift  # noqa: E402
 
 WORK = Path(__file__).resolve().parents[1] / "scripts" / "work.py"
 
-MODELED_AT = "d4dc5fa"
+MODELED_AT = "2ba0b6d"
 MODELED = {
     "alive": "f1f9574a8ad75670",
     "maybe_waiting": "b5093f786995e028",
@@ -77,7 +78,7 @@ MODELED = {
     "current_lease": "647f2e51dedbbfd9",
     "claim_at": "d13a239d32440d08",
     "unclosed_tasks": "c1b08c620e752898",
-    "task_command": "1be11aadcb159544",
+    "task_command": "f367321343d23f2e",
     "integrate": "be70176842d82a73",
     "dispatch": "7b2ce7ae7c39483f",
 }
