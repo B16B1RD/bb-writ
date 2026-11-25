@@ -391,6 +391,259 @@ class TestParallel(unittest.TestCase):
         self.git(self.repo, 'worktree', 'lock', a['dir'])
         self.w('task', 'cleanup', '--dir', a['dir'], '--token', a['token'], '--saved', 'main', code=6)
         self.assertNotIn('cleanup', self.w('task', 'list', '--dir', self.repo)['tasks'][0])
+        self.assertTrue(self.is_worktree_of_task(a), '作業場所が Git の作業ツリーでなくなった')
+        self.git(self.repo, 'worktree', 'unlock', a['dir'])
+        self.w('task', 'cleanup', '--dir', a['dir'], '--token', a['token'], '--saved', 'main')
+        self.assertFalse(Path(a['dir']).exists())
+
+    def registered(self, task):
+        """task の作業場所が Git の worktree の一覧に在るか（作業場所が無くても引ける。道筋は symlink を解いて比べる）。"""
+        d = Path(task['dir']).resolve()
+        return d in [Path(x[len('worktree '):]).resolve() for x in self.git(self.repo, 'worktree', 'list', '--porcelain').splitlines()
+                     if x.startswith('worktree ')]
+
+    def assert_closed(self, task):
+        """task が閉じている: 作業場所・ブランチ・タスクの記録・Git の登録・担当の記録が無い。"""
+        self.assertFalse(Path(task['dir']).exists())
+        self.assertEqual(self.git(self.repo, 'branch', '--list', task['branch']), '')
+        self.assertEqual(self.w('task', 'list', '--dir', self.repo)['tasks'], [])
+        self.assertFalse(self.registered(task))
+        self.assertFalse((Path(task['note']['path']).parent / 'lease.json').exists())
+
+    def test_cleanup_keeps_a_worktree_holding_a_directory_whose_items_it_cannot_remove(self):
+        """git worktree remove は、作業場所の削除に失敗しても Git の登録を消す（戻す道具が無い）。中の項目を消せないディレクトリ
+        （項目を持つのに、書き込みか中へ入る権限が無い）があると、作業場所が途中まで消えて登録だけが消え、タスクを閉じられなくなった（#77）。
+        task cleanup は、削除を始める前に、その道筋を理由に出して拒み、作業場所の項目を 1 つも消さず、Git の登録とブランチを残し、
+        片付けの途中の記録を書かない。権限を戻せば、同じ片付けで閉じる。"""
+        self.skip_unless_permissions_hold()
+
+        def tracked_many(d):
+            for i in range(1, 9):
+                (d / f'd{i}').mkdir()
+                (d / f'd{i}' / 'f').write_text(f'{i}\n')
+                (d / f'top{i}').write_text(f'{i}\n')
+
+        def tracked_nested(d):
+            (d / 'x' / 'y').mkdir(parents=True)
+            (d / 'x' / 'y' / 'f').write_text('f\n')
+        for name, tracked, untracked, locked in (
+                ('a tracked directory that can be read but not written', lambda d: None, [], 'src'),
+                ('an untracked read-only directory holding an empty directory', lambda d: None, ['u/s'], 'u'),
+                ('one read-only tracked directory among many tracked directories and files', tracked_many, [], 'd5'),
+                ('a read-only tracked directory below a writable one', tracked_nested, [], 'x/y')):
+            with self.subTest(name):
+                a = self.start()
+                d = Path(a['dir'])
+                (d / 'src').mkdir(exist_ok=True)  # 前の場面で統合済みなら、変更は無い
+                (d / 'src' / 'f').write_text('f\n')
+                tracked(d)
+                self.git(d, 'add', '.')
+                self.git(d, 'commit', '-qm', '追跡するディレクトリ', '--allow-empty')
+                self.integrate(a, self.git(self.repo, 'rev-parse', 'main'), self.git(d, 'rev-parse', 'HEAD'))
+                for p in untracked:
+                    (d / p).mkdir(parents=True)
+                self.lock(d / locked, 0o555)
+                before = sorted(map(str, d.rglob('*')))
+                r = self.w('task', 'cleanup', '--dir', a['dir'], '--token', a['token'], '--saved', 'main', code=6)
+                self.assertEqual(r['reason'], f'書き込めないディレクトリがある: {locked}。中の項目を消せないので、作業場所を保持する')
+                self.assertEqual(sorted(map(str, d.rglob('*'))), before)
+                self.assertTrue(self.is_worktree_of_task(a), '作業場所が Git の作業ツリーでなくなった')  # Git の登録もブランチも残る
+                self.assertNotIn('cleanup', self.w('task', 'list', '--dir', self.repo)['tasks'][0])
+                (d / locked).chmod(0o755)
+                self.w('task', 'cleanup', '--dir', a['dir'], '--token', a['token'], '--saved', 'main')
+                self.assert_closed(a)
+
+    def test_cleanup_names_a_directory_whose_items_it_cannot_remove_whose_name_is_not_utf8(self):
+        """中の項目を消せないディレクトリの名前が UTF-8 として読めなくても、UTF-8 の出力で落ちない形（読めないバイトは \\xe9）の道筋を
+        理由に出して拒み、作業場所を Git の作業ツリーのまま残す。"""
+        self.skip_unless_permissions_hold()
+        a = self.start()
+        d = Path(a['dir'])
+        try:
+            os.mkdir(os.path.join(os.fsencode(d), b'caf\xe9'))
+        except OSError:
+            self.skipTest('このファイルシステムは UTF-8 でない名前を作らせない')
+        locked = d / os.fsdecode(b'caf\xe9')
+        (locked / 'f').write_text('f\n')
+        self.git(d, 'add', '.')
+        self.git(d, 'commit', '-qm', 'UTF-8 でない名前')
+        self.integrate(a, self.git(self.repo, 'rev-parse', 'main'), self.git(d, 'rev-parse', 'HEAD'))
+        self.lock(locked, 0o555)
+        self.env['PYTHONIOENCODING'] = 'utf-8:strict'  # UTF-8 のロケールの出力と同じ（C のロケールの Python は読めないバイトをそのまま出す）
+        r = self.w('task', 'cleanup', '--dir', a['dir'], '--token', a['token'], '--saved', 'main', code=6)
+        self.assertEqual(r['reason'], '書き込めないディレクトリがある: caf\\xe9。中の項目を消せないので、作業場所を保持する')
+        self.assertTrue(self.is_worktree_of_task(a), '作業場所が Git の作業ツリーでなくなった')
+
+    def test_cleanup_still_removes_an_empty_read_only_directory_and_a_read_only_file(self):
+        """空のディレクトリと読み取り専用のファイルは、親に書ければ消せるので、書き込めなくても片付けは通る。"""
+        for name, committed, prepare, at, mode in (
+                ('an empty read-only directory', 'with-dir', lambda d: (d / 'u').mkdir(), 'u', 0o555),
+                ('a read-only tracked file', 'ro', lambda d: None, 'ro', 0o444)):
+            with self.subTest(name):
+                a = self.start()
+                d = Path(a['dir'])
+                self.integrate(a, self.git(self.repo, 'rev-parse', 'main'), self.change(a, committed))
+                prepare(d)
+                self.lock(d / at, mode)
+                self.assertEqual((d / at).stat().st_mode & 0o777, mode)
+                self.w('task', 'cleanup', '--dir', a['dir'], '--token', a['token'], '--saved', 'main')
+                self.assert_closed(a)
+
+    def stopped_cleanup(self, mode=0o555, name='src'):
+        """片付けの前の確かめの後に、作業場所の項目を消せなくなった片付け。PATH の先頭の偽の git が、git worktree remove の直前に、
+        作業場所の追跡するディレクトリ name の権限を mode にしてから、本物（PATH を変える前に引いた絶対パス）を呼ぶ。
+        git は作業場所を途中まで消して止まり、Git の登録を消す。止まった task cleanup の出力と、タスク・保存した commit を返す。"""
+        self.skip_unless_permissions_hold()
+        a = self.start()
+        d = Path(a['dir'])
+        try:
+            (d / name).mkdir()
+        except OSError:
+            self.skipTest('このファイルシステムは UTF-8 でない名前を作らせない')
+        (d / name / 'f').write_text('f\n')
+        self.git(d, 'add', '.')
+        self.git(d, 'commit', '-qm', '追跡するディレクトリ')
+        head = self.git(d, 'rev-parse', 'HEAD')
+        self.integrate(a, self.git(self.repo, 'rev-parse', 'main'), head)
+        # 片付けの前は、手引きの status の見方で何も出ない（未保存の変更が無い）
+        self.assertEqual(self.git(d, '-c', 'core.fsmonitor=false', '--no-optional-locks', 'status', '--porcelain', '--untracked-files=all',
+                                  '--ignored=matching', '--ignore-submodules=dirty'), '')
+        bin_dir = Path(self.tmp.name) / 'bin'
+        bin_dir.mkdir()
+        fake = bin_dir / 'git'
+        fake.write_bytes(os.fsencode('#!/bin/sh\nfor last; do :; done\ncase " $* " in *" worktree remove "*) chmod ' + format(mode, 'o')
+                                     + ' "$last"/' + shlex.quote(name) + ';; esac\nexec ' + shlex.quote(shutil.which('git')) + ' "$@"\n'))
+        fake.chmod(0o755)
+        self.addCleanup(lambda: (d / name).chmod(0o755) if os.path.lexists(d / name) else None)
+        path = self.env['PATH']
+        self.env['PATH'] = str(bin_dir) + os.pathsep + path
+        r = self.w('task', 'cleanup', '--dir', a['dir'], '--token', a['token'], '--saved', 'main', code=6)
+        self.env['PATH'] = path
+        self.assertEqual((d / name).stat().st_mode & 0o777, mode, '偽の git が呼ばれていない')
+        self.assertFalse(self.registered(a), 'git が Git の登録を残した（作りたい状態にならなかった）')
+        self.assertIn('cleanup', self.w('task', 'list', '--dir', self.repo)['tasks'][0], '片付けの途中の記録が無い（作りたい状態にならなかった）')
+        return a, head, r
+
+    def test_a_cleanup_that_stopped_while_removing_the_worktree_keeps_its_record_for_task_resume(self):
+        """git worktree remove が作業場所を途中まで消して止まり、Git の登録だけが消えたら、片付けは始まっている。task cleanup は、
+        片付けの途中の記録を消さずに残し、task resume で仕上げるよう理由に出す（記録を消して、task cleanup でも task resume でも
+        閉じられなくなった。#77）。"""
+        a, head, r = self.stopped_cleanup()
+        self.assertTrue(r['reason'].startswith('作業場所を消している途中で止まった（'), r['reason'])
+        self.assertIn(f"task resume --task {a['task']}", r['reason'])
+        self.assertTrue((Path(a['dir']) / 'src' / 'f').exists())
+        self.assertEqual(self.w('task', 'list', '--dir', self.repo)['tasks'][0]['cleanup'], {'saved': 'refs/heads/main', 'commit': head})
+
+    def test_task_resume_removes_what_a_stopped_cleanup_left_once_the_cause_is_fixed(self):
+        """片付けの途中で、Git の登録が消えて作業場所の残りが在るとき、task resume は残りを消してから片付けを仕上げる。残りを消せなければ、
+        消せない道筋を理由に出して拒み、消せないものと片付けの途中の記録とブランチを残す（消せるものは消える。片付けの前に、未保存の
+        変更が無いと確かめたもの）。原因を直せば、同じ task resume で閉じる。"""
+        a, head, _ = self.stopped_cleanup()
+        d = Path(a['dir'])
+        r = self.w('task', 'resume', '--dir', self.repo, '--task', a['task'], '--holder', 'x', code=6)
+        self.assertTrue(r['reason'].startswith('片付けの途中の残りを消せない: '), r['reason'])
+        self.assertIn(str(d / 'src'), r['reason'])
+        self.assertTrue((d / 'src' / 'f').exists())
+        self.assertEqual(self.w('task', 'list', '--dir', self.repo)['tasks'][0]['cleanup'], {'saved': 'refs/heads/main', 'commit': head})
+        self.assertEqual(self.git(self.repo, 'rev-parse', a['branch']), head)
+        (d / 'src').chmod(0o755)
+        got = self.w('task', 'resume', '--dir', self.repo, '--task', a['task'], '--holder', 'x')
+        self.assertTrue(got.get('completed'), got)
+        self.assert_closed(a)
+
+    def test_task_resume_names_a_directory_it_cannot_open_in_what_a_stopped_cleanup_left(self):
+        """片付けの途中の残りに、一覧できず中へも入れないディレクトリがあれば、task resume はその絶対の道筋を理由に出して拒む
+        （記録の置き場を読み書きできない、の終了コード 2 にしない）。権限を戻せば、同じ task resume で閉じる。"""
+        a, _, _ = self.stopped_cleanup(mode=0)
+        r = self.w('task', 'resume', '--dir', self.repo, '--task', a['task'], '--holder', 'x', code=6)
+        self.assertTrue(r['reason'].startswith('片付けの途中の残りを消せない: '), r['reason'])
+        self.assertIn(os.path.join(a['dir'], 'src') + ': ', r['reason'])
+        (Path(a['dir']) / 'src').chmod(0o755)
+        got = self.w('task', 'resume', '--dir', self.repo, '--task', a['task'], '--holder', 'x')
+        self.assertTrue(got.get('completed'), got)
+        self.assert_closed(a)
+
+    def test_task_resume_names_a_directory_it_cannot_remove_whose_name_is_not_utf8(self):
+        """片付けの途中の残りの、消せないディレクトリの名前が UTF-8 として読めなくても、UTF-8 の出力で落ちない形（読めないバイトは \\xe9）の
+        絶対の道筋を理由に出して拒む。"""
+        a, _, _ = self.stopped_cleanup(name=os.fsdecode(b'caf\xe9'))
+        self.env['PYTHONIOENCODING'] = 'utf-8:strict'  # UTF-8 のロケールの出力と同じ
+        r = self.w('task', 'resume', '--dir', self.repo, '--task', a['task'], '--holder', 'x', code=6)
+        self.assertTrue(r['reason'].startswith('片付けの途中の残りを消せない: '), r['reason'])
+        self.assertIn(os.path.join(a['dir'], 'caf\\xe9') + ': ', r['reason'])
+
+    def test_task_resume_keeps_a_registered_worktree_with_a_cleanup_mark_and_its_uncommitted_changes(self):
+        """task resume が残りを消すのは、Git の登録が消えたときだけ。片付けの途中の記録があっても、登録が残る作業場所（片付けが記録を
+        書いた直後に止められた形）は消さず、ふつうの再開として担当を返し、未 commit の変更・追跡外のファイル・ブランチ・登録を残す。"""
+        a = self.start()
+        head = self.change(a, 'a')
+        self.integrate(a, self.git(self.repo, 'rev-parse', 'main'), head)  # 照合は通る（保存先に入り、ブランチは記録の commit のまま）
+        reg = next(Path(self.tmp.name, 'state').rglob(a['task'] + '.json'))
+        reg.write_text(json.dumps({**json.loads(reg.read_text()), 'cleanup': {'saved': 'refs/heads/main', 'commit': head}}))
+        self.w('release', '--dir', a['dir'], '--token', a['token'])
+        d = Path(a['dir'])
+        (d / 'a').write_text('書き換えた\n')
+        (d / 'untracked').write_text('追跡外\n')
+        self.assertTrue(self.registered(a))
+        self.assertIn('cleanup', self.w('task', 'list', '--dir', self.repo)['tasks'][0])
+        p = subprocess.run([sys.executable, '-B', str(WORK), 'task', 'resume', '--dir', str(self.repo), '--task', a['task'], '--holder', 'x'],
+                           env=self.env, capture_output=True, text=True)
+        # 消えたものを先に見る（終了コードより先に。消した後で別の理由で失敗しても、消したことを失敗の理由に出す）
+        self.assertTrue((d / 'a').exists() and (d / 'untracked').exists(), '登録の残る作業場所の中身を消した: ' + p.stdout + p.stderr)
+        self.assertEqual((d / 'a').read_text(), '書き換えた\n')
+        self.assertEqual((d / 'untracked').read_text(), '追跡外\n')
+        self.assertTrue(self.is_worktree_of_task(a), '作業場所が Git の作業ツリーでなくなった')  # Git の登録もブランチも残る
+        self.assertEqual(self.git(self.repo, 'rev-parse', a['branch']), head)
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        got = json.loads(p.stdout)
+        self.assertNotIn('completed', got)  # ふつうの再開として担当を返す
+        self.assertTrue(got.get('token'), got)
+
+    def test_task_resume_keeps_an_unregistered_directory_without_a_cleanup_mark(self):
+        """片付けの途中の記録が無ければ、Git の登録の無い作業場所のディレクトリを、task resume は消さず、今の理由で拒む。"""
+        a = self.start()
+        self.w('release', '--dir', a['dir'], '--token', a['token'])
+        self.git(self.repo, 'worktree', 'remove', a['dir'])
+        d = Path(a['dir'])
+        d.mkdir()
+        (d / 'data.txt').write_text('important\n')
+        self.assertFalse(self.registered(a))
+        self.assertNotIn('cleanup', self.w('task', 'list', '--dir', self.repo)['tasks'][0])
+        r = self.w('task', 'resume', '--dir', self.repo, '--task', a['task'], '--holder', 'x', code=6)
+        self.assertEqual(r['reason'], '作業場所の作成が未完了か、登録と実物が異なる。記録と git worktree list を照合する')
+        self.assertEqual((d / 'data.txt').read_text(), 'important\n')
+
+    def assert_resume_keeps_what_a_stopped_cleanup_left(self, change):
+        """片付けの途中で、Git の登録が消えて残りが在るタスクに change(タスク, 片付けの commit) を当て、task resume が change の返す
+        照合の理由で拒み、残りを消さず、片付けの途中の記録を残すことを確かめる。残りは消せるものにして、拒否が照合によるものだと分かるようにする。"""
+        a, head, _ = self.stopped_cleanup()
+        d = Path(a['dir'])
+        (d / 'src').chmod(0o755)
+        why = change(a, head)
+        before = sorted(map(str, d.rglob('*')))
+        r = self.w('task', 'resume', '--dir', self.repo, '--task', a['task'], '--holder', 'x', code=6)
+        self.assertEqual(r['reason'], why)
+        self.assertEqual(sorted(map(str, d.rglob('*'))), before)
+        self.assertIn('cleanup', self.w('task', 'list', '--dir', self.repo)['tasks'][0])
+
+    def test_task_resume_keeps_what_a_stopped_cleanup_left_when_the_task_branch_moved(self):
+        """片付けの途中の残りは、消すと戻せないので、task resume は保存先の照合を先に通す。タスクのブランチが片付けの commit から
+        進んでいれば、今の照合の理由で拒み、残りを消さない。"""
+        def moved(a, head):
+            tree = self.git(self.repo, 'rev-parse', head + '^{tree}')
+            later = self.git(self.repo, '-c', 'user.name=t', '-c', 'user.email=t', 'commit-tree', tree, '-p', head, '-m', '後の commit')
+            self.git(self.repo, 'update-ref', 'refs/heads/' + a['branch'], later)
+            return '片付けの途中の後にタスクのブランチが進んだ。記録と差分を照合する'
+        self.assert_resume_keeps_what_a_stopped_cleanup_left(moved)
+
+    def test_task_resume_keeps_what_a_stopped_cleanup_left_when_the_change_is_not_in_the_saved_place(self):
+        """片付けの途中の記録の保存先に、片付けの commit が入っていなければ、task resume は今の照合の理由で拒み、残りを消さない。"""
+        def unsaved(a, head):
+            self.git(self.repo, 'branch', 'old', a['base'])
+            reg = next(Path(self.tmp.name, 'state').rglob(a['task'] + '.json'))
+            reg.write_text(json.dumps({**json.loads(reg.read_text()), 'cleanup': {'saved': 'refs/heads/old', 'commit': head}}))
+            return '片付けの途中の保存先 refs/heads/old に、このタスクの変更が入っていない。記録と差分を照合する'
+        self.assert_resume_keeps_what_a_stopped_cleanup_left(unsaved)
 
     def test_a_background_process_of_a_hook_does_not_keep_the_lock(self):
         a = self.start()
