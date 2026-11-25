@@ -776,8 +776,8 @@ def contained(repo, commit, ref, look_only=False):
     return p.returncode == 0 and p.stdout.split()[0] == git(repo, 'rev-parse', ref + '^{tree}')
 
 
-# 書く子が書けた作業場所で動かす git に付ける -c（launch.py の QUIET_GIT と同じ）。git status・worktree remove が設定から走らせる
-# core.fsmonitor を外す（コマンド行の -c は include・config.worktree の値より強く、中で起こす git にも伝わる。git 2.43 で測った。#64）。
+# 書く子が書けた作業場所で動かす git に付ける -c（launch.py の QUIET_GIT と同じ）。git status・ls-files・index の写しを書く update-index・
+# worktree remove が設定から走らせる core.fsmonitor を外す（コマンド行の -c は include・config.worktree の値より強く、中で起こす git にも伝わる。git 2.43 で測った。#64）。
 # filter は外さない（どこで定めたものも。LFS などの required の filter を外すと status が壊れる。守らない範囲は launch.py の QUIET_GIT の注釈）。
 QUIET = ['-c', 'core.fsmonitor=false']
 
@@ -822,8 +822,12 @@ def clean(d, ignored=False, child=False):
     空でも、中身を確かめられないので、その道筋（UTF-8 として読めないバイトは \\xe9 の形）を入れた理由（ValueError）で拒む（git status はそこを飛ばし、標準エラーに警告を
     出すか、何も出さないだけなので、片付けが git worktree remove まで進んだ。#68）。git の警告の文は読まない。統合の見方は数えない
     （データを消さず、利用者の checkout に root の持つ置き場などがありうる）。
+    ignored では、さらに、skip-worktree か assume-unchanged の付いた、作業場所に実物のある追跡ファイルを、フラグを外して同じ status で見て
+    （hidden_change）、変更が出れば、その道筋を入れた理由（ValueError）で拒む（git はその変更を status に出さないので、片付けが書き換えた
+    中身ごと消した。core.ignoreStat=true と、sparse.expectFilesOutsideOfPatterns=true の sparse-checkout でも、設定だけで同じことが起きた。
+    #76）。フラグがあるだけでは拒まない（core.ignoreStat=true では全部の追跡ファイルに付くので、片付けが通らなくなる）。統合の見方は見ない。
     数えないもの: 開ける、無視しない空のディレクトリ・FIFO やソケットだけのディレクトリ（status に出ず、保存するデータが無い）、
-    skip-worktree や assume-unchanged の付いた追跡ファイルの変更（git に見ないよう指示したもので、別の原因）。"""
+    フラグの付いた追跡ファイルを消しただけのもの（実物が無く、失うデータが無い）。"""
     p = subprocess.run(['git', '-C', str(d), *QUIET, '--no-optional-locks', 'status', '--porcelain', '-z', '--untracked-files=all',
                         *(['--ignore-submodules=dirty'] if child else []), *(['--ignored=matching'] if ignored else [])],
                        stdin=subprocess.DEVNULL, capture_output=True)
@@ -837,7 +841,42 @@ def clean(d, ignored=False, child=False):
     if rel is not None:
         # UTF-8 の出力で落ちないよう、UTF-8 として読めないバイトは \xe9 の形にする
         raise ValueError(f"開けないディレクトリがある: {os.fsencode(rel).decode('utf-8', 'backslashreplace')}。中身を確かめられないので、作業場所を保持する")
+    hidden = hidden_change(d, child) if ignored else None
+    if hidden is not None:
+        raise ValueError('skip-worktree か assume-unchanged の付いた追跡ファイルに、status に出ない変更がある: '
+                         f"{hidden.decode('utf-8', 'backslashreplace')}。作業場所を保持する")
     return True
+
+
+def hidden_change(d, child):
+    """作業ツリーの根 d で、skip-worktree か assume-unchanged の付いた追跡ファイルのうち、フラグを外して見れば status に出る変更のある
+    もののどれか 1 つの、根からの道筋（バイト列）。無ければ None。フラグの付いた項目のうち作業場所に実物のあるものだけを、index の写しの上で
+    フラグを外し、clean と同じ見方の status（追跡外のものは見ない）で比べる。元の index とフラグは書き換えない。写しを書く update-index
+    は hooks を走らせない（post-index-change が走った）。"""
+    p = subprocess.run(['git', '-C', str(d), *QUIET, 'ls-files', '-v', '-z'], stdin=subprocess.DEVNULL, capture_output=True)
+    if p.returncode:
+        raise ValueError(os.fsdecode(p.stderr).strip() or 'git が失敗した')
+    # 1 欄は「字 道筋」。S・s は skip-worktree、小文字は assume-unchanged（s は両方、m は未マージの項目）
+    flagged = [e[2:] for e in p.stdout.split(b'\0') if e[:1] in (b'S', b's', b'h', b'm')
+               and os.path.lexists(os.path.join(os.fsencode(d), e[2:]))]
+    if not flagged:
+        return None
+    index = git(d, 'rev-parse', '--path-format=absolute', '--git-path', 'index')
+    with tempfile.TemporaryDirectory() as scratch:
+        env = {**os.environ, 'GIT_INDEX_FILE': os.path.join(scratch, 'index')}
+        with open(index, 'rb') as src, open(env['GIT_INDEX_FILE'], 'wb') as dst:
+            dst.write(src.read())
+        # 1 回の呼び出しに 2 つのフラグを書くと、assume-unchanged しか外れない
+        for flag in ('--no-skip-worktree', '--no-assume-unchanged'):
+            p = subprocess.run(['git', '-C', str(d), *QUIET, '-c', 'core.hooksPath=/dev/null', 'update-index', flag, '-z', '--stdin'],
+                               input=b''.join(e + b'\0' for e in flagged), capture_output=True, env=env)
+            if p.returncode:
+                raise ValueError(os.fsdecode(p.stderr).strip() or 'git が失敗した')
+        p = subprocess.run(['git', '-C', str(d), *QUIET, '--no-optional-locks', 'status', '--porcelain', '-z', '--untracked-files=no',
+                            *(['--ignore-submodules=dirty'] if child else [])], stdin=subprocess.DEVNULL, capture_output=True, env=env)
+        if p.returncode:
+            raise ValueError(os.fsdecode(p.stderr).strip() or 'git が失敗した')
+    return next((e[3:] for e in p.stdout.split(b'\0') if e), None)
 
 
 class LeaseRefused(Exception):
