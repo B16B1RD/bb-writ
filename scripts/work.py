@@ -822,10 +822,12 @@ def clean(d, ignored=False, child=False):
     空でも、中身を確かめられないので、その道筋（UTF-8 として読めないバイトは \\xe9 の形）を入れた理由（ValueError）で拒む（git status はそこを飛ばし、標準エラーに警告を
     出すか、何も出さないだけなので、片付けが git worktree remove まで進んだ。#68）。git の警告の文は読まない。統合の見方は数えない
     （データを消さず、利用者の checkout に root の持つ置き場などがありうる）。
-    ignored では、さらに、skip-worktree か assume-unchanged の付いた、作業場所に実物のある追跡ファイルを、フラグを外して同じ status で見て
-    （hidden_change）、変更が出れば、その道筋を入れた理由（ValueError）で拒む（git はその変更を status に出さないので、片付けが書き換えた
-    中身ごと消した。core.ignoreStat=true と、sparse.expectFilesOutsideOfPatterns=true の sparse-checkout でも、設定だけで同じことが起きた。
-    #76）。フラグがあるだけでは拒まない（core.ignoreStat=true では全部の追跡ファイルに付くので、片付けが通らなくなる）。統合の見方は見ない。
+    ignored では、さらに、skip-worktree か assume-unchanged の付いた、作業場所に実物のある追跡ファイルを、フラグを外して中身で比べ
+    （hidden_change）、変更があれば、その道筋を入れた理由（ValueError）で拒む（git はその変更を status に出さないので、片付けが書き換えた
+    中身ごと消した。#76）。フラグは、人が付けるほか、core.ignoreStat=true では git が index を更新した項目に付け（task start の作業場所は
+    checkout したてなので、追跡ファイルの全部に付く）、sparse.expectFilesOutsideOfPatterns=true の sparse-checkout では cone の外の実物に
+    残る。フラグがあるだけでは拒まない（core.ignoreStat=true の作業場所で、片付けが通らなくなる）。統合の見方は見ない。
+    フラグの付いた追跡ファイルを消して、同じ名前の空のディレクトリを置いた作業場所は拒む（フラグを外した status に削除として出る）。
     数えないもの: 開ける、無視しない空のディレクトリ・FIFO やソケットだけのディレクトリ（status に出ず、保存するデータが無い）、
     フラグの付いた追跡ファイルを消しただけのもの（実物が無く、失うデータが無い）。"""
     p = subprocess.run(['git', '-C', str(d), *QUIET, '--no-optional-locks', 'status', '--porcelain', '-z', '--untracked-files=all',
@@ -849,15 +851,18 @@ def clean(d, ignored=False, child=False):
 
 
 def hidden_change(d, child):
-    """作業ツリーの根 d で、skip-worktree か assume-unchanged の付いた追跡ファイルのうち、フラグを外して見れば status に出る変更のある
-    もののどれか 1 つの、根からの道筋（バイト列）。無ければ None。フラグの付いた項目のうち作業場所に実物のあるものだけを、index の写しの上で
-    フラグを外し、clean と同じ見方の status（追跡外のものは見ない）で比べる。比べる前に、写しの更新時刻を元の index のものに合わせる。
-    元の index とフラグは書き換えない。写しを書く update-index は hooks を走らせない（post-index-change が走った）。"""
+    """作業ツリーの根 d で、skip-worktree か assume-unchanged の付いた、作業場所に実物のある追跡ファイルのうち、フラグを外して中身で
+    比べれば変更のあるもののどれか 1 つの、根からの道筋（バイト列）。無ければ None。index の写しの上でそれらのフラグを外し、写しの更新時刻を
+    1 秒にして、git に stat の一致を信じずに中身を比べさせる status（追跡外・無視するものは見ない）で比べ、出力のうちフラグの付いた道筋
+    だけを数える（フラグが付いている間、git は項目の stat の記録を更新しないので、記録は当てにならない）。元の index とフラグは書き換えない。
+    写しを書く update-index は hooks を走らせない（post-index-change が走った）。
+    守らない範囲: フラグの無いファイルは、前と同じく、clean の片付けの見方の status だけで判定する（git が見ない形の変更は見ない）。git が
+    設定で変更に数えないもの（core.fileMode=false での実行ビットだけの変更）は見つけない。"""
     p = subprocess.run(['git', '-C', str(d), *QUIET, 'ls-files', '-v', '-z'], stdin=subprocess.DEVNULL, capture_output=True)
     if p.returncode:
         raise ValueError(os.fsdecode(p.stderr).strip() or 'git が失敗した')
-    # 1 欄は「字 道筋」。S・s は skip-worktree、小文字は assume-unchanged（s は両方、m は未マージの項目）
-    flagged = [e[2:] for e in p.stdout.split(b'\0') if e[:1] in (b'S', b's', b'h', b'm')
+    # 1 欄は「字 道筋」。S・s は skip-worktree、h・s は assume-unchanged（s は両方）
+    flagged = [e[2:] for e in p.stdout.split(b'\0') if e[:1] in (b'S', b's', b'h')
                and os.path.lexists(os.path.join(os.fsencode(d), e[2:]))]
     if not flagged:
         return None
@@ -866,20 +871,21 @@ def hidden_change(d, child):
         env = {**os.environ, 'GIT_INDEX_FILE': os.path.join(scratch, 'index')}
         with open(index, 'rb') as src, open(env['GIT_INDEX_FILE'], 'wb') as dst:
             dst.write(src.read())
-            st = os.fstat(src.fileno())
         # 1 回の呼び出しに 2 つのフラグを書くと、assume-unchanged しか外れない
         for flag in ('--no-skip-worktree', '--no-assume-unchanged'):
             p = subprocess.run(['git', '-C', str(d), *QUIET, '-c', 'core.hooksPath=/dev/null', 'update-index', flag, '-z', '--stdin'],
                                input=b''.join(e + b'\0' for e in flagged), capture_output=True, env=env)
             if p.returncode:
                 raise ValueError(os.fsdecode(p.stderr).strip() or 'git が失敗した')
-        # 写しの更新時刻が新しいと、index が覚えたのと同じ秒に同じ大きさで書き換えた変更を、git が stat だけで変更なしと見る
-        os.utime(env['GIT_INDEX_FILE'], ns=(st.st_atime_ns, st.st_mtime_ns))
+        # git は、index の更新時刻が 0 でなく、項目の覚えた更新時刻以下なら、stat の一致を信じずに中身を比べる（0 ではそうならない）
+        os.utime(env['GIT_INDEX_FILE'], ns=(10**9, 10**9))
         p = subprocess.run(['git', '-C', str(d), *QUIET, '--no-optional-locks', 'status', '--porcelain', '-z', '--untracked-files=no',
                             *(['--ignore-submodules=dirty'] if child else [])], stdin=subprocess.DEVNULL, capture_output=True, env=env)
         if p.returncode:
             raise ValueError(os.fsdecode(p.stderr).strip() or 'git が失敗した')
-    return next((e[3:] for e in p.stdout.split(b'\0') if e), None)
+    # 1 欄は「XY 道筋」。フラグの無いファイルも中身で比べられて出るので、フラグの付いた道筋だけを数える
+    marked = set(flagged)
+    return next((e[3:] for e in p.stdout.split(b'\0') if e[3:] in marked), None)
 
 
 class LeaseRefused(Exception):
