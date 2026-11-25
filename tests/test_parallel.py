@@ -1001,8 +1001,9 @@ class TestParallel(unittest.TestCase):
 
     def test_cleanup_keeps_a_worktree_whose_flagged_tracked_file_holds_a_change_status_does_not_show(self):
         """git status は、skip-worktree か assume-unchanged の付いた追跡ファイルの変更を出さない。task cleanup はそれを見逃し、書き換えた
-        ファイルごと作業場所を消した（#76）。core.ignoreStat=true（git が追跡ファイルの全部に assume-unchanged を付ける）と、
-        sparse.expectFilesOutsideOfPatterns=true の sparse-checkout（cone の外の実物に skip-worktree が残る）でも、設定だけで同じことが起きた。
+        ファイルごと作業場所を消した（#76）。git が付けたフラグでも同じことが起きた: core.ignoreStat=true（git が index を更新した項目に
+        assume-unchanged を付ける。task start の作業場所は checkout したてなので、追跡ファイルの全部に付く）と、
+        sparse.expectFilesOutsideOfPatterns=true の sparse-checkout（cone の外の実物に skip-worktree が残る）。
         フラグを外して見れば変更のあるファイルがあれば、その道筋を理由に出して拒み、作業場所・変更・index・フラグを元のまま残す。
         代表の場面（skip-worktree と assume-unchanged）では、変更を戻せば、同じ片付けが通る。"""
         def config(*pairs):
@@ -1033,6 +1034,11 @@ class TestParallel(unittest.TestCase):
             (d / 'a').symlink_to('missing')
             self.assertFalse(os.path.exists(d / 'a'))  # 指す先が無い
 
+        def newline_name_rewrite(a, d):
+            self.commit_and_integrate(a, 'x\ny', 'x\n')
+            self.git(d, 'update-index', '--skip-worktree', 'x\ny')
+            (d / 'x\ny').write_text('changed\n')
+
         def ignorestat_rewrite(a, d):
             self.commit_and_integrate(a, 'n', 'n\n')  # git が自分で書いたので、assume-unchanged が付く
             (d / 'n').write_text('changed\n')
@@ -1052,6 +1058,7 @@ class TestParallel(unittest.TestCase):
                 ('only the executable bit of an assume-unchanged file', None, flag('--assume-unchanged', then=make_executable), 'a', 'h', None),
                 ('a skip-worktree file replaced by a symlink', None, flag('--skip-worktree', then=to_symlink), 'a', 'S', None),
                 ('a skip-worktree file replaced by a symlink to nothing', None, flag('--skip-worktree', then=to_dangling_symlink), 'a', 'S', None),
+                ('a change to a skip-worktree file whose name has a newline', None, newline_name_rewrite, 'x\ny', 'S', None),
                 ('a change to a tracked file with core.ignoreStat on', config(('core.ignoreStat', 'true')), ignorestat_rewrite, 'n', 'h', None),
                 ('a file outside the cone that differs from the index with files expected outside the patterns',
                  lambda r: (sparse_expect(r), self.git(r, 'sparse-checkout', 'set', 'src')), outside_cone_rewrite, 'other/o', 'S', None)):
@@ -1223,40 +1230,111 @@ class TestParallel(unittest.TestCase):
                     self.assertEqual(mark.read_text(), '', '片付けの間に hook が走った')
                     self.assertEqual(d.exists(), changed)
 
-    def test_cleanup_keeps_a_change_to_a_flagged_file_rewritten_in_the_same_second_at_the_same_size(self):
-        """git は、index のファイルと同じ秒に書き換えられた項目を、stat を信じずに中身で比べる（同じ秒に同じ大きさで書き換えると、stat が
-        同じに見えるため）。index の写しの更新時刻が「いま」だと、index が覚えたのと同じ秒に同じ大きさで書き換えたフラグ付きのファイルを、
-        git が stat だけで変更なしと見て、片付けが作業場所ごと消した。同じ秒は、時計を待たずに、ファイルと index の更新時刻を過去の同じ
-        秒 P に置いて作る。core.trustctime=false は、試験を時計に依らなくするための設定（ctime は書き換えのたびに「いま」になり、戻せない）。
-        P を置いた後は、index を書き直す git（add・update-index・--no-optional-locks の無い status）を動かさない。"""
-        for name, flag, extra in (('a skip-worktree file', '--skip-worktree', None),
-                                  ('an assume-unchanged file', '--assume-unchanged', None),
-                                  ('a tracked file with core.ignoreStat on', None, ('core.ignoreStat', 'true'))):
-            with self.subTest(name):
-                def before(r):
-                    self.git(r, 'config', 'core.trustctime', 'false')
-                    if extra:
-                        self.git(r, 'config', *extra)
-                self.fresh_repo('repo-same-second-' + name.replace(' ', '-'), before)
+    def stat_matching_rewrite(self, name, before, flags, tag):
+        """場面ごとの新しい元の checkout（before の後に core.trustctime=false）で task start し、作業場所に追跡ファイル n を、更新時刻が
+        過去の秒 P のまま add・commit・統合して、flags を付け（flag_of が tag になる）、同じ大きさの別の中身に書き換えて、更新時刻を P に
+        戻す（stat が index の覚えた値と同じまま、中身だけが違う）。タスクと作業場所と P を返す。"""
+        def prepare(r):
+            if before:
+                before(r)
+            self.git(r, 'config', 'core.trustctime', 'false')  # ctime は書き換えのたびに「いま」になり、戻せないので比べない
+        self.fresh_repo(name, prepare)
+        a = self.start()
+        d = Path(a['dir'])
+        at = d / 'n'
+        P = (int(time.time()) - 1000) * 10**9
+        at.write_text('n\n')
+        os.utime(at, ns=(P, P))  # add の前に（index が更新時刻 P を覚える）
+        self.git(d, 'add', 'n')
+        self.git(d, 'commit', '-qm', '追跡するファイル')
+        self.integrate(a, self.git(self.repo, 'rev-parse', 'main'), self.git(d, 'rev-parse', 'HEAD'))
+        for f in flags:
+            self.git(d, 'update-index', f, 'n')
+        self.assertEqual(self.flag_of(d, 'n'), tag)
+        at.write_text('X\n')  # 同じ大きさの別の中身
+        os.utime(at, ns=(P, P))
+        return a, d, P
+
+    def test_cleanup_keeps_a_change_to_a_flagged_file_even_when_its_stat_matches_what_the_index_recorded(self):
+        """フラグが付いている間、git はその項目の stat の記録を更新しないので、記録は当てにならない。フラグ付きのファイルを、stat が index の
+        覚えた値と同じまま（同じ更新時刻・同じ大きさ）中身だけ書き換えると、フラグを外して stat で見ても変更なしに見え、片付けが作業場所ごと
+        消した。素の git status が index を書き直した後（index の更新時刻だけが進み、同じ秒の項目を中身で比べる git の守りが外れる）も同じ。
+        片付けは、フラグの付いた実物のあるファイルを、stat を信じずに中身で比べて拒む。core.trustctime=false は、試験を時計に依らなく
+        するための設定（ctime は書き換えのたびに「いま」になり、戻せない）。更新時刻は待たずに、過去の秒に置いて作る。"""
+        def config(k, v):
+            return lambda r: self.git(r, 'config', k, v)
+        for form, before, flags, tag in (
+                ('a skip-worktree file', None, ['--skip-worktree'], 'S'),
+                ('an assume-unchanged file', None, ['--assume-unchanged'], 'h'),
+                ('a file with both flags', None, ['--skip-worktree', '--assume-unchanged'], 's'),
+                ('a tracked file with core.ignoreStat on', config('core.ignoreStat', 'true'), [], 'h'),
+                ('a skip-worktree file with a split index', config('core.splitIndex', 'true'), ['--skip-worktree'], 'S'),
+                ('a skip-worktree file with many files on', config('feature.manyFiles', 'true'), ['--skip-worktree'], 'S')):
+            for then in ('nothing', 'a plain git status rewrites the index'):
+                with self.subTest(f'{form}, then {then}'):
+                    a, d, P = self.stat_matching_rewrite(f"repo-stat-{form.replace(' ', '-')}-{then == 'nothing'}", before, flags, tag)
+                    if then != 'nothing':
+                        self.git(d, 'status')  # --no-optional-locks を付けない（index を書き直す）
+                    self.assertEqual((os.stat(d / 'n').st_mtime_ns, os.stat(d / 'n').st_size), (P, len('n\n')),
+                                     'ファイルの更新時刻か大きさが、index の覚えた値と違う')
+                    self.assert_cleanup_keeps_the_hidden_change(a, 'n', 'n')  # index のバイト列は、片付けの直前と直後で比べる
+
+    def test_cleanup_still_ignores_a_change_git_does_not_see_in_a_file_with_no_flag(self):
+        """フラグの無いファイルは、前と同じく、片付けの見方の status だけで判定する（守らない範囲: stat が index の覚えた値と同じまま中身だけ
+        書き換えた、git が見ない形の変更は、フラグの無いファイルでは見ない）。フラグの付いたファイルを中身で比べるために、フラグの無い
+        ファイルの扱いを変えない（フラグの無いファイルを、フラグの付いた追跡ファイルと名指しして拒まない）。"""
+        self.fresh_repo('repo-unflagged', lambda r: self.git(r, 'config', 'core.trustctime', 'false'))
+        a = self.start()
+        d = Path(a['dir'])
+        u = d / 'u'
+        P = (int(time.time()) - 1000) * 10**9
+        u.write_text('u\n')
+        os.utime(u, ns=(P, P))
+        self.git(d, 'add', 'u')
+        self.git(d, 'commit', '-qm', '追跡するファイル')
+        self.integrate(a, self.git(self.repo, 'rev-parse', 'main'), self.git(d, 'rev-parse', 'HEAD'))
+        self.git(d, 'update-index', '--skip-worktree', 'a')  # 変更の無い、フラグの付いたファイル
+        u.write_text('X\n')
+        os.utime(u, ns=(P, P))
+        self.assertEqual((self.flag_of(d, 'u'), self.flag_of(d, 'a')), ('H', 'S'))
+        self.assertEqual(self.handbook_status(d), '')
+        self.w('task', 'cleanup', '--dir', a['dir'], '--token', a['token'], '--saved', 'main')
+        self.assertFalse(d.exists())
+
+    def test_integrate_passes_with_a_change_a_flag_hides_in_the_checkout_it_lands_in(self):
+        """統合先の checkout（元の checkout）に、フラグで隠した変更があっても、統合はデータを消さないので通り、隠した変更とフラグが残る
+        （統合先は片付けの見方で見ない）。続く片付けも通る。"""
+        for flag, tag in (('--skip-worktree', 'S'), ('--assume-unchanged', 'h')):
+            with self.subTest(flag):
+                self.fresh_repo('repo-integrate-into' + flag)
+                self.git(self.repo, 'update-index', flag, 'b')
+                (self.repo / 'b').write_text('hidden in the checkout\n')
                 a = self.start()
-                d = Path(a['dir'])
-                at = d / 'n'
-                P = (int(time.time()) - 1000) * 10**9
-                at.write_text('n\n')
-                os.utime(at, ns=(P, P))  # add の前に（index が更新時刻 P を覚える）
-                self.git(d, 'add', 'n')
-                self.git(d, 'commit', '-qm', '追跡するファイル')
-                self.integrate(a, self.git(self.repo, 'rev-parse', 'main'), self.git(d, 'rev-parse', 'HEAD'))
-                if flag:
-                    self.git(d, 'update-index', flag, 'n')
-                at.write_text('X\n')  # 同じ大きさの別の中身
-                os.utime(at, ns=(P, P))
-                index = Path(self.git(d, 'rev-parse', '--path-format=absolute', '--git-path', 'index'))
-                os.utime(index, ns=(P, P))  # 最後に。ここから片付けまで、index を書き直す git を動かさない
-                self.assertEqual(self.flag_of(d, 'n'), {'--skip-worktree': 'S', '--assume-unchanged': 'h', None: 'h'}[flag])
-                self.assertEqual((os.stat(at).st_mtime_ns, os.stat(index).st_mtime_ns, os.stat(at).st_size), (P, P, len('n\n')),
-                                 'ファイルと index の更新時刻が同じ秒 P に無いか、大きさが元と違う')
-                self.assert_cleanup_keeps_the_hidden_change(a, 'n', 'n')
+                head = self.change(a, 'c')
+                self.integrate(a, a['base'], head)
+                self.assertEqual(self.git(self.repo, 'rev-parse', 'main'), head)
+                self.assertEqual((self.repo / 'b').read_text(), 'hidden in the checkout\n')
+                self.assertEqual(self.flag_of(self.repo, 'b'), tag)
+                self.w('task', 'cleanup', '--dir', a['dir'], '--token', a['token'], '--saved', 'main')
+                self.assertFalse(Path(a['dir']).exists())
+
+    def test_cleanup_refuses_a_flagged_file_replaced_by_an_empty_directory(self):
+        """フラグの付いた追跡ファイルを消して、同じ名前の空のディレクトリを置いた作業場所は、フラグを外した status に削除として出るので、
+        その道筋を理由に出して拒む。ディレクトリを消せば（フラグの付いたファイルを消しただけになり）、同じ片付けが通る。"""
+        self.fresh_repo('repo-empty-dir')
+        a = self.start()
+        d = Path(a['dir'])
+        self.git(d, 'update-index', '--skip-worktree', 'a')
+        (d / 'a').unlink()
+        (d / 'a').mkdir()
+        self.assertEqual(self.flag_of(d, 'a'), 'S')
+        self.assertEqual(self.handbook_status(d), '')
+        r = self.w('task', 'cleanup', '--dir', a['dir'], '--token', a['token'], '--saved', 'main', code=6)
+        self.assertEqual(r['reason'], self.HIDDEN.format('a'))
+        self.assertTrue(self.is_worktree_of_task(a), '作業場所が Git の作業ツリーでなくなった')
+        (d / 'a').rmdir()
+        self.w('task', 'cleanup', '--dir', a['dir'], '--token', a['token'], '--saved', 'main')
+        self.assertFalse(d.exists())
 
     def test_cleanup_refuses_when_git_fails_while_it_checks_flagged_files(self):
         """フラグを外して見る git（ls-files、index の写しに当てる update-index、写しで比べる status）のどれかが失敗したら、隠れた変更を
