@@ -3634,7 +3634,7 @@ class TestOpRun(unittest.TestCase):
 
 
 class TestQuietGit(unittest.TestCase):
-    """書く子が書けた作業場所で、work.py の git（task cleanup の status・worktree remove）は、子が仕込んだ設定・hooks・入れ子の
+    """書く子が書けた作業場所で、work.py の git（task cleanup の status・ls-files・index の写しを書く update-index・worktree remove）は、子が仕込んだ設定・hooks・入れ子の
     リポジトリの命令を走らせない（#64。git 2.43 で測った出どころごと）。仕込みが本物であることは、素の git status で確かめる。"""
 
     def setUp(self):
@@ -3737,6 +3737,55 @@ class TestQuietGit(unittest.TestCase):
         rc, out = self.work("integrate", "--dir", str(wt), "--token", token, "--expected", target, "--verified", head)
         self.assertEqual(rc, 0, out)  # 統合まで進んだ
         self.assertFalse(self.marker.exists(), out)
+        subprocess.run(["git", "status", "--porcelain"], cwd=wt, env=self.env, capture_output=True, stdin=subprocess.DEVNULL, timeout=60)
+        self.assertTrue(self.marker.exists())  # 仕込みが本物であることの確かめ（素の status は走らせる）
+
+    HIDDEN = "skip-worktree か assume-unchanged の付いた追跡ファイルに、status に出ない変更がある: a.txt。作業場所を保持する"
+
+    def hide_a_change(self, wt):
+        """作業場所の a.txt に skip-worktree を付けて書き換え、片付けがフラグを外して見る（index の写しを書く update-index と、比べる status）
+        ところまで進む形にする。フラグと実物は、命令を走らせない git で確かめる。"""
+        self.git("update-index", "--skip-worktree", "a.txt", cwd=wt)
+        (wt / "a.txt").write_text("changed\n")
+        self.assertEqual(self.git("-c", "core.fsmonitor=false", "ls-files", "-v", "--", "a.txt", cwd=wt), "S a.txt")
+        self.assertTrue((wt / "a.txt").is_file())
+
+    def test_task_cleanup_runs_no_planted_fsmonitor_while_it_checks_flagged_files(self):
+        # 子が自分の git dir の config.worktree に fsmonitor を置き、フラグを付けた追跡ファイルに変更を隠す。片付けは、フラグを外して見る
+        # git（写しを書く update-index、比べる status）でも、その fsmonitor を走らせずに、隠れた変更を理由に拒む
+        rc, started = self.work("task", "start", "--dir", str(self.repo), "--holder", "A")
+        wt, token = Path(started["dir"]), started["token"]
+        self.hide_a_change(wt)  # 仕込みの前に（ここで動かす git が fsmonitor を走らせないように）
+        self.git("config", "extensions.worktreeConfig", "true", cwd=self.repo)
+        own = Path(self.git("rev-parse", "--absolute-git-dir", cwd=wt))
+        (own / "config.worktree").write_text(f"[core]\n\tfsmonitor = touch {self.marker}\n")
+        self.marker.unlink(missing_ok=True)
+        rc, out = self.work("task", "cleanup", "--dir", str(wt), "--token", token, "--saved", "main")
+        self.assertFalse(self.marker.exists(), f"片付けの間に、子が config.worktree に置いた fsmonitor が走った: {out}")  # 印を先に見る
+        self.assertEqual((rc, out.get("reason")), (6, self.HIDDEN))  # フラグを外して見る status まで進んだ
+        subprocess.run(["git", "status", "--porcelain"], cwd=wt, env=self.env, capture_output=True, stdin=subprocess.DEVNULL, timeout=60)
+        self.assertTrue(self.marker.exists())  # 仕込みが本物であることの確かめ（素の status は走らせる）
+
+    def test_task_cleanup_runs_no_git_command_from_a_nested_repository_while_it_checks_flagged_files(self):
+        # 子が gitlink にした入れ子のリポジトリの設定に filter を置き（commit して、外から見て変更の無い形）、フラグを付けた追跡ファイルに
+        # 変更を隠す。片付けは、フラグを外して比べる status でも入れ子に入らずに、隠れた変更を理由に拒む
+        rc, started = self.work("task", "start", "--dir", str(self.repo), "--holder", "A")
+        wt, token = Path(started["dir"]), started["token"]
+        nested = wt / "nested"
+        self.git("init", "-q", "nested", cwd=wt)
+        (nested / "b.txt").write_text("b\n")
+        (nested / ".gitattributes").write_text("b.txt filter=y\n")
+        self.git("add", "b.txt", ".gitattributes", cwd=nested)
+        self.git("commit", "-q", "-m", "x", cwd=nested)
+        self.git("config", "filter.y.clean", f"sh -c 'touch {self.marker}; cat'", cwd=nested)
+        self.git("add", "nested", cwd=wt)
+        self.git("commit", "-q", "-m", "nested", cwd=wt)
+        self.hide_a_change(wt)
+        os.utime(nested / "b.txt", (time.time() + 5, time.time() + 5))
+        self.marker.unlink(missing_ok=True)
+        rc, out = self.work("task", "cleanup", "--dir", str(wt), "--token", token, "--saved", "main")
+        self.assertFalse(self.marker.exists(), f"片付けの間に、入れ子のリポジトリの filter が走った: {out}")  # 印を先に見る
+        self.assertEqual((rc, out.get("reason")), (6, self.HIDDEN))  # フラグを外して見る status まで進んだ
         subprocess.run(["git", "status", "--porcelain"], cwd=wt, env=self.env, capture_output=True, stdin=subprocess.DEVNULL, timeout=60)
         self.assertTrue(self.marker.exists())  # 仕込みが本物であることの確かめ（素の status は走らせる）
 

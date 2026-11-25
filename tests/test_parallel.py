@@ -945,6 +945,323 @@ class TestParallel(unittest.TestCase):
         outside.chmod(0o755)
         self.assertEqual((outside / 'data.txt').read_text(), 'important\n')
 
+    HIDDEN = 'skip-worktree か assume-unchanged の付いた追跡ファイルに、status に出ない変更がある: {}。作業場所を保持する'
+
+    def fresh_repo(self, name, before=None):
+        """場面ごとの新しい元の checkout を作り、self.repo にする（設定と sparse-checkout は作業場所へ引き継がれ、場面の間で混ざるため）。
+        追跡ファイルは a・b・src/f・other/o。before は task start の前に元の checkout へ当てる準備（設定・sparse-checkout・サブモジュール）。"""
+        self.repo = Path(self.tmp.name) / name
+        self.repo.mkdir()
+        self.git(self.repo, 'init', '-q', '-b', 'main')
+        self.git(self.repo, 'config', 'user.name', 'Test')
+        self.git(self.repo, 'config', 'user.email', 'test')
+        for p in ('a', 'b', 'src/f', 'other/o'):
+            (self.repo / p).parent.mkdir(exist_ok=True)
+            (self.repo / p).write_text(Path(p).name + '\n')
+        self.git(self.repo, 'add', '.')
+        self.git(self.repo, 'commit', '-qm', '初期状態')
+        if before:
+            before(self.repo)
+
+    def handbook_status(self, d):
+        """手引き（playbook-parallel の「片付ける」）が、何が残っているかを見るときの status。"""
+        return self.git(d, '-c', 'core.fsmonitor=false', '--no-optional-locks', 'status', '--porcelain', '--untracked-files=all',
+                        '--ignored=matching', '--ignore-submodules=dirty')
+
+    def flag_of(self, d, path):
+        """git ls-files -v の、path の行の先頭の字（H はフラグ無し、S は skip-worktree、h は assume-unchanged、s は両方）。"""
+        return self.git(d, '-c', 'core.fsmonitor=false', 'ls-files', '-v', '--', path)[:1]
+
+    def commit_and_integrate(self, a, name, content):
+        d = Path(a['dir'])
+        (d / name).write_text(content)
+        self.git(d, 'add', name)
+        self.git(d, 'commit', '-qm', '追跡するファイル')
+        self.integrate(a, self.git(self.repo, 'rev-parse', 'main'), self.git(d, 'rev-parse', 'HEAD'))
+
+    def assert_cleanup_keeps_the_hidden_change(self, a, path, shown):
+        """task cleanup が、隠れた変更のある path を、道筋 shown を入れた理由で拒み、作業場所・その変更・index のバイト列・フラグを元のまま残すこと。"""
+        d = Path(a['dir'])
+        self.assertEqual(self.handbook_status(d), '')  # 手引きの見方には出ない（準備が外れて、前からの理由で拒まれていない）
+        at = os.path.join(os.fsencode(d), os.fsencode(path))
+
+        def kept():  # 変更（中身・モード・symlink の先）
+            if os.path.islink(at):
+                return 'symlink', os.readlink(at)
+            with open(at, 'rb') as f:
+                return os.lstat(at).st_mode, f.read()
+        index = Path(self.git(d, 'rev-parse', '--path-format=absolute', '--git-path', 'index'))
+        index_before, flags_before, change = index.read_bytes(), self.git(d, '-c', 'core.fsmonitor=false', 'ls-files', '-v'), kept()
+        r = self.w('task', 'cleanup', '--dir', a['dir'], '--token', a['token'], '--saved', 'main', code=6)
+        self.assertEqual(r['reason'], self.HIDDEN.format(shown))
+        self.assertTrue(self.is_worktree_of_task(a), '作業場所が Git の作業ツリーでなくなった')
+        self.assertEqual(kept(), change, '隠れた変更が残っていない')
+        self.assertTrue(index.read_bytes() == index_before, 'index のファイルが書き換わった')
+        self.assertEqual(self.git(d, '-c', 'core.fsmonitor=false', 'ls-files', '-v'), flags_before)
+
+    def test_cleanup_keeps_a_worktree_whose_flagged_tracked_file_holds_a_change_status_does_not_show(self):
+        """git status は、skip-worktree か assume-unchanged の付いた追跡ファイルの変更を出さない。task cleanup はそれを見逃し、書き換えた
+        ファイルごと作業場所を消した（#76）。core.ignoreStat=true（git が追跡ファイルの全部に assume-unchanged を付ける）と、
+        sparse.expectFilesOutsideOfPatterns=true の sparse-checkout（cone の外の実物に skip-worktree が残る）でも、設定だけで同じことが起きた。
+        フラグを外して見れば変更のあるファイルがあれば、その道筋を理由に出して拒み、作業場所・変更・index・フラグを元のまま残す。
+        代表の場面（skip-worktree と assume-unchanged）では、変更を戻せば、同じ片付けが通る。"""
+        def config(*pairs):
+            return lambda r: [self.git(r, 'config', k, v) for k, v in pairs]
+
+        def flag(*flags, then):
+            def prepare(a, d):
+                for f in flags:
+                    self.git(d, 'update-index', f, 'a')
+                then(d)
+            return prepare
+
+        def rewrite(d):
+            (d / 'a').write_text('changed\n')
+
+        def make_executable(d):
+            p = subprocess.run(['git', '-C', str(d), 'config', '--bool', 'core.fileMode'], env=self.env, capture_output=True, text=True)
+            if p.stdout.strip() == 'false':
+                self.skipTest('この作業場所は core.fileMode が false で、実行ビットの変更を数えない')
+            (d / 'a').chmod(0o755)
+
+        def to_symlink(d):
+            (d / 'a').unlink()
+            (d / 'a').symlink_to('b')
+
+        def to_dangling_symlink(d):
+            (d / 'a').unlink()
+            (d / 'a').symlink_to('missing')
+            self.assertFalse(os.path.exists(d / 'a'))  # 指す先が無い
+
+        def ignorestat_rewrite(a, d):
+            self.commit_and_integrate(a, 'n', 'n\n')  # git が自分で書いたので、assume-unchanged が付く
+            (d / 'n').write_text('changed\n')
+
+        def outside_cone_rewrite(a, d):
+            (d / 'other').mkdir()
+            (d / 'other' / 'o').write_text('changed\n')
+        sparse_expect = config(('sparse.expectFilesOutsideOfPatterns', 'true'))
+        for name, before, prepare, path, tag, undo in (
+                ('a change to a skip-worktree file', None, flag('--skip-worktree', then=rewrite), 'a', 'S', 'a\n'),
+                ('a change to an assume-unchanged file', None, flag('--assume-unchanged', then=rewrite), 'a', 'h', 'a\n'),
+                ('a change to a file with both flags', None, flag('--skip-worktree', '--assume-unchanged', then=rewrite), 'a', 's', None),
+                ('a change to a skip-worktree file with a split index', config(('core.splitIndex', 'true')),
+                 flag('--skip-worktree', then=rewrite), 'a', 'S', None),
+                ('a change to a skip-worktree file with many files on', config(('feature.manyFiles', 'true')),
+                 flag('--skip-worktree', then=rewrite), 'a', 'S', None),
+                ('only the executable bit of an assume-unchanged file', None, flag('--assume-unchanged', then=make_executable), 'a', 'h', None),
+                ('a skip-worktree file replaced by a symlink', None, flag('--skip-worktree', then=to_symlink), 'a', 'S', None),
+                ('a skip-worktree file replaced by a symlink to nothing', None, flag('--skip-worktree', then=to_dangling_symlink), 'a', 'S', None),
+                ('a change to a tracked file with core.ignoreStat on', config(('core.ignoreStat', 'true')), ignorestat_rewrite, 'n', 'h', None),
+                ('a file outside the cone that differs from the index with files expected outside the patterns',
+                 lambda r: (sparse_expect(r), self.git(r, 'sparse-checkout', 'set', 'src')), outside_cone_rewrite, 'other/o', 'S', None)):
+            with self.subTest(name):
+                self.fresh_repo('repo-' + name.replace(' ', '-'), before)
+                a = self.start()
+                d = Path(a['dir'])
+                prepare(a, d)
+                self.assertEqual(self.flag_of(d, path), tag)
+                self.assert_cleanup_keeps_the_hidden_change(a, path, path)
+                if undo is not None:
+                    (d / path).write_text(undo)
+                    self.w('task', 'cleanup', '--dir', a['dir'], '--token', a['token'], '--saved', 'main')
+                    self.assertFalse(d.exists())
+
+    def test_cleanup_names_a_flagged_tracked_file_whose_name_is_not_utf8(self):
+        """UTF-8 として読めない名前の、フラグの付いた追跡ファイルに隠れた変更があれば、UTF-8 の出力で落ちない形（読めないバイトは \\xe9）の
+        道筋を理由に出して拒み、作業場所・変更・index・フラグを元のまま残す。"""
+        self.fresh_repo('repo-non-utf8')
+        a = self.start()
+        d = Path(a['dir'])
+        name = os.fsdecode(b'caf\xe9')
+        try:
+            with open(os.path.join(os.fsencode(d), b'caf\xe9'), 'wb') as f:
+                f.write(b'x\n')
+        except OSError:
+            self.skipTest('このファイルシステムは UTF-8 でない名前を作らせない')
+        self.git(d, 'add', '.')
+        self.git(d, 'commit', '-qm', 'UTF-8 でない名前')
+        self.integrate(a, self.git(self.repo, 'rev-parse', 'main'), self.git(d, 'rev-parse', 'HEAD'))
+        self.git(d, 'update-index', '--assume-unchanged', name)
+        with open(os.path.join(os.fsencode(d), b'caf\xe9'), 'wb') as f:
+            f.write(b'changed\n')
+        self.assertEqual(self.flag_of(d, name), 'h')
+        self.env['PYTHONIOENCODING'] = 'utf-8:strict'  # UTF-8 のロケールの出力と同じ（C のロケールの Python は読めないバイトをそのまま出す）
+        self.assert_cleanup_keeps_the_hidden_change(a, name, 'caf\\xe9')
+
+    def test_cleanup_passes_when_flagged_tracked_files_hold_no_change(self):
+        """フラグを外して見ても変更の無い作業場所（変更の無いフラグ付きのファイル、フラグ付きのファイルを消しただけ、未初期化のサブモジュールの
+        項目、split index、core.ignoreStat=true、cone の外のファイルが無い sparse-checkout と sparse index、cone の外の実物が index と同じ
+        sparse.expectFilesOutsideOfPatterns=true）は、失うものが無いので、フラグがあっても片付けが通る（フラグがあれば拒むと、
+        core.ignoreStat=true のリポジトリで片付けが 1 度も通らなくなる）。"""
+        def config(*pairs):
+            return lambda r: [self.git(r, 'config', k, v) for k, v in pairs]
+
+        def flag(f, then=lambda d: None):
+            def prepare(a, d):
+                self.git(d, 'update-index', f, 'a')
+                then(d)
+                return [('a', {'--skip-worktree': 'S', '--assume-unchanged': 'h'}[f])]
+            return prepare
+
+        def touch(d):
+            t = os.stat(d / 'a').st_mtime + 10
+            os.utime(d / 'a', (t, t))
+
+        def submodule(r):
+            sub = Path(self.tmp.name) / 'sub-origin'
+            sub.mkdir()
+            self.git(sub, 'init', '-q', '-b', 'main')
+            self.git(sub, '-c', 'user.name=t', '-c', 'user.email=t', 'commit', '-q', '--allow-empty', '-m', 's')
+            self.git(r, '-c', 'protocol.file.allow=always', 'submodule', 'add', '-q', str(sub), 'lib')
+            self.git(r, 'commit', '-qm', 'サブモジュール')
+
+        def flag_submodule(a, d):
+            self.assertTrue((d / 'lib').is_dir())  # 未初期化のサブモジュールは、空のディレクトリとして在る
+            self.git(d, 'update-index', '--skip-worktree', 'lib')
+            return [('lib', 'S')]
+
+        def ignorestat(a, d):
+            self.commit_and_integrate(a, 'n', 'n\n')
+            return [('n', 'h'), ('a', 'h')]
+
+        def outside_cone_absent(a, d):
+            self.assertFalse(os.path.lexists(d / 'other'))
+            return [('other/o', 'S')]
+
+        def sparse_index(a, d):
+            self.assertIn('other/', self.git(d, 'ls-files', '--sparse').splitlines())  # index が sparse のまま
+            return outside_cone_absent(a, d)
+
+        def outside_cone_same(a, d):
+            (d / 'other').mkdir()
+            (d / 'other' / 'o').write_text('o\n')
+            return [('other/o', 'S')]
+        cone = lambda r: self.git(r, 'sparse-checkout', 'set', 'src')  # noqa: E731
+        for name, before, prepare in (
+                ('an unchanged skip-worktree file', None, flag('--skip-worktree')),
+                ('an assume-unchanged file only touched', None, flag('--assume-unchanged', then=touch)),
+                ('an assume-unchanged file removed', None, flag('--assume-unchanged', then=lambda d: (d / 'a').unlink())),
+                ('a skip-worktree entry of an uninitialised submodule', submodule, flag_submodule),
+                ('an unchanged skip-worktree file with a split index', config(('core.splitIndex', 'true')), flag('--skip-worktree')),
+                ('unchanged files with core.ignoreStat on', config(('core.ignoreStat', 'true')), ignorestat),
+                ('a sparse checkout with nothing outside the cone', cone, outside_cone_absent),
+                ('a sparse index with nothing outside the cone', lambda r: (cone(r), self.git(r, 'sparse-checkout', 'init', '--cone', '--sparse-index')),
+                 sparse_index),
+                ('a file outside the cone the same as the index with files expected outside the patterns',
+                 lambda r: (config(('sparse.expectFilesOutsideOfPatterns', 'true'))(r), cone(r)), outside_cone_same)):
+            with self.subTest(name):
+                self.fresh_repo('repo-' + name.replace(' ', '-'), before)
+                a = self.start()
+                d = Path(a['dir'])
+                for path, tag in prepare(a, d):
+                    self.assertEqual(self.flag_of(d, path), tag, path)
+                self.assertEqual(self.handbook_status(d), '')
+                self.w('task', 'cleanup', '--dir', a['dir'], '--token', a['token'], '--saved', 'main')
+                self.assertFalse(d.exists())
+
+    def test_cleanup_refuses_a_flagged_file_replaced_by_a_directory_of_data_for_the_usual_reason(self):
+        """フラグの付いた追跡ファイルを消して、同じ名前のディレクトリにデータを置いた作業場所は、status にそのデータが出る
+        （?? a/data）ので、前からの理由（未保存の変更・未完了の操作がある）で拒む。"""
+        self.fresh_repo('repo-dir-with-data')
+        a = self.start()
+        d = Path(a['dir'])
+        self.git(d, 'update-index', '--skip-worktree', 'a')
+        (d / 'a').unlink()
+        (d / 'a').mkdir()
+        (d / 'a' / 'data').write_text('important\n')
+        self.assertEqual(self.flag_of(d, 'a'), 'S')
+        self.assertEqual(self.handbook_status(d), '?? a/data')
+        r = self.w('task', 'cleanup', '--dir', a['dir'], '--token', a['token'], '--saved', 'main', code=6)
+        self.assertEqual(r['reason'], '未保存の変更・未完了の操作がある。作業場所を保持する')
+        self.assertEqual((d / 'a' / 'data').read_text(), 'important\n')
+
+    def test_integrate_still_passes_with_a_change_a_flag_hides(self):
+        """統合はデータを消さないので、作業場所に skip-worktree で隠した変更があっても、前と同じく通る（片付けだけが拒む）。"""
+        self.fresh_repo('repo-integrate')
+        a = self.start()
+        d = Path(a['dir'])
+        head = self.change(a, 'c')
+        self.git(d, 'update-index', '--skip-worktree', 'a')
+        (d / 'a').write_text('changed\n')
+        self.integrate(a, a['base'], head)
+        self.assertEqual(self.git(self.repo, 'rev-parse', 'main'), head)
+        self.assertEqual((d / 'a').read_text(), 'changed\n')
+
+    def test_cleanup_does_not_run_the_index_hooks_while_it_checks_flagged_files(self):
+        """片付けは、フラグを外して見るために index の写しを書くが、そのときに post-index-change の hook を走らせない（作業場所の中を指す
+        core.hooksPath なら、書く子が置いたものが走る）。共有の hooks（元の checkout の .git/hooks）でも、作業場所の中の hooks でも、
+        隠れた変更を拒む場面でも、通る場面でも同じ。フラグを付けた git update-index で hook が走ることを確かめ、印を空にしてから数える。"""
+        mark = Path(self.tmp.name) / 'hook-ran'
+        script = f'#!/bin/sh\necho ran >> {shlex.quote(str(mark))}\n'
+        for where in ('common hooks', 'core.hooksPath inside the worktree'):
+            for changed in (True, False):
+                with self.subTest(where=where, changed=changed):
+                    self.fresh_repo(f"repo-hook-{where.replace(' ', '-')}-{changed}")
+                    a = self.start()
+                    d = Path(a['dir'])
+                    if where == 'common hooks':
+                        hook = self.repo / '.git' / 'hooks' / 'post-index-change'
+                        hook.write_text(script)
+                        hook.chmod(0o755)
+                    else:
+                        (d / '.h').mkdir()
+                        (d / '.h' / 'post-index-change').write_text(script)
+                        (d / '.h' / 'post-index-change').chmod(0o755)
+                        self.git(d, 'add', '.h')
+                        self.git(d, 'commit', '-qm', 'hooks')
+                        self.integrate(a, self.git(self.repo, 'rev-parse', 'main'), self.git(d, 'rev-parse', 'HEAD'))
+                        self.git(d, 'config', 'core.hooksPath', str(d / '.h'))
+                    mark.write_text('')
+                    self.git(d, 'update-index', '--skip-worktree', 'a')
+                    self.assertNotEqual(mark.read_text(), '', 'hook が走る形になっていない')
+                    if changed:
+                        (d / 'a').write_text('changed\n')
+                    self.assertEqual(self.handbook_status(d), '')
+                    mark.write_text('')
+                    self.w('task', 'cleanup', '--dir', a['dir'], '--token', a['token'], '--saved', 'main', code=6 if changed else 0)
+                    self.assertEqual(mark.read_text(), '', '片付けの間に hook が走った')
+                    self.assertEqual(d.exists(), changed)
+
+    def test_cleanup_refuses_when_git_fails_while_it_checks_flagged_files(self):
+        """フラグを外して見る git（ls-files、index の写しに当てる update-index、写しで比べる status）のどれかが失敗したら、隠れた変更を
+        確かめられないので、片付けは git の文を理由に出して拒み、作業場所と変更を残す（失敗を通すと、変更を見つけないまま作業場所ごと消す）。
+        PATH の先頭の偽の git が、狙った 1 つの呼び出しだけを失敗させ、印を残す（ほかは本物を呼ぶ）。比べる status は、GIT_INDEX_FILE の
+        付いた status で見分ける（片付けの最初の status には付いていない）。"""
+        real = shlex.quote(shutil.which('git'))  # PATH を変える前に引く（偽の git が自分を呼び続けない）
+        plain_env = dict(self.env)
+        for sub, only_with_index_file in (('ls-files', False), ('update-index', False), ('status', True)):
+            with self.subTest(failing=sub):
+                self.fresh_repo('repo-failing-' + sub)
+                a = self.start()
+                d = Path(a['dir'])
+                self.git(d, 'update-index', '--skip-worktree', 'a')
+                (d / 'a').write_text('changed\n')
+                self.assertEqual(self.flag_of(d, 'a'), 'S')
+                bin_dir, mark = Path(self.tmp.name) / ('bin-' + sub), Path(self.tmp.name) / ('failed-' + sub)
+                bin_dir.mkdir()
+                line = f'偽の git が {sub} を失敗させた'
+                hit = f'[ "$sub" = {sub} ]' + (' && [ -n "${GIT_INDEX_FILE+x}" ]' if only_with_index_file else '')
+                (bin_dir / 'git').write_text(
+                    '#!/bin/sh\n'
+                    'sub= skip=\n'
+                    'for x in "$@"; do\n'  # -C・-c の値を飛ばした、最初の語が副命令
+                    '  if [ -n "$skip" ]; then skip=; continue; fi\n'
+                    '  case "$x" in -C|-c) skip=1 ;; -*) ;; *) sub=$x; break ;; esac\n'
+                    'done\n'
+                    f'if {hit}; then echo {shlex.quote(line)} >&2; : >> {shlex.quote(str(mark))}; exit 3; fi\n'
+                    f'exec {real} "$@"\n')
+                (bin_dir / 'git').chmod(0o755)
+                self.env = {**plain_env, 'PATH': str(bin_dir) + os.pathsep + plain_env['PATH']}
+                try:
+                    r = self.w('task', 'cleanup', '--dir', a['dir'], '--token', a['token'], '--saved', 'main', code=6)
+                finally:
+                    self.env = plain_env
+                self.assertTrue(mark.exists(), f'偽の git が {sub} の呼び出しに当たっていない: {r}')
+                self.assertIn(line, r['reason'])
+                self.assertTrue(self.is_worktree_of_task(a), '作業場所が Git の作業ツリーでなくなった')
+                self.assertEqual((d / 'a').read_text(), 'changed\n', '隠れた変更が残っていない')
+
     def test_new_task_does_not_implicitly_include_another_task(self):
         a = self.start()
         self.change(a, 'other-task')
