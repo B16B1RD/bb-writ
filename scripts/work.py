@@ -851,8 +851,8 @@ def clean(d, ignored=False, child=False):
 def hidden_change(d, child):
     """作業ツリーの根 d で、skip-worktree か assume-unchanged の付いた追跡ファイルのうち、フラグを外して見れば status に出る変更のある
     もののどれか 1 つの、根からの道筋（バイト列）。無ければ None。フラグの付いた項目のうち作業場所に実物のあるものだけを、index の写しの上で
-    フラグを外し、clean と同じ見方の status（追跡外のものは見ない）で比べる。元の index とフラグは書き換えない。写しを書く update-index
-    は hooks を走らせない（post-index-change が走った）。"""
+    フラグを外し、clean と同じ見方の status（追跡外のものは見ない）で比べる。比べる前に、写しの更新時刻を元の index のものに合わせる。
+    元の index とフラグは書き換えない。写しを書く update-index は hooks を走らせない（post-index-change が走った）。"""
     p = subprocess.run(['git', '-C', str(d), *QUIET, 'ls-files', '-v', '-z'], stdin=subprocess.DEVNULL, capture_output=True)
     if p.returncode:
         raise ValueError(os.fsdecode(p.stderr).strip() or 'git が失敗した')
@@ -866,12 +866,15 @@ def hidden_change(d, child):
         env = {**os.environ, 'GIT_INDEX_FILE': os.path.join(scratch, 'index')}
         with open(index, 'rb') as src, open(env['GIT_INDEX_FILE'], 'wb') as dst:
             dst.write(src.read())
+            st = os.fstat(src.fileno())
         # 1 回の呼び出しに 2 つのフラグを書くと、assume-unchanged しか外れない
         for flag in ('--no-skip-worktree', '--no-assume-unchanged'):
             p = subprocess.run(['git', '-C', str(d), *QUIET, '-c', 'core.hooksPath=/dev/null', 'update-index', flag, '-z', '--stdin'],
                                input=b''.join(e + b'\0' for e in flagged), capture_output=True, env=env)
             if p.returncode:
                 raise ValueError(os.fsdecode(p.stderr).strip() or 'git が失敗した')
+        # 写しの更新時刻が新しいと、index が覚えたのと同じ秒に同じ大きさで書き換えた変更を、git が stat だけで変更なしと見る
+        os.utime(env['GIT_INDEX_FILE'], ns=(st.st_atime_ns, st.st_mtime_ns))
         p = subprocess.run(['git', '-C', str(d), *QUIET, '--no-optional-locks', 'status', '--porcelain', '-z', '--untracked-files=no',
                             *(['--ignore-submodules=dirty'] if child else [])], stdin=subprocess.DEVNULL, capture_output=True, env=env)
         if p.returncode:
