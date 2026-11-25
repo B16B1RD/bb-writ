@@ -795,18 +795,48 @@ def claude_staging_only(p):
         return False
 
 
+def unopened_dir(d):
+    """d の下で、一覧できないか中へ入れない（中の項目を調べられない）最初のディレクトリの、d からの相対の道筋（d そのものなら「.」）。無ければ None。
+    権限のビットは読まず、一覧と、中の「.」の lstat を試して確かめる。symlink の先へは入らない。
+    再帰しない（Python 3.11 以下の os.walk は再帰で歩き、深い木で落ちる）。"""
+    stack = ['']
+    while stack:
+        rel = stack.pop()
+        at = os.path.join(d, rel)
+        try:
+            os.lstat(os.path.join(at, '.'))
+            with os.scandir(at) as entries:
+                stack.extend(os.path.join(rel, e.name) for e in entries if e.is_dir(follow_symlinks=False))
+        except OSError:
+            return rel or '.'
+    return None
+
+
 def clean(d, ignored=False, child=False):
     """作業ツリーの根 d に、未保存の変更が無いか。命令を走らせない形の status（QUIET、hooks を走らせない --no-optional-locks）で見る。
     child（書く子が書けた作業場所）では、入れ子のリポジトリの設定を読まないよう、サブモジュールの中に入らない
     （--ignore-submodules=dirty。サブモジュールが別の commit を指す変更は数える）。
-    無視するものの行のうち、Claude Code の空の置き場（claude_staging_only）だけは数えない。"""
+    無視するものの行のうち、Claude Code の空の置き場（claude_staging_only）だけは数えない。
+    ignored（片付けの見方）では、status に何も残らなくても、一覧できないか中へ入れないディレクトリ（unopened_dir）が 1 つでもあれば、
+    空でも、中身を確かめられないので、その道筋（UTF-8 として読めないバイトは \\xe9 の形）を入れた理由（ValueError）で拒む（git status はそこを飛ばし、標準エラーに警告を
+    出すか、何も出さないだけなので、片付けが git worktree remove まで進んだ。#68）。git の警告の文は読まない。統合の見方は数えない
+    （データを消さず、利用者の checkout に root の持つ置き場などがありうる）。
+    数えないもの: 無視しない空のディレクトリ・FIFO やソケットだけのディレクトリ（status に出ず、保存するデータが無い）、
+    skip-worktree や assume-unchanged の付いた追跡ファイルの変更（git に見ないよう指示したもので、別の原因）。"""
     p = subprocess.run(['git', '-C', str(d), *QUIET, '--no-optional-locks', 'status', '--porcelain', '-z', '--untracked-files=all',
                         *(['--ignore-submodules=dirty'] if child else []), *(['--ignored=matching'] if ignored else [])],
                        stdin=subprocess.DEVNULL, capture_output=True)
     if p.returncode:
         raise ValueError(os.fsdecode(p.stderr).strip() or 'git が失敗した')
     # 1 欄は「XY 道筋」（道筋はリポジトリの根から、引用しない）。改名の元の道筋の欄は、改名の欄で数え終わっている
-    return all(e[:3] == b'!! ' and claude_staging_only(os.path.join(os.fsencode(d), e[3:])) for e in p.stdout.split(b'\0') if e)
+    if not all(e[:3] == b'!! ' and claude_staging_only(os.path.join(os.fsencode(d), e[3:])) for e in p.stdout.split(b'\0') if e):
+        return False
+    # status に Claude Code の空の置き場しか出ないので、歩く木に無視する大きな置き場は無い（初期化したサブモジュールの中は除く。その中の無視するものも歩く）
+    rel = unopened_dir(d) if ignored else None
+    if rel is not None:
+        # どのロケールでも出力できるよう、UTF-8 として読めないバイトは \xe9 の形にする
+        raise ValueError(f"開けないディレクトリがある: {os.fsencode(rel).decode('utf-8', 'backslashreplace')}。中身を確かめられないので、作業場所を保持する")
+    return True
 
 
 class LeaseRefused(Exception):

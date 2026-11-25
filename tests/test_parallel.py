@@ -803,6 +803,147 @@ class TestParallel(unittest.TestCase):
                 self.w('task', 'cleanup', '--dir', a['dir'], '--token', a['token'], '--saved', 'main', code=6)
                 self.assertEqual(sorted(map(str, d.rglob('*'))), before)  # 作業場所の .git も残る
 
+    def skip_unless_permissions_hold(self):
+        probe = Path(self.tmp.name) / 'probe-dir'
+        probe.mkdir()
+        probe.chmod(0)
+        try:
+            os.listdir(probe)
+            self.skipTest('この環境では権限が効かない')
+        except PermissionError:
+            pass
+        finally:
+            probe.chmod(0o755)
+
+    def lock(self, path, mode):
+        """path の権限を mode にし、試験の後で戻す（一時の置き場を消せるように）。"""
+        path.chmod(mode)
+        self.addCleanup(lambda: path.chmod(0o755) if os.path.lexists(path) else None)
+
+    def is_worktree_of_task(self, task):
+        d = Path(task['dir']).resolve()
+        listed = [Path(x[len('worktree '):]).resolve() for x in self.git(self.repo, 'worktree', 'list', '--porcelain').splitlines()
+                  if x.startswith('worktree ')]
+        return d in listed and self.git(d, 'symbolic-ref', 'HEAD') == 'refs/heads/' + task['branch']
+
+    def test_cleanup_keeps_a_worktree_holding_a_directory_it_cannot_open(self):
+        """git status は、開けないディレクトリを出力に出さず飛ばす（標準エラーに警告を出すか、何も出さない）。task cleanup はそれを見逃し、
+        git worktree remove が Git の登録を消してから削除に失敗して、タスクを閉じられなくなった（空なら中身を確かめずに消した。#68）。
+        一覧できないか中へ入れないディレクトリは、空かどうかにかかわらず、その道筋を理由に出して拒み、作業場所を Git の作業ツリーの
+        まま残す。権限を戻して中身を片付ければ、同じ片付けが通る。"""
+        self.skip_unless_permissions_hold()
+
+        def remove(p):
+            return lambda d: shutil.rmtree(d / p)
+        for name, files, locked, mode, tidy in (
+                ('data in a hidden directory nobody can open', ['.cache/data.txt'], '.cache', 0, remove('.cache')),
+                ('an empty directory nobody can open', ['u/'], 'u', 0, remove('u')),
+                ('data in a directory that can be entered but not listed', ['u/data.txt'], 'u', 0o333, remove('u')),
+                ('data under a directory that can be listed but not entered', ['u/s/data.txt'], 'u', 0o444, remove('u')),
+                ('data in a directory nobody can open under an untracked directory', ['t/u/data.txt'], 't/u', 0, remove('t')),
+                ('data in a directory nobody can open under a tracked directory', ['src/u/data.txt'], 'src/u', 0, remove('src/u')),
+                ('a tracked directory nobody can open', [], 'src', 0, lambda d: None),
+                ('a change to a tracked file in a tracked directory that can be listed but not entered', ['src/keep'], 'src', 0o444,
+                 lambda d: self.git(d, 'checkout', '--', 'src/keep')),
+                ('data below a middle directory that can only be entered', ['x/y/z/data'], 'x/y', 0o111, remove('x')),
+                ('data in a directory nobody can open next to the Claude Code staging dir', ['.claude/.cc-writes/', 'u/data.txt'], 'u', 0,
+                 remove('u')),  # 置き場は status に「!! .claude/」と出るが、数えない
+                ('the worktree itself can be entered but not listed', [], '.', 0o333, lambda d: None)):
+            with self.subTest(name):
+                a = self.start()
+                d = Path(a['dir'])
+                (d / 'src').mkdir(exist_ok=True)
+                (d / 'src' / 'keep').write_text('keep\n')  # 追跡するディレクトリ（前の場合で統合済みなら、変更は無い）
+                (d / '.gitignore').write_text('/.claude/\n')
+                self.git(d, 'add', 'src', '.gitignore')
+                self.git(d, 'commit', '-qm', '追跡するディレクトリ', '--allow-empty')
+                self.integrate(a, self.git(self.repo, 'rev-parse', 'main'), self.git(d, 'rev-parse', 'HEAD'))
+                for p in files:
+                    (d / p.rstrip('/')).parent.mkdir(parents=True, exist_ok=True)
+                    if p.endswith('/'):
+                        (d / p).mkdir()
+                    else:
+                        (d / p).write_text('important\n')
+                before = sorted(map(str, d.rglob('*')))
+                self.lock(d / locked, mode)
+                r = self.w('task', 'cleanup', '--dir', a['dir'], '--token', a['token'], '--saved', 'main', code=6)
+                self.assertEqual(r['reason'], f'開けないディレクトリがある: {locked}。中身を確かめられないので、作業場所を保持する')
+                self.assertTrue(self.is_worktree_of_task(a), '作業場所が Git の作業ツリーでなくなった')  # Git の登録もブランチも残る
+                (d / locked).chmod(0o755)
+                self.assertEqual(sorted(map(str, d.rglob('*'))), before)
+                tidy(d)
+                self.w('task', 'cleanup', '--dir', a['dir'], '--token', a['token'], '--saved', 'main')
+                self.assertFalse(d.exists())
+
+    def test_cleanup_names_a_directory_it_cannot_open_inside_an_initialised_submodule(self):
+        """片付けの status はサブモジュールの中の変更を見ず（--ignore-submodules=dirty）、git は何も出さない。それでも中の開けない
+        ディレクトリを、その道筋を理由に出して拒み、作業場所を Git の作業ツリーのまま残す。"""
+        self.skip_unless_permissions_hold()
+        sub = Path(self.tmp.name) / 'sub-origin'
+        sub.mkdir()
+        self.git(sub, 'init', '-q', '-b', 'main')
+        self.git(sub, '-c', 'user.name=t', '-c', 'user.email=t', 'commit', '-q', '--allow-empty', '-m', 's')
+        self.git(self.repo, '-c', 'protocol.file.allow=always', 'submodule', 'add', '-q', str(sub), 'lib')
+        self.git(self.repo, 'commit', '-qm', 'add')
+        t = self.start()
+        at = Path(t['dir'])
+        self.git(at, '-c', 'protocol.file.allow=always', 'submodule', 'update', '-q', '--init')
+        (at / 'lib' / 'u').mkdir()
+        (at / 'lib' / 'u' / 'data.txt').write_text('important\n')
+        self.lock(at / 'lib' / 'u', 0)
+        r = self.w('task', 'cleanup', '--dir', t['dir'], '--token', t['token'], '--saved', 'main', code=6)
+        self.assertEqual(r['reason'], '開けないディレクトリがある: lib/u。中身を確かめられないので、作業場所を保持する')
+        self.assertTrue(self.is_worktree_of_task(t), '作業場所が Git の作業ツリーでなくなった')
+
+    def test_cleanup_names_a_directory_it_cannot_open_whose_name_is_not_utf8(self):
+        """UTF-8 として読めない名前の開けないディレクトリでも、どのロケールでも出力できる形（読めないバイトは \\xe9）の道筋を
+        理由に出して拒み、作業場所を Git の作業ツリーのまま残す（読めないバイトのまま出すと、UTF-8 の出力で落ちた）。"""
+        self.skip_unless_permissions_hold()
+        a = self.start()
+        d = Path(a['dir'])
+        try:
+            os.mkdir(os.path.join(os.fsencode(d), b'caf\xe9'))
+        except OSError:
+            self.skipTest('このファイルシステムは UTF-8 でない名前を作らせない')
+        locked = d / os.fsdecode(b'caf\xe9')
+        (locked / 'data.txt').write_text('important\n')
+        self.lock(locked, 0)
+        self.env['PYTHONIOENCODING'] = 'utf-8:strict'  # UTF-8 のロケールの出力と同じ（C のロケールの Python は読めないバイトをそのまま出す）
+        r = self.w('task', 'cleanup', '--dir', a['dir'], '--token', a['token'], '--saved', 'main', code=6)
+        self.assertEqual(r['reason'], '開けないディレクトリがある: caf\\xe9。中身を確かめられないので、作業場所を保持する')
+        self.assertTrue(self.is_worktree_of_task(a), '作業場所が Git の作業ツリーでなくなった')
+
+    def test_integrate_still_passes_with_directories_it_cannot_open(self):
+        """統合はデータを消さないので、統合先の checkout と作業場所に開けないディレクトリ（root が持つ置き場など）があっても通る。"""
+        self.skip_unless_permissions_hold()
+        a = self.start()
+        head = self.change(a, 'a')
+        for at in (self.repo, Path(a['dir'])):
+            (at / 'u').mkdir()
+            (at / 'u' / 'data.txt').write_text('important\n')
+            self.lock(at / 'u', 0)
+        self.integrate(a, a['base'], head)
+        self.assertEqual(self.git(self.repo, 'rev-parse', 'main'), head)
+        self.assertEqual((self.repo / 'a').read_text(), 'a\n')
+
+    def test_cleanup_does_not_follow_a_tracked_link_to_a_directory_it_cannot_open(self):
+        """片付けは symlink の先へ入らない。追跡する symlink が作業場所の外の開けないディレクトリを指していても通り、先のものは残る。"""
+        self.skip_unless_permissions_hold()
+        outside = Path(self.tmp.name) / 'outside'
+        outside.mkdir()
+        (outside / 'data.txt').write_text('important\n')
+        a = self.start()
+        d = Path(a['dir'])
+        (d / 'link').symlink_to(outside)
+        self.git(d, 'add', 'link')
+        self.git(d, 'commit', '-qm', '外を指す symlink')
+        self.integrate(a, a['base'], self.git(d, 'rev-parse', 'HEAD'))
+        self.lock(outside, 0)
+        self.w('task', 'cleanup', '--dir', a['dir'], '--token', a['token'], '--saved', 'main')
+        self.assertFalse(d.exists())
+        outside.chmod(0o755)
+        self.assertEqual((outside / 'data.txt').read_text(), 'important\n')
+
     def test_new_task_does_not_implicitly_include_another_task(self):
         a = self.start()
         self.change(a, 'other-task')
