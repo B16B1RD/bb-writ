@@ -1223,6 +1223,41 @@ class TestParallel(unittest.TestCase):
                     self.assertEqual(mark.read_text(), '', '片付けの間に hook が走った')
                     self.assertEqual(d.exists(), changed)
 
+    def test_cleanup_keeps_a_change_to_a_flagged_file_rewritten_in_the_same_second_at_the_same_size(self):
+        """git は、index のファイルと同じ秒に書き換えられた項目を、stat を信じずに中身で比べる（同じ秒に同じ大きさで書き換えると、stat が
+        同じに見えるため）。index の写しの更新時刻が「いま」だと、index が覚えたのと同じ秒に同じ大きさで書き換えたフラグ付きのファイルを、
+        git が stat だけで変更なしと見て、片付けが作業場所ごと消した。同じ秒は、時計を待たずに、ファイルと index の更新時刻を過去の同じ
+        秒 P に置いて作る。core.trustctime=false は、試験を時計に依らなくするための設定（ctime は書き換えのたびに「いま」になり、戻せない）。
+        P を置いた後は、index を書き直す git（add・update-index・--no-optional-locks の無い status）を動かさない。"""
+        for name, flag, extra in (('a skip-worktree file', '--skip-worktree', None),
+                                  ('an assume-unchanged file', '--assume-unchanged', None),
+                                  ('a tracked file with core.ignoreStat on', None, ('core.ignoreStat', 'true'))):
+            with self.subTest(name):
+                def before(r):
+                    self.git(r, 'config', 'core.trustctime', 'false')
+                    if extra:
+                        self.git(r, 'config', *extra)
+                self.fresh_repo('repo-same-second-' + name.replace(' ', '-'), before)
+                a = self.start()
+                d = Path(a['dir'])
+                at = d / 'n'
+                P = (int(time.time()) - 1000) * 10**9
+                at.write_text('n\n')
+                os.utime(at, ns=(P, P))  # add の前に（index が更新時刻 P を覚える）
+                self.git(d, 'add', 'n')
+                self.git(d, 'commit', '-qm', '追跡するファイル')
+                self.integrate(a, self.git(self.repo, 'rev-parse', 'main'), self.git(d, 'rev-parse', 'HEAD'))
+                if flag:
+                    self.git(d, 'update-index', flag, 'n')
+                at.write_text('X\n')  # 同じ大きさの別の中身
+                os.utime(at, ns=(P, P))
+                index = Path(self.git(d, 'rev-parse', '--path-format=absolute', '--git-path', 'index'))
+                os.utime(index, ns=(P, P))  # 最後に。ここから片付けまで、index を書き直す git を動かさない
+                self.assertEqual(self.flag_of(d, 'n'), {'--skip-worktree': 'S', '--assume-unchanged': 'h', None: 'h'}[flag])
+                self.assertEqual((os.stat(at).st_mtime_ns, os.stat(index).st_mtime_ns, os.stat(at).st_size), (P, P, len('n\n')),
+                                 'ファイルと index の更新時刻が同じ秒 P に無いか、大きさが元と違う')
+                self.assert_cleanup_keeps_the_hidden_change(a, 'n', 'n')
+
     def test_cleanup_refuses_when_git_fails_while_it_checks_flagged_files(self):
         """フラグを外して見る git（ls-files、index の写しに当てる update-index、写しで比べる status）のどれかが失敗したら、隠れた変更を
         確かめられないので、片付けは git の文を理由に出して拒み、作業場所と変更を残す（失敗を通すと、変更を見つけないまま作業場所ごと消す）。
