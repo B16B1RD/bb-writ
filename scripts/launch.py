@@ -1753,7 +1753,34 @@ def launcher_error(out_dir: Path) -> str:
         return f"残せない: {e!r}"
 
 
+def wait_main(argv: list[str]) -> int:
+    """`launch.py --wait <out>`: 背景で起こした launcher の終わりを、最大 --seconds 秒（既定 540）待つ。
+    out の record.json が JSON として読めたら（launcher が書き終えたら）すぐ返り、1 行の JSON（done・status・problems の先頭 5 つ・out）を出して
+    終了コード 0。読めないまま上限に来たら done が偽の 1 行を出して終了コード 3（まだ動いているか、記録を書けずに止まった。止まったかは launcher の pid で見る）。
+    待つ側（指揮者）が、確かめる間隔を自分で決めて短い待ちをくり返さないための手段（3 分ごとに確かめ、そのたびに会話の全部を読み直していた）。
+    record.json は 1 回の書き込みで書くので、書きかけ（JSON として読めない）は、まだ終わっていないと見る。"""
+    ap = argparse.ArgumentParser(prog="launch.py --wait")
+    ap.add_argument("out", type=Path)
+    ap.add_argument("--seconds", type=float, default=540)
+    a = ap.parse_args(argv)
+    rec, deadline = a.out / "record.json", time.monotonic() + max(a.seconds, 0)
+    while True:
+        try:
+            r = obj(json.loads(rec.read_text(encoding="utf-8")))
+        except (OSError, ValueError):
+            r = None
+        if r is not None:
+            print(json.dumps({"done": True, "status": r.get("status"), "problems": list(r.get("problems") or [])[:5], "out": str(a.out)}, ensure_ascii=False))
+            return 0
+        if time.monotonic() >= deadline:
+            print(json.dumps({"done": False, "out": str(a.out), "waited_s": a.seconds}, ensure_ascii=False))
+            return 3
+        time.sleep(min(5, max(deadline - time.monotonic(), 0.05)))
+
+
 def main() -> int:
+    if sys.argv[1:2] == ["--wait"]:
+        return wait_main(sys.argv[2:])
     ap = argparse.ArgumentParser()
     ap.add_argument("--host", choices=("claude", "codex", "grok"))
     ap.add_argument("--cwd", type=Path)

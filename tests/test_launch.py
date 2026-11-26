@@ -2,6 +2,7 @@
 
 import errno
 import json
+import threading
 import shutil
 import signal
 import os
@@ -5641,6 +5642,35 @@ launch.claude_reads = claude_reads
                            env=env, capture_output=True, text=True)
         self.assertNotEqual(p.returncode, 0)
         self.assertEqual((out / 'record.json').read_text(), record)
+
+
+
+class TestWait(unittest.TestCase):
+    """`launch.py --wait <out>` は、背景の launcher が record.json を書き終えるまで待ち、上限で返る（指揮者が短い待ちをくり返していた）。"""
+
+    def wait(self, out, *extra):
+        p = subprocess.run([sys.executable, "-B", str(LAUNCH), "--wait", str(out), *extra], capture_output=True, text=True, timeout=60)
+        return p.returncode, json.loads(p.stdout)
+
+    def test_waiting_returns_as_soon_as_the_record_is_written_and_gives_up_at_the_limit(self):
+        with tempfile.TemporaryDirectory() as d:
+            out = Path(d) / "out"
+            out.mkdir()
+            started = time.monotonic()
+            rc, r = self.wait(out, "--seconds", "0.3")  # まだ記録が無い
+            self.assertEqual((rc, r["done"]), (3, False), r)
+            self.assertLess(time.monotonic() - started, 10)
+            (out / "record.json").write_text('{"status": "ok", "probl', encoding="utf-8")  # 書きかけは、まだ終わっていない
+            self.assertEqual(self.wait(out, "--seconds", "0.3")[0], 3)
+
+            def finish():
+                time.sleep(1)
+                (out / "record.json").write_text(json.dumps({"status": "failed", "problems": ["p1", "p2"]}), encoding="utf-8")
+            threading.Thread(target=finish).start()
+            started = time.monotonic()
+            rc, r = self.wait(out, "--seconds", "30")
+            self.assertEqual((rc, r["done"], r["status"], r["problems"]), (0, True, "failed", ["p1", "p2"]), r)
+            self.assertLess(time.monotonic() - started, 15)  # 上限まで待たずに返る
 
 
 if __name__ == "__main__":
