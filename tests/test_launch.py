@@ -4788,11 +4788,13 @@ launch.claude_reads = claude_reads
         (self.cfg / "grok-auth" / "auth.json").unlink()
         rc, rec = self.run_launch("grok", cwd=self.grok_target())
         self.assertEqual(rec["status"], "unavailable")
+        self.assertIn("専用ログインが無い", rec["problems"][0])  # delegate が、この句で専用ログインの不足と読ませる
         self.assertIn("GROK_HOME=", rec["problems"][0])
         self.assertIn("README の「任意機能の準備」の「Grok Build の専用ログイン」", rec["problems"][0])
         (self.cfg / "codex-home" / "auth.json").unlink()
         rc, rec = self.run_launch("codex")
         self.assertEqual(rec["status"], "unavailable")
+        self.assertIn("専用ログインが無い", rec["problems"][0])  # delegate が、この句で専用ログインの不足と読ませる
         self.assertIn("CODEX_HOME=", rec["problems"][0])
         self.assertIn("README の「任意機能の準備」の「Codex の専用ログイン」", rec["problems"][0])
 

@@ -186,6 +186,7 @@ class TestWork(unittest.TestCase):
         self.assertFalse(a["note"]["filled"])
         self.assertIsNone(a["note"]["body"])  # 雛形のままの本文は返さない
         self.assertTrue(Path(a["note"]["evidence_dir"]).is_dir())  # 証拠の置き場（/tmp に置かせない）
+        self.assertIn("\n- 済んだことと証拠:\n", Path(a["note"]["path"]).read_text(encoding="utf-8"))  # playbook-docs-skill が、この欄の名前で書く先を指す
         Path(a["note"]["path"]).write_text("# 作業の記録\n\n- 目的: digits を足す\n", encoding="utf-8")
         self.expire()
         rc, b = self.w("claim", "--holder", "B")
@@ -2166,6 +2167,7 @@ class TestOpRun(unittest.TestCase):
         rc, r = self.run_op(tok, "push:feat@1", "--reviewed", self.head(), "--", str(Path(self.tmp.name) / "no-such-command"))
         self.assertEqual(rc, 127)
         self.assertIn("exit 127", r["op"]["result"])
+        self.assertIn("コマンドは走っていない", r["op"]["result"])  # playbook-deliver が、この句で「走っていない」と読ませる
         self.assertEqual(self.pending(), [])
 
     def test_release_is_refused_while_the_command_runs(self):
@@ -2622,6 +2624,7 @@ class TestOpRun(unittest.TestCase):
                 rec = self.wait_done(key)
                 self.assertIn(f"exit {128 + int(sig)}", rec["result"])
                 self.assertIn("起動の前に止められた", rec["result"])
+                self.assertIn("コマンドは走っていない", rec["result"])  # playbook-deliver が、この句で「走っていない」と読ませる
                 self.assertFalse(marker.exists())
                 self.assertNotIn("Traceback", p.stderr)  # 監督役が終わり際に落ちていない
                 self.assertNotIn("Traceback", (r / "supervise.err").read_text() if (r / "supervise.err").exists() else "")
@@ -3580,13 +3583,15 @@ class TestOpRun(unittest.TestCase):
         self.pid_gone(sup)
         d = json.loads(self.lease_file().read_text())
         self.lease_file().write_text(json.dumps({**d, "expires_at": time.time() - 1}))  # 延ばす者がいなくなり、期限が切れた
-        self.assertEqual(self.w("claim", "--dir", str(self.wt), "--holder", "B")[0], 3)
+        rc, r = self.w("claim", "--dir", str(self.wt), "--holder", "B")
+        self.assertEqual(rc, 3, r)
+        self.assertIn("op run の外部操作がまだ動いている", r["reason"])  # playbook-session-pickup が、この句で「消えるまで待って取り直す」と分ける
         self.assertEqual(self.run_op(tok, "push:feat@1:retry", "--reviewed", self.head(), *self.script("print(1)"))[0], 4)  # やり直せない
         self.assertEqual([(o["key"], o.get("running")) for o in self.w("op", "pending", "--dir", str(self.wt))[1]["pending_ops"]],
                          [("push:feat@1", True)])
         self.assertIsNone(json.loads(p.stdout.read())["exit"])  # 結果を返さずに終わった。走ったかは分からない
+        self.assertEqual(p.wait(), 1)  # 記録が begun のまま（終了コードが無い）なので 1（work.py の使い方の文）
         go.write_text("")
-        p.wait()
         for _ in range(100):
             if not self.w("op", "pending", "--dir", str(self.wt))[1]["pending_ops"][0].get("running"):
                 break

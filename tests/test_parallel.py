@@ -542,6 +542,68 @@ class TestParallel(unittest.TestCase):
         self.assertEqual(self.w('task', 'list', '--dir', self.repo)['tasks'][0]['cleanup'],
                          {'saved': 'refs/heads/main', 'commit': head, 'removal_stopped': True})
 
+    def kept(self, task):
+        """止まった片付けの後に残っているもの: 作業場所の残り（道筋ごとの種類・権限と中身）、状態の置き場の記録（片付けの途中の記録・
+        担当・作業の記録。作業場所の置き場は残りとして見るので除く）、タスクのブランチの commit。"""
+        def walk(top, skip=()):
+            got = {}
+            for at, dirs, files in os.walk(top):
+                dirs[:] = [x for x in dirs if os.path.join(at, x) not in skip]
+                for name in dirs + files:
+                    f = os.path.join(at, name)
+                    st = os.lstat(f)
+                    got[f] = (st.st_mode, os.readlink(f) if os.path.islink(f) else None if os.path.isdir(f) else Path(f).read_bytes())
+            return got
+        state = self.env['BB_WRIT_STATE_DIR']
+        return walk(task['dir']), walk(state, skip=(os.path.join(state, 'worktrees'),)), self.git(self.repo, 'rev-parse', task['branch'])
+
+    def assert_cleanup_again_is_refused_and_removes_nothing(self, task, code, reason):
+        """止まった片付けの後に、同じ task cleanup をもう一度呼ぶと、終了コード code と理由 reason で拒み、残り・状態の置き場の記録・
+        ブランチを変えない。状態の置き場は、前に在ったものが消えも変わりもしないことだけを見る（記録の置き場が増えるのは許す）。"""
+        self.assertTrue(os.path.lexists(Path(task['dir']) / 'src' / 'f'), '残りが無い（作りたい状態にならなかった）')
+        tree, state, branch = self.kept(task)
+        r = self.w('task', 'cleanup', '--dir', task['dir'], '--token', task['token'], '--saved', 'main', code=code)
+        self.assertEqual(r, {'ok': False, 'reason': reason})
+        tree2, state2, branch2 = self.kept(task)
+        self.assertEqual(tree2, tree)
+        self.assertEqual({k: v for k, v in state2.items() if k in state}, state)
+        self.assertEqual(branch2, branch)
+
+    def assert_cleanup_again_is_refused_whether_the_git_file_is_left_or_gone(self, gone_code, gone_reason):
+        """止まった片付けの後に、同じ task cleanup をもう一度呼ぶと、残りに .git が残る形では「git のリポジトリでない: <作業場所>」
+        （終了コード 2）で、.git を消した形では gone_code と gone_reason(作業場所) で拒み、どちらも何も変えない。消せない原因（書き込めない
+        ディレクトリ src）を直せば、task resume で閉じる。.git が残るかは git の消す順しだいなので、git が残さなかった環境でも、片付けの前に
+        在った .git と同じ中身を置いて、残る形から見る。"""
+        before = []
+        a, _, _ = self.stopped_cleanup(prepare=lambda d: before.append((d / '.git').read_bytes()))
+        git_file = Path(a['dir']) / '.git'
+        if not os.path.lexists(git_file):
+            git_file.write_bytes(before[0])
+        self.assert_cleanup_again_is_refused_and_removes_nothing(a, 2, f"git のリポジトリでない: {a['dir']}")
+        git_file.unlink()
+        self.assert_cleanup_again_is_refused_and_removes_nothing(a, gone_code, gone_reason(a['dir']))
+        (Path(a['dir']) / 'src').chmod(0o755)
+        got = self.w('task', 'resume', '--dir', self.repo, '--task', a['task'], '--holder', 'x')
+        self.assertTrue(got.get('completed'), got)
+        self.assert_closed(a)
+
+    def test_task_cleanup_called_again_after_it_stopped_is_refused_and_removes_nothing(self):
+        """片付けが作業場所を消している途中で止まった後に、同じ task cleanup をもう一度呼ぶと、残りが Git の作業ツリーでないので、
+        残りに .git が残っていても消えていても「git のリポジトリでない: <作業場所>」（終了コード 2）で拒み、残り・状態の置き場の記録・
+        ブランチを変えない。消せない原因を直せば、task resume で閉じる（playbook-parallel の「片付ける」が、この理由と終了コードを名指しする）。
+        状態の置き場がどの Git リポジトリの外にも在る形なので、一時の置き場が Git リポジトリの中に在れば飛ばす。"""
+        if subprocess.run(['git', '-C', self.tmp.name, 'rev-parse'], env=self.env, capture_output=True).returncode == 0:
+            self.skipTest('一時の置き場が Git リポジトリの中に在り、状態の置き場をリポジトリの外に置けない')
+        self.assert_cleanup_again_is_refused_whether_the_git_file_is_left_or_gone(2, lambda d: f"git のリポジトリでない: {d}")
+
+    def test_task_cleanup_called_again_after_it_stopped_with_the_state_inside_another_repository_is_refused_and_removes_nothing(self):
+        """状態の置き場が別の Git リポジトリの中に在る（ホームを Git で管理している、など）と、止まった後の同じ task cleanup は、残りに
+        .git が残っていれば「git のリポジトリでない: <作業場所>」（終了コード 2）で、消えていれば、外側のリポジトリを見つけて「この場所は
+        task start で作った作業場所ではない」（6）で拒む。どちらも、残り・状態の置き場の記録・ブランチを変えず、消せない原因を直せば、
+        task resume で閉じる（playbook-parallel の「片付ける」が、この理由と終了コードを名指しする）。"""
+        self.git(Path(self.tmp.name), 'init', '-q', '-b', 'outer')  # 状態の置き場と元の checkout を包む、別のリポジトリ
+        self.assert_cleanup_again_is_refused_whether_the_git_file_is_left_or_gone(6, lambda d: 'この場所は task start で作った作業場所ではない')
+
     def test_task_resume_removes_what_a_stopped_cleanup_left_once_the_cause_is_fixed(self):
         """片付けの途中で、Git の登録が消えて作業場所の残りが在るとき、task resume は残りを消してから片付けを仕上げる。残りを消せなければ、
         最初に消せなかった項目で止まり、その項目の道筋を理由に出して拒み、消せないものと片付けの途中の記録とブランチを残す。
