@@ -11,7 +11,7 @@ https://github.com/user-attachments/assets/dd9c669e-0d1e-4645-a631-ea70809b345a
 基本機能に要るもの。基本機能は、手元で調べる・直す・確かめるまでの使い方。push・PR まで頼む場合と、`delegate`・`interrogate`・`reflect`・`playbook-eval` を使う場合は、[任意機能の準備](#任意機能の準備)も要る。
 
 - OS：Linux・macOS・WSL2。Windows のネイティブ環境（PowerShell など）は対象外。入口がファイルに書く前に実行する `scripts/work.py` が、Unix にしか無い `fcntl` を使うので動かない。読むだけの使い方も、ネイティブ環境では確かめていない。Windows では、WSL2 の中に CLI を入れて、その中で起動する。
-- CLI：Claude Code・Codex・Grok Build のどれか 1 つ。Claude Code では、入口は Fable で動く別の子（指揮者）として立つので、Fable を使えるアカウントを前提にする。Fable を使えずに入口が止まるときは、入口の代わりに本体を名前で呼ぶ（[Claude Code で Fable を使えないとき](#claude-code-で-fable-を使えないとき)）。入口が別の子として動くことを確かめた版は、2.1.328 と 2.1.329。
+- CLI：Claude Code・Codex・Grok Build のどれか 1 つ。Claude Code では、入口は Fable で動く別の子（指揮者）として立つので、Fable を使えるアカウントを前提にする。Fable を使えずに入口が止まるときは、入口の代わりに本体を名前で呼ぶ（[Claude Code で Fable を使えないとき](#claude-code-で-fable-を使えないとき)）。入口が別の子として動くことを確かめたバージョンは、2.1.328 と 2.1.329。
 - Python：3.9 以上を `python3` で起動できること。標準ライブラリだけを使うので、パッケージは要らない。macOS では、Command Line Tools に付く `python3`（3.9）で足りる。
 - git：2.38 以上（`git --version`）。タスクの作業場所の一覧に 2.36、squash・rebase で統合した後の片付けの確認に 2.38 で入った機能を使う。macOS では、Command Line Tools に付く `git` がこれ以上なら足りる（macOS 15 の Command Line Tools は 2.39.5 と報告されているが、手元では確かめていない）。
 - GitHub CLI（`gh`、ログイン済み）：Issue・PR を名指しして頼むときと、push・PR などの外部操作の前にアカウントと書き込み権限を確かめるときに使う。gh が無いと、名指しした Issue・PR の本文とコメントを読めず、GitHub への外部操作はこの確かめで止まる。Issue・PR を名指しせずに、リポジトリを読む・手元で直すだけなら要らない。
@@ -52,9 +52,9 @@ Grok Build は Claude Code のプラグインも読む（Claude 互換の既定�
 
 ## 使い始める
 
-依頼文の書き方（どこまで任せるか、Issue からドラフト PR・マージまでの進め方、`unknowns` との使い分け）は [はじめての bb-writ](docs/getting-started.md) にある。
+依頼文の書き方（どこまで任せるか、Issue からドラフト PR・マージまでの進め方、`unknowns` との使い分け）は[はじめての bb-writ](docs/getting-started.md) にある。
 
-その次に読むのは [スキルの使い方](docs/skills.md)。`interrogate`・`reflect`・`correct` など、自分で呼ぶスキルの頼み方と返ってくるものを 1 本ずつ説明している。
+その次に読むのは[スキルの使い方](docs/skills.md)。`interrogate`・`reflect`・`correct` など、自分で呼ぶスキルの頼み方と返ってくるものを 1 本ずつ説明している。
 
 作業するリポジトリで CLI を開き、入口のスキルを明示して頼む。たとえば README を調べるだけなら、次のように入力する。
 
@@ -78,7 +78,7 @@ Grok Build:
 
 Claude Code では、入口は呼んだセッションとは別の子（指揮者）として、背景で動く。指揮者に届くのは、呼んだときの依頼文だけで、それまでの会話は見えない。指揮者への返事と追加の依頼は、親の入力欄でなく指揮者に直接打つ（動いている間は画面下の一覧で ↓ を 2 回押して Enter、終わった後は `/tasks` から指揮者を開いて入力欄に打つ）。詳しくは[スキルの使い方](docs/skills.md)の「2. bb-writ（入口）」にある。
 
-Claude Code は、普通の依頼文だけでは入口を使わない。入口の名前を付けずに使わせるには、作業するリポジトリの `CLAUDE.md` に「技術的な仕事は、まず bb-writ:bb-writ スキルを使って始める」と書く。Codex と Grok Build は、入口の名前を付けない普通の依頼でも入口を最初に読んだ（試験での観測）。どの CLI でも hook の設定は要らない。
+Claude Code は、普通の依頼文だけでは入口を使わない。入口の名前を付けずに使わせるには、作業するリポジトリの `CLAUDE.md` に「技術的な仕事は、まず bb-writ:bb-writ スキルを使って始める」と書く。Codex と Grok Build は、入口の名前を付けない普通の依頼でも入口を最初に読んだ（テストでの観測）。どの CLI でも hook の設定は要らない。
 
 CLI を非対話で動かすときは（`claude -p` など）、Claude Code では `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1` を付ける。付けないと、背景の処理の途中の文（「終わると通知が届きます」など）が結果として出て、`--output-format json` や stream-json の利用者が完成の報告と取り違える。
 
@@ -114,7 +114,7 @@ Claude Code を複数起動する場合も、Claude Code と Codex を組み合�
 
 インストールに使った CLI で実行する。marketplace の情報を先に更新し、プラグインを更新する。
 
-版ごとに変わったことは [`CHANGELOG.md`](CHANGELOG.md) にある。新しい版が出たときに知らせを受けるには、GitHub のリポジトリで「Watch」→「Custom」→「Releases」を選ぶ。
+バージョンごとに変わったことは [`CHANGELOG.md`](CHANGELOG.md) にある。新しいバージョンが出たときに知らせを受けるには、GitHub のリポジトリで「Watch」→「Custom」→「Releases」を選ぶ。
 
 ### Claude Code
 
@@ -127,7 +127,7 @@ claude plugin update bb-writ@bb-writ
 
 ### Codex
 
-Codex は版ごとの写しを置くので、marketplace の更新後に削除・再追加する。
+Codex はバージョンごとの写しを置くので、marketplace の更新後に削除・再追加する。
 
 ```sh
 codex plugin marketplace upgrade bb-writ
@@ -156,9 +156,16 @@ grok plugin install <ディレクトリ> --trust
 
 ## 仕組みと含まれるスキル
 
-入口のスキル `bb-writ` が呼ばれると、進め方の本体 `conduct` を読み、依頼を言い直し、最初に手引きを呼び、リポジトリを読み、必要な原則だけを読んで進め、「何を実行し、どの結果を見て、依頼を満たすと判断したか」を返す。
+入口のスキル `bb-writ` が呼ばれると、次の順に進む。
 
-Claude Code では、変更を書く依頼では、入口（指揮者）は成果物を自分で書かず、別プロセスの書く子に書かせて、返った実物を確かめる。Codex では、最も難しい種類の依頼だけを書く子に任せ、ほかは入口が自分で書く。Grok Build では、最も難しい種類の依頼も含めて、どの依頼も入口が自分で書く（書く子を立てない）。push・PR の前には、新しい文脈の検証役に成果物を検証させる。
+1. 進め方の本体 `conduct` を読む。
+2. 依頼を言い直す。
+3. 最初に手引きを呼ぶ。
+4. リポジトリを読む。
+5. 必要な原則だけを読んで進める。
+6. 「何を実行し、どの結果を見て、依頼を満たすと判断したか」を返す。
+
+Claude Code では、変更を書く依頼の成果物を、入口（指揮者）は自分で書かない。入口は別プロセスの書く子に書かせて、返った実物を確かめる。Codex では、最も難しい種類の依頼だけを書く子に任せ、ほかは入口が自分で書く。Grok Build では、最も難しい種類の依頼も含めて、どの依頼も入口が自分で書く（書く子を立てない）。push・PR の前には、新しい文脈の検証役に成果物を検証させる。
 
 子の役の名前は、次のとおり。
 
@@ -174,23 +181,23 @@ Claude Code では、変更を書く依頼では、入口（指揮者）は成�
 
 - 手引き：`playbook-investigation`（読んで答える）・`playbook-bug`（不具合を直す）・`playbook-feature`（振る舞いを足す・変える）・`playbook-docs-skill`（文書・スキルを直す）・`playbook-verify`（確かめて返す。検証の条件の全文）・`playbook-deliver`（担当・記録・push や PR などの外部操作・PR のレビューへの応え方）・`playbook-parallel`（タスクごとの作業場所の確保・再開・統合・片付け）・`playbook-session-pickup`（続きを引き受ける）・`playbook-pause-safely`（安全に止める）・`playbook-eval`（スキルや設定の変種を同じ依頼で走らせ、目隠しで比べる）。
 - 委任と審査：`delegate`（別系統の CLI の起動）、`interrogate`（2 系統の審査役）。
-- 検証：`create-verification-skill`（対象のリポジトリに検証スキルを作って 1 回通す）、`create-formal-verification-skill`（順序・途中の死・再開の約束を全部の順序で確かめる検査を作る。pstack の同名のスキルの考え方から書き直した）、`create-property-test-skill`（入力の形・文字コード・大きさの約束を、揺れの一覧を組み合わせた多数の入力で確かめる性質の試験を作る）。
+- 検証：`create-verification-skill`（対象のリポジトリに検証スキルを作って 1 回通す）、`create-formal-verification-skill`（順序・途中の死・再開の約束を全部の順序で確かめる検査を作る。pstack の同名のスキルの考え方から書き直した）、`create-property-test-skill`（入力の形・文字コード・大きさの約束を、揺れの一覧を組み合わせた多数の入力で確かめるプロパティテストを作る）。
 - 学び：`reflect`（振り返って行き先へ送る）、`correct`（繰り返す誤りを起こせなくする）。
 - 探索：`unknowns`（実装前に、盲点の洗い出しや案の比較をする）。入口 `bb-writ` と同じく、Claude Code では Fable で動く別の子として立ち、進め方の全文は本体 `explore` にある。使い方は[スキルの使い方](docs/skills.md)の「3. unknowns（実装の前の探索）」にある。
 - 原則：1 本ずつ別のスキル `principle-*`（18 本）。本体の「原則の索引」から、仕事の局面に当たるものだけを呼ぶ。
 - hook（Claude Code）：2 つある。Codex と Grok Build では、守りの hook は何も止めず、同じことを入口の文が求める。案内の hook は案内を足さない（入口が呼んだセッションの中で動くので、要らない）。
   - 守りの hook：入口か本体を呼んだセッション（入口が立てた指揮者とその子孫を含み、指揮者が launcher で立てる子は含まない）で、関門（push・PR の前の照合。`work.py op run`）を通さない `git push`・`gh pr create`・`gh pr merge`・`gh release create` を拒否する。範囲と止めない書き方は `scripts/push_guard.py` の docstring にある。
-  - 案内の hook（`scripts/conductor_hint.py`）：入口か探索の入口 `unknowns` を呼んだセッションで、子への返事と続きの依頼は利用者が子に直接打つよう、親のセッションに案内する。案内だけで入力は止めず、従うかは親のモデルしだい。入口の指揮者が失敗して終わったときの案内は[Claude Code で Fable を使えないとき](#claude-code-で-fable-を使えないとき)にあり、詳しくは [`delegate`](skills/delegate/SKILL.md) の「指揮者への返事（案内の hook）」にある。
+  - 案内の hook（`scripts/conductor_hint.py`）：入口か探索の入口 `unknowns` を呼んだセッションで、子への返事と続きの依頼は利用者が子に直接打つよう、親のセッションに案内する。案内だけで入力は止めず、従うかは親のモデルしだい。入口の指揮者が失敗して終わったときの案内は [Claude Code で Fable を使えないとき](#claude-code-で-fable-を使えないとき)にあり、詳しくは [`delegate`](skills/delegate/SKILL.md) の「指揮者への返事（案内の hook）」にある。
 
 ## 任意機能の準備
 
-push・PR まで頼む場合と、`delegate`・`interrogate`・`reflect`・`playbook-eval` を使う場合は、[前提](#前提)に加えて、ここの準備が要る。bb-writ は、実装を任せる書く子（Claude Code。Codex では最も難しい種類の依頼。Grok Build の入口は、書く子を立てない）と、判定を任せる子（検証役・審査役・確かめ役・返す前の判定の子）を CLI の別プロセスとして起動する。その子は、普段のログインでなく、bb-writ だけが使うログイン（専用ログイン）で動く。分けるのは、子の使った量を普段の作業と区別し、普段の設定（個人の指示・hook・プラグイン）を子に混ぜないため。
+push・PR まで頼む場合と `delegate`・`interrogate`・`reflect`・`playbook-eval` を使う場合は、[前提](#前提)に加えて、ここの準備が要る。bb-writ は、実装を任せる書く子（Claude Code。Codex では最も難しい種類の依頼。Grok Build の入口は、書く子を立てない）と、判定を任せる子（検証役・審査役・確かめ役・返す前の判定の子）を CLI の別プロセスとして起動する。その子は、普段のログインでなく、bb-writ だけが使うログイン（専用ログイン）で動く。分けるのは、子の使った量を普段の作業と区別し、普段の設定（個人の指示・hook・プラグイン）を子に混ぜないため。
 
 何を用意するか：
 
 - push・PR だけなら、使っている CLI の専用ログインがあれば足りる。返す前の判定の子を、使っている CLI と同じ CLI で起動するため。Claude Code なら、下の dotenvx と、Linux・WSL2 では `bwrap`・`socat` も要る。
 - 手元の作業だけでも、実装を書く子に任せるには、使っている CLI の専用ログインが要る（Claude Code なら、上の項と同じく dotenvx と、Linux・WSL2 では `bwrap`・`socat` も）。無ければ、入口が自分で書く。
-- `interrogate` の別系統の審査役と、`playbook-eval`・`reflect` の別系統の読み手には、もう 1 つの CLI（Claude Code・Codex・Grok Build のどれか）と、その専用ログインが要る。
+- `interrogate` の別系統の審査役と、`playbook-eval`・`reflect` の別系統の読み手には、もう 1 つの CLI（Claude Code・Codex・Grok Build のどれか）とその専用ログインが要る。
 
 専用ログインが無いまま push・PR を頼むと、bb-writ は返す前の判定の子を起動できず、push・PR は拒否される。拒否の文と、子を起動できなかったときの返答に、この節が出てくる。用意したら、同じセッションでもう一度頼めばよい（bb-writ は子を起動するたびに専用ログインの置き場を見る）。Claude Code では、動いている指揮者に直接打つか、入口を呼び直す。
 
@@ -219,7 +226,7 @@ dotenvx set CLAUDE_CODE_OAUTH_TOKEN "$T" --no-native -f ~/.config/bb-writ/.env -
 
 2 つを 1 度に貼らない。`read` が 2 行目を入力として読み、その後に貼ったトークンがコマンドとして実行されて、履歴に残る。
 
-`--no-native` を省かない。dotenvx 2.25 以降は、OS の secret store（macOS のキーチェーンなど）が使えると、鍵を `.env.keys` でなくそこに置くことがある。そこに置かれると、bb-writ は鍵を見つけられず、子を起動しない。`--no-native` は 2.25 より前の版でも通る（1.75.1・2.24.1 で確かめた）。
+`--no-native` を省かない。dotenvx 2.25 以降は、OS の secret store（macOS のキーチェーンなど）が使えると、鍵を `.env.keys` でなくそこに置くことがある。そこに置かれると、bb-writ は鍵を見つけられず、子を起動しない。`--no-native` は 2.25 より前のバージョンでも通る（1.75.1・2.24.1 で確かめた）。
 
 Linux・WSL2 では、子の Claude Code が OS の sandbox（bubblewrap）の中で動き、sandbox を起動できなければ子は起動しない。`command -v bwrap socat` を実行し、どちらかが出なければ入れる（Debian・Ubuntu では `sudo apt install bubblewrap socat`）。macOS では要らない。
 
@@ -237,11 +244,13 @@ ls ~/.config/bb-writ/.env.keys
 CLAUDE_CONFIG_DIR=~/.config/bb-writ/claude-home env -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN dotenvx run -q -f ~/.config/bb-writ/.env -fk ~/.config/bb-writ/.env.keys -- claude -p "ok とだけ返して" --model haiku < /dev/null
 ```
 
-`ok` と返れば、専用ログインで動く。先頭の `env -u` は、シェルにある API キーを外す（キーがあると、トークンより先に使われる。launcher も子に渡さない）。`Failed to authenticate. API Error: 401` で終われば、トークンが違うので、`claude setup-token` からやり直す。`claude auth status` は、トークンが無効でも `"loggedIn": true` を返すので、確かめに使わない。`~/.config/bb-writ/claude-home` は、子の Claude Code の設定と会話記録の置き場で、初めて使うときにできる。
+`ok` と返れば、専用ログインで動く。先頭の `env -u` は、シェルにある API キーを外す（キーがあると、トークンより先に使われる。launcher も子に渡さない）。`Failed to authenticate. API Error: 401` で終われば、トークンが違うので、`claude setup-token` からやり直す。`claude auth status` は、トークンが無効でも `"loggedIn": true` を返すので、確かめに使わない。
 
-トークンは、`claude setup-token` でログインしたアカウントのもので、ふだんのログインを切り替えても変わらない。Claude のアカウントを切り替えたら、専用ログインのトークンも作り直す。作り直すには、上の `claude setup-token`・`IFS= read -rs T`・`dotenvx set …` の 3 つを、もう一度順に実行する。`.env` の値は置き換わる（dotenvx 2.36.0 で確かめた）。その後、上の確かめの問い合わせをもう一度実行する。
+`~/.config/bb-writ/claude-home` は、子の Claude Code の設定と会話記録の置き場で、初めて使うときにできる。
 
-専用ログインだけが利用枠の上限で断られ、同じ時刻のふだんのログインには枠が残っていたことがある。トークンを作り直すと通った。前のトークンが別のアカウントのものだったかは、確かめていない。
+トークンは、`claude setup-token` でログインしたアカウントのもので、普段のログインを切り替えても変わらない。Claude のアカウントを切り替えたら、専用ログインのトークンも作り直す。作り直すには、上の `claude setup-token`・`IFS= read -rs T`・`dotenvx set …` の 3 つを、もう一度順に実行する。`.env` の値は置き換わる（dotenvx 2.36.0 で確かめた）。その後、上の確かめの問い合わせをもう一度実行する。
+
+専用ログインだけが利用枠の上限で断られ、同じ時刻の普段のログインには枠が残っていたことがある。トークンを作り直すと通った。前のトークンが別のアカウントのものだったかは、確かめていない。
 
 bb-writ は Claude Code の子を起動する前に、専用ログインのトークンの組織と、bb-writ を呼んだ環境の Claude Code のログインの組織を比べる。違えば案内を出す。違っても、確かめられなくても、起動は止めない。結果の見方と、この確かめが守らないことは[専用ログインの組織の確かめ](docs/login-org-check.md)にある。
 
@@ -269,7 +278,7 @@ GROK_HOME=~/.config/bb-writ/grok-auth grok login
 
 Grok Build には、ログインの状態を見るコマンドが無い（`grok --help` の一覧で、ログインに関わるのは `login` と `logout` だけ。`grok usage` は、この使い方では「can't show your plan's usage here yet」で終わる）。`~/.config/bb-writ/grok-auth/auth.json` ができていればよい。認証が通らないと、子は「Not signed in」で終わる。そのときは同じコマンドでログインし直す。
 
-呼び出し方の詳細は [`delegate` の手引き](skills/delegate/SKILL.md) にある。
+呼び出し方の詳細は [`delegate` の手引き](skills/delegate/SKILL.md)にある。
 
 ## 開発
 
@@ -279,17 +288,17 @@ Grok Build には、ログインの状態を見るコマンドが無い（`grok 
 - 置き場：スキルは `skills/<名前>/SKILL.md`（上の一覧と同じ名前）。補助スクリプトは `scripts/launch.py`（別系統の CLI の起動と報告の検査）と `scripts/work.py`（担当の貸し出しと外部操作の記録）で、標準ライブラリだけを使う。
 - 必要な内容は、すべて SKILL.md の本文に入れる。プラグイン内の別ファイルを読ませると、Claude Code が承認を求めるため。
 - 並行開発の仕組み（作業場所の分離・再開・統合・片付け）を変えたときは、このリポジトリの検証スキル `verify-parallel`（`.agents/skills/verify-parallel/`。Claude Code は `.claude/skills/` の symlink から読む）で、実際の CLI を使って確かめる。配布物（`skills/`）には含めない。
-- 試験：`python3 -B tests/run.py`（試験ごとに別のプロセスで並べて回す。順に回すなら `python3 -B -m unittest discover -s tests -t .`）。入力の形の性質の試験（`tests/test_properties.py`）は Hypothesis を使い、無ければ飛ばす。入れるときは `pip install -r tests/requirements.txt`（試験だけの依存）。
+- テスト：`python3 -B tests/run.py`（テストごとに別のプロセスで並べて回す。順に回すなら `python3 -B -m unittest discover -s tests -t .`）。入力の形のプロパティテスト（`tests/test_properties.py`）は Hypothesis を使い、無ければ飛ばす。入れるときは `pip install -r tests/requirements.txt`（テストだけの依存）。
 - トークン・認証情報を画面・ログ・会話に出さない。ワーカーは bb-writ 専用のログインを使う（[`delegate` の手引き](skills/delegate/SKILL.md)）。
 - 対象のリポジトリを増やすたびに bb-writ 自身を直さない。対象に固有のことは、対象のリポジトリの中で解く。
 
 ## 生い立ち
 
-bb-writ は [cc-rite-workflow](https://github.com/B16B1RD/cc-rite-workflow)（rite）の後継。rite は Issue を起点に、仕様・実装・レビュー・PR を固定の工程で回していた。作者は rite を使い続けるうちに、生成 AI で作る時代に旧来の工程をなぞることに疑問を持ち、開発の進め方そのものを見直した。その際、[@poteto](https://x.com/poteto)（Lauren Tan）氏の [pstack](https://github.com/cursor/plugins/tree/main/pstack) の考え方に共感し、rite で得た知見と pstack を参考に、CLI ハーネスで動くスキルのプラグインとして作り直した。
+bb-writ は [cc-rite-workflow](https://github.com/B16B1RD/cc-rite-workflow)（rite）の後継。rite は Issue を起点に、仕様・実装・レビュー・PR を固定の工程で回していた。作者は rite を使い続けるうちに、生成 AI で作る時代に旧来の工程をなぞることに疑問を持ち、開発の進め方そのものを見直した。その際、[@poteto](https://x.com/poteto)（Lauren Tan）氏の [pstack](https://github.com/cursor/plugins/tree/main/pstack) の考え方に共感し、rite で得た知見と pstack を参考に CLI ハーネスで動くスキルのプラグインとして作り直した。
 
-- **rite から**：子への委任の範囲と実効設定の記録、専用ログイン、根拠に基づく報告、中断・訂正・外部操作（push・PR・マージ）の記録と照合。Issue の書式・固定の工程・対象の登録は捨てた。
+- **rite から**：子への委任の範囲と実効設定の記録、専用ログイン、根拠に基づく報告。中断・訂正・外部操作（push・PR・マージ）の記録と照合。Issue の書式・固定の工程・対象の登録は捨てた。
 - **pstack から**：原則のうち 12 本（CLI ハーネス向けに日本語で書き直した。残る 6 本は作者の原則）、入口が依頼を読んで手引きを選ぶ形、`correct`・`create-verification-skill`・`create-formal-verification-skill`・`interrogate`・`reflect` の考え方。出典と著作権表示は [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md)。
-- **pstack と違うところ**：pstack の一部の機能が使う Grok Bot（webhook で起動するボット）と、Cursor 専用の機能（bugbot・automations など）を前提にしない。別系統のモデルによる判断、作業の継続、権限を、Claude Code・Codex・Grok Build の正式な実行・再開・プラグインの機能と薄い補助コードで成り立たせる。
+- **pstack と違うところ**：pstack の一部の機能が使う Grok Bot（webhook で起動するボット）と、Cursor 専用の機能（bugbot・automations など）を前提にしない。別系統のモデルによる判断・作業の継続・権限を、Claude Code・Codex・Grok Build の正式な実行・再開・プラグインの機能と薄い補助コードで成り立たせる。
 
 ## ライセンス
 
