@@ -260,7 +260,7 @@ class TestTaskModel(unittest.TestCase):
         self.assertIn("unclosed を見る（unclosed_tasks）。このタスクは閉じるものとして出る", text)
 
     def test_without_the_check_when_taking_a_stale_list_takes_a_waiting_owners_task(self):
-        """task resume が取る時に maybe_waiting を見ないと（Issue #32 の直しの後のバージョン）、閉じる側は、持ち主の担当が切れて 24 時間を過ぎた
+        """task resume が取る時に maybe_waiting を見ないと（Issue #32 の直しの後の版）、閉じる側は、持ち主の担当が切れて 24 時間を過ぎた
         ときに取った一覧から、戻って延ばし、また切れた持ち主の担当を取る（実物の再現: tests/test_parallel.py の
         test_a_stale_list_does_not_take_the_task_of_an_owner_who_came_back）。"""
         bad, _, trace = check({**NOW, "resume_refuses_waiting": False})

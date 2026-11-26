@@ -738,7 +738,7 @@ class TestLaunch(unittest.TestCase):
     def launch_env(self, mode="good", path=None, env_extra=None):
         """偽の CLI・試験のホームと設定で launcher を起こす環境。偽の子に渡す FAKE_* は fake_env.json にも書く（子の環境を絞る launcher でも届く）。
         試験ごとに組んでいたころ、写し損ねて HOME と fake_env.json が抜け、launcher が実物のホームを走査し、偽の子が落ちたまま通った試験があった。"""
-        # 起こした launcher が実物のホームと設定を見ないことを確かめる試験は無い（HOME を付け替えずに組んだ試験が、基点のバージョンで通っていた）
+        # 起こした launcher が実物のホームと設定を見ないことを確かめる試験は無い（HOME を付け替えずに組んだ試験が、基点の版で通っていた）
         env = {**os.environ, "HOME": str(self.home), "PATH": path if path is not None else f"{self.bin}:/usr/bin:/bin", "BB_WRIT_CONFIG_DIR": str(self.cfg),
                "BB_WRIT_STATE_DIR": str(self.state), "FAKE_MODE": mode, "FAKE_ARGS": str(self.args_file),
                "FAKE_TEXT": GOOD.encode().decode("unicode_escape"), **(env_extra or {})}
