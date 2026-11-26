@@ -99,7 +99,7 @@ Claude Code では、入口 `bb-writ` と探索の入口 `unknowns` は、Fable 
 
 入口が止まったとき、どう見えるか：
 
-- 対話：入口 `bb-writ` の指揮者が失敗して終わると、親のセッションが、失敗したことと次の手を伝えて止まる。次の手は、本体を名前で呼ぶか、入口を呼び直すかの 2 つ。案内の hook（`scripts/conductor_hint.py`）と入口の説明が、親にそう求める。ただし、従うかは親のモデルしだい。親が依頼を自分で進め始めたら、止めて、次の手を自分で打つ（親が進めた分には、作業場所の確保も検証も掛からない）。
+- 対話：入口 `bb-writ` の指揮者が失敗して終わると、親のセッションが、失敗したことと次の手を伝えて止まる。次の手は、本体を名前で呼ぶか、入口を呼び直すかの 2 つ。案内の hook（`scripts/conductor_hint.py`）と入口の説明が、親にそう求める。ただし、従うかは親のモデルしだい。親が依頼を自分で進め始めたら、止めて、次の手を自分で打つ。親が進めた分には、作業場所の確保も検証も掛からない。
 - 非対話の実行（`claude -p`）：エラーの文が結果として返るだけで、仕事は進まない。
 - エラーの文：Claude Code が入口のモデルを解決できないときは、`There's an issue with the selected model (<名前>). It may not exist or you may not have access to it.` で始まる文になる。利用枠が尽きたときの文は、これと同じとは限らない。
 
@@ -107,7 +107,7 @@ Claude Code では、入口 `bb-writ` と探索の入口 `unknowns` は、Fable 
 
 - Claude Code の設定の `availableModels`（使えるモデルの一覧）が Fable を外しているとき：入口は止まらず、指揮者は代わりのモデルで動く（この動きと代わりのモデルの選び方は、公式の文書の [Restrict model selection](https://code.claude.com/docs/en/model-config#restrict-model-selection) と [When an allowlist blocks a subagent model](https://code.claude.com/docs/en/sub-agents#when-an-allowlist-blocks-a-subagent-model) の節）。
 - 混雑や通信など一時的なエラーで指揮者が失敗したとき：本体を呼ばずに、入口を呼び直す。
-- bb-writ が立てる子（書く子・判定を任せる子）が Fable を使えないとき：入口の話でなく、bb-writ の側で扱う。動きは [`delegate`](skills/delegate/SKILL.md) の「モデルと effort」に、確かめた範囲は[専用ログインの細部](docs/dedicated-login.md#子が-fable-を使えないとき)にある。
+- bb-writ が立てる子が Fable を使えないとき：入口の話でなく、bb-writ の側で扱う。動きは [`delegate`](skills/delegate/SKILL.md) の「モデルと effort」に、確かめた範囲は[専用ログインの細部](docs/dedicated-login.md#子が-fable-を使えないとき)にある。
 
 どこまで確かめたか：
 
