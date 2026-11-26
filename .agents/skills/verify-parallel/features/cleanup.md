@@ -7,7 +7,7 @@
 変更を別のブランチへ統合してから専用 worktree を片付ける。
 
 ## 動かし方
-`python3 -B -m unittest tests.test_parallel -v`。実 CLI 試験後は remaining-tasks.json が空、試験用 repo の main に成果物が残ること。
+`python3 -B -m unittest tests.test_parallel -v`。実 CLI テスト後は remaining-tasks.json が空、テスト用 repo の main に成果物が残ること。
 
 ## 注意
 squash・rebase で統合した保存先は、統合先が進んだ後も片付けられる。統合していない commit が残る・保存先で取り消された・衝突する場合は自動削除しない。作業場所を保持する。

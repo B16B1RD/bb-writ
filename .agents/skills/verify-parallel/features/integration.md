@@ -7,7 +7,7 @@
 中断したタスクを再開し、最新の統合先を取り込んで検証・反映する。
 
 ## 動かし方
-`python3 -B -m unittest tests.test_parallel -v`。実 CLI 試験では、生成した成果ブランチを resume し、先行変更を取り込んで integrate する。
+`python3 -B -m unittest tests.test_parallel -v`。実 CLI テストでは、生成した成果ブランチを resume し、先行変更を取り込んで integrate する。
 
 ## 注意
 排他は同じ状態ディレクトリを使う同じ PC のローカル操作に対するもの。GitHub の競合は対象側の CI・保護規則で扱う。

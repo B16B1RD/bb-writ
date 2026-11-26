@@ -27,7 +27,7 @@ description: 仕事の区切りで、この会話と作業の記録から繰り�
 ## 4. 行き先と形を決める
 
 - 行き先は `principle-route-lessons`: ワークフローそのものの学びは bb-writ（スキル・スクリプト）へ、対象のドメインの学びは対象のリポジトリへ。
-- 形は `principle-encode-lessons-in-structure`: 作り → 型 → lint・CI → 試験 → 手引きの文、の順に強いものを選ぶ。文を足すのは、判断が要って仕組みにできないときだけ。
+- 形は `principle-encode-lessons-in-structure`: 作り → 型 → lint・CI → テスト → 手引きの文、の順に強いものを選ぶ。文を足すのは、判断が要って仕組みにできないときだけ。
 
 ## 5. 送る
 

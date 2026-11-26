@@ -1,6 +1,6 @@
 # bb-writ の開発の取り決め
 
-bb-writ は、CLI ハーネス（Claude Code・Codex。Grok Build も同じ SKILL.md を読む）向けのスキルのプラグイン。概要・入れ方・生い立ち・ライセンスは `README.md`。オーナー専用の取り決め（手元の環境・試験用のリポジトリ・push の方法）は、gitignore した `CLAUDE.local.md` にある（無ければ、この文書だけに従う）。
+bb-writ は、CLI ハーネス（Claude Code・Codex。Grok Build も同じ SKILL.md を読む）向けのスキルのプラグイン。概要・入れ方・生い立ち・ライセンスは `README.md`。オーナー専用の取り決め（手元の環境・テスト用のリポジトリ・push の方法）は、gitignore した `CLAUDE.local.md` にある（無ければ、この文書だけに従う）。
 
 ## 話し方と名前
 
@@ -14,7 +14,7 @@ bb-writ は、CLI ハーネス（Claude Code・Codex。Grok Build も同じ SKIL
 
 ## 形
 
-- 入口は `skills/bb-writ`（進め方の本体 `skills/conduct` を呼ぶ薄い入口。Claude Code では、frontmatter の `context: fork`・`model` で、呼んだセッションとは別の子＝指揮者として動く。Codex・Grok Build は frontmatter のこの 2 行を使わず、入口を読んで本体へ進む）、手引きは `skills/playbook-*`、委任とホストごとの接続点は `skills/delegate`、探索は `skills/unknowns`（本体 `skills/explore` を呼ぶ薄い入口。入口 `bb-writ` と同じく、Claude Code では fork した子として動く）、審査は `skills/interrogate`、検証スキルの生成は `skills/create-verification-skill`、形式検証の検査の生成は `skills/create-formal-verification-skill`、性質の試験の生成は `skills/create-property-test-skill`、学びは `skills/reflect`・`skills/correct`、原則は `skills/principle-*`（1 本 1 スキル）。スキルは目的ごとに分ける（1 つに詰め込まない）。bb-writ 自身を確かめる検証スキル（`verify-parallel`）は配らず、`create-verification-skill` の決めどおり `.agents/skills/` に置く（Claude Code には `.claude/skills/` からの symlink で見せる。置き場と symlink を確かめる検査は無い。配布の検査は `skills/` だけを見る）。
+- 入口は `skills/bb-writ`（進め方の本体 `skills/conduct` を呼ぶ薄い入口。Claude Code では、frontmatter の `context: fork`・`model` で、呼んだセッションとは別の子＝指揮者として動く。Codex・Grok Build は frontmatter のこの 2 行を使わず、入口を読んで本体へ進む）、手引きは `skills/playbook-*`、委任とホストごとの接続点は `skills/delegate`、探索は `skills/unknowns`（本体 `skills/explore` を呼ぶ薄い入口。入口 `bb-writ` と同じく、Claude Code では fork した子として動く）、審査は `skills/interrogate`、検証スキルの生成は `skills/create-verification-skill`、形式検証の検査の生成は `skills/create-formal-verification-skill`、プロパティテストの生成は `skills/create-property-test-skill`、学びは `skills/reflect`・`skills/correct`、原則は `skills/principle-*`（1 本 1 スキル）。スキルは目的ごとに分ける（1 つに詰め込まない）。bb-writ 自身を確かめる検証スキル（`verify-parallel`）は配らず、`create-verification-skill` の決めどおり `.agents/skills/` に置く（Claude Code には `.claude/skills/` からの symlink で見せる。置き場と symlink を確かめる検査は無い。配布の検査は `skills/` だけを見る）。
 - すべて SKILL.md の本文で届く形にする。Claude Code はプラグイン内の別ファイルの Read に承認を求め、`disable-model-invocation` のスキルは Skill ツールから呼べない（2026-10-17 の実測。`tests/test_distribution.py` が検査する）。
 - 補助スクリプトは `scripts/launch.py`（別系統の CLI を専用ログインで起動し報告を検査）と `scripts/work.py`（作業場所の確保・担当の貸し出し・統合の排他と照合・外部操作の照合と実行の記録）。標準ライブラリだけ。補助コードに入れるのは、プロセス終了の検出・結果形式の検査・同じ作業への二重書き込みの防止・公開対象と検証対象の一致（`work.py op run --verified`）のような、実際に壊れた場合を試せる機械的な約束だけ。「次は設計」「次はレビュー」という工程の順序を持たせない。例外は push・PR の前の関門 1 つで、届ける前の審査か要らない理由と変更の危険度の宣言、HEAD の監査役の記録、作業の記録の欄を求める。何を求め何を見ないかと、その理由は「規則と強制するもの」の表の push・PR の行に書く。
 - 必須の機能を bb-writ の hook やカスタム subagent 定義に置かない。hook はホストごとに違い、ハーネス間の互換性を保てないため。入口・原則・手引き・検証スキルの生成・学びは、それらが無くても成り立たせる。hook を使うのは任意の案内や通知と、スキルの文がすでに求める関門へ戻すための拒否だけ（`hooks/hooks.json` の、拒否の `scripts/push_guard.py` と、案内の `scripts/conductor_hint.py`。hook が動かないホストでも、同じことを入口の文と description が求める）。
@@ -26,11 +26,11 @@ bb-writ は、CLI ハーネス（Claude Code・Codex。Grok Build も同じ SKIL
 - プラグインとして配る（大前提）。出すときは `.claude-plugin/plugin.json`・`plugin.json`・`.claude-plugin/marketplace.json` のバージョンを一緒に上げる。Codex も同じ 2 つ（marketplace と root の `plugin.json`）を読む（0.163.0 で確認）。ホスト専用のマニフェストは、必要が実物で出るまで足さない。Codex の専用ログインはバージョンごとの写しで、写しが launcher と中身で違うと、launcher は Codex の子を起動しない。専用ログインの marketplace が手元のディレクトリで登録してあり、その置き場が launcher の置き場なら、launcher が起動の前に自分で入れ直す。そうでないとき（GitHub から入れた marketplace、作業場所の launcher など）は、launcher が理由に出すコマンド（`CODEX_HOME=<専用ログイン> codex plugin add bb-writ@<marketplace>`。GitHub から入れた marketplace なら、その前に `marketplace upgrade`。`remove` は要らない）で、手で入れ直す（作業場所の launcher では、統合してから）。
 - 変更履歴は利用者向けの `CHANGELOG.md` 1 つ。バージョンを上げる commit で、先頭に `## <バージョン> - <日付>` の節を足し、前のタグからの変更（バージョンを上げなかった commit の分も）を利用者に何が変わるかで書く。開発者向けの履歴は別に書かず、タグの間の git log を使う。push の後、その commit に `claude plugin tag --push` でタグ（`bb-writ--v<バージョン>`）を付け、Release は `gh release create <タグ> --title "bb-writ <バージョン>" --notes-file <その節を抜き出したファイル>` で作る。Release の本文は手で書かない（同じ文面を 2 か所で持たないため。commit を経ない文は、公開前の検査も通らない）。
 
-## 試験
+## テスト
 
-- 単体: `python3 -B tests/run.py`（偽の CLI で launcher と work.py、配布の形。試験ごとに別のプロセスで並べて回し、`-j N` で数を、引数で試験の名前を絞る。順に回すなら `python3 -B -m unittest discover -s tests -t .`）。`tests/test_properties.py` は Hypothesis（`tests/requirements.txt`、試験だけの依存）で入力の形の性質を見て、無ければ飛ばす。CI は入れて回す。
+- 単体: `python3 -B tests/run.py`（偽の CLI で launcher と work.py、配布の形。テストごとに別のプロセスで並べて回し、`-j N` で数を、引数でテストの名前を絞る。順に回すなら `python3 -B -m unittest discover -s tests -t .`）。`tests/test_properties.py` は Hypothesis（`tests/requirements.txt`、テストだけの依存）で入力の形の性質を見て、無ければ飛ばす。CI は入れて回す。
 - スキルの変更は、新しい CLI セッションで実物を確かめる（最初のツール呼び出しで使われるか、成果物）。比べるときは `skills/playbook-eval`。
-- GitHub に触れる確かめは、自分が管理する試験用のリポジトリで行う。子の CLI の起動に、普段渡さない設定（`GH_CONFIG_DIR`・`GH_TOKEN`）を足さない。
+- GitHub に触れる確かめは、自分が管理するテスト用のリポジトリで行う。子の CLI の起動に、普段渡さない設定（`GH_CONFIG_DIR`・`GH_TOKEN`）を足さない。
 
 ## 規則と強制するもの
 
@@ -56,7 +56,7 @@ bb-writ は、CLI ハーネス（Claude Code・Codex。Grok Build も同じ SKIL
 | 指揮者への返事を、親のセッションが取り次ぐ前提で設計・説明しない。利用者が `/tasks` から指揮者に直接返事する | `hooks/hooks.json` の `scripts/conductor_hint.py`（入口か探索の入口 unknowns を呼んだセッションに案内を足す。従うかは親のモデルしだい）。`tests/test_conductor_hint.py` |
 | 入口の子（指揮者）が失敗して終わったら、親のセッションは依頼を自分で進めず、失敗と次の手（本体を名前で呼ぶ・入口を呼び直す）を伝えて止まる（入口のモデルを使えずに指揮者が失敗した後、親が関門を通さずにファイルを書き換えた。#57） | `scripts/conductor_hint.py` の `FAILED`（失敗の知らせのターンに案内を足す。従うかは親のモデルしだい）と入口の description。`test_a_failure_notice_of_the_conductor_gets_the_stop_hint` |
 | launcher の Claude Code の子に、入口 `bb-writ:bb-writ` を呼ばせない（呼ぶたびに指揮者が fork する） | `scripts/launch.py` が `permissions.deny: Skill(bb-writ:bb-writ)` と依頼文の先頭の 1 行を渡す。`test_claude_children_cannot_invoke_the_entry`・`test_a_prompt_that_starts_with_a_slash_is_not_run_as_a_command` |
-| push・PR は、届ける前の審査を通した commit（HEAD か、その後の差分を危険度 低 と宣言した祖先）か、審査が要らない理由と危険度の宣言から出す（危険度も理由も書かずに interrogate を省いて push した）。中・高は `--interrogate` で立てた審査役の記録が要る。子が sandbox で試験を実行できなかったときは `--not-run` の宣言で数える | `scripts/work.py` の `op run`・`op begin` の `--reviewed`・`--delta`・`--risk`・`--not-run`。`TestReviewedCommit`・`TestNotRunDeclaration`。記録の真偽と審査の中身は見ない |
+| push・PR は、届ける前の審査を通した commit（HEAD か、その後の差分を危険度 低 と宣言した祖先）か、審査が要らない理由と危険度の宣言から出す（危険度も理由も書かずに interrogate を省いて push した）。中・高は `--interrogate` で立てた審査役の記録が要る。子が sandbox でテストを実行できなかったときは `--not-run` の宣言で数える | `scripts/work.py` の `op run`・`op begin` の `--reviewed`・`--delta`・`--risk`・`--not-run`。`TestReviewedCommit`・`TestNotRunDeclaration`。記録の真偽と審査の中身は見ない |
 | push・PR は、宣言にかかわらず、HEAD を対象にした遵守の監査役（`--audit`）が `ok` で返り、届けてよい（`deliver: yes`）と判定してから出す。記録・下書き・証拠の整えだけなら `yes` で、立て直さない（`none:文書だけ` で push し、行どうしの食い違いを人のレビューまで見逃した）。監査役は審査と周に数えない | `launch.py` の `AUDIT_CONTRACT`、`work.py` の `reviews_of`。`test_every_push_and_pr_needs_an_audit_of_the_head_even_when_no_review_is_declared`・`test_an_audit_that_sent_the_work_back_does_not_open_the_gate`・`test_an_auditor_must_say_whether_to_deliver_and_the_record_keeps_it`・`test_an_audit_does_not_count_as_a_review`。掛かるのは鍵 `push`・`pr` だけ |
 | 入口を呼んだセッションは、`work.py op run` を通さずに外へ出さない（素の `git push`・`gh pr create`・`gh pr merge`・`gh release create`。担当も記録も取らない書き手が素の push で届けた） | Claude Code は `hooks/hooks.json` の `scripts/push_guard.py`（会話記録の入口の印か、入口で始まった子の会話記録で見分ける。守らない範囲と誤って止める例は `scripts/push_guard.py` の docstring）。`test_a_push_by_the_conductor_after_clear_is_denied`・`test_the_hook_denies_a_conductor_started_from_another_version_of_the_plugin`。Codex・Grok Build は入口の文だけ |
 | push・PR は、作業の記録の目的・制約・確かめ方・指摘の扱いを書いてから出す（長いセッションで、指摘の扱いの一覧を飛ばしたまま直し始めた） | `scripts/work.py` の `note_gaps`。`TestNoteBeforePublish`・`TestInputShapes`（欄が空かだけを見る） |
@@ -64,8 +64,8 @@ bb-writ は、CLI ハーネス（Claude Code・Codex。Grok Build も同じ SKIL
 | task start の作業場所で審査が 3 周に達したら、作業の記録の「仕組みの要否」を書いてから push・PR を出す（周ごとに仕組みへ直しを足し、約 25 周回した） | `scripts/work.py` の `review_rounds`。`TestPremiseAfterRounds` |
 | CI の結果を見ずに完了と報告しない。Release は CI が通った commit にだけ出す。CI の上限は最も遅い OS の実測の 3 倍以上にする | `scripts/work.py` の `ci_not_passed`。`test_a_release_waits_for_the_ci_of_the_commit_to_pass`・`test_ci_jobs_have_room_for_the_slow_macos_runners` |
 | バージョンはマニフェストの間で揃え、`CHANGELOG.md` の先頭は今のバージョン。スキルは SKILL.md の本文だけで届き、名前はフォルダと同じ | `tests/test_distribution.py` |
-| 道筋を扱う変更は、一時の置き場が symlink の下でも試験が通るようにする（macOS の一時ディレクトリは `/private/var` への symlink の下） | CI の `unit-symlink-tmp`。`test_ci_also_runs_the_tests_with_the_temporary_place_under_a_symlink` |
-| 試験が PATH に置く偽のコマンドから本物を呼ぶときは、PATH を変える前に引いた絶対パスで呼ぶ（偽の git が自分を呼び続け、プロセスの上限を埋めた） | `tests/process_limit.py`。`test_tests_run_under_a_process_limit` |
+| 道筋を扱う変更は、一時の置き場が symlink の下でもテストが通るようにする（macOS の一時ディレクトリは `/private/var` への symlink の下） | CI の `unit-symlink-tmp`。`test_ci_also_runs_the_tests_with_the_temporary_place_under_a_symlink` |
+| テストが PATH に置く偽のコマンドから本物を呼ぶときは、PATH を変える前に引いた絶対パスで呼ぶ（偽の git が自分を呼び続け、プロセスの上限を埋めた） | `tests/process_limit.py`。`test_tests_run_under_a_process_limit` |
 | 状態の置き場に置いたものの要否を、利用者に聞かない。置くものには、消す者と時を決める | `scripts/launch.py` の `sweep_leftovers`・`hold_place`、`scripts/work.py` の `unclosed_tasks`。`test_the_launcher_removes_its_leftovers_after_the_retention`・`test_a_place_in_use_is_kept_whatever_the_records_say`・`tests/test_sweep_model.py`（関数を変えたら、モデルが本文を写しているかを読み直す） |
 | 担当の期限が切れても、誰も取り直していなければ、持ち主の操作を拒否しない | `scripts/work.py` の `held_lease`。`test_an_expired_lease_nobody_took_stays_with_its_holder`・`test_an_expired_lease_nobody_took_still_integrates_and_cleans_up` |
 | 期限が切れて 24 時間以内のタスクを、閉じるタスクとして `unclosed` に出さず、`--take-over` の無い `task resume` でも取らない（待っている持ち主の作業場所が消された。#32。その後も古い一覧から取れた） | `scripts/work.py` の `maybe_waiting`・`claim_at`。`test_a_task_whose_owner_may_still_be_waiting_is_not_offered_for_closing`・`test_a_stale_list_does_not_take_the_task_of_an_owner_who_came_back` |
@@ -73,9 +73,9 @@ bb-writ は、CLI ハーネス（Claude Code・Codex。Grok Build も同じ SKIL
 | 審査の後に commit だけが変わった（bot の作り直し・rebase・amend で中身が同じ）なら、審査をやり直さない（bot が PR のブランチを作り直し、同じ中身の審査をやり直した） | `scripts/work.py` の `tree_twin`。`test_a_review_carries_over_when_only_the_commits_are_rebuilt` |
 | 書く子の実行中に動いたリモート追跡の ref（`refs/remotes/`）を、子の失敗に数えない（指揮者の fetch で、git を動かしていない書く子が failed になった） | `scripts/launch.py` の `git_changes`。`test_write_child_may_commit_only_to_its_own_branch` |
 | 前例を写して値だけを進める変更は、成果物の検証役と条件 (5) の子を立てず、監査役に前例との照合を任せる。依頼の範囲の外で見つけたことは差分に入れずに返答に書き、範囲の外に足した文への指摘は削って閉じる（前例どおりのバージョンの固定 1 件に、子 9 人と 62 分を使った） | 無い（`conduct`・`playbook-verify` の文だけ） |
-| スキル（`skills/`）と README が「…」で引く補助コードの文には、その文を見る試験を置く（引いた文を見る試験が無いまま、手引きに入った） | `test_what_the_scripts_print_and_the_skills_quote_is_looked_at_by_a_test`（引いた句が `tests/` の文字列に在ることだけを見る。assert しているかは見ない） |
+| スキル（`skills/`）と README が「…」で引く補助コードの文には、その文を見るテストを置く（引いた文を見るテストが無いまま、手引きに入った） | `test_what_the_scripts_print_and_the_skills_quote_is_looked_at_by_a_test`（引いた句が `tests/` の文字列に在ることだけを見る。assert しているかは見ない） |
 | 人が読む文書の文だけの直し（コードブロック・インラインのコード・コマンド・値・数値・リンク先を変えない）は、手順の実行・台帳・成果物の検証役を省き、読者役と監査役で確かめる。スキルと指示ファイルは除く（README の 2 件の直しに 95 分かかった） | 無い（`playbook-verify`・`playbook-docs-skill`・`conduct` の文だけ） |
-| この表の行は、短い規則（根拠の経緯は括弧で短く）と、強制するコード・試験の名前だけにする。実測の記録・確かめた回数・守らない範囲の細部は書かず、守らない範囲はそのコードの docstring と試験に置く（1 行が 8,000 字を超え、実装を変えるたびに文の照合の直しが続いた） | `test_rules_table_rows_stay_short`・`test_tests_named_in_the_rules_table_exist`（行の長さと、名指しした試験の実在だけを見る。実測を書いたかは見ない） |
+| この表の行は、短い規則（根拠の経緯は括弧で短く）と、強制するコード・テストの名前だけにする。実測の記録・確かめた回数・守らない範囲の細部は書かず、守らない範囲はそのコードの docstring とテストに置く（1 行が 8,000 字を超え、実装を変えるたびに文の照合の直しが続いた） | `test_rules_table_rows_stay_short`・`test_tests_named_in_the_rules_table_exist`（行の長さと、名指ししたテストの実在だけを見る。実測を書いたかは見ない） |
 
 ## commit
 
