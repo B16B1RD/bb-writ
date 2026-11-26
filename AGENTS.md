@@ -74,6 +74,7 @@ bb-writ は、CLI ハーネス（Claude Code・Codex。Grok Build も同じ SKIL
 | 書く子の実行中に動いたリモート追跡の ref（`refs/remotes/`）を、子の失敗に数えない（指揮者の fetch で、git を動かしていない書く子が failed になった） | `scripts/launch.py` の `git_changes`。`test_write_child_may_commit_only_to_its_own_branch` |
 | 前例を写して値だけを進める変更は、成果物の検証役と条件 (5) の子を立てず、監査役に前例との照合を任せる。依頼の範囲の外で見つけたことは差分に入れずに返答に書き、範囲の外に足した文への指摘は削って閉じる（前例どおりの版の固定 1 件に、子 9 人と 62 分を使った） | 無い（`conduct`・`playbook-verify` の文だけ） |
 | スキル（`skills/`）と README が「…」で引く補助コードの文には、その文を見る試験を置く（引いた文を見る試験が無いまま、手引きに入った） | `test_what_the_scripts_print_and_the_skills_quote_is_looked_at_by_a_test`（引いた句が `tests/` の文字列に在ることだけを見る。assert しているかは見ない） |
+| 人が読む文書の文だけの直し（コードブロック・インラインのコード・コマンド・値・数値・リンク先を変えない）は、手順の実行・台帳・成果物の検証役を省き、読者役と監査役で確かめる。スキルと指示ファイルは除く（README の 2 件の直しに 95 分かかった） | 無い（`playbook-verify`・`playbook-docs-skill`・`conduct` の文だけ） |
 | この表の行は、短い規則（根拠の経緯は括弧で短く）と、強制するコード・試験の名前だけにする。実測の記録・確かめた回数・守らない範囲の細部は書かず、守らない範囲はそのコードの docstring と試験に置く（1 行が 8,000 字を超え、実装を変えるたびに文の照合の直しが続いた） | `test_rules_table_rows_stay_short`・`test_tests_named_in_the_rules_table_exist`（行の長さと、名指しした試験の実在だけを見る。実測を書いたかは見ない） |
 
 ## commit
