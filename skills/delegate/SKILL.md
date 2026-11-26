@@ -7,7 +7,7 @@ description: 子に委任するとき、別系統の CLI（Claude Code・Codex�
 
 入口 `bb-writ` から始めた仕事で会話が要約された後は、入口の本体 `bb-writ:conduct` を呼び直して全文を読み直す（`bb-writ:bb-writ` は呼び直さない）（要約の後は、先に呼んだ入口が落ちていることがある）。
 
-正本は SKILL.md で、どのホストでも同じものを読む。ここに書くのは、委任・非対話実行・再開・権限の、ホストごとに違う呼び出し方と、launcher が返すものの読み方だけ。launcher が自分で済ませる照合の仕組みと、守らない範囲の細部は `scripts/launch.py` の docstring にある。実測の記録（日付・版・回数）はここに書かない。必須の機能を bb-writ の hook やカスタム subagent 定義に置かない（Claude Code の hook は 2 つで、どちらも同じことを入口の文が求める）。
+正本は SKILL.md で、どのホストでも同じものを読む。ここに書くのは、委任・非対話実行・再開・権限の、ホストごとに違う呼び出し方と、launcher が返すものの読み方だけ。launcher が自分で済ませる照合の仕組みと、守らない範囲の細部は `scripts/launch.py` の docstring にある。実測の記録（日付・バージョン・回数）はここに書かない。必須の機能を bb-writ の hook やカスタム subagent 定義に置かない（Claude Code の hook は 2 つで、どちらも同じことを入口の文が求める）。
 
 ## 共通
 
@@ -82,11 +82,11 @@ python3 <launch.py> --resume <前の記録の out> --prompt-file <続きの依�
 ## Codex
 
 - **入口:** 入口の frontmatter の `context`・`model` は使われず、入口は呼んだセッションの中で読まれ、続けて本体の SKILL.md を読む（題材のリポジトリの `.agents/skills/` に置いた写しで確かめた。プラグインとして入れた形では確かめていない）。
-- **同じ系統の委任:** 新しい文脈が要るときは `codex exec` を別プロセスで起動する。Codex 自身のサブエージェント機能は版と設定で有効・無効が変わるので、使えるかはその場で確かめ、使えなければそう書く。
+- **同じ系統の委任:** 新しい文脈が要るときは `codex exec` を別プロセスで起動する。Codex 自身のサブエージェント機能はバージョンと設定で有効・無効が変わるので、使えるかはその場で確かめ、使えなければそう書く。
 - **launcher の書く子:** `--add-dir` で渡すのは、作業場所の記録と、Git の共通ディレクトリのうち commit に要る `objects`・自分のブランチの ref と reflog・その worktree の管理ディレクトリだけ（共通の `config`・`hooks`・`main` には書けない）。
 - **非対話実行:** `codex exec --json -m <model> -c model_reasoning_effort="<effort>" [-s read-only|workspace-write|danger-full-access] [-C <dir>] [--add-dir <dir>] "<依頼>" < /dev/null`。stdin を閉じないと「Reading additional input from stdin...」で待ち続ける。承認を Codex 自身の自動レビューに任せるなら `--approve-for-me`（workspace-write を含むので `-s` と併用できない）。sandbox の中でネットワークが要るなら `-c sandbox_workspace_write.network_access=true`、作業領域の外に書く場所は `--add-dir`。構造化した結果が要るなら `--output-schema <file>`。利用者の設定と AGENTS を切るなら `--ignore-user-config`・`--ignore-rules`。Git 管理外で動かすなら `--skip-git-repo-check`。launcher の読み取り専用の子は `-s` でなく権限の profile で起動するので、`-s`（`sandbox_mode`）を一緒に渡さない（対象の `.codex/config.toml` の `sandbox_mode` も profile を変えうる）。
 - **再開:** `codex exec resume <SESSION_ID>`（`--last` で直前）。`resume` は `-C`・`--add-dir`・`--approve-for-me` を受けないので、`exec` の引数を `exec` の側に置いたまま、依頼の前に `resume <id>` を挟む。
-- **プラグイン:** `codex plugin marketplace add <このリポジトリの絶対パス>` → `codex plugin add bb-writ@bb-writ`。写しが `$CODEX_HOME/plugins/cache/bb-writ/bb-writ/<版>/` に置かれ、bb-writ を更新しても自分では新しくならない。launcher の Codex の子は専用ログインの写しを読むので、launcher は起動の前に写しを自分と中身で比べる。写しが無ければ bb-writ 無しの子として起動し、同じなら起動する。違えば、その marketplace が手元のディレクトリで、その置き場が launcher 自身の置き場のときだけ、`codex plugin add bb-writ@<marketplace>` を 1 回実行して入れ直す（記録の `codex_plugin_add`。`remove` は要らない）。そうでないとき（GitHub から入れた marketplace、作業場所の launcher など）は `unavailable` で、理由に手で入れ直すコマンド（`CODEX_HOME=<専用ログイン> codex plugin add bb-writ@<marketplace>`。GitHub から入れた marketplace なら先に `marketplace upgrade`）が入るので、それを実行してから立て直す（作業場所の launcher では、統合してから）。入れ直しても違うときも `unavailable` で、理由に違うファイルと add の出力の末尾が入るので、出力から原因を直す。守らない範囲は `codex_refresh` の docstring。
+- **プラグイン:** `codex plugin marketplace add <このリポジトリの絶対パス>` → `codex plugin add bb-writ@bb-writ`。写しが `$CODEX_HOME/plugins/cache/bb-writ/bb-writ/<バージョン>/` に置かれ、bb-writ を更新しても自分では新しくならない。launcher の Codex の子は専用ログインの写しを読むので、launcher は起動の前に写しを自分と中身で比べる。写しが無ければ bb-writ 無しの子として起動し、同じなら起動する。違えば、その marketplace が手元のディレクトリで、その置き場が launcher 自身の置き場のときだけ、`codex plugin add bb-writ@<marketplace>` を 1 回実行して入れ直す（記録の `codex_plugin_add`。`remove` は要らない）。そうでないとき（GitHub から入れた marketplace、作業場所の launcher など）は `unavailable` で、理由に手で入れ直すコマンド（`CODEX_HOME=<専用ログイン> codex plugin add bb-writ@<marketplace>`。GitHub から入れた marketplace なら先に `marketplace upgrade`）が入るので、それを実行してから立て直す（作業場所の launcher では、統合してから）。入れ直しても違うときも `unavailable` で、理由に違うファイルと add の出力の末尾が入るので、出力から原因を直す。守らない範囲は `codex_refresh` の docstring。
 - **Claude Code を子にする:** `CLAUDE_CONFIG_DIR=~/.config/bb-writ/claude-home CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1 dotenvx run -f ~/.config/bb-writ/.env -fk ~/.config/bb-writ/.env.keys -- claude -p "<依頼>" --output-format json --model <m> --effort <e>`。背景の処理を止めるのは、終わりの知らせが次のターンを起こすと json の出力が最後のターンの結果だけになり、報告が消えるため。
 
 ## Grok Build
