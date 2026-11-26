@@ -173,7 +173,7 @@ class TestWork(unittest.TestCase):
         self.assertEqual(self.w("op", "pending")[1]["pending_ops"], [])
 
     def test_op_begun_by_an_earlier_version_can_still_be_closed(self):
-        """前の版は種類を問わず記録した。版を上げた後も、残った操作を op done で閉じられる。"""
+        """前のバージョンは種類を問わず記録した。バージョンを上げた後も、残った操作を op done で閉じられる。"""
         rc, a = self.w("claim", "--holder", "A")
         with open(Path(a["note"]["path"]).parent / "ops.jsonl", "a", encoding="utf-8") as f:
             f.write(json.dumps({"key": "pr-create:feat/x", "state": "begun", "at": time.time(), "holder": "A", "what": "gh pr create"}) + "\n")

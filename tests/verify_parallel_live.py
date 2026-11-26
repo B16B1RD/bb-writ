@@ -63,7 +63,7 @@ def main():
         return json.loads(run([sys.executable, '-B', ROOT / 'scripts/work.py', *words], env=env))
 
     def session(host, name):
-        instructions = f'''この試験では開発中の bb-writ を使う。スキルの正本は {ROOT}/skills/ 以下。キャッシュの旧版を使わない。
+        instructions = f'''この試験では開発中の bb-writ を使う。スキルの正本は {ROOT}/skills/ 以下。キャッシュの古いバージョンを使わない。
 bb-writ の入口と playbook-feature、playbook-parallel を読み、次の依頼を実行する。
 「{name}.txt を作り、内容を {name} の一行にする」。
 独立した新規タスクとして作業場所を自動確保し、その中で変更・検証・commit する。

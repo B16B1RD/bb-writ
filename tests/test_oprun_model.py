@@ -4,18 +4,18 @@
 範囲は担当 2・鍵 2・token 3。担当の期限切れはいつでも起こせる（実際の時間を写さない、保守的な写し方）。
 過去の修正を戻した版をフラグで作り、それぞれが反例を出すことも試す（一度も落ちたことのない検査は、何も確かめていない）。
 同じ修正を実物の work.py の写しに戻し、その不具合を見る試験が落ちることは、tests/test_replay.py が確かめる（フラグと 1 対 1）。
-TLA+ の同じモデル（TLC）とは、2026-11-15 の版（持ち主の照合が期限を見ない Issue #31 の変更）で、状態数（TLC_STATES）と、
+TLA+ の同じモデル（TLC）とは、2026-11-15 のバージョン（持ち主の照合が期限を見ない Issue #31 の変更）で、状態数（TLC_STATES）と、
 戻した版 4 つの違反と反例の動作の数が一致した（TLC は行き詰まりの検査を外して流す。token を使い切った終わりの状態は行き詰まりになり、
 このモデルも行き詰まりは見ない）。TLA+ の HolderKeepsAccess は ENABLED で書くので、Next から外しただけの動作も可能と数える
-（ここでは successors で見るので、外すと破れる）。TLA+ のモデルはリポジトリに無い（最初の版は Issue #19 の付録）。
-2026-11-24 の版は、コマンドの終了コード（cmd の ok・fail）・done の result（res）・照合に拒否された op run のコマンド（stray）と、
-b908b17・d5923ce を戻すフラグ 3 つを足した。TLC とは照らしていない（その場で TLC を使えなかった）。代わりに、今の版の状態を、TLC と
+（ここでは successors で見るので、外すと破れる）。TLA+ のモデルはリポジトリに無い（最初のバージョンは Issue #19 の付録）。
+2026-11-24 のバージョンは、コマンドの終了コード（cmd の ok・fail）・done の result（res）・照合に拒否された op run のコマンド（stray）と、
+b908b17・d5923ce を戻すフラグ 3 つを足した。TLC とは照らしていない（その場で TLC を使えなかった）。代わりに、今のバージョンの状態を、TLC と
 照らした変数へ写した数（cmd の ok・fail を exited に畳み、res と stray を落とす）が TLC_STATES と同じことを試験で確かめる（足した値と
-動作が、照らした版の動きを変えていない）。足したフラグの反例の動作の数は、TLC と照らしていない。足した分岐は、tests/test_replay.py の
+動作が、照らしたバージョンの動きを変えていない）。足したフラグの反例の動作の数は、TLC と照らしていない。足した分岐は、tests/test_replay.py の
 場面（test_work.py の test_a_second_op_run_right_after_the_first_begins_is_refused・test_only_external_begin_and_the_running_done_are_refused_while_running・
 test_refused_begin_does_not_run_the_command・test_failed_command_is_recorded_with_its_exit_code）が、今の work.py で通り、戻した写しで落ちる。
 モデル（MODEL_PARTS の関数と、それが読む定数）を変えると、その本文のハッシュ（MODELED_MODEL）が変わって落ちる。全探索を通し、
-写した数が TLC_STATES のままかを見てから、MODELED_MODEL と MODELED_STATES を書き換える。写した数が変わる変更（照らした版の動きを
+写した数が TLC_STATES のままかを見てから、MODELED_MODEL と MODELED_STATES を書き換える。写した数が変わる変更（照らしたバージョンの動きを
 変える変更）は、TLA+ のモデルに同じ変更を入れて TLC と照らしてから TLC_STATES も書き換える（TLC は CI に置かないので、照らし直したかは
 試験で確かめない）。
 
@@ -61,7 +61,7 @@ from model_tie import body, drift, fingerprint  # noqa: E402
 WORK = Path(__file__).resolve().parents[1] / "scripts" / "work.py"
 
 MODELED_AT = "982b555"
-TLC_STATES = 84981  # TLC と照らした版の状態数（TLC_FIELDS に写した数）
+TLC_STATES = 84981  # TLC と照らしたバージョンの状態数（TLC_FIELDS に写した数）
 MODELED_STATES = 222085
 MODELED_MODEL = "0bad1c49061cf3a4"
 MODELED = {
@@ -111,7 +111,7 @@ ALIVE = {"started", "waiting", "wrote"}  # 監督役が生きている段
 EXITED = ("ok", "fail")  # 終わったコマンドの終了コード
 FIELDS = ("lease_tok", "lease_alive", "next_tok", "tok_of", "rec", "lock_file", "holders", "oprun", "sup", "sup_tok", "cmd", "left",
           "res", "stray")
-TLC_FIELDS = FIELDS[:12]  # TLC と照らした版の変数（cmd の終わりは exited の 1 つ）
+TLC_FIELDS = FIELDS[:12]  # TLC と照らしたバージョンの変数（cmd の終わりは exited の 1 つ）
 
 # 今のコードと、過去の修正を 1 つずつ戻した版。True が今のコード
 NOW = {"cmd_holds_lock": True, "done_lock_free": True, "claim_checks_run": True, "holder_by_token": True,
@@ -254,7 +254,7 @@ def violated(s, f):
 
 
 def tlc_view(s):
-    """TLC と照らした版の変数への写像。終わったコマンドの ok・fail を exited に畳み、res と stray を落とす。"""
+    """TLC と照らしたバージョンの変数への写像。終わったコマンドの ok・fail を exited に畳み、res と stray を落とす。"""
     d = dict(zip(FIELDS, s))
     d["cmd"] = tuple("exited" if c in EXITED else c for c in d["cmd"])
     return tuple(d[n] for n in TLC_FIELDS)
@@ -337,7 +337,7 @@ class TestOpRunModel(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.seen = set()
-        cls.now = check(NOW, cls.seen)  # 今の版の全探索は 1 回だけ（下の試験が同じ結果を使う）
+        cls.now = check(NOW, cls.seen)  # 今のバージョンの全探索は 1 回だけ（下の試験が同じ結果を使う）
 
     def test_the_modeled_code_keeps_the_invariants_in_every_interleaving(self):
         bad, n, trace = self.now
@@ -345,7 +345,7 @@ class TestOpRunModel(unittest.TestCase):
 
     def test_the_model_is_the_one_checked_against_tlc(self):
         self.assertEqual(len({tlc_view(s) for s in self.seen}), TLC_STATES,
-                         "TLC と照らした変数へ写した状態の数が、TLC と照らした数と違う（足した値や動作が、照らした版の動きを変えた）。"
+                         "TLC と照らした変数へ写した状態の数が、TLC と照らした数と違う（足した値や動作が、照らしたバージョンの動きを変えた）。"
                          "意図した変更なら、TLA+ のモデルに同じ変更を入れて TLC と照らしてから TLC_STATES を書き換える（tests/test_oprun_model.py の冒頭）")
         self.assertEqual(self.now[1], MODELED_STATES, "モデルの状態数が、見直した数と違う。モデルを変えたなら、写した数を見てから "
                          "MODELED_STATES を書き換える（tests/test_oprun_model.py の冒頭）")

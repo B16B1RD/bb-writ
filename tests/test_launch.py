@@ -86,7 +86,7 @@ FAKE_CODEX = textwrap.dedent(r'''
         if not _m:
             print(f"Error: plugin `bb-writ` was not found in marketplace `{_mp}`", file=sys.stderr)
             sys.exit(1)
-        # 本物と同じく、別の場所に全部を組み、古い写しを退けてから、改名で置く（版のディレクトリは 1 つだけ）
+        # 本物と同じく、別の場所に全部を組み、古い写しを退けてから、改名で置く（バージョンのディレクトリは 1 つだけ）
         os.makedirs(_base, exist_ok=True)
         _build = tempfile.mkdtemp(prefix="plugin-install-", dir=_base)
         for _d in ("skills", "scripts"):
@@ -99,7 +99,7 @@ FAKE_CODEX = textwrap.dedent(r'''
             _wait(".gap")
         if _how in ("drop", "hollow"):  # 古い写しを退けて、新しい写しを置かずに 1 で終わる（写しの無い状態を残す）
             shutil.rmtree(_build)
-            if _how == "hollow":  # skills の無い版のディレクトリだけを置く（写しと数えない形）
+            if _how == "hollow":  # skills の無いバージョンのディレクトリだけを置く（写しと数えない形）
                 os.makedirs(os.path.join(_base, "bb-writ", "9.9.9", "scripts"))
             print("progress " + "x" * 400)  # 標準出力の長い行の後に、標準エラーへ失敗の文（理由に残すのは、つないだものの末尾）
             print("Error: failed to activate updated plugin cache entry: I/O error (os error 5)", file=sys.stderr)
@@ -169,7 +169,7 @@ FAKE_CODEX = textwrap.dedent(r'''
             if (value(f"permissions.{profile}.network.enabled") or "").lower() == "true":
                 network = "enabled"
             entries += [entry(d, "write") for d in added]
-        # 入力の書き換えの場面（対象の設定が同じ profile に足した・版で記録の形が変わった）
+        # 入力の書き換えの場面（対象の設定が同じ profile に足した・バージョンで記録の形が変わった）
         extra = {"odd-deny-path": {"path": {"type": "weird"}, "access": "deny"}, "odd-entry": 42, "odd-access": entry(":root", "readwrite"), "odd-path": {"path": {"type": "weird"}, "access": "read"},
                  "slash-tmp-profile": entry(":slash_tmp", "write"), "wide-profile": entry(os.getcwd(), "write"),
                  "outdir-profile": entry(os.path.dirname(os.environ.get("TMPDIR", "/nonexistent/x")), "write"),
@@ -738,7 +738,7 @@ class TestLaunch(unittest.TestCase):
     def launch_env(self, mode="good", path=None, env_extra=None):
         """偽の CLI・試験のホームと設定で launcher を起こす環境。偽の子に渡す FAKE_* は fake_env.json にも書く（子の環境を絞る launcher でも届く）。
         試験ごとに組んでいたころ、写し損ねて HOME と fake_env.json が抜け、launcher が実物のホームを走査し、偽の子が落ちたまま通った試験があった。"""
-        # 起こした launcher が実物のホームと設定を見ないことを確かめる試験は無い（HOME を付け替えずに組んだ試験が、基点の版で通っていた）
+        # 起こした launcher が実物のホームと設定を見ないことを確かめる試験は無い（HOME を付け替えずに組んだ試験が、基点のバージョンで通っていた）
         env = {**os.environ, "HOME": str(self.home), "PATH": path if path is not None else f"{self.bin}:/usr/bin:/bin", "BB_WRIT_CONFIG_DIR": str(self.cfg),
                "BB_WRIT_STATE_DIR": str(self.state), "FAKE_MODE": mode, "FAKE_ARGS": str(self.args_file),
                "FAKE_TEXT": GOOD.encode().decode("unicode_escape"), **(env_extra or {})}
@@ -940,7 +940,7 @@ class TestLaunch(unittest.TestCase):
         h1 = git("rev-parse", "HEAD")
         rc, first = self.run_launch("claude", extra=["--timeout", "2"], env_extra={"FAKE_HANG": "1"})
         self.assertEqual(first["head"], h1)
-        with open(self.state / "delegations.jsonl", "a") as f:  # 前の版の記録には saw が無い
+        with open(self.state / "delegations.jsonl", "a") as f:  # 前のバージョンの記録には saw が無い
             f.write(json.dumps({"session": first["session"], "out": "x"}) + "\n")
         rc, plain = self.run_launch(None, extra=["--resume", first["out"]])
         self.assertEqual(plain["head"], h1, plain)
@@ -1368,7 +1368,7 @@ class TestLaunch(unittest.TestCase):
                                             ("codex", "deep-usage", "failed", "子の結果を記録に書けない")):
             with self.subTest(mode=mode):
                 rc, rec = self.run_launch(host, mode=mode)
-                # 読める深さ・書ける深さは Python の版で違う（3.10 は深さ 3000 を読めず、3.13 以降は書ける）。launcher と同じ Python で見る
+                # 読める深さ・書ける深さは Python のバージョンで違う（3.10 は深さ 3000 を読めず、3.13 以降は書ける）。launcher と同じ Python で見る
                 try:
                     json.loads("[" * 3000 + "]" * 3000)
                     readable = True
@@ -1395,7 +1395,7 @@ class TestLaunch(unittest.TestCase):
                 self.assertIn(rec["out"], (self.state / "delegations.jsonl").read_text())
 
     def test_values_that_cannot_be_written_still_write_the_record(self):
-        # Python の版によらず受け皿を通す: 印の付いた値だけ、indent 付きの書き出しを失敗させる（試験だけが読む sitecustomize）
+        # Python のバージョンによらず受け皿を通す: 印の付いた値だけ、indent 付きの書き出しを失敗させる（試験だけが読む sitecustomize）
         site = Path(self.tmp.name) / "site"
         site.mkdir()
         (site / "sitecustomize.py").write_text(textwrap.dedent('''
@@ -1562,7 +1562,7 @@ class TestLaunch(unittest.TestCase):
                 rc, rec = self.run_launch("claude", env_extra=env)
                 self.assertEqual((rc, rec["status"]), (2, "invalid-report"), rec)
                 problems = rec["problems"]
-                if problem == "深":  # 読めないか、記録に書けない（Python の版で深さの上限が違う。3.15 の decoder は読める）
+                if problem == "深":  # 読めないか、記録に書けない（Python のバージョンで深さの上限が違う。3.15 の decoder は読める）
                     self.assertTrue([p for p in problems if "読めない" in p or "深すぎて" in p], problems)
                 else:
                     self.assertTrue([p for p in problems if problem in p], problems)
@@ -3280,10 +3280,10 @@ class TestLaunch(unittest.TestCase):
         rc, again = self.run_launch(None, extra=["--resume", rec["out"]])
         self.assertEqual((rc, again["status"], again["audit"], last()["audit"]), (0, "ok", True, True), again)
         rc, plain = self.run_launch("claude", extra=["--timeout", "2"], env_extra={"FAKE_HANG": "1"})
-        old = Path(self.tmp.name) / "old-audit-record"  # 前の版の launcher の記録には欄が無い
+        old = Path(self.tmp.name) / "old-audit-record"  # 前のバージョンの launcher の記録には欄が無い
         old.mkdir()
         (old / "record.json").write_text(json.dumps({k: v for k, v in plain.items() if k != "audit"}))
-        for case, prev in (("launcher が書いた記録", plain["out"]), ("audit の欄の無い前の版の記録", str(old))):
+        for case, prev in (("launcher が書いた記録", plain["out"]), ("audit の欄の無い前のバージョンの記録", str(old))):
             with self.subTest(case):
                 p = self.run_launch(None, extra=["--resume", prev], raw=True)
                 self.assertEqual(p.returncode, 0, p.stderr)
@@ -3310,10 +3310,10 @@ class TestLaunch(unittest.TestCase):
         rc, again = self.run_launch(None, extra=["--resume", rec["out"]])
         self.assertEqual((rc, again["status"], again["interrogate"], last()["interrogate"]), (0, "ok", True, True), again)
         rc, plain = self.run_launch("claude", extra=["--timeout", "2"], env_extra={"FAKE_HANG": "1"})  # 条件 (5) の子の続きは審査役に化けない
-        old = Path(self.tmp.name) / "old-record"  # 前の版の launcher の記録には欄が無い
+        old = Path(self.tmp.name) / "old-record"  # 前のバージョンの launcher の記録には欄が無い
         old.mkdir()
         (old / "record.json").write_text(json.dumps({k: v for k, v in plain.items() if k != "interrogate"}))
-        for case, prev in (("launcher が書いた記録", plain["out"]), ("interrogate の欄の無い前の版の記録", str(old))):
+        for case, prev in (("launcher が書いた記録", plain["out"]), ("interrogate の欄の無い前のバージョンの記録", str(old))):
             with self.subTest(case):
                 p = self.run_launch(None, extra=["--resume", prev], raw=True)
                 self.assertEqual(p.returncode, 0, p.stderr)
@@ -3389,7 +3389,7 @@ class TestLaunch(unittest.TestCase):
         kept = [self.leftover("tmp", self.stamp(30, "-resumed"), {"at": now - 30 * 86400}, {"at": now - 86400}),  # 古い置き場でも、続きの起動が最近
                 self.leftover("tmp", self.stamp(30, "-order"), {"at": now - 86400}, {"at": now - 30 * 86400}),  # 記録の並びは時刻の順とは限らない
                 self.leftover("tmp", self.stamp(1, "-newname"), {"at": now - 30 * 86400}),  # 記録の時刻より名前の日時が新しい
-                self.leftover("tmp", self.stamp(1, "-noat"), {}),       # 記録に時刻が無い（前の版の記録）: 名前の日時で決める
+                self.leftover("tmp", self.stamp(1, "-noat"), {}),       # 記録に時刻が無い（前のバージョンの記録）: 名前の日時で決める
                 self.leftover("tmp", self.stamp(-30, "-future"), {}),   # 未来の日時の名前だけ: 使える時刻が無いので、期限では消さない
                 self.leftover("tmp", "99991231-235959-far", {}),        # 日時として読めるが、遠い未来
                 self.leftover("tmp", "名前に日時が無い", {}),             # 記録にも名前にも時刻が無ければ、期限では消さない
@@ -5152,7 +5152,7 @@ launch.claude_reads = claude_reads
     LIST = ["plugin", "marketplace", "list", "--json"]
 
     def stale_codex_copy(self, mp="bb-writ"):
-        """専用ログインに、この bb-writ と 1 行だけ違う写し（古い版）を置く。"""
+        """専用ログインに、この bb-writ と 1 行だけ違う写し（古いバージョン）を置く。"""
         c = self.cfg / "codex-home" / "plugins" / "cache" / mp / "bb-writ" / "9.9.8"
         for d in ("skills", "scripts"):
             shutil.copytree(ROOT / d, c / d, ignore=shutil.ignore_patterns("__pycache__"))
@@ -5410,7 +5410,7 @@ launch.claude_reads = claude_reads
             first = self.start_codex_launcher("first", self.launch_env(env_extra={"FAKE_HANG": "1"}), ["--timeout", "60"])
             self.wait_until(self.args_file.exists, "入れ直した後に 1 つ目の codex exec が呼ばれない")
             self.assertEqual(len(self.plugin_changes()), 1, "1 つ目の launcher が入れ直していない")
-            placed = next((home / "plugins" / "cache" / "bb-writ" / "bb-writ").iterdir())  # add が置いた版の写しを、もう一度古くする
+            placed = next((home / "plugins" / "cache" / "bb-writ" / "bb-writ").iterdir())  # add が置いたバージョンの写しを、もう一度古くする
             target = placed / "skills" / "interrogate" / "SKILL.md"
             target.write_text(target.read_text(encoding="utf-8") + "\n古い文\n", encoding="utf-8")
             try:
@@ -5462,7 +5462,7 @@ launch.claude_reads = claude_reads
             for d in ("skills", "scripts"):
                 shutil.copytree(ROOT / d, c / d, ignore=shutil.ignore_patterns("__pycache__"))
         for name, prepare, how in (("写しが無いまま", lambda: None, "drop"), ("別の marketplace に同じ中身の写しが在る", other, "drop"),
-                                   ("skills の無い版の置き場だけが在る", lambda: None, "hollow")):
+                                   ("skills の無いバージョンの置き場だけが在る", lambda: None, "hollow")):
             with self.subTest(name):
                 home = self.reset_codex_login()
                 self.stale_codex_copy()

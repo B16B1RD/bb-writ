@@ -21,7 +21,7 @@ Claude Code 2.1.329）。非対話で --input-format stream-json に本文をブ
 見分けられない）では、子の会話記録も見る（entry_child）。入口の子の会話記録の先頭の行は、入口のスキルの本文を読み込んだ行
 （content が「Base directory for this skill: <プラグインの置き場>/skills/bb-writ」で始まる）。孫（指揮者が Agent ツールで立てた子）は、
 同じ置き場の meta.json の parentAgentId でたどる。cache に写すプラグインの置き場は更新のたびに変わるので、先頭の行の置き場は、
-hook の置き場と同じ場所か、同じ親の下の別の置き場（版の兄弟）なら同じ入口と数える（same_entry）。
+hook の置き場と同じ場所か、同じ親の下の別の置き場（バージョンの兄弟）なら同じ入口と数える（same_entry）。
 
 守らない範囲（守るのは、上の読み方と前置きで書いた普段の書き方だけ。判定できなければ通し、このスクリプトを読めなければ hook も 0 で終わる）:
 - 通す書き方: 別の語に包む（sh -c '…'・eval・xargs・trap・coproc・find -exec・| sh・env -S "git push"）、前置きの一覧に無い包むコマンド
@@ -35,7 +35,7 @@ hook の置き場と同じ場所か、同じ親の下の別の置き場（版の
   短い引数の dry-run（git push -nq）。
 - 指揮者を見分けずに通す形: プラグインの置き場の道筋に改行が在る、子の会話記録の名前のものが FIFO（hook が時間の上限で終わる）、
   孫の meta.json が無い、hook の置き場と親の違う置き場で始まった指揮者（marketplace や入れ方を替えた後）、入口の skills/bb-writ 自体が
-  symlink の置き場で、別の版の置き場で始まった指揮者、前の版の hook を使い続けるセッションで、その版の置き場が片付けで消えた後。
+  symlink の置き場で、別のバージョンの置き場で始まった指揮者、前のバージョンの hook を使い続けるセッションで、そのバージョンの置き場が片付けで消えた後。
 - 指揮者と誤って数える形: 入口と関係のない子の先頭の行が、このプラグインの入口の置き場の文で始まる、過去の指揮者と同じ agent_id が
   関係のない子に付く、hook の置き場と同じ親の下の別のディレクトリの skills/bb-writ を読み込んだ子（same_entry）、先頭の行の道筋が
   空か相対で、hook の作業ディレクトリから解くと入口の置き場か、その隣の skills/bb-writ になる。
@@ -370,15 +370,15 @@ def first_row(path: str):
 
 def same_entry(base: str, entry: str) -> bool:
     """先頭の行の道筋 base が、hook の置き場の入口 entry（<親>/<名前>/skills/bb-writ）と同じ入口か。同じ場所か、同じ親の下の別の
-    置き場（版の兄弟）の skills/bb-writ（<親>/<別の名前>/skills/bb-writ）なら同じ入口と数える。どちらも実体の道筋に直し、道筋の部品で
+    置き場（バージョンの兄弟）の skills/bb-writ（<親>/<別の名前>/skills/bb-writ）なら同じ入口と数える。どちらも実体の道筋に直し、道筋の部品で
     比べる（違ってよいのは <名前> の 1 段だけ。文字列の前方一致では比べない）。同じ場所は、先に実体の道筋の一致で見る（入口の
     skills/bb-writ 自体が symlink の置き場では、実体の道筋が skills/bb-writ で終わらないので、兄弟の比べには当たらない）。置き場が
-    在るかと、名前の形（版の文字列か）は見ない。
+    在るかと、名前の形（バージョンの文字列か）は見ない。
 
-    理由: cache に写すプラグインの置き場は cache/<marketplace>/<plugin>/<版>/ で、更新のたびに変わる（公式の文書 plugins/loading）。
-    前の版の置き場で始まった指揮者の先頭の行は、前の版の置き場を指したまま続く。
+    理由: cache に写すプラグインの置き場は cache/<marketplace>/<plugin>/<バージョン>/ で、更新のたびに変わる（公式の文書 plugins/loading）。
+    前のバージョンの置き場で始まった指揮者の先頭の行は、前のバージョンの置き場を指したまま続く。
     誤って数える形: hook の置き場と同じ親の下の、別のディレクトリの skills/bb-writ を読み込んだ子も、同じ入口と数える。cache に写す形
-    では、別の版の置き場。置き場からそのまま読む形（--plugin-dir・手元のディレクトリの marketplace）では、置き場の隣のディレクトリ
+    では、別のバージョンの置き場。置き場からそのまま読む形（--plugin-dir・手元のディレクトリの marketplace）では、置き場の隣のディレクトリ
     （例: 置き場がホームの直下なら、ホームの .claude/skills/bb-writ）。
     守らない範囲は module の docstring。"""
     base, entry = os.path.realpath(base), os.path.realpath(entry)

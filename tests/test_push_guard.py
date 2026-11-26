@@ -61,7 +61,7 @@ BY_QUEUED_FORKED_SLASH = {"type": "queue-operation", "operation": "enqueue", "co
 SHORT_NAME_HEADS = {"空白の後に引数": "/bb-writ 直して", "引数なし": "/bb-writ", "タブの後に引数": "/bb-writ\t直して",
                     "改行の後に引数": "/bb-writ\n直して", "全角の空白の後に引数": "/bb-writ\u3000直して"}
 BY_QUEUED_SHORT_SLASH = {"type": "queue-operation", "operation": "enqueue", "content": "/bb-writ 直して"}
-# 利用者の行に短い名前が打ったままで残る形は、確かめた版では見ていない（残っていれば数える）
+# 利用者の行に短い名前が打ったままで残る形は、確かめたバージョンでは見ていない（残っていれば数える）
 BY_SHORT_SLASH = {"type": "user", "message": {"role": "user", "content": "/bb-writ 直して"}}
 BY_SHORT_SLASH_IN_TEXT_BLOCK = {"type": "user", "message": {"role": "user", "content": [{"type": "text", "text": "/bb-writ 直して"}]}}
 # 入口の名前で始まらない文（名前の前方一致、ほかのスキル、本体の名前でない別の名前、先頭の空白・改行、文の途中の名前）
@@ -577,11 +577,11 @@ class TestPushGuard(unittest.TestCase):
         self.assertTrue(p.stdout.strip(), "指揮者の素の push が通った")
         self.assertEqual(json.loads(p.stdout)["hookSpecificOutput"]["permissionDecision"], "deny")
 
-    # プラグインの更新の後: cache に写したプラグインの置き場は版ごとに変わる（cache/<marketplace>/<plugin>/<版>/）。hook は新しい版の
-    # 置き場から動き、前の版の置き場で始まった指揮者の先頭の行は前の版の置き場を指す。
+    # プラグインの更新の後: cache に写したプラグインの置き場はバージョンごとに変わる（cache/<marketplace>/<plugin>/<バージョン>/）。hook は新しいバージョンの
+    # 置き場から動き、前のバージョンの置き場で始まった指揮者の先頭の行は前のバージョンの置き場を指す。
     # 親の会話記録に印は置かず、子の会話記録だけで決まる場面にする
     def cached_plugin(self, version) -> Path:
-        """<一時>/cache/m/bb-writ/<版> に、push_guard.py の写しを置いたプラグインの置き場を作り、その道筋を返す。"""
+        """<一時>/cache/m/bb-writ/<バージョン> に、push_guard.py の写しを置いたプラグインの置き場を作り、その道筋を返す。"""
         place = Path(self.tmp.name) / "cache" / "m" / "bb-writ" / version
         (place / "scripts").mkdir(parents=True, exist_ok=True)
         (place / "scripts" / "push_guard.py").write_text(GUARD.read_text(encoding="utf-8"), encoding="utf-8")
@@ -604,16 +604,16 @@ class TestPushGuard(unittest.TestCase):
         self.child("s1", "v1", entry_first_row(versions / "0.29.0" / "skills" / "bb-writ"), CONTINUED)
         self.child("s1", "v2", entry_first_row(versions / "1a2b3c4d5e6f" / "skills" / "bb-writ"), CONTINUED)
         self.child("s1", "v3", entry_first_row(versions / "0.29.0" / "skills" / "bb-writ", blocks=True), CONTINUED)
-        message = "前の版の置き場で始まった指揮者の素の push が通った"
-        with self.subTest("前の版の置き場がもう無い（14 日後に消えた後）"):
+        message = "前のバージョンの置き場で始まった指揮者の素の push が通った"
+        with self.subTest("前のバージョンの置き場がもう無い（14 日後に消えた後）"):
             self.assertFalse((versions / "0.29.0").exists())
             self.assertEqual(self.hook_decision(hook_root, t, "v1"), "deny", message)
-        with self.subTest("版の形でない名前の置き場（commit の SHA の 12 桁）"):
+        with self.subTest("バージョンの形でない名前の置き場（commit の SHA の 12 桁）"):
             self.assertEqual(self.hook_decision(hook_root, t, "v2"), "deny", message)
         with self.subTest("先頭の行が text のブロック"):
             self.assertEqual(self.hook_decision(hook_root, t, "v3"), "deny", message)
         (self.cached_plugin("0.29.0") / "skills" / "bb-writ").mkdir(parents=True)
-        with self.subTest("前の版の置き場が在る"):
+        with self.subTest("前のバージョンの置き場が在る"):
             self.assertEqual(self.hook_decision(hook_root, t, "v1"), "deny", message)
 
     def test_the_hook_compares_another_version_by_real_paths(self):
@@ -626,7 +626,7 @@ class TestPushGuard(unittest.TestCase):
         for name, root, aid in (("先頭の行の道筋が symlink 越し", hook_root, "l1"),
                                 ("hook の置き場が symlink 越し", tmp / "link" / "m" / "bb-writ" / "0.29.1", "l2")):
             with self.subTest(name):
-                self.assertEqual(self.hook_decision(root, t, aid), "deny", "symlink 越しの前の版の置き場の指揮者の素の push が通った")
+                self.assertEqual(self.hook_decision(root, t, aid), "deny", "symlink 越しの前のバージョンの置き場の指揮者の素の push が通った")
 
     def test_the_hook_denies_a_conductor_when_the_entry_folder_itself_is_a_symlink(self):
         # 置き場の skills/bb-writ 自体が別の場所への symlink: 実体の道筋は skills/bb-writ で終わらないが、同じ場所の指揮者は止める
@@ -650,7 +650,7 @@ class TestPushGuard(unittest.TestCase):
         self.child("s1", CONDUCTOR, entry_first_row(Path(self.tmp.name) / "cache" / "m" / "bb-writ" / "0.29.0" / "skills" / "bb-writ"))
         self.child("s1", "b0000000000000001", CONTINUED, parent_id=CONDUCTOR)
         self.assertEqual(self.hook_decision(hook_root, t, "b0000000000000001"), "deny",
-                         "前の版の置き場で始まった指揮者が立てた孫の素の push が通った")
+                         "前のバージョンの置き場で始まった指揮者が立てた孫の素の push が通った")
 
     def test_the_hook_passes_children_of_places_that_are_not_another_version_of_the_plugin(self):
         cache = Path(self.tmp.name) / "cache"
@@ -659,19 +659,19 @@ class TestPushGuard(unittest.TestCase):
         t = self.parent()
         cases = (("別の marketplace の下", cache / "m2" / "bb-writ" / "0.29.0" / "skills" / "bb-writ"),
                  ("別のプラグインの名前の下", cache / "m" / "other" / "0.29.0" / "skills" / "bb-writ"),
-                 ("前の版の本体の置き場（skills/conduct）", earlier / "skills" / "conduct"),
-                 ("前の版の skills/bb-writ-x", earlier / "skills" / "bb-writ-x"),
-                 ("前の版の skills/bb-writ/refs", earlier / "skills" / "bb-writ" / "refs"),
-                 ("前の版の skills の外の bb-writ", earlier / "bb-writ"),
-                 ("前の版の skills でない段の下の bb-writ", earlier / "other" / "bb-writ"),
+                 ("前のバージョンの本体の置き場（skills/conduct）", earlier / "skills" / "conduct"),
+                 ("前のバージョンの skills/bb-writ-x", earlier / "skills" / "bb-writ-x"),
+                 ("前のバージョンの skills/bb-writ/refs", earlier / "skills" / "bb-writ" / "refs"),
+                 ("前のバージョンの skills の外の bb-writ", earlier / "bb-writ"),
+                 ("前のバージョンの skills でない段の下の bb-writ", earlier / "other" / "bb-writ"),
                  ("1 段深い置き場", earlier / "x" / "skills" / "bb-writ"),
-                 ("版の親の skills/bb-writ", cache / "m" / "bb-writ" / "skills" / "bb-writ"),
+                 ("バージョンの親の skills/bb-writ", cache / "m" / "bb-writ" / "skills" / "bb-writ"),
                  ("親の名前に続きのある隣", cache / "m" / "bb-writ-x" / "0.29.0" / "skills" / "bb-writ"),
                  ("同じ marketplace とプラグインの名前の、別の根の下の置き場", Path(self.tmp.name) / "cache2" / "m" / "bb-writ" / "0.29.0" / "skills" / "bb-writ"))
         for i, (name, base) in enumerate(cases):
             self.child("s1", f"n{i}", entry_first_row(base), CONTINUED)
             with self.subTest(name):
-                self.assertIsNone(self.hook_decision(hook_root, t, f"n{i}"), "入口の版の兄弟でない置き場の子の push を止めた")
+                self.assertIsNone(self.hook_decision(hook_root, t, f"n{i}"), "入口のバージョンの兄弟でない置き場の子の push を止めた")
         # 対照: 同じ hook の置き場で、その置き場の skills/bb-writ で始まった指揮者は止める（hook が動いて比べている）
         self.child("s1", CONDUCTOR, entry_first_row(hook_root / "skills" / "bb-writ"))
         with self.subTest("対照: hook の置き場の skills/bb-writ"):

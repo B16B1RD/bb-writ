@@ -120,7 +120,7 @@ class TestParallel(unittest.TestCase):
 
     def test_a_broken_record_of_another_task_does_not_stop_a_new_task(self):
         """ほかのタスクの担当の記録（書く子が書き換えうる）が壊れていても、task start は新しいタスクの担当と token を返す。
-        壊れたタスクは、確かめられないものとして unclosed に並ぶ。task list も、前の版が通していた形（JSON として読める値）では止まらない。"""
+        壊れたタスクは、確かめられないものとして unclosed に並ぶ。task list も、前のバージョンが通していた形（JSON として読める値）では止まらない。"""
         for name, lease, listable in (('深い入れ子', '[' * 100000 + ']' * 100000, False), ('float にできない期限', '{"token": "t", "expires_at": 1' + '0' * 400 + '}', True),
                                       ('JSON でない', '{', False), ('期限が文字列', '{"token": "t", "expires_at": "あした"}', True)):
             with self.subTest(name):

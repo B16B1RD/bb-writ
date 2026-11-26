@@ -1,4 +1,4 @@
-"""配布の形: マニフェストの名前と版がそろう。スキルの名前は置き場と同じで、使う場面を description に書く。"""
+"""配布の形: マニフェストの名前とバージョンがそろう。スキルの名前は置き場と同じで、使う場面を description に書く。"""
 
 import json
 import re
@@ -21,7 +21,7 @@ class TestManifests(unittest.TestCase):
         self.assertEqual({claude["version"], root["version"], entry["version"]}, {claude["version"]})  # 出すときは 3 か所を一緒に上げる
 
     def test_changelog_starts_with_the_current_version(self):
-        """版を上げた commit で CHANGELOG.md にも節を足す（Release の本文はその節から作る）。"""
+        """バージョンを上げた commit で CHANGELOG.md にも節を足す（Release の本文はその節から作る）。"""
         claude = json.loads((ROOT / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8"))
         text = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
         newest = next(line for line in text.splitlines() if line.startswith("## "))
@@ -115,7 +115,7 @@ class TestSkills(unittest.TestCase):
         """要約の後に入口の本体が合計の枠から落ちたときのため、手引き 8 本・delegate・interrogate の本文の先頭 4,000 字以内に
         呼び直しの文を置く。単独でも呼ばれる delegate・interrogate は、入口から始めた仕事に限る。
         playbook-pause-safely・playbook-eval・reflect・correct・unknowns・原則・検証スキルには置いていない。
-        呼び直すのは本体 `bb-writ:conduct`。入口 `bb-writ:bb-writ` を呼び直させる前の版の文と、「`bb-writ:bb-writ` を呼び直…」の
+        呼び直すのは本体 `bb-writ:conduct`。入口 `bb-writ:bb-writ` を呼び直させる前のバージョンの文と、「`bb-writ:bb-writ` を呼び直…」の
         言い回しは、どのスキルにも残さない（Claude Code では、入口を呼ぶたびに fork した指揮者がもう 1 人立つ）。見るのはこの 3 つの
         文字列だけで、別の言い回しで入口を呼び直させる文は見ない。目印の文を書き換えたら、ここの目印も直す。"""
         plain = "会話が要約された後は、入口の本体 `bb-writ:conduct` を呼び直して全文を読み直す"
@@ -131,7 +131,7 @@ class TestSkills(unittest.TestCase):
             at = body.find(sentence)
             self.assertNotEqual(at, -1, name)
             self.assertLess(at, 4000, name)  # 先頭 5,000 トークンの内側
-        for p in sorted((ROOT / "skills").glob("*/SKILL.md")):  # 前の版の文（入口そのものを呼び直させる）
+        for p in sorted((ROOT / "skills").glob("*/SKILL.md")):  # 前のバージョンの文（入口そのものを呼び直させる）
             text = p.read_text(encoding="utf-8")
             for old in ("入口 `bb-writ` を呼び直して", "入口を呼び直して", "`bb-writ:bb-writ` を呼び直"):
                 self.assertNotIn(old, text, p.parent.name)
