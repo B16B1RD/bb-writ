@@ -101,7 +101,7 @@ Claude Code では、入口 `bb-writ` と探索の入口 `unknowns` は、Fable 
 
 - 対話：入口 `bb-writ` の指揮者が失敗して終わると、親のセッションが、失敗したことと次の手を伝えて止まる。次の手は、本体を名前で呼ぶか、入口を呼び直すかの 2 つ。案内の hook（`scripts/conductor_hint.py`）と入口の説明が、親にそう求める。ただし、従うかは親のモデルしだい。親が依頼を自分で進め始めたら、止めて、次の手を自分で打つ（親が進めた分には、作業場所の確保も検証も掛からない）。
 - 非対話の実行（`claude -p`）：エラーの文が結果として返るだけで、仕事は進まない。
-- エラーの文：Claude Code が入口のモデルを解決できないときは `There's an issue with the selected model (<名前>). It may not exist or you may not have access to it.` になる。利用枠が尽きたときの文は、これと同じとは限らない。
+- エラーの文：Claude Code が入口のモデルを解決できないときは、`There's an issue with the selected model (<名前>). It may not exist or you may not have access to it.` で始まる文になる。利用枠が尽きたときの文は、これと同じとは限らない。
 
 本体を呼ばなくてよいとき：
 
