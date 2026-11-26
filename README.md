@@ -90,9 +90,9 @@ Claude Code の非対話の実行では、指揮者が終わるまで待って�
 
 ### Claude Code で Fable を使えないとき
 
-Fable を使えずに入口が止まるときは、入口の代わりに本体を名前で呼ぶ（`/bb-writ:conduct <依頼>`）。本体は別の子を立てずに、呼んだセッションを指揮者として、そのセッションのモデルで進む。本体の説明（description）には「依頼は入口 `bb-writ` で受け、ここでは直接受けない」とあるが、利用者が名前で呼んだときは、この説明のままで進んだ。探索の入口 `unknowns` も、本体を名前で呼ぶ（`/bb-writ:explore <題>`）と、呼んだセッションのモデルで進んだ。
+Fable を使えずに入口が止まるときは、入口の代わりに本体を名前で呼ぶ（`/bb-writ:conduct <依頼>`）。本体は別の子を立てずに、呼んだセッションを指揮者として、そのセッションのモデルで進む。本体の説明（description）には「依頼は入口 `bb-writ` で受け、ここでは直接受けない」とあるが、利用者が名前で呼んだときは、この説明のままで進んだ（Claude Code 2.1.329 で確かめた）。探索の入口 `unknowns` も、本体を名前で呼ぶ（`/bb-writ:explore <題>`）と、呼んだセッションのモデルで進んだ（2.1.330 で確かめた）。
 
-Fable を使えないアカウントそのものでの動きは、入口 `bb-writ` も探索の入口 `unknowns` も、確かめていない。入口のモデルを解決できない名前に書き換えた写しで確かめると、入口の子は `There's an issue with the selected model (<名前>). It may not exist or you may not have access to it.` という文のエラーで止まった。非対話では、この文が結果として返るだけで、仕事は進まなかった。対話で指揮者が失敗で終わると、案内の hook（`scripts/conductor_hint.py`）が親のセッションに案内を足し、依頼を自分で進めず失敗と次の手を伝えて止まるよう求める。
+Fable を使えないアカウントそのものでの動きは、入口 `bb-writ` も探索の入口 `unknowns` も、確かめていない。入口のモデルを解決できない名前に書き換えた写しで確かめると、入口の子は `There's an issue with the selected model (<名前>). It may not exist or you may not have access to it.` という文のエラーで止まった。非対話では、この文が結果として返るだけで、仕事は進まなかった。対話で指揮者が失敗で終わると、案内の hook（`scripts/conductor_hint.py`）が親のセッションに案内を足し、依頼を自分で進めず失敗と次の手を伝えて止まるよう求める（入口の説明にも、進めずに次の手を伝える 1 文がある）。
 
 Claude Code の設定の `availableModels`（使えるモデルの一覧）が Fable を外しているときは、入口は止まらず、指揮者は代わりのモデルで動く（この動きと代わりのモデルの選び方は、公式の文書の [Restrict model selection](https://code.claude.com/docs/en/model-config#restrict-model-selection) と [When an allowlist blocks a subagent model](https://code.claude.com/docs/en/sub-agents#when-an-allowlist-blocks-a-subagent-model) の節）。claude.ai の管理画面でモデルを止める組織の制限（`availableModels` とは別の仕組み）での入口の動きは確かめていない。
 
@@ -182,7 +182,7 @@ Claude Code では、変更を書く依頼の成果物を、入口（指揮者�
 - 探索：`unknowns`（実装前に、盲点の洗い出しや案の比較をする）。入口 `bb-writ` と同じく、Claude Code では Fable で動く別の子として立ち、進め方の全文は本体 `explore` にある。使い方は[スキルの使い方](docs/skills.md)の「3. unknowns（実装の前の探索）」にある。
 - 原則：1 本ずつ別のスキル `principle-*`（18 本）。本体の「原則の索引」から、仕事の局面に当たるものだけを呼ぶ。
 - hook（Claude Code）：2 つある。Codex と Grok Build では、守りの hook は何も止めない（関門（push・PR の前の照合。`work.py op run`）を通さずに外へ出さないことは、入口のスキルの文が求める）。案内の hook は案内を足さない（この 2 つの CLI では入口が呼んだセッションの中で動くので、案内が要らない）。
-  - 守りの hook：入口 `bb-writ` か本体 `conduct` を呼んだセッション（入口が立てた指揮者とその子孫を含み、指揮者が launcher で立てる子は含まない）で、関門を通さない `git push`・`gh pr create`・`gh pr merge`・`gh release create` を拒否する。探索の入口 `unknowns` だけを呼んだセッションは、対象でない。範囲と止めない書き方は `scripts/push_guard.py` の docstring にある。
+  - 守りの hook：入口 `bb-writ` か本体 `conduct` を呼んだセッション（入口が立てた指揮者とその子孫を含み、指揮者が launcher で立てる子は含まない）で、関門を通さない普段の書き方の `git push`・`gh pr create`・`gh pr merge`・`gh release create` を拒否する。探索の入口 `unknowns` だけを呼んだセッションは、対象でない。範囲と止めない書き方は `scripts/push_guard.py` の docstring にある。
   - 案内の hook（`scripts/conductor_hint.py`）：入口か探索の入口 `unknowns` を呼んだセッションで、子への返事と続きの依頼は利用者が子に直接打つよう、親のセッションに案内する。案内だけで入力は止めず、従うかは親のモデルしだい。入口の指揮者が失敗して終わったときの案内は [Claude Code で Fable を使えないとき](#claude-code-で-fable-を使えないとき)にあり、詳しくは [`delegate`](skills/delegate/SKILL.md) の「指揮者への返事（案内の hook）」にある。
 
 ## 任意機能の準備
@@ -263,7 +263,7 @@ CODEX_HOME=~/.config/bb-writ/codex-home codex login
 
 この専用ログインに bb-writ を入れるかは任意。入れると、子のスキルの一覧に bb-writ が出る。入れるときは、[インストール](#codex)の 2 つのコマンドの先頭に `CODEX_HOME=~/.config/bb-writ/codex-home` を付けて実行する。
 
-入れた写しは bb-writ を更新しても自分では新しくならず、起動する側の bb-writ と中身が違うと Codex の子は起動しない。入れ直しの条件とコマンドは [`delegate`](skills/delegate/SKILL.md) の「Codex」の「プラグイン」にある（入れ直しのコマンドは Codex CLI 0.171.0 で確かめた）。
+入れた写しは、bb-writ を更新しても自分では新しくならない。写しが起動する側の bb-writ と中身で違うと、bb-writ は自分で入れ直してから起動するか、起動せずに入れ直すコマンドを示す。どちらになるかの条件は [`delegate`](skills/delegate/SKILL.md) の「Codex」の「プラグイン」にある（入れ直しのコマンドは Codex CLI 0.171.0 で確かめた）。
 
 ### Grok Build の専用ログイン
 
