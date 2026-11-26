@@ -215,7 +215,8 @@ def claude_write(out):
 
 def claude_write_installed(out):
     """#85: launcher の置き場が ~/.claude の下に在る（プラグインを普通に入れた形）とき、Claude Code の書く子は、その置き場の
-    scripts/work.py で担当を取れる。~/.claude の中で読めるのは、その scripts とそこへ下りる途中だけで、置き場の scripts の外も読めない。"""
+    scripts/work.py で担当を取れる。~/.claude の中で読めるのは、その scripts とそこへ下りる途中だけで、置き場の scripts の外も読めない。
+    見る find の一覧の形（拒んだ ~/.claude の中が空に見え、戻した道筋だけが在る）は Linux（WSL2）の sandbox で確かめたもので、macOS では確かめていない。"""
     claude = Path.home() / '.claude'
     if not claude.is_dir():
         return {'claude_dir_exists': False}, {'problems': [f'{claude} が無い（launcher の置き場をその下に置く確認なので、飛ばさずに落とす）']}
@@ -252,6 +253,7 @@ def claude_write_installed(out):
     on_the_way = {str(d) for d in scripts.parents if d == claude or claude in d.parents}
     checks = {
         'child_ran': rec['status'] in ('ok', 'invalid-report'),
+        # 守らない: 子が別の場所の work.py を探して担当を取っても真（依頼文は置き場の work.py を名指しし、題材のリポジトリに work.py は無い）
         'child_can_claim': lease['holder'] == 'child',
         'reads_only_the_scripts': str(scripts / 'work.py') in lines
         and all(l in on_the_way or l == str(scripts) or l.startswith(str(scripts) + '/') for l in lines),

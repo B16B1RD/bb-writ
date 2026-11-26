@@ -697,7 +697,8 @@ def claude_readable(p, fs) -> bool:
     """Claude Code の子の Bash が p を読めるか（読み取り専用の子にも書く子にも使う）。denyRead・allowRead のうち p を含む最も深い規則で決まる
     （同じ深さに両方あるときは拒否に倒すが、実物でどちらが勝つかは確かめていない。テストは、並べないことを別に見る）
     （allowRead は拒んだ中を戻し、その中の denyRead はまた拒む。2.1.327 の実物の子で、ホームの拒否・~/.local の戻し・その中の
-    状態の置き場の拒否・その中の対象の戻しが、この順で効いた）。"""
+    状態の置き場の拒否・その中の対象の戻しが、この順で効いた。書く子では 2.1.332 で、~/.claude の拒否と、その中の launcher の
+    scripts の戻しが効いた）。"""
     p = str(p)
     rules = [(r, "deny") for r in fs.get("denyRead", [])] + [(r, "allow") for r in fs.get("allowRead", [])]
     hits = [(len(r), k) for r, k in rules if p == r or p.startswith(r.rstrip("/") + "/")]
@@ -4462,16 +4463,27 @@ launch.claude_reads = claude_reads
     def test_a_claude_writer_reads_the_launchers_own_scripts_when_they_sit_under_a_denied_place(self):
         # プラグインを普通に入れた構成（~/.claude/plugins/cache/bb-writ/bb-writ/<バージョン>/）では、launcher の置き場が拒む置き場の下に在り、
         # 書く子が依頼文どおりの work.py claim を開けなかった（#85）。launcher 自身の scripts だけを戻し、拒む置き場とその中のほかは拒んだまま
-        home = self.home.resolve()  # 一時の置き場が symlink の下（macOS の /var）でも、ホームは symlink を通らない道筋で渡す
-        self.home = home
+        home = self.home.resolve()  # 一時の置き場が symlink の下（macOS の /var）でも、ホームと専用ログインは symlink を通らない道筋で渡す
+        self.home, self.cfg = home, self.cfg.resolve()
         (home / ".claude").mkdir()
         (home / ".claude" / ".credentials.json").write_text("x")
         outside = Path(tempfile.mkdtemp(dir=self.tmp.name, prefix="outside-")).resolve()  # 偽のホームの外
-        cases = (("~/.claude の下", home / ".claude" / "plugins" / "cache" / "bb-writ" / "bb-writ" / "9.9.9", None),
-                 ("別の拒む置き場（~/.codex）の下", home / ".codex" / "plugins" / "cache" / "bb-writ" / "bb-writ" / "9.9.9", None),
-                 ("ホームの外の symlink の綴りで起こす", home / ".claude" / "plugins" / "cache" / "bb-writ" / "bb-writ" / "9.9.8", outside / "link"))
-        for name, base, link in cases:
+        (outside / "dot").mkdir()
+        (home / ".kube").symlink_to(outside / "dot", target_is_directory=True)  # 拒む置き場そのものが symlink（dotfiles に張る形）
+        cache = home / ".claude" / "plugins" / "cache" / "bb-writ" / "bb-writ"
+        cases = (  # (場面, 写しの置き場（この綴りで置く）, 起こす symlink, 写しの置き場が下に在る拒む置き場（無ければ None）, ~/.config/git を作るか)
+            ("~/.claude の下", cache / "9.9.9", None, home / ".claude", False),
+            ("別の拒む置き場（~/.codex）の下", home / ".codex" / "plugins" / "cache" / "bb-writ" / "bb-writ" / "9.9.9", None, home / ".codex", False),
+            ("ホームの外の symlink の綴りで起こす", cache / "9.9.8", outside / "link", home / ".claude", False),
+            ("拒む置き場そのものが symlink", home / ".kube" / "bb-writ" / "9.9.7", None, home / ".kube", False),
+            ("拒む置き場と名前の頭だけが同じ置き場（足さない）", home / ".claude-x" / "bb-writ" / "9.9.6", None, None, False),
+            ("専用ログインの置き場の下", self.cfg / "plugins" / "bb-writ" / "9.9.5", None, self.cfg, False),
+            ("~/.config/git が在る", cache / "9.9.4", None, home / ".claude", True),  # 最後に置く（作った ~/.config/git は、後の場合の allowRead に入る）
+        )
+        for name, base, link, place, git_xdg in cases:
             with self.subTest(name):
+                if git_xdg:
+                    (home / ".config" / "git").mkdir(parents=True)
                 shutil.copytree(ROOT / "scripts", base / "scripts", ignore=shutil.ignore_patterns("__pycache__"))
                 (base / "skills" / "x").mkdir(parents=True)
                 (base / "skills" / "x" / "SKILL.md").write_text("x")  # 写しの置き場の scripts の外
@@ -4485,12 +4497,19 @@ launch.claude_reads = claude_reads
                 self.assertEqual((p.returncode, rec["status"]), (0, "ok"), rec)
                 argv = json.loads(self.args_file.read_text())
                 fs = json.loads(argv[argv.index("--settings") + 1])["sandbox"]["filesystem"]
-                # 偽のホームに ~/.config/git は無いので、戻すのは写しの（実の道筋の）scripts ちょうど 1 つ
-                self.assertEqual(fs["allowRead"], [str(base / "scripts")], "allowRead が launcher 自身の scripts ちょうど 1 つでない")
-                self.assertTrue({str(home / ".claude"), str(self.cfg)} <= set(fs["denyRead"]), fs)  # 拒む置き場は拒んだまま
-                self.assertTrue(claude_readable(base / "scripts" / "work.py", fs), fs)
-                for secret in (home / ".claude" / ".credentials.json", base / "skills" / "x" / "SKILL.md"):  # 認証情報と、scripts の外
-                    self.assertFalse(claude_readable(secret, fs), secret)
+                # 戻すのは、在れば ~/.config/git と、拒む置き場の下に在るときだけ、写しの実の道筋の scripts
+                scripts = os.path.realpath(base / "scripts")
+                want = ([str(home / ".config" / "git")] if git_xdg else []) + ([scripts] if place else [])
+                self.assertEqual(fs["allowRead"], want, "allowRead が、Git の設定と launcher 自身の scripts のうち戻すものちょうどでない")
+                denied = {str(home / ".claude"), str(self.cfg), *([str(place)] if place else [])}
+                self.assertTrue(denied <= set(fs["denyRead"]), f"拒む置き場が denyRead に無い: {fs}")
+                unreadable = [home / ".claude" / ".credentials.json", self.cfg / ".env"]  # 認証情報
+                # claude_readable は道筋の文字列で決めるので、scripts の中と外は、拒む置き場が綴りのまま実の道筋のときだけ見る
+                if place is not None and os.path.realpath(place) == str(place):
+                    self.assertTrue(claude_readable(Path(scripts) / "work.py", fs), f"launcher の scripts/work.py が読めない: {fs}")
+                    unreadable.append(Path(scripts).parent / "skills" / "x" / "SKILL.md")
+                for q in unreadable:
+                    self.assertFalse(claude_readable(q, fs), f"読めてはいけない場所が読める（認証情報か scripts の外）: {q}")
 
     def test_grok_read_only_denies_the_credential_places_keeps_what_it_runs_and_gets_a_narrow_env(self):
         # 読み取り専用の Grok の子は、ホームの認証情報の置き場を読め、親の環境（SSH_AUTH_SOCK・トークン）がそのまま渡っていた（#43）。

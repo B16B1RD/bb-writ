@@ -163,12 +163,15 @@ def secret_reads(cfg: Path) -> dict:
     Git の設定（~/.config/git）と、拒む置き場の下に在る launcher 自身の scripts（プラグインを普通に入れると ~/.claude の下に在り、
     子が依頼文どおりの work.py で担当を取って返せなかった。#85）。launcher の置き場のほか（skills など）は戻さない。
     在るものだけを渡す（無い場所を渡すと、sandbox がホームに空の場所を作り、時間切れで止めると残る）。
-    守らない範囲: scripts は実の道筋で、拒む置き場は渡す綴りのままで比べるので、拒む置き場への道筋が symlink を通る（~/.claude
-    そのものが symlink など）と、下に在ると見なさず戻さない。"""
+    下に在るかは、scripts も拒む置き場も実の道筋に直して比べる（拒む置き場そのものが symlink でも、sandbox は行き先を拒むので、
+    行き先の下の scripts を戻す）。
+    守らない範囲: 拒む置き場の中から launcher の置き場へ下りる道筋が symlink で外へ出る（~/.claude/plugins が外への symlink など）と、
+    scripts の実の道筋が拒む置き場の下に無いので戻さない。専用ログインの置き場を、ほかの拒む置き場の下に在る launcher の scripts
+    そのものにすると、同じ道筋が許可と拒否に並ぶ。"""
     git = Path.home() / ".config" / "git"
     deny = [Path.home() / p for p in SECRET_PLACES if os.path.lexists(Path.home() / p)] + [cfg]
     scripts = Path(__file__).resolve().parent
-    allow = ([git] if os.path.lexists(git) else []) + ([scripts] if any(p in scripts.parents for p in deny) else [])
+    allow = ([git] if os.path.lexists(git) else []) + ([scripts] if any(Path(os.path.realpath(p)) in scripts.parents for p in deny) else [])
     return {"denyRead": [str(p) for p in deny], "allowRead": [str(p) for p in allow]}
 
 
