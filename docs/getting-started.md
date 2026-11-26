@@ -100,7 +100,7 @@ bb-writ が照合するのは、マージの直前に自分で確かめた commi
 
 ```text
 /bb-writ:bb-writ 次の内容を Issue にして、直して PR を出し、CI が通ったらマージまで。
-README のセットアップの節に、Python の版を確かめるコマンド（uv run python --version）を足す。
+README のセットアップの節に、Python のバージョンを確かめるコマンド（uv run python --version）を足す。
 ```
 
 bb-writ は Issue を作り、直して確かめ、PR を出し、CI の結果を待ってからマージします。次の場合は、マージせずに止まって理由を返します。
