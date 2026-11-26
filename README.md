@@ -90,13 +90,31 @@ Claude Code の非対話の実行では、指揮者が終わるまで待って�
 
 ### Claude Code で Fable を使えないとき
 
-Fable を使えずに入口が止まるときは、入口の代わりに本体を名前で呼ぶ（`/bb-writ:conduct <依頼>`）。本体は別の子を立てずに、呼んだセッションを指揮者として、そのセッションのモデルで進む。本体の説明（description）には「依頼は入口 `bb-writ` で受け、ここでは直接受けない」とあるが、利用者が名前で呼んだときは、この説明のままで進んだ（Claude Code 2.1.329 で確かめた）。探索の入口 `unknowns` も、本体を名前で呼ぶ（`/bb-writ:explore <題>`）と、呼んだセッションのモデルで進んだ（2.1.330 で確かめた）。
+Claude Code では、入口 `bb-writ` と探索の入口 `unknowns` は、Fable で動く別の子として立つ。Fable を使えない間は、その子がモデルのエラーで終わり、依頼は進まない。アカウントで Fable を使えない場合だけでなく、Fable の利用枠が尽きている間も、これに当たる。そのときは、入口の代わりに本体（進め方の全文を持つスキル）を、次のとおりに名前で呼ぶ。
 
-Fable を使えないアカウントそのものでの動きは、入口 `bb-writ` も探索の入口 `unknowns` も、確かめていない。入口のモデルを解決できない名前に書き換えた写しで確かめると、入口の子は `There's an issue with the selected model (<名前>). It may not exist or you may not have access to it.` という文のエラーで止まった。非対話では、この文が結果として返るだけで、仕事は進まなかった。対話で指揮者が失敗で終わると、案内の hook（`scripts/conductor_hint.py`）が親のセッションに案内を足し、依頼を自分で進めず失敗と次の手を伝えて止まるよう求める（入口の説明にも、進めずに次の手を伝える 1 文がある）。
+- 入口 `bb-writ` の代わり：`/bb-writ:conduct <依頼>`
+- 探索の入口 `unknowns` の代わり：`/bb-writ:explore <題>`
 
-Claude Code の設定の `availableModels`（使えるモデルの一覧）が Fable を外しているときは、入口は止まらず、指揮者は代わりのモデルで動く（この動きと代わりのモデルの選び方は、公式の文書の [Restrict model selection](https://code.claude.com/docs/en/model-config#restrict-model-selection) と [When an allowlist blocks a subagent model](https://code.claude.com/docs/en/sub-agents#when-an-allowlist-blocks-a-subagent-model) の節）。claude.ai の管理画面でモデルを止める組織の制限（`availableModels` とは別の仕組み）での入口の動きは確かめていない。
+本体は別の子を立てず、呼んだセッションの中で、そのセッションのモデルで進む。入口は本体を読んで従うだけの薄い入口なので、進め方は入口から呼んだときと同じになる。開く指揮者がいないので、返事と追加の依頼は、そのセッションの入力欄に打つ。Fable を使えるようになったら（利用枠が戻ったら）、入口に戻す。
 
-bb-writ が立てる子が Fable を使えないときの動きは [`delegate`](skills/delegate/SKILL.md) の「モデルと effort」に、確かめた範囲は[専用ログインの細部](docs/dedicated-login.md#子が-fable-を使えないとき)にある。
+入口が止まったとき、どう見えるか：
+
+- 対話：入口 `bb-writ` の指揮者が失敗して終わると、親のセッションが、失敗したことと次の手を伝えて止まる。次の手は、本体を名前で呼ぶか、入口を呼び直すかの 2 つ。案内の hook（`scripts/conductor_hint.py`）と入口の説明が、親にそう求める。従うかは親のモデルしだいで、親が依頼を自分で進めた分には、作業場所の確保も検証も掛からない。
+- 非対話の実行（`claude -p`）：エラーの文が結果として返るだけで、仕事は進まない。
+- エラーの文：モデルを使えないときは `There's an issue with the selected model (<名前>). It may not exist or you may not have access to it.` になる。
+
+本体を呼ばなくてよいとき：
+
+- 設定の `availableModels`（使えるモデルの一覧）が Fable を外しているとき：入口は止まらず、指揮者は代わりのモデルで動く（この動きと代わりのモデルの選び方は、公式の文書の [Restrict model selection](https://code.claude.com/docs/en/model-config#restrict-model-selection) と [When an allowlist blocks a subagent model](https://code.claude.com/docs/en/sub-agents#when-an-allowlist-blocks-a-subagent-model) の節）。
+- 混雑や通信など一時的なエラーで指揮者が失敗したとき：本体を呼ばずに、入口を呼び直す。
+- bb-writ が立てる子（書く子・判定を任せる子）が Fable を使えないとき：入口の話でなく、bb-writ の側で扱う。動きは [`delegate`](skills/delegate/SKILL.md) の「モデルと effort」に、確かめた範囲は[専用ログインの細部](docs/dedicated-login.md#子が-fable-を使えないとき)にある。
+
+どこまで確かめたか：
+
+- 本体を名前で呼んで進むことは、`conduct` は Claude Code 2.1.329 で、`explore` は 2.1.330 で確かめた。本体 `conduct` の説明（description）には「依頼は入口 `bb-writ` で受け、ここでは直接受けない」とある。利用者が名前で呼んだときは、この説明のままで進んだ。
+- 利用枠が尽きたログインで確かめたのは、対話で入口 `bb-writ` の指揮者が失敗して終わり、親のセッションが失敗と次の手を伝えるところまで。
+- Fable を使えないアカウントそのものでの動きは、入口 `bb-writ` も探索の入口 `unknowns` も確かめていない。上のエラーの文と非対話の動きは、入口のモデルを解決できない名前に書き換えた写しで確かめた。
+- claude.ai の管理画面でモデルを止める組織の制限（`availableModels` とは別の仕組み）での入口の動きは、確かめていない。
 
 ## 並行して開発する
 
