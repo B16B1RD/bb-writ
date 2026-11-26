@@ -165,14 +165,18 @@ class TestWorkflows(unittest.TestCase):
         self.assertRegex(text, r"(?m)TMPDIR=" + re.escape(link.group(1)) + r" python3 -B tests/run\.py(?: -j \d+)?$")
 
 
-def script_strings(src):
-    """ソースの文字列の定数を、隣り合う文字列の継ぎ目と f 文字列の値を外して並べる（値の所は \0）。"""
+def script_strings(src, docstrings=True):
+    """ソースの文字列の定数を、隣り合う文字列の継ぎ目と f 文字列の値を外して並べる（値の所は \0）。docstrings が偽なら、
+    モジュール・クラス・関数の docstring を除く。"""
     import ast
+    tree = ast.parse(src)
+    owners = (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)
+    docs = set() if docstrings else {id(n.body[0].value) for n in ast.walk(tree) if isinstance(n, owners) and ast.get_docstring(n, clean=False) is not None}
     out = []
-    for node in ast.walk(ast.parse(src)):
+    for node in ast.walk(tree):
         if isinstance(node, ast.JoinedStr):
             out.append("".join(v.value if isinstance(v, ast.Constant) and isinstance(v.value, str) else "\0" for v in node.values))
-        elif isinstance(node, ast.Constant) and isinstance(node.value, str):
+        elif isinstance(node, ast.Constant) and isinstance(node.value, str) and id(node) not in docs:
             out.append(node.value)
     return out
 
@@ -236,6 +240,38 @@ class TestReadmeSections(unittest.TestCase):
                         break
                     body.append((level, name))
                 self.assertIn((3, sub), body, f"{script} が指す README の「{top}」の「{sub}」が無い")
+
+
+class TestQuotedOutputs(unittest.TestCase):
+    def test_what_the_scripts_print_and_the_skills_quote_is_looked_at_by_a_test(self):
+        """スキル（skills/*/SKILL.md）と README.md が「…」で引く句のうち、scripts/*.py の文字列の定数に在る 8 字以上のものは、
+        tests/*.py の文字列の定数にも在る。手引きは、補助コードの出す文を引いて、読者に次の手を決めさせる（「理由が『…』なら」
+        「『…』（終了コード 2）で拒まれる」）。その文が変わると案内が黙って切れるので、文を見る試験を置かせる（引いた文を見る試験が
+        無いまま、手引きに入った）。引いた句は、置き換えの印（<…>・…・（…））で切り、いちばん長い切れ端で照らす。docstring は、
+        scripts の側では出す文でなく、tests の側では照合でないので、どちらも数えない。
+        守らない範囲: 文字列が tests に在ることだけを見る（assert しているかは見ない）。同じ句を出す箇所が scripts に複数あると、
+        1 か所でも試験が見ていれば通る。scripts の文字列の定数が補助コードの出す文かどうかは見分けない（記録の欄の名前やただの語も、
+        補助コードの文を引いたのでない「…」も、scripts の文字列に在れば数える）。tests の側は、1 つの文字列の定数に続けて在る句だけを
+        数える（f 文字列の値や + で継いで作る句は、在ると数えない）。「」でない引き方（バッククォート・言い換え）、終了コード、8 字に
+        満たない句（置き換えの印で切れて 8 字に満たなくなる句を含む）は見ない。"""
+        def strings(folder):
+            return [s for f in sorted((ROOT / folder).glob("*.py")) for s in script_strings(f.read_text(encoding="utf-8"), docstrings=False)]
+        scripts, tests = strings("scripts"), strings("tests")
+        quoted, missing = 0, []
+        for doc in [*sorted((ROOT / "skills").glob("*/SKILL.md")), ROOT / "README.md"]:
+            for n, line in enumerate(doc.read_text(encoding="utf-8").splitlines(), 1):
+                for q in re.findall(r"「([^」]+)」", line):
+                    key = max((part.strip() for part in re.split(r"<[^>]*>|…|（[^）]*）?", q)), key=len)
+                    if len(key) < 8 or not any(key in s for s in scripts):
+                        continue
+                    quoted += 1
+                    if not any(key in s for s in tests):
+                        missing.append(f"{doc.relative_to(ROOT)}:{n}: 「{q}」")
+        # 下限は、引き方か拾い方が変わって大きく減れば落ち、手引きの句をいくつか言い換えただけでは落ちない値
+        self.assertGreaterEqual(quoted, 12, "スキルと README が「」で引く補助コードの文が、ほとんど見つからない。引き方か拾い方が変わったので、この検査の拾い方を直す")
+        if missing:
+            self.fail("スキルか README が「」で引く補助コードの文を、どの試験も見ていない。それぞれの文を assert する試験を tests に足す:\n"
+                      + "\n".join(missing))
 
 
 if __name__ == "__main__":
