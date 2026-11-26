@@ -1,4 +1,4 @@
-"""並べて回す tests/run.py: 小さな偽の試験の包みで、終了コード・落ちた試験の名前と出力・集計を見る。"""
+"""並べて回す tests/run.py: 小さな偽のテストの包みで、終了コード・落ちたテストの名前と出力・集計を見る。"""
 
 import re
 import subprocess
@@ -7,7 +7,7 @@ import tempfile
 import textwrap
 import unittest
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).resolve().parent)); import process_limit  # noqa: E402,F401  試験に上限を掛ける（直に走らせても）
+sys.path.insert(0, str(Path(__file__).resolve().parent)); import process_limit  # noqa: E402,F401  テストに上限を掛ける（直に走らせても）
 
 RUN = Path(__file__).resolve().parent / "run.py"
 

@@ -46,7 +46,7 @@ task と integrate の照合拒否は終了コード 6、担当の拒否は 3、
 公開する操作（鍵の種類が push・pr・merge・release）の op begin には --verified <検証した commit> が要る。作業場所の HEAD と違えば拒否する（6）。
 push・pr には --reviewed も要る（初回の push も）。届ける前の審査（入口の条件 (5)・(6)）を通した commit の ID（16 進）か、
 要らない理由を none:<理由> で書く。無い・形が違う・commit が見つからない・ID でなく参照に解決されたら拒否し（2）、作業場所の HEAD と違えば拒否する（6）。
-HEAD と違っても、その commit が HEAD の祖先で、--delta 低:<理由>（審査の後の差分の危険度。文と試験だけで、振る舞い・主張を変えない
+HEAD と違っても、その commit が HEAD の祖先で、--delta 低:<理由>（審査の後の差分の危険度。文とテストだけで、振る舞い・主張を変えない
 直し）を付ければ通す（その commit の、この作業場所を --cwd にした審査の記録と、HEAD の監査役は同じく求める。task start の作業場所（下の階層も同じ場所）では、
 基点より後と確かめられない commit の審査は数えない。差分の中身と宣言の真偽は見ず、
 監査役が確かめる）。--delta が中・高・形が違う・none: と並ぶ・HEAD そのものの審査と並ぶなら 2、祖先でないか基点より後と確かめられないなら（置き換え・grafts・commit-graph は外して見る）6。
@@ -62,11 +62,11 @@ commit を書いたときは、launcher の委任の記録（delegations.jsonl�
 push・pr は、--reviewed（none: を含む）に関わらず、作業場所の HEAD を対象に launcher に --audit を付けて起動し ok で返った
 読み取り専用の監査役（返す前の判定）の記録が無ければ拒否する（6）。監査役の記録は審査の記録にも周の数にも数えない。
 監査役の記録は、判定の deliver が行と record.json の両方で yes（届けてよい）のものだけを数える。何を挙げたかは見ない。
-push・pr に --not-run <理由>（子が sandbox のせいで対象の試験・検査を実行できなかった理由）を付けると、その commit を対象に
+push・pr に --not-run <理由>（子が sandbox のせいで対象のテスト・検査を実行できなかった理由）を付けると、その commit を対象に
 not-run で返り、子が実行の欄に実行できなかった（execution が no）と書いた記録も、審査役・--interrogate の審査役・監査役と審査の周に数える
-（ブラウザの試験など、子を何回立てても ok の記録ができず、作業者が関門の外で出したため）。実行の欄の無い報告（launcher が読んだだけとして
+（ブラウザのテストなど、子を何回立てても ok の記録ができず、作業者が関門の外で出したため）。実行の欄の無い報告（launcher が読んだだけとして
 not-run にしたもの）は数えない。理由が空か、push・pr 以外に付けたら拒否する（2）。宣言は ops.jsonl の not_run に残す。宣言の真偽
-（教えれば動いた場面か）と、親が HEAD で試験を実行したかは見ず、監査役が判定する。宣言なしで記録が無いと拒否するとき、not-run の記録があれば
+（教えれば動いた場面か）と、親が HEAD でテストを実行したかは見ず、監査役が判定する。宣言なしで記録が無いと拒否するとき、not-run の記録があれば
 理由の文で宣言のしかたを示す。スキルの要求を読んでいて弱いもので代える・黙って省く（読者役を
 別の目的の読み手で代える、意味の判断を役割の違う agent に見せる）まま、none: で出したため。
 push・pr は、作業の記録（note.md）の目的・制約・確かめ方・指摘の扱いの欄が空か無ければ拒否する（2）。
@@ -95,7 +95,7 @@ https の push に使われる git の credential helper のアカウントは�
 担当の生死はプロセスで判定しない（Codex の sandbox の中は別の pid 名前空間で、外の CLI が見えない。2026-10-17 の実測）。
 op run のコマンドが終わっていないかも pid では見ず、操作ごとのロック（running-<鍵のハッシュ>.lock）の flock で見る
 （ロックは監督役・コマンド・それが残したものが持ち、プロセスが死ねば OS が外す）。
-環境変数 BB_WRIT_SUPERVISE_GATE は試験だけが使う（op run と監督役の中の止まり所。設定されていても 60 秒で先へ進み、コマンドには渡さない）。
+環境変数 BB_WRIT_SUPERVISE_GATE はテストだけが使う（op run と監督役の中の止まり所。設定されていても 60 秒で先へ進み、コマンドには渡さない）。
 claim は作業場所ごとの記録 note.md の雛形と証拠の置き場 evidence/ を作り、その場所と（書かれていれば）記録の中身を返す。後任は claim の出力だけで記録にたどり着く。
 claim・status・task resume・task cleanup の note は、終えた後に今の状態・次の一手の欄を書き直していない
 done の操作（ops.jsonl の記録。種類を問わない）を ops_after_note に並べる（1 行は key・what・exit・at。exit は監督役が書いた記録（by が
@@ -109,7 +109,7 @@ done の行は、終えた時点の今の状態・次の一手の欄の中身の
 消えない。#59）。守らない範囲: 終える前に「済み」と書いた操作も、書き直すまで並ぶ。今の状態・次の一手の欄の行を書き換えた記録（「* 今の状態:」など）は
 欄と見なさず、その中身は前の欄に数える（note_gaps と同じ）。間に操作を終えずに今の状態を書き直し、前と同じ文に戻した場合は、また並ぶ。欄の中身は両端の空白だけを除いて比べるので、複数行の欄の途中の行末の
 空白を消すと、書き直したと見なす。空の次の一手の行を足すと、中身を書かなくても書き直したと見なす。今と違う note_state の done が
-後に複数あるときは最も遅いものを境にし、境と同じ at の操作は並べない（試験は、境の取り方と同じ at の扱いと、手で書き換えた done の行で at が
+後に複数あるときは最も遅いものを境にし、境と同じ at の操作は並べない（テストは、境の取り方と同じ at の扱いと、手で書き換えた done の行で at が
 数でない行が note_state を持つときの型の検査を見ない）。note_state の無い done の行（この変更より前の記録、終えた時点の記録を読めなかった行）は、記録を最後に書いた時刻
 （mtime）と比べる: 本文を変えずに mtime だけが進んだ場合は、古い今の状態が残っていても欄は出ない。時計を戻した場合。at と mtime が同じ値のときに
 どちらになるか。mtime の粒が粗いファイルシステムで、操作の直後に書き足した場合は、書き足した後も、次に書くまで並ぶことがある。監督役の印（by）がある記録を
@@ -283,10 +283,10 @@ def not_run_hint(commit: str, cwd=None, role: int = 0) -> str:
     found = reviews_of(commit, cwd, not_run=True)[role]
     if not found:
         return ""
-    return ("。この commit には、子が対象の試験・検査を実行できずに not-run で返った記録がある"
+    return ("。この commit には、子が対象のテスト・検査を実行できずに not-run で返った記録がある"
             f"（{found[0]}）。"
             "sandbox のせいで子が実行できない（headless Chrome・Node の子プロセス・127.0.0.1 など。写し方を教えれば動くものは除く）なら、"
-            "関門の外で出さず、親が HEAD で同じ試験を実行して証拠（コマンド・終了コード・出力）を作業の記録に書き、"
+            "関門の外で出さず、親が HEAD で同じテストを実行して証拠（コマンド・終了コード・出力）を作業の記録に書き、"
             "--not-run <子が実行できなかった理由> を付けて op run する（監査役はその証拠を判定する。`playbook-deliver`）")
 
 
@@ -825,7 +825,7 @@ def claude_staging_only(p):
 def unopened_dir(d):
     """d の下で、一覧できないか中へ入れない（中の項目を調べられない）ディレクトリのどれか 1 つの、d からの相対の道筋（d そのものなら「.」）。無ければ None。
     権限のビットは読まず、一覧と、中の「.」の lstat を試して確かめる。symlink の先へは入らない。
-    再帰しない（os.walk で歩いた版は、Python 3.9 で 1100 段の木を歩いて RecursionError で落ちた）。これを確かめる試験は無い
+    再帰しない（os.walk で歩いた版は、Python 3.9 で 1100 段の木を歩いて RecursionError で落ちた）。これを確かめるテストは無い
     （その深さの木は、開けるファイルの数の上限が 1024 以下の環境では、git 自身が歩けず、片付けが通らない）。"""
     stack = ['']
     while stack:
@@ -1252,7 +1252,7 @@ def integrate(a):
         if dest.resolve() != repo.resolve():
             raise ValueError('ローカル統合先は元の checkout に限る。対象側の PR 経路などで統合する')
         target_lease = read(rr / 'lease.json')
-        if alive(target_lease, time.time()):  # この拒否を外す退行を落とす試験は無い（守らない範囲）
+        if alive(target_lease, time.time()):  # この拒否を外す退行を落とすテストは無い（守らない範囲）
             raise ValueError('統合先の checkout に生きた担当がいる。書き換えず待つ')
         held = run_holder(rr)
         if held:
@@ -1324,12 +1324,12 @@ def op_step(a, r: Path, live, now: float, action: str):
         if a.key.split(":")[0] not in REVIEWED:
             return ({"ok": False, "reason": "--not-run は、push・pr の関門で、子が sandbox のせいで実行できなかった記録を数える宣言。ほかの操作には付けない"}, 2)
         if not a.not_run.strip():
-            return ({"ok": False, "reason": "--not-run の後に、子が対象の試験・検査を実行できなかった理由を書く（headless Chrome が子の sandbox で起動しない、など）"}, 2)
+            return ({"ok": False, "reason": "--not-run の後に、子が対象のテスト・検査を実行できなかった理由を書く（headless Chrome が子の sandbox で起動しない、など）"}, 2)
         not_run = a.not_run.strip()
     if action == "begin" and a.key.split(":")[0] in REVIEWED:
         if not a.reviewed:
             return ({"ok": False, "reason": "push・pr には --reviewed <届ける前の審査を通した commit> か --reviewed none:<要らない理由> が要る。"
-                        "試験・検査を足した・変えたなら、入口の条件 (5)・(6) をこの commit で通す。" + changed_since_publish(r, a.dir, head)}, 2)
+                        "テスト・検査を足した・変えたなら、入口の条件 (5)・(6) をこの commit で通す。" + changed_since_publish(r, a.dir, head)}, 2)
         if a.reviewed.startswith("none:"):
             if not a.reviewed[5:].strip():
                 return ({"ok": False, "reason": "--reviewed none: の後に、審査が要らない理由を書く。" + changed_since_publish(r, a.dir, head)}, 2)
@@ -1356,7 +1356,7 @@ def op_step(a, r: Path, live, now: float, action: str):
                 after = (", ".join(files.splitlines()) or "なし") if rc == 0 else f"（差分を出せない: {err}）"
                 if a.delta is None:
                     return ({"ok": False, "reason": f"審査を通した commit {reviewed} と作業場所の HEAD {head} が違う。"
-                                f"審査の後に変えた。直した commit で審査を通し直してから出すか、審査の後の差分の危険度が低（文と試験だけで、"
+                                f"審査の後に変えた。直した commit で審査を通し直してから出すか、審査の後の差分の危険度が低（文とテストだけで、"
                                 f"振る舞い・主張を変えない）なら --delta 低:<理由> を付ける（宣言は HEAD の監査役が確かめる。"
                                 f"`interrogate` の 5）。審査の後に変えたファイル: {after}"}, 6)
                 d = re.fullmatch(r"(低|中|高):(.*)", a.delta, re.S)
@@ -1678,8 +1678,8 @@ def finish(r: Path, spec: dict):
 
 
 def gate(name: str):
-    """試験だけが使う止まり所。BB_WRIT_SUPERVISE_GATE のディレクトリに at-<name>（中身は pid）を書き、<name> ができるまで待つ。
-    監督役の中の数 ms の窓（fork の後・コマンドを起こす前）に、試験がシグナルを送れるようにする。"""
+    """テストだけが使う止まり所。BB_WRIT_SUPERVISE_GATE のディレクトリに at-<name>（中身は pid）を書き、<name> ができるまで待つ。
+    監督役の中の数 ms の窓（fork の後・コマンドを起こす前）に、テストがシグナルを送れるようにする。"""
     d = os.environ.get("BB_WRIT_SUPERVISE_GATE")
     if d and Path(d).is_dir():
         try:
@@ -1850,9 +1850,9 @@ def main() -> int:
     o.add_argument("--verified", help="検証した commit（push・pr・merge・release で必須。作業場所の HEAD と一致させる）")
     o.add_argument("--reviewed", help="届ける前の審査を通した commit か none:<理由>（push・pr で必須。commit は作業場所の HEAD と一致させるか、HEAD の祖先にして --delta を付け、その commit を対象に launcher で ok で返った読み取り専用の子（審査役・確かめ役など。監査役は除く）の記録が要る。--risk が中・高なら --interrogate を付けた審査役の記録。どちらでも、HEAD を対象に --audit を付けて立て、届けてよい（deliver: yes）と判定した監査役の記録も要る）")
     o.add_argument("--delta", help="審査を通した commit（--reviewed）から HEAD までの差分の危険度と理由 低:<理由>（push・pr で、--reviewed の commit が HEAD の祖先のときだけ。中・高なら HEAD で審査を通す）")
-    o.add_argument("--not-run", dest="not_run", help="子が sandbox のせいで対象の試験・検査を実行できなかった理由（push・pr だけ。付けると、"
+    o.add_argument("--not-run", dest="not_run", help="子が sandbox のせいで対象のテスト・検査を実行できなかった理由（push・pr だけ。付けると、"
                    "その commit を対象に not-run で返り、実行の欄に実行できなかった（no）と書いた子の記録も、審査役・--interrogate の審査役・監査役と審査の周に数える。"
-                   "実行の欄の無い報告は数えない。親が HEAD で実行した試験の証拠を作業の記録に書き、監査役に判定させる）")
+                   "実行の欄の無い報告は数えない。親が HEAD で実行したテストの証拠を作業の記録に書き、監査役に判定させる）")
     o.add_argument("--risk", help="変更の危険度と理由 低|中|高:<理由>（push・pr で必須。中・高は --reviewed none: と一緒に使えない）")
     c = sub.add_parser("check")
     c.add_argument("--dir", type=Path, required=True)

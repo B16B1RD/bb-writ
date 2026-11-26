@@ -8,7 +8,7 @@ import signal
 from pathlib import Path
 import subprocess
 import sys
-sys.path.insert(0, str(Path(__file__).resolve().parent)); import process_limit  # noqa: E402,F401  試験に上限を掛ける（直に走らせても）
+sys.path.insert(0, str(Path(__file__).resolve().parent)); import process_limit  # noqa: E402,F401  テストに上限を掛ける（直に走らせても）
 import tempfile
 import time
 import unittest
@@ -22,8 +22,8 @@ class TestParallel(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.repo = Path(self.tmp.name) / 'repo'
         self.repo.mkdir()
-        # 利用者の全体の Git 設定を読まない（全体の core.hooksPath があると、利用者の hook が試験の commit のたびに動いた）。
-        # 切り離しそのものを確かめる試験は無い（外しても、全体の設定が試験の git の動きを変えない環境では落ちない）
+        # 利用者の全体の Git 設定を読まない（全体の core.hooksPath があると、利用者の hook がテストの commit のたびに動いた）。
+        # 切り離しそのものを確かめるテストは無い（外しても、全体の設定がテストの git の動きを変えない環境では落ちない）
         self.env = {**os.environ, 'BB_WRIT_STATE_DIR': str(Path(self.tmp.name) / 'state'), 'GIT_CONFIG_GLOBAL': os.devnull, 'GIT_CONFIG_NOSYSTEM': '1'}
         self.git(self.repo, 'init', '-q', '-b', 'main')
         self.git(self.repo, 'config', 'user.name', 'Test')
@@ -331,7 +331,7 @@ class TestParallel(unittest.TestCase):
                              env=self.env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
         # op run を止めても、監督役（別のセッション）とコマンドは残る。コマンドを止め、監督役が終わるのを待ってから片付ける。
-        # この片付けを外しても試験は落ちない（残さないことは確かめない）。pid のファイルが書かれる前に試験が落ちると、
+        # この片付けを外してもテストは落ちない（残さないことは確かめない）。pid のファイルが書かれる前にテストが落ちると、
         # コマンドを止められず、監督役は sleep 20 の終わりまで残る
         def stop():
             try:
@@ -348,7 +348,7 @@ class TestParallel(unittest.TestCase):
         lease = json.loads((rr / 'lease.json').read_text())
         lease['expires_at'] = 1
         # 監督役は token が同じ担当の期限を 1 秒ごとに延ばす。延ばされて「生きた担当がいる」の拒否に変わらないように。
-        # 時機の競争を避ける行で、外してもまず落ちない（外したことを捕まえる試験は無い）
+        # 時機の競争を避ける行で、外してもまず落ちない（外したことを捕まえるテストは無い）
         lease['token'] = 'x'
         (rr / 'lease.json').write_text(json.dumps(lease))
         got = self.integrate(a, self.git(self.repo, 'rev-parse', 'main'), head, code=6)
@@ -1145,9 +1145,9 @@ class TestParallel(unittest.TestCase):
         self.git(a['dir'], 'commit', '-qm', '設定を除外')
         head = self.git(a['dir'], 'rev-parse', 'HEAD')
         self.integrate(a, a['base'], head)
-        (Path(a['dir']) / '.env').write_text('試験用のローカル設定')
+        (Path(a['dir']) / '.env').write_text('テスト用のローカル設定')
         self.w('task', 'cleanup', '--dir', a['dir'], '--token', a['token'], '--saved', 'main', code=6)
-        self.assertEqual((Path(a['dir']) / '.env').read_text(), '試験用のローカル設定')
+        self.assertEqual((Path(a['dir']) / '.env').read_text(), 'テスト用のローカル設定')
 
     def test_cleanup_does_not_count_the_claude_staging_dir(self):
         """Claude Code が設定を書くときの空の .claude/.cc-writes は、同じ場所の別のセッションも使う。task cleanup がそれを未保存の
@@ -1219,7 +1219,7 @@ class TestParallel(unittest.TestCase):
             probe.chmod(0o755)
 
     def lock(self, path, mode):
-        """path の権限を mode にし、試験の後で戻す（一時の置き場を消せるように）。"""
+        """path の権限を mode にし、テストの後で戻す（一時の置き場を消せるように）。"""
         path.chmod(mode)
         self.addCleanup(lambda: path.chmod(0o755) if os.path.lexists(path) else None)
 
@@ -1233,7 +1233,7 @@ class TestParallel(unittest.TestCase):
         """git status は、開けないディレクトリを出力に出さず飛ばす（標準エラーに警告を出すか、何も出さない）。task cleanup はそれを見逃し、
         git worktree remove が Git の登録を消してから削除に失敗して、タスクを閉じられなくなった（空なら中身を確かめずに消した。#68）。
         一覧できないか中へ入れないディレクトリは、空かどうかにかかわらず、その道筋を理由に出して拒み、作業場所を Git の作業ツリーの
-        まま残す。権限を戻して中身を片付ければ、同じ片付けが通る。試験が作るのは自分の持つ場所だけ（ほかの利用者が持つ開けない場所を作るには
+        まま残す。権限を戻して中身を片付ければ、同じ片付けが通る。テストが作るのは自分の持つ場所だけ（ほかの利用者が持つ開けない場所を作るには
         root が要る）。"""
         self.skip_unless_permissions_hold()
 
@@ -1664,9 +1664,9 @@ class TestParallel(unittest.TestCase):
         覚えた値と同じまま（同じ更新時刻・同じ大きさ）中身だけ書き換えると、フラグを外して stat で見ても変更なしに見え、片付けが作業場所ごと
         消した。素の git status が index を書き直した後（index の更新時刻だけが進み、同じ秒の項目を中身で比べる git の守りが外れる）も同じ。
         index が覚えた更新時刻の秒が 0 の項目（更新時刻 0 秒のファイルを add したもの）でも同じ。
-        片付けは、フラグの付いた実物のあるファイルを、stat を信じずに中身で比べて拒む。core.trustctime=false は、試験を時計に依らなく
+        片付けは、フラグの付いた実物のあるファイルを、stat を信じずに中身で比べて拒む。core.trustctime=false は、テストを時計に依らなく
         するための設定（ctime は書き換えのたびに「いま」になり、戻せない）。更新時刻は待たずに、過去の秒に置いて作る。
-        名前の形（改行の入った名前など）は、この試験の場面に置いていない。"""
+        名前の形（改行の入った名前など）は、このテストの場面に置いていない。"""
         def config(k, v):
             return lambda r: self.git(r, 'config', k, v)
         for form, before, flags, tag in (
@@ -1738,10 +1738,10 @@ class TestParallel(unittest.TestCase):
         self.integrate(a, self.git(self.repo, 'rev-parse', 'main'), self.git(d, 'rev-parse', 'HEAD'))
         self.git(d, 'update-index', '--skip-worktree', 'a.bin')
         ran = lambda: set(log.read_text().split()) if log.exists() else set()  # noqa: E731
-        self.assertTrue(ran() >= set(names), f'add で、フィルタが .bin に走っていない（試験の準備の失敗）: {sorted(ran())}')
+        self.assertTrue(ran() >= set(names), f'add で、フィルタが .bin に走っていない（テストの準備の失敗）: {sorted(ran())}')
         log.write_text('')
         self.assertEqual(self.handbook_status(d), '')
-        self.assertEqual(ran(), set(), '手引きの status の見方で、フィルタが走った（試験の準備の失敗）')
+        self.assertEqual(ran(), set(), '手引きの status の見方で、フィルタが走った（テストの準備の失敗）')
         self.w('task', 'cleanup', '--dir', a['dir'], '--token', a['token'], '--saved', 'main')
         self.assertFalse(d.exists())
         self.assertEqual(ran(), {'a.bin'}, f'片付けの間にフィルタが走ったファイル: {sorted(ran())}')

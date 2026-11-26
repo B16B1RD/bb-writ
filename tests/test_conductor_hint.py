@@ -4,7 +4,7 @@
 見ないこと: 案内の文面（どの言い回しで親が従うかは、実物で数える）。additionalContext が空でない文であることだけを見る。
 ただし、どの案内が付いたか（失敗の案内・いつもの案内・unknowns の案内）は、それぞれの目印の語で見分ける。
 会話記録の行の材料は tests/test_push_guard.py のものを使う（入口の印の読み方は push_guard.py の entry_in と同じなので、写しを作らない）。
-探索の入口 unknowns の印（conductor_hint.py の used_unknowns）は、この試験の中で組んだ行で見る。"""
+探索の入口 unknowns の印（conductor_hint.py の used_unknowns）は、このテストの中で組んだ行で見る。"""
 import json
 import os
 import shutil
@@ -14,7 +14,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent)); import process_limit  # noqa: E402,F401  試験に上限を掛ける（直に走らせても）
+sys.path.insert(0, str(Path(__file__).resolve().parent)); import process_limit  # noqa: E402,F401  テストに上限を掛ける（直に走らせても）
 from test_push_guard import (  # noqa: E402
     BODY_BARE_NAME, BODY_NAME_HEADS_A_QUEUED_ROW, BROKEN_ROW, BY_BARE_NAME, BY_BODY_SKILL_TOOL, BY_BODY_SLASH,
     BY_BODY_SLASH_IN_TEXT_BLOCK,
@@ -303,7 +303,7 @@ class TestConductorHint(unittest.TestCase):
         return root
 
     def shell_env(self, **extra) -> dict:
-        """hook のコマンドをシェルで動かす環境。利用者のホームと設定に左右されないように、HOME を試験の一時の置き場にし、
+        """hook のコマンドをシェルで動かす環境。利用者のホームと設定に左右されないように、HOME をテストの一時の置き場にし、
         BASH_ENV・ENV（非対話のシェルが読む起動の文）を渡さない（読めない .bashrc の診断が stderr に出て、確かめに当たった）。"""
         home = Path(self.tmp.name) / "home"
         home.mkdir(exist_ok=True)
@@ -370,7 +370,7 @@ class TestConductorHint(unittest.TestCase):
         p = subprocess.run(["sh", "-c", self.hook_command()], input=self.stdin(self.transcript(BY_SKILL_TOOL)),
                            capture_output=True, text=True, timeout=30, env=env)
         self.assertEqual(p.returncode, 0, p.stderr)
-        self.assertTrue(p.stdout.strip(), "hook が案内を出さなかった（試験の準備の誤り）")
+        self.assertTrue(p.stdout.strip(), "hook が案内を出さなかった（テストの準備の誤り）")
         self.assertEqual(sorted(x.name for x in (root / "scripts").iterdir()), ["conductor_hint.py", "push_guard.py"],
                          "プラグインの置き場に __pycache__ ができた")
 

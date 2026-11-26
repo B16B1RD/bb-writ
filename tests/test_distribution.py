@@ -5,7 +5,7 @@ import re
 import unittest
 from pathlib import Path
 import sys
-sys.path.insert(0, str(Path(__file__).resolve().parent)); import process_limit  # noqa: E402,F401  試験に上限を掛ける（直に走らせても）
+sys.path.insert(0, str(Path(__file__).resolve().parent)); import process_limit  # noqa: E402,F401  テストに上限を掛ける（直に走らせても）
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -141,8 +141,8 @@ class TestWorkflows(unittest.TestCase):
     """CI の定義（.github/workflows）。"""
 
     def test_ci_jobs_have_room_for_the_slow_macos_runners(self):
-        """macOS の job は、成功した実行で 8〜12.9 分かかり（2026-11。0.24.0 で試験が増えた後の最長が 12.9 分）、日によって 1〜2 割揺れる。
-        下限は、その最長の 3 倍（38.7 分）を切り上げた 39 分。上限 10 分では全部通る試験が 3 回続けて打ち切られた（2026-11）。
+        """macOS の job は、成功した実行で 8〜12.9 分かかり（2026-11。0.24.0 でテストが増えた後の最長が 12.9 分）、日によって 1〜2 割揺れる。
+        下限は、その最長の 3 倍（38.7 分）を切り上げた 39 分。上限 10 分では全部通るテストが 3 回続けて打ち切られた（2026-11）。
         見るのは、ファイルの中の「timeout-minutes:」の後に、空白と、引用符 1 つまでを挟んで、数字が続く形だけ（数字は 10 進の数として読む）。
         守らない範囲: ほかの書き方の上限（式 ${{ }}、符号つき、引用符の中の空白、鍵を引用符で囲む、など）と、上限を書かない job
         （既定は 360 分）は見ない。ファイルの文字を見るだけなので、step ごとの上限や、コメントの中の timeout-minutes でも落ちる
@@ -152,12 +152,12 @@ class TestWorkflows(unittest.TestCase):
         for p in files:
             for m in re.finditer(r"timeout-minutes:\s*[\"']?(\d+)", p.read_text(encoding="utf-8")):  # 引用符で書いた数も見る
                 self.assertGreaterEqual(int(m.group(1)), 39, f"{p.name} の timeout-minutes: {m.group(1)}。最も遅い OS（macOS）の成功した実行の最長を "
-                                        "gh run list・gh run view で見て、その 3 倍以上にする。試験を削って合わせない")
+                                        "gh run list・gh run view で見て、その 3 倍以上にする。テストを削って合わせない")
 
     def test_ci_also_runs_the_tests_with_the_temporary_place_under_a_symlink(self):
-        """macOS の一時ディレクトリは symlink の下にあり、解く前と解いた道筋を比べる試験の誤りが、macOS の CI で何度か落ち（0.24.0 など）、
-        0.28.0 の前にも手元で同じ形を作って見つかった。Linux の job でも、TMPDIR を symlink にした道筋で全試験を回す。見るのは、workflow に ln -s と、
-        その道筋を TMPDIR にして、試験の名前で絞らずに tests/run.py を回す行があることだけ（その step が実際に動くか、どの job で動くかは見ない。
+        """macOS の一時ディレクトリは symlink の下にあり、解く前と解いた道筋を比べるテストの誤りが、macOS の CI で何度か落ち（0.24.0 など）、
+        0.28.0 の前にも手元で同じ形を作って見つかった。Linux の job でも、TMPDIR を symlink にした道筋で全テストを回す。見るのは、workflow に ln -s と、
+        その道筋を TMPDIR にして、テストの名前で絞らずに tests/run.py を回す行があることだけ（その step が実際に動くか、どの job で動くかは見ない。
         コメントにした行、if: false の step、ln -s の行き先が違う形でも通る）。"""
         text = "\n".join(p.read_text(encoding="utf-8") for p in sorted((ROOT / ".github" / "workflows").glob("*.y*ml")))
         link = re.search(r"ln -s \S+ (\S+)", text)
@@ -193,7 +193,7 @@ def readme_headings(text):
 
 
 class TestRulesTable(unittest.TestCase):
-    """AGENTS.md の「規則と強制するもの」の行は、短い規則（経緯は括弧で短く）と強制するものの名前だけにする。見るのは行の長さと、名指しした試験の名前の実在だけ。
+    """AGENTS.md の「規則と強制するもの」の行は、短い規則（経緯は括弧で短く）と強制するものの名前だけにする。見るのは行の長さと、名指ししたテストの名前の実在だけ。
     行として数えるのは「| 」で始まる行だけで、先頭の「| 」を落とした行は数えない。欄は最初の「 | 」で分けるので、
     コードの中の「 | 」で欄の長さを取り違えることがある（守らない）。"""
 
@@ -211,7 +211,7 @@ class TestRulesTable(unittest.TestCase):
             self.assertLessEqual(len(enforce), 360, f"強制するものの文が長い: {rule[:40]}")
 
     def test_tests_named_in_the_rules_table_exist(self):
-        """表が名指しする試験の名前（test_…・Test…）は、tests/ に在る（名前を変えたら表も直す）。"""
+        """表が名指しするテストの名前（test_…・Test…）は、tests/ に在る（名前を変えたら表も直す）。"""
         defined = set()
         for path in (ROOT / "tests").glob("*.py"):
             defined |= set(re.findall(r"(?:def|class)\s+((?:test_|Test)\w+)", path.read_text(encoding="utf-8")))
@@ -246,11 +246,11 @@ class TestQuotedOutputs(unittest.TestCase):
     def test_what_the_scripts_print_and_the_skills_quote_is_looked_at_by_a_test(self):
         """スキル（skills/*/SKILL.md）と README.md が「…」で引く句のうち、scripts/*.py の文字列の定数に在る 8 字以上のものは、
         tests/*.py の文字列の定数にも在る。手引きは、補助コードの出す文を引いて、読者に次の手を決めさせる（「理由が『…』なら」
-        「『…』（終了コード 2）で拒まれる」）。その文が変わると案内が黙って切れるので、文を見る試験を置かせる（引いた文を見る試験が
+        「『…』（終了コード 2）で拒まれる」）。その文が変わると案内が黙って切れるので、文を見るテストを置かせる（引いた文を見るテストが
         無いまま、手引きに入った）。引いた句は、置き換えの印（<…>・…・（…））で切り、いちばん長い切れ端で照らす。docstring は、
         scripts の側では出す文でなく、tests の側では照合でないので、どちらも数えない。
         守らない範囲: 文字列が tests に在ることだけを見る（assert しているかは見ない）。同じ句を出す箇所が scripts に複数あると、
-        1 か所でも試験が見ていれば通る。scripts の文字列の定数が補助コードの出す文かどうかは見分けない（記録の欄の名前やただの語も、
+        1 か所でもテストが見ていれば通る。scripts の文字列の定数が補助コードの出す文かどうかは見分けない（記録の欄の名前やただの語も、
         補助コードの文を引いたのでない「…」も、scripts の文字列に在れば数える）。tests の側は、1 つの文字列の定数に続けて在る句だけを
         数える（f 文字列の値や + で継いで作る句は、在ると数えない）。「」でない引き方（バッククォート・言い換え）、終了コード、8 字に
         満たない句（置き換えの印で切れて 8 字に満たなくなる句を含む）は見ない。"""
@@ -270,7 +270,7 @@ class TestQuotedOutputs(unittest.TestCase):
         # 下限は、引き方か拾い方が変わって大きく減れば落ち、手引きの句をいくつか言い換えただけでは落ちない値
         self.assertGreaterEqual(quoted, 12, "スキルと README が「」で引く補助コードの文が、ほとんど見つからない。引き方か拾い方が変わったので、この検査の拾い方を直す")
         if missing:
-            self.fail("スキルか README が「」で引く補助コードの文を、どの試験も見ていない。それぞれの文を assert する試験を tests に足す:\n"
+            self.fail("スキルか README が「」で引く補助コードの文を、どのテストも見ていない。それぞれの文を assert するテストを tests に足す:\n"
                       + "\n".join(missing))
 
 

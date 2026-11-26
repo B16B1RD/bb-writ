@@ -53,7 +53,7 @@ def failed_children(prompt: str):
     """入力の先頭の知らせの見出しの status が failed なら、見出しの task-id を返す。本文（summary・result・note）と、2 つ目からの知らせは
     読まない（このリポジトリの会話記録で、受け付けた知らせ 3,303 件と、知らせで始まる user の行 1,015 件は、すべて知らせ 1 つだった。
     2026-11-23）。守らない範囲: 見出しの要素が NOTICE_HEAD の並びと違うバージョン（知らない要素が status の前に入る・順が変わる）では、
-    失敗の案内が付かず、いつもの案内になる（試験が見るのは、2.1.330 の会話記録に出た要素と並びだけ）。status は failed と等しいときだけ数える。"""
+    失敗の案内が付かず、いつもの案内になる（テストが見るのは、2.1.330 の会話記録に出た要素と並びだけ）。status は failed と等しいときだけ数える。"""
     head = NOTICE_HEAD.match(prompt)
     return TASK_ID.findall(head.group(1)) if head and head.group(2) == "failed" else []
 
@@ -76,7 +76,7 @@ def used_unknowns(path: str, push_guard) -> bool:
     """会話記録に、探索の入口 unknowns を呼んだ印があるか。数えるのは、Skill ツールの bb-writ:unknowns の呼び出し、利用者の行の
     スラッシュの記録、利用者の行と入力を受け付けた行のうち、名前で始まる素の文（fork するスキルをスラッシュで呼ぶと、この形で残る）。
     短い名前は、素の文と受け付けた行の /unknowns だけを数え、Skill ツールの短い名前 unknowns とスラッシュの記録の /unknowns は数えない
-    （どれも、ほかのプラグインの unknowns とは見分けない）。試験は、名前の境目（/bb-writ:unknownsx）・文の途中の名前・先頭の空白・
+    （どれも、ほかのプラグインの unknowns とは見分けない）。テストは、名前の境目（/bb-writ:unknownsx）・文の途中の名前・先頭の空白・
     enqueue でない行・壊れた行・深い入れ子の行（json.loads が RecursionError を上げる）の扱いを見ない。"""
     with open(path, encoding="utf-8", errors="replace") as f:
         for line in f:

@@ -12,7 +12,7 @@ import textwrap
 import time
 import unittest
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).resolve().parent)); import process_limit  # noqa: E402,F401  試験に上限を掛ける（直に走らせても）
+sys.path.insert(0, str(Path(__file__).resolve().parent)); import process_limit  # noqa: E402,F401  テストに上限を掛ける（直に走らせても）
 
 ROOT = Path(__file__).resolve().parents[1]
 LAUNCH = ROOT / "scripts" / "launch.py"
@@ -22,7 +22,7 @@ GOOD = ('ok.\\n```json\\n{"conclusion": "x は正しい", "deliver": "yes", "evi
 FAKE_CODEX = textwrap.dedent(r'''
     #!/usr/bin/env python3
     import json, os, sys
-    _f = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fake_env.json")  # 子の環境を絞る launcher でも、試験の設定を届ける
+    _f = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fake_env.json")  # 子の環境を絞る launcher でも、テストの設定を届ける
     os.environ.update({k: v for k, v in json.load(open(_f)).items() if k not in os.environ})
     if sys.argv[1:2] == ["plugin"]:  # codex plugin …。exec の記録（FAKE_ARGS）は書かず、呼び出しを FAKE_ARGS.plugin に 1 行ずつ足す
         try:  # 標準入力が閉じてある（/dev/null）か。macOS でも同じ判定になるよう、装置と inode で比べる
@@ -36,7 +36,7 @@ FAKE_CODEX = textwrap.dedent(r'''
         import re, shutil, tempfile, time
         _home = os.environ.get("CODEX_HOME") or os.path.join(os.environ["HOME"], ".codex")  # 本物と同じく、無ければ ~/.codex
 
-        def _wait(mark=None):  # 試験が FAKE_ARGS.go を置くまで待つ（上限つき。試験は落ちた道でも .go を置く）
+        def _wait(mark=None):  # テストが FAKE_ARGS.go を置くまで待つ（上限つき。テストは落ちた道でも .go を置く）
             if mark:
                 open(os.environ["FAKE_ARGS"] + mark, "w").close()
             _end = time.time() + 30
@@ -58,7 +58,7 @@ FAKE_CODEX = textwrap.dedent(r'''
                 print("progress " + "x" * 400)
                 print("Error: failed to load marketplace(s): fake manifest is missing", file=sys.stderr)
                 sys.exit(1)
-            if _list.startswith("out:"):  # 試験が組んだ標準出力（JSON でないもの、形の違う JSON）
+            if _list.startswith("out:"):  # テストが組んだ標準出力（JSON でないもの、形の違う JSON）
                 sys.stdout.write(_list[4:])
                 sys.exit(0)
             print("WARNING: fake warning", file=sys.stderr)  # 本物も標準エラーに出すことがある（標準出力には混ざらない）
@@ -140,7 +140,7 @@ FAKE_CODEX = textwrap.dedent(r'''
     thread = os.environ.get("FAKE_THREAD", "0199aaaa-bbbb-7ccc-8ddd-eeeeffff0000")
     sessions = os.path.join(os.environ["CODEX_HOME"], "sessions")
     import glob
-    # 試験が手で置いた記録（sessions/fake の外）があればそれを使う。偽の Codex の記録は起動ごとに書き直す（権限は引数で変わる）
+    # テストが手で置いた記録（sessions/fake の外）があればそれを使う。偽の Codex の記録は起動ごとに書き直す（権限は引数で変わる）
     if mode != "no-rollout" and not [f for f in glob.glob(os.path.join(sessions, "**", f"rollout-*-{thread}.jsonl"), recursive=True)
                                      if os.path.dirname(f) != os.path.join(sessions, "fake")]:
         # 引数から、0.163.0 が記録する実効の権限を組み立てる（profile の名前や -c の書き方に結び付けない）
@@ -227,7 +227,7 @@ FAKE_CODEX = textwrap.dedent(r'''
         subprocess.run(["git", "branch", "parent-work"], check=True)
         subprocess.run(["git", "config", "branch.main.remote", "origin"], check=True)
     open(os.environ["FAKE_ARGS"] + ".tmpdir", "w").write(os.environ.get("TMPDIR", ""))
-    if mode == "tmpdir":  # 書ける一時ディレクトリで試験を動かした
+    if mode == "tmpdir":  # 書ける一時ディレクトリでテストを動かした
         import tempfile
         tempfile.mkdtemp()
     # ORPHAN
@@ -241,7 +241,7 @@ FAKE_CODEX = textwrap.dedent(r'''
     print(json.dumps({"type": "item.completed", "item": {"type": "agent_message", "text": text}}, ensure_ascii=raw))
     if mode == "deep-usage":  # 読めるが、記録（indent 付き）には書けない深さ
         print('{"type": "turn.completed", "usage": ' + "[" * 3000 + "]" * 3000 + "}")
-    elif mode == "unwritable-usage":  # 試験の sitecustomize が書き出しを失敗させる印
+    elif mode == "unwritable-usage":  # テストの sitecustomize が書き出しを失敗させる印
         print(json.dumps({"type": "turn.completed", "usage": {"__unwritable__": 1}}))
     else:
         print(json.dumps({"type": "turn.completed", "usage": {"input_tokens": 5}}, ensure_ascii=raw))
@@ -256,7 +256,7 @@ FAKE_CODEX = textwrap.dedent(r'''
 FAKE_CLAUDE = textwrap.dedent(r'''
     #!/usr/bin/env python3
     import json, os, sys
-    _f = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fake_env.json")  # 子の環境を絞る launcher でも、試験の設定を届ける
+    _f = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fake_env.json")  # 子の環境を絞る launcher でも、テストの設定を届ける
     os.environ.update({k: v for k, v in json.load(open(_f)).items() if k not in os.environ})
     if sys.argv[1:3] == ["auth", "status"] or os.environ.get("ANTHROPIC_LOG") == "debug":
         # launcher の、専用ログインの組織の確かめ（claude auth status --json と、ANTHROPIC_LOG=debug の問い合わせ）。既存の記録（FAKE_ARGS など）と
@@ -331,7 +331,7 @@ FAKE_CLAUDE = textwrap.dedent(r'''
     mode = os.environ.get("FAKE_MODE")
     if mode == "home-claude-only":  # 空の .claude だけを作る
         os.makedirs(os.path.join(os.environ["HOME"], ".claude"))
-    if mode == "home-cli-places":  # 2.1.327 の CLI が、試験を実行した子でホームに作った空のディレクトリ（名前は使った機能で変わる）
+    if mode == "home-cli-places":  # 2.1.327 の CLI が、テストを実行した子でホームに作った空のディレクトリ（名前は使った機能で変わる）
         for d in ("bridge-spawn", "child-logs", "daemon", "file-history", "ssh", "made-up-by-a-later-version"):
             os.makedirs(os.path.join(os.environ["HOME"], ".claude", d), exist_ok=True)
         os.makedirs(os.path.join(os.environ["HOME"], ".config", "anthropic"))
@@ -516,11 +516,11 @@ FAKE_CLAUDE = textwrap.dedent(r'''
         result = result.replace('"deliver": "yes", ', '')
     if mode == "deliver-upper":  # 判定の値の形が違う
         result = result.replace('"deliver": "yes"', '"deliver": "YES"')
-    if mode in ("deliver-not-run", "deliver-no-not-run"):  # 試験を実行できなかった監査役（判定は書いた）
+    if mode in ("deliver-not-run", "deliver-no-not-run"):  # テストを実行できなかった監査役（判定は書いた）
         result = result.replace('"completed": "yes"', '"completed": "no"')
         if mode == "deliver-no-not-run":
             result = result.replace('"deliver": "yes"', '"deliver": "no"')
-    if mode == "unwritable-report":  # 試験の sitecustomize が書き出しを失敗させる印
+    if mode == "unwritable-report":  # テストの sitecustomize が書き出しを失敗させる印
         result = result.replace('"conclusion": "', '"__unwritable__": 1, "conclusion": "')
     if mode == "deep":  # 読めるが、記録（indent 付き）には書けない深さの報告
         result = result.replace('"conclusion": "', '"z": ' + "[" * 3000 + "]" * 3000 + ', "conclusion": "')
@@ -551,7 +551,7 @@ FAKE_CLAUDE = textwrap.dedent(r'''
 FAKE_GROK = textwrap.dedent(r'''
     #!/usr/bin/env python3
     import json, os, sys
-    _f = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fake_env.json")  # 子の環境を絞る launcher でも、試験の設定を届ける
+    _f = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fake_env.json")  # 子の環境を絞る launcher でも、テストの設定を届ける
     os.environ.update({k: v for k, v in json.load(open(_f)).items() if k not in os.environ})
     open(os.environ["FAKE_ARGS"] + ".allenv", "w").write(json.dumps(sorted(k for k in os.environ if not k.startswith("FAKE_"))))
     env = {k: v for k, v in os.environ.items() if k.startswith("GROK_") or k in ("XAI_API_KEY", "RUST_LOG")}
@@ -677,7 +677,7 @@ def fs_rules(argv: list) -> dict:
 
 
 def stop_leftover(pid: int):
-    """試験の偽の子が残した sleep 600 と回し役だけを止める（番号が別のプロセスに使い回されていたら触らない）。"""
+    """テストの偽の子が残した sleep 600 と回し役だけを止める（番号が別のプロセスに使い回されていたら触らない）。"""
     try:
         if b"600" in Path(f"/proc/{pid}/cmdline").read_bytes() or b"(x) Z 1 ()" in Path(f"/proc/{pid}/stat").read_bytes():
             os.kill(pid, 9)
@@ -695,7 +695,7 @@ def load_launch():
 
 def claude_readable(p, fs) -> bool:
     """読み取り専用の Claude Code の子の Bash が p を読めるか。denyRead・allowRead のうち p を含む最も深い規則で決まる
-    （同じ深さに両方あるときは拒否に倒すが、実物でどちらが勝つかは確かめていない。試験は、並べないことを別に見る）
+    （同じ深さに両方あるときは拒否に倒すが、実物でどちらが勝つかは確かめていない。テストは、並べないことを別に見る）
     （allowRead は拒んだ中を戻し、その中の denyRead はまた拒む。2.1.327 の実物の子で、ホームの拒否・~/.local の戻し・その中の
     状態の置き場の拒否・その中の対象の戻しが、この順で効いた）。"""
     p = str(p)
@@ -706,9 +706,9 @@ def claude_readable(p, fs) -> bool:
 
 class TestLaunch(unittest.TestCase):
     def setUp(self):
-        # 試験の中から直に呼ぶ git（リポジトリを用意する commit など）と、起こす launcher が、利用者の全体の Git 設定（core.hooksPath など）を
-        # 読まないように（全体の設定を渡す試験は、env_extra で上書きする）。切り離しそのものを確かめる試験は無い
-        # （外しても、全体の設定が試験の git の動きを変えない環境では落ちない）
+        # テストの中から直に呼ぶ git（リポジトリを用意する commit など）と、起こす launcher が、利用者の全体の Git 設定（core.hooksPath など）を
+        # 読まないように（全体の設定を渡すテストは、env_extra で上書きする）。切り離しそのものを確かめるテストは無い
+        # （外しても、全体の設定がテストの git の動きを変えない環境では落ちない）
         from unittest import mock
         no_global = mock.patch.dict(os.environ, {"GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"})
         no_global.start()
@@ -732,13 +732,13 @@ class TestLaunch(unittest.TestCase):
         self.args_file = t / "args.json"
 
     def tearDown(self):
-        self.orphans()  # 試験が run_launch の途中で落ちても、偽の子孫を残さない（記録の置き場を消す前に読む）
+        self.orphans()  # テストが run_launch の途中で落ちても、偽の子孫を残さない（記録の置き場を消す前に読む）
         self.tmp.cleanup()
 
     def launch_env(self, mode="good", path=None, env_extra=None):
-        """偽の CLI・試験のホームと設定で launcher を起こす環境。偽の子に渡す FAKE_* は fake_env.json にも書く（子の環境を絞る launcher でも届く）。
-        試験ごとに組んでいたころ、写し損ねて HOME と fake_env.json が抜け、launcher が実物のホームを走査し、偽の子が落ちたまま通った試験があった。"""
-        # 起こした launcher が実物のホームと設定を見ないことを確かめる試験は無い（HOME を付け替えずに組んだ試験が、基点の版で通っていた）
+        """偽の CLI・テストのホームと設定で launcher を起こす環境。偽の子に渡す FAKE_* は fake_env.json にも書く（子の環境を絞る launcher でも届く）。
+        テストごとに組んでいたころ、写し損ねて HOME と fake_env.json が抜け、launcher が実物のホームを走査し、偽の子が落ちたまま通ったテストがあった。"""
+        # 起こした launcher が実物のホームと設定を見ないことを確かめるテストは無い（HOME を付け替えずに組んだテストが、基点の版で通っていた）
         env = {**os.environ, "HOME": str(self.home), "PATH": path if path is not None else f"{self.bin}:/usr/bin:/bin", "BB_WRIT_CONFIG_DIR": str(self.cfg),
                "BB_WRIT_STATE_DIR": str(self.state), "FAKE_MODE": mode, "FAKE_ARGS": str(self.args_file),
                "FAKE_TEXT": GOOD.encode().decode("unicode_escape"), **(env_extra or {})}
@@ -746,7 +746,7 @@ class TestLaunch(unittest.TestCase):
         return env
 
     def repo_git(self):
-        """試験のリポジトリを動かす git。開発機の全体の除外（~/.config/git/ignore）と設定を読まない。"""
+        """テストのリポジトリを動かす git。開発機の全体の除外（~/.config/git/ignore）と設定を読まない。"""
         env = {**os.environ, "HOME": str(self.home), "XDG_CONFIG_HOME": str(self.home / ".config"),
                "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}
         return lambda *a, cwd=None: subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", *a], cwd=cwd or self.cwd,
@@ -757,11 +757,11 @@ class TestLaunch(unittest.TestCase):
         env = self.launch_env(mode, path, env_extra)
         target = ["--host", host, "--cwd", str(cwd or self.cwd)] if host else []  # host が無いのは --resume（記録から取る）
         p = subprocess.run([sys.executable, str(LAUNCH), *target, "--prompt-file", str(self.prompt), *extra],
-                           env=env, capture_output=True, text=True, timeout=120, cwd=proc_cwd, stdin=stdin)  # launcher が止まったら、試験ごと止まらずに落とす
+                           env=env, capture_output=True, text=True, timeout=120, cwd=proc_cwd, stdin=stdin)  # launcher が止まったら、テストごと止まらずに落とす
         return p if raw else (p.returncode, json.loads(p.stdout))
 
     def launch_in_background(self, extra, mode="stop", env_extra=None):
-        """launcher を起動し、偽の子が動き始めるのを待って返す（シグナル・同時の起動の試験）。"""
+        """launcher を起動し、偽の子が動き始めるのを待って返す（シグナル・同時の起動のテスト）。"""
         for f in (".started", ".term", ".stage"):
             Path(str(self.args_file) + f).unlink(missing_ok=True)
         env = self.launch_env(mode, env_extra=env_extra)
@@ -912,8 +912,8 @@ class TestLaunch(unittest.TestCase):
         rc, first = self.run_launch("claude", extra=["--timeout", "2"], env_extra={"FAKE_HANG": "1"})
         p = self.launch_in_background(["--resume", first["out"], "--timeout", "60"], mode="stop-deaf")
 
-        # この試験の置き場の偽の CLI だけを止める（pkill の無い環境では、偽の子は 60 秒で自分から終わる）。
-        # この片付けを外しても試験は落ちない（試験の後に偽の子を残さないことは確かめない）
+        # このテストの置き場の偽の CLI だけを止める（pkill の無い環境では、偽の子は 60 秒で自分から終わる）。
+        # この片付けを外してもテストは落ちない（テストの後に偽の子を残さないことは確かめない）
         def stop_fakes():
             try:
                 subprocess.run(["pkill", "-KILL", "-f", str(self.bin)], check=False)
@@ -925,7 +925,7 @@ class TestLaunch(unittest.TestCase):
         self.assertIn("同じ session の続きが動いている", second.stderr)
         p.kill()  # 子は残る（launcher の外の話）が、排他は手放す
         p.communicate(timeout=30)
-        stop_fakes()  # launcher を KILL したので、偽の子（止めを聞かずに 60 秒眠る）が試験の後まで残る
+        stop_fakes()  # launcher を KILL したので、偽の子（止めを聞かずに 60 秒眠る）がテストの後まで残る
         self.orphans()
         rc, again = self.run_launch(None, extra=["--resume", first["out"]])
         self.assertEqual(rc, 0, again)
@@ -971,7 +971,7 @@ class TestLaunch(unittest.TestCase):
 
     def test_a_jump_of_the_wall_clock_does_not_bring_the_timeout_forward(self):
         """時間切れの期限も、壁時計が飛んでも早まらない（子が動き始めた後に、壁時計だけを 100 秒進める）。期限を子の起動の後に
-        壁時計で決め直す形は、この試験は通る（守らない）。期限と所要時間の両方を壁時計に戻した形もこの試験は通り、
+        壁時計で決め直す形は、このテストは通る（守らない）。期限と所要時間の両方を壁時計に戻した形もこのテストは通り、
         test_the_duration_does_not_follow_a_jump_of_the_wall_clock が落とす。"""
         rc, rec = self.run_launch("claude", extra=["--timeout", "3"],
                                   env_extra={"FAKE_HANG": "1", **self.launcher_site(self.WALL_CLOCK_JUMPS_ONCE_THE_CHILD_RUNS)})
@@ -1180,7 +1180,7 @@ class TestLaunch(unittest.TestCase):
 
     def test_launch_leaves_no_bytecode_in_the_plugin(self):
         subprocess.run(["rm", "-rf", str(ROOT / "scripts" / "__pycache__")], check=True)
-        self.run_launch("codex")  # 試験の外と同じく -B なしで起動する
+        self.run_launch("codex")  # テストの外と同じく -B なしで起動する
         self.assertFalse((ROOT / "scripts" / "__pycache__").exists())
 
     def test_the_record_names_the_commit_the_child_saw_only_when_the_tree_matches_it(self):
@@ -1217,7 +1217,7 @@ class TestLaunch(unittest.TestCase):
                 self.assertIn("指摘の扱い", rec["next"])  # 審査に数える子が返ったその場で、直す前に書く欄を出す
                 # 確かめ役と監査役を 1 つのコマンドで続けて立て、監査役が毎回「直前の確かめ役の指摘の扱いが無い」で止まった（#34）
                 self.assertIn("HEAD を動かさない", rec["next"])
-        # 試験が見るのは役ごとの出し分け（目印の句）だけで、案内の意味（順序・範囲）は読者役で確かめる
+        # テストが見るのは役ごとの出し分け（目印の句）だけで、案内の意味（順序・範囲）は読者役で確かめる
         rc, rec = self.run_launch("claude", extra=["--interrogate"])  # --interrogate の審査役も、監査役の文でなく順序の文
         self.assertEqual((rc, "HEAD を動かさない" in rec["next"], "前の監査" in rec["next"]), (0, True, False), rec)
         # 書く子・ok でない子に next を出さないことは test_only_a_child_counted_as_a_review_is_told_to_write_the_triage が見る
@@ -1226,7 +1226,7 @@ class TestLaunch(unittest.TestCase):
         self.assertEqual((rc, "指摘の扱い" in rec["next"], "前の監査" in rec["next"], "HEAD を動かさない" in rec["next"]), (0, True, True, False), rec)
         rc, rec = self.run_launch("claude", extra=["--audit"])
         self.assertEqual((rc, "立て直さない" in rec["next"], "前の監査" in rec["next"]), (0, True, False), rec)
-        # 試験を実行できなかった監査役（not-run）の案内は、差し戻したときだけ差し戻しを先に言う。判定は記録に残る（work.py が照らす）
+        # テストを実行できなかった監査役（not-run）の案内は、差し戻したときだけ差し戻しを先に言う。判定は記録に残る（work.py が照らす）
         for mode, deliver, sent_back in (("deliver-no-not-run", "no", True), ("deliver-not-run", "yes", False)):
             rc, rec = self.run_launch("claude", mode=mode, extra=["--audit"])
             self.assertEqual((rec["status"], rec["deliver"], "差し戻し" in rec["next"]), ("not-run", deliver, sent_back), rec)
@@ -1395,7 +1395,7 @@ class TestLaunch(unittest.TestCase):
                 self.assertIn(rec["out"], (self.state / "delegations.jsonl").read_text())
 
     def test_values_that_cannot_be_written_still_write_the_record(self):
-        # Python のバージョンによらず受け皿を通す: 印の付いた値だけ、indent 付きの書き出しを失敗させる（試験だけが読む sitecustomize）
+        # Python のバージョンによらず受け皿を通す: 印の付いた値だけ、indent 付きの書き出しを失敗させる（テストだけが読む sitecustomize）
         site = Path(self.tmp.name) / "site"
         site.mkdir()
         (site / "sitecustomize.py").write_text(textwrap.dedent('''
@@ -1608,11 +1608,11 @@ class TestLaunch(unittest.TestCase):
         self.assertIn('"execution": {"completed"', argv[-1])  # 実行の欄と、写して動かす場所
         self.assertIn("$TMPDIR", argv[-1])
         # 約束の意味を決める文は、文ごと固定する（語の有無だけでは、意味を逆にした書き換えが通った）
-        for sentence in ("execution.completed は、この依頼で対象の試験・検査を最後まで実行できたか。yes は実行して、試験自身の合否を得た"
-                         "（試験が退行を見つけて落ちたのも yes）。no は実行できなかったか途中で止まった。試験が環境・権限で止まった（一時ディレクトリを作れない、"
-                         "Read-only file system、Permission denied、コマンドが無い）なら、試験のコマンドの終了コードに関わらず no。not-needed はこの依頼に"
+        for sentence in ("execution.completed は、この依頼で対象のテスト・検査を最後まで実行できたか。yes は実行して、テスト自身の合否を得た"
+                         "（テストが退行を見つけて落ちたのも yes）。no は実行できなかったか途中で止まった。テストが環境・権限で止まった（一時ディレクトリを作れない、"
+                         "Read-only file system、Permission denied、コマンドが無い）なら、テストのコマンドの終了コードに関わらず no。not-needed はこの依頼に"
                          "実行が要らない。commands には実行したコマンドと終了コードを書く（yes なら 1 つ以上）。\n",
-                         "対象に書く試験・検査は、`mktemp -d` で新しく作ったディレクトリ（$TMPDIR の下。無ければ /tmp の下）に対象を写して（cp -r など）、そこで動かす。決まった名前や pid だけの名前の場所に写さない（並行する子どうしでも、同じ子の別のコマンドでも、$TMPDIR も pid も同じことがある）。"):
+                         "対象に書くテスト・検査は、`mktemp -d` で新しく作ったディレクトリ（$TMPDIR の下。無ければ /tmp の下）に対象を写して（cp -r など）、そこで動かす。決まった名前や pid だけの名前の場所に写さない（並行する子どうしでも、同じ子の別のコマンドでも、$TMPDIR も pid も同じことがある）。"):
             self.assertIn(sentence, argv[-1])
         # 権限を変える設定は、この 3 つだけ（sandbox_mode・-s を足すと profile より優先され、別の書ける場所を足すと広がる）
         conf = [argv[i + 1] for i, x in enumerate(argv) if x in ("-c", "--config") and not argv[i + 1].startswith("model_reasoning_effort")]
@@ -1644,7 +1644,7 @@ class TestLaunch(unittest.TestCase):
         for absent in (f"{h}/.config", f"{h}/.config/git",  # Git の設定を含む置き場は中身ごと、Git の設定は拒まない
                        f"{h}/.codex", f"{h}/.codex/packages", f"{h}/.gnupg", f"{h}/.aws", f"{h}/missing", f"{h}/.kube"):
             self.assertNotIn(absent, rules)
-        self.assertEqual(rules.get(str(self.cfg.resolve())), "deny")  # 専用ログイン（試験ではホームの外）
+        self.assertEqual(rules.get(str(self.cfg.resolve())), "deny")  # 専用ログイン（テストではホームの外）
         # 普段の専用ログインは ~/.config の下。拒む場所の下の場所は書かない
         nested = home / ".config" / "bb-writ"
         shutil.copytree(self.cfg, nested)
@@ -1678,7 +1678,7 @@ class TestLaunch(unittest.TestCase):
             if not os.path.lexists(q):
                 q.parent.mkdir(parents=True, exist_ok=True)
                 (q.write_text("x") if place in (".netrc", ".git-credentials") else q.mkdir())
-        rc, rec = self.run_launch("codex")  # 本体は試験の bin（ホームの外）
+        rc, rec = self.run_launch("codex")  # 本体はテストの bin（ホームの外）
         self.assertEqual((rc, rec["status"]), (0, "ok"), rec)
         argv = json.loads(self.args_file.read_text())
         rules = fs_rules(argv)
@@ -1822,7 +1822,7 @@ class TestLaunch(unittest.TestCase):
         self.assertTrue([d for d, acc in rules.items() if acc == "deny" and (a == d or a.startswith(d + "/"))], rules)
 
     def test_tests_run_under_a_process_limit(self):
-        # 試験が偽のコマンドで自分を呼び続けても、増えるのは試験の分だけ（利用者全体の上限を埋めて Claude Code を落とした）
+        # テストが偽のコマンドで自分を呼び続けても、増えるのはテストの分だけ（利用者全体の上限を埋めて Claude Code を落とした）
         if not sys.platform.startswith("linux") or os.geteuid() == 0:
             self.skipTest("上限を掛けるのは Linux の一般の利用者だけ")
         import resource
@@ -1857,7 +1857,7 @@ class TestLaunch(unittest.TestCase):
     def test_live_checks_give_the_launcher_command_every_value_it_reads(self):
         # 実機の確認の台本は、launcher の main を通らずに、自分で組んだ名前空間で command() を呼ぶ。main が起動の前に決める値
         # （--resume を足したときの resume・session、--audit を足したときの audit）が増えても、台本は CI で動かないので足し忘れ、
-        # AttributeError で動かなくなっていた（引数の数は合っていたので、上の試験は通った）。台本に書かれた SimpleNamespace(...) を
+        # AttributeError で動かなくなっていた（引数の数は合っていたので、上のテストは通った）。台本に書かれた SimpleNamespace(...) を
         # そのまま組み、偽の CLI の環境で command() に渡す。コマンドの要素が全部文字列であることも見る（session を None のまま渡すと、
         # Claude Code の --session-id の値が None になり、起動の段で落ちる）。
         # 守らない範囲:
@@ -1867,7 +1867,7 @@ class TestLaunch(unittest.TestCase):
         #   名前空間も、session が文字列なら通る（Codex の書く名前空間は session が None なので落ちる）。
         # - host の変数には claude と codex だけを入れる（台本の hosts の一覧は読まない）。台本が host の変数で grok を起動するように
         #   なっても、Grok の経路（grok_home を読む）は動かさない。host='grok' を直に書いた名前空間は Grok の経路まで動かすが、
-        #   grok_home が無ければ落ち、読み取り専用の Grok は、この試験の対象が一時ディレクトリの下にあるので値がそろっていても落ちる。
+        #   grok_home が無ければ落ち、読み取り専用の Grok は、このテストの対象が一時ディレクトリの下にあるので値がそろっていても落ちる。
         # - command() の後の台本の処理（組んだコマンドの書き換え・実行）は見ない。
         # 台本の正当な書き換えでも落ちる形: 組んだ後に属性を足す（a.resume = None。値は SimpleNamespace(...) の中に書く）、command() に
         # 渡さない SimpleNamespace(...) を tests/verify_*.py に置く（全部を command() に渡すものとして扱う）、キーワードの値が
@@ -1891,7 +1891,7 @@ class TestLaunch(unittest.TestCase):
                         cmd, _, why = launch.command(a, "x", self.state / "scratch")
                         self.assertIsNone(why)
                         self.assertEqual([c for c in cmd if not isinstance(c, str)], [], cmd)
-        self.assertGreater(seen, 0, "台本が command() に渡す名前空間を 1 つも見つけられない（組み方を変えたなら、この試験も直す）")
+        self.assertGreater(seen, 0, "台本が command() に渡す名前空間を 1 つも見つけられない（組み方を変えたなら、このテストも直す）")
 
     def test_skipping_unwritable_places_is_only_for_read_only_file_systems(self):
         from unittest import mock
@@ -1901,10 +1901,10 @@ class TestLaunch(unittest.TestCase):
                     with self.assertRaises(unittest.SkipTest):
                         self.writable_dir(Path("/var/tmp"))
                 else:
-                    try:  # 飛ばさずに失敗として伝わる（飛ばすと、この試験自身が飛ばされて通って見えた）
+                    try:  # 飛ばさずに失敗として伝わる（飛ばすと、このテスト自身が飛ばされて通って見えた）
                         self.writable_dir(Path("/var/tmp"))
                     except unittest.SkipTest:
-                        self.fail(f"errno {code} で試験を飛ばした")
+                        self.fail(f"errno {code} でテストを飛ばした")
                     except OSError:
                         pass
                     else:
@@ -1937,7 +1937,7 @@ class TestLaunch(unittest.TestCase):
 
     def test_codex_read_only_child_keeps_only_its_package_and_drops_secret_env(self):
         # 残すのは、実機で要ると分かったものだけ（codex 本体とそのパッケージ、Git の設定、対象とその共通ディレクトリ）。
-        # nvm を ~/.config に入れた node・npm や、dotfiles を指す道具は、名前を挙げた置き場の下なので拒まれる（子の試験は動かず not-run）
+        # nvm を ~/.config に入れた node・npm や、dotfiles を指す道具は、名前を挙げた置き場の下なので拒まれる（子のテストは動かず not-run）
         home = self.home
         pkg = home / ".config" / "nvm" / "versions" / "node" / "v22"
         (pkg / "lib" / "node_modules" / "@openai" / "codex" / "bin").mkdir(parents=True)
@@ -1982,7 +1982,7 @@ class TestLaunch(unittest.TestCase):
             self.assertIn(name, env)
 
     def test_codex_read_only_child_gets_its_own_writable_tmpdir(self):
-        # -s read-only では mktemp -d も失敗し、審査役が試験を動かせなかった。書けるのは起動ごとの一時ディレクトリだけで、
+        # -s read-only では mktemp -d も失敗し、審査役がテストを動かせなかった。書けるのは起動ごとの一時ディレクトリだけで、
         # それは --out（呼び出し側が選ぶ）でなく、いつも bb-writ の状態の置き場にできる
         rc, rec = self.run_launch("codex", mode="tmpdir")
         self.assertEqual((rc, rec["status"]), (0, "ok"), rec)
@@ -2136,7 +2136,7 @@ class TestLaunch(unittest.TestCase):
                 self.assertIn(sign, rec["problems"][0])
 
     def test_write_children_are_not_told_to_copy_and_are_not_not_run(self):
-        # 写して動かすのは読み取り専用の子だけ。書く子は作業場所で試験を動かし、実行の欄が無くても「読んだだけ」にしない
+        # 写して動かすのは読み取り専用の子だけ。書く子は作業場所でテストを動かし、実行の欄が無くても「読んだだけ」にしない
         good = GOOD.encode().decode("unicode_escape")
         for host in ("codex", "claude"):
             for text, ran in ((good.replace(', "execution": {"completed": "yes", "commands": [{"command": "python3 -m unittest", "exit": 0}]}', ""), None),
@@ -2163,7 +2163,7 @@ class TestLaunch(unittest.TestCase):
             argv = json.loads(self.args_file.read_text())
             return argv[-1] if host == "codex" else argv[argv.index("-p") + 1]
 
-        # 書く子は試験が作る作業場所で起動する。時間切れにして、続きの依頼文も見る
+        # 書く子はテストが作る作業場所で起動する。時間切れにして、続きの依頼文も見る
         rc, rec = self.run_launch("claude", extra=["--write", "--timeout", "2"], cwd=self.worktree("marks")[1], env_extra={"FAKE_HANG": "1"})
         self.assertEqual((rc, rec["status"]), (2, "timeout"), rec)
         first = given("claude")
@@ -2234,7 +2234,7 @@ class TestLaunch(unittest.TestCase):
             ({"completed": "yes"}, "invalid-report", "yes"),  # commands の鍵が無い
             ({"completed": "no", "commands": [{"command": 42, "exit": 2}]}, "invalid-report", "no"),
             ("yes", "invalid-report", None),
-            ({"completed": "yes", "commands": [{"command": "bash tests/self-test.sh", "exit": 1}]}, "ok", "yes"),  # 試験が落ちたのも実行できた
+            ({"completed": "yes", "commands": [{"command": "bash tests/self-test.sh", "exit": 1}]}, "ok", "yes"),  # テストが落ちたのも実行できた
             ({"completed": "not-needed"}, "ok", "not-needed"),
         )
         for host in ("codex", "claude", "grok"):
@@ -2249,7 +2249,7 @@ class TestLaunch(unittest.TestCase):
                     prompt = {"codex": lambda: prompt[-1], "claude": lambda: prompt[prompt.index("-p") + 1],
                               "grok": lambda: prompt[prompt.index("-p") + 1]}[host]()
                     # 読み取り専用の子には、どのホストでも、子ごとに新しく作った場所へ写して動かす約束を渡す（#46。並行する
-                    # Claude Code の子は $TMPDIR も pid も同じだった）。試験が見るのは子に渡す約束の文だけで、子が約束に従うかと、
+                    # Claude Code の子は $TMPDIR も pid も同じだった）。テストが見るのは子に渡す約束の文だけで、子が約束に従うかと、
                     # interrogate・playbook-verify の依頼文の雛形の文と、not-run の案内の写し方の文は見ない（守らない）
                     for phrase in ("`mktemp -d` で新しく作ったディレクトリ", "に対象を写して（cp -r など）、そこで動かす",
                                    "決まった名前や pid だけの名前の場所に写さない"):
@@ -2350,7 +2350,7 @@ class TestLaunch(unittest.TestCase):
 
     def test_a_hardest_writer_gets_its_default_limit(self):
         # --timeout を省くと、役割の既定の上限で動く（delegate の SKILL.md: 既定 1800、--hardest の書く子は 3600）。上限は記録の timeout_s で
-        # 見る（その値で待って時間切れにすることは、--timeout を渡す試験が見る）。3600 秒は待たない
+        # 見る（その値で待って時間切れにすることは、--timeout を渡すテストが見る）。3600 秒は待たない
         for extra, limit in ((["--write", "--hardest"], 3600), (["--write"], 1800), ([], 1800)):
             with self.subTest(extra=extra):
                 rc, rec = self.run_launch("claude", extra=extra)
@@ -2486,7 +2486,7 @@ class TestLaunch(unittest.TestCase):
     @unittest.skipUnless(sys.platform.startswith("linux"), "子の CLI が切り離した子孫を止めるのは Linux だけ（PR_SET_CHILD_SUBREAPER）")
     def test_processes_the_child_detached_do_not_outlive_it(self):
         # Claude Code 2.1.309 の Bash は、コマンドを新しいセッションで起こす。プロセスグループを止めるだけでは、子が終わった後も
-        # 試験を回し続け、作業場所にも書けた（Issue #20）。どの子でも、正常に終わったときも時間切れのときも止め、記録に並べる。
+        # テストを回し続け、作業場所にも書けた（Issue #20）。どの子でも、正常に終わったときも時間切れのときも止め、記録に並べる。
         # 見るのは、子孫が 1.5 秒後に書く前に止めたことまでで、照合（Git の管理情報・ホームの比較）より前に止めた順序は見ない（照合は速く終わる）
         sleep = shutil.which("sleep")  # PATH を偽の置き場に変える前に、本物を絶対パスで引く
         bystander = subprocess.Popen([sleep, "600"], start_new_session=True)  # launcher の子孫でないものは止めない
@@ -2512,10 +2512,10 @@ class TestLaunch(unittest.TestCase):
                     self.assertEqual(rec["problems"], ["3 秒で終わらなかった", f"--resume {rec['out']} で続きから起動できる"], rec)
                     # 期限は launcher が測る時間で見る。launcher の処理は毎回約 3.8 秒で終わる。壁時計で測っていたときは、ときどき
                     # 約 2.3 秒延びて 5 秒を越えた（WSL2 の壁時計が約 35 秒ごとに約 2.3 秒進み、それに重なった起動。70 回中 4 回。
-                    # Issue #33。今は所要時間を launcher も試験も単調時計で測る）。WSL2 では単調時計も実際より数 % 遅く進み（adjtimex の
+                    # Issue #33。今は所要時間を launcher もテストも単調時計で測る）。WSL2 では単調時計も実際より数 % 遅く進み（adjtimex の
                     # tick が標準より小さい）、壁時計がそれを飛んで取り戻していた。期限と所要時間は同じ単調時計なので、互いに食い違わない。
-                    # 試験の側の時間では、返らないことだけを捕まえる。試験の側の計測を壁時計に戻す後退を落とす試験は無く、15〜60 秒の待ちの
-                    # 上限（偽の子や印のファイルを待つ所、work.py の試験用の止まり所）は壁時計のまま（どれも、待つものが現れるまでの打ち切り）
+                    # テストの側の時間では、返らないことだけを捕まえる。テストの側の計測を壁時計に戻す後退を落とすテストは無く、15〜60 秒の待ちの
+                    # 上限（偽の子や印のファイルを待つ所、work.py のテスト用の止まり所）は壁時計のまま（どれも、待つものが現れるまでの打ち切り）
                     self.assertLess(rec["duration_s"], 5, rec)
                     self.assertLess(took, 10, rec)
                 for pid in pids:
@@ -2619,7 +2619,7 @@ class TestLaunch(unittest.TestCase):
                 self.stop_fakes()  # 前の subTest が、止まらない子の CLI として残したもの
                 self.addCleanup(self.stop_fakes)
                 t0 = time.monotonic()
-                # 猶予を実際に 30 秒待つと、試験全体が CI の上限を超える
+                # 猶予を実際に 30 秒待つと、テスト全体が CI の上限を超える
                 rc, rec = self.launch_patched("launch.STOP_GRACE = 1", ["--host", host, "--cwd", str(self.cwd), "--timeout", "2"], mode=mode,
                                               env_extra={"FAKE_SLEEP": sleep, "PYTHONPATH": str(site), "FAKE_SITE": what, **({"FAKE_CLOSE_OUT": "1"} if closed else {})})
                 self.orphans()
@@ -2636,7 +2636,7 @@ class TestLaunch(unittest.TestCase):
                     self.assertEqual(self.fakes(), [], rec)
 
     def fakes(self) -> list:
-        """偽の CLI（この試験の bin の下のもの）のうち、まだ動いているものの pid。"""
+        """偽の CLI（このテストの bin の下のもの）のうち、まだ動いているものの pid。"""
         alive = []
         for d in filter(str.isdigit, os.listdir("/proc")):
             try:
@@ -2654,7 +2654,7 @@ class TestLaunch(unittest.TestCase):
                 pass
 
     def orphans(self) -> list:
-        """偽の子が切り離して起こした子孫（上の段と 6 段の鎖）の pid。試験が落ちても残さないよう、片付けに登録する。"""
+        """偽の子が切り離して起こした子孫（上の段と 6 段の鎖）の pid。テストが落ちても残さないよう、片付けに登録する。"""
         orphan = Path(str(self.args_file) + ".orphan")
         if not orphan.exists():
             return []
@@ -2789,7 +2789,7 @@ class TestLaunch(unittest.TestCase):
         self.assertEqual((rc, rec["status"]), (0, "ok"), rec)
         good = next((sessions / "fake").glob("rollout-*")).read_bytes()
 
-        def placed(n, make):  # 試験が sessions/fake の外に置いた記録を、偽の Codex はそのまま使う
+        def placed(n, make):  # テストが sessions/fake の外に置いた記録を、偽の Codex はそのまま使う
             thread = f"0199aaaa-bbbb-7ccc-8ddd-eeeeffff{3000 + n}"
             (sessions / "other").mkdir(exist_ok=True)
             make(sessions / "other" / f"rollout-1-{thread}.jsonl")
@@ -2831,7 +2831,7 @@ class TestLaunch(unittest.TestCase):
         """launcher が子を待つ間に TERM・HUP・INT を受けたら、直下の子に TERM を伝え、子が片付けて終わるのを待ち、
         照合して記録を書く（続きから起動できる）。中断で launcher と子をまとめて止めると、子の CLI（Claude Code 2.1.310）が
         対象に .claude/.cc-writes を残し、記録も残らなかった。TERM を無視する子は、--timeout の残りまでで止める。
-        子が終わった後（照合の間）に受けたシグナルは、子を止めたと記録しない。猶予の秒数（30 秒）と、2 回目のシグナルの扱いは試験しない。"""
+        子が終わった後（照合の間）に受けたシグナルは、子を止めたと記録しない。猶予の秒数（30 秒）と、2 回目のシグナルの扱いはテストしない。"""
         def launch(mode, sig, timeout="60", ignore_hup=False, then=None):
             for f in (".started", ".term", ".stage"):
                 Path(str(self.args_file) + f).unlink(missing_ok=True)
@@ -3016,7 +3016,7 @@ class TestLaunch(unittest.TestCase):
         rc, again = self.run_launch(None, extra=["--resume", rec["out"]])
         self.assertEqual((again["status"], again["head"]), ("ok", h1), again)
         self.assertIn("指摘の扱い", again["next"])  # 審査に数える続きの子には、直す前に書く欄を出す
-        # 続きの子にも背景の処理を使わせない（時間切れの後の続きは、長い試験の後で起きやすい）
+        # 続きの子にも背景の処理を使わせない（時間切れの後の続きは、長いテストの後で起きやすい）
         self.assertEqual(json.loads(Path(str(self.args_file) + ".env").read_text())["CLAUDE_CODE_DISABLE_BACKGROUND_TASKS"], "1")
         rc, rec = self.run_launch("claude", extra=["--timeout", "2"], cwd=repo, env_extra=hang)
         subprocess.run(["git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "-q", "--allow-empty", "-m", "2"], check=True)
@@ -3165,14 +3165,14 @@ class TestLaunch(unittest.TestCase):
 
     def test_an_auditor_is_told_to_judge_every_item_of_the_skill_whatever_the_prompt(self):
         """親が書いた監査役の依頼文が判定の項目を狭めても、監査役は playbook-verify の節の項目をすべて判定するよう約束を受ける
-        （Claude Code の続きでも）。監査役でない子には足さない（試験が見るのは、読み取り専用・--interrogate・--write の最初の起動だけ。
+        （Claude Code の続きでも）。監査役でない子には足さない（テストが見るのは、読み取り専用・--interrogate・--write の最初の起動だけ。
         --hardest の子と、監査役でない子の続きに足さないことは見ない）。"""
         # 監査役が受け取る依頼文に、約束の意味を決める句を、句ごと固定する（言い換えると落ちる。語の有無だけでは、意味を逆にした書き換えが通る）
         mark = "返す前の判定（bb-writ の監査役の約束）: 上の依頼文に書かれていなくても"  # 約束の見出し句。足さない側も、この句で見る
         phrases = (mark, "bb-writ のスキル `playbook-verify` の「返す前の判定（遵守の監査）」の節を全文読み",
                    "文の照合）をすべて判定する。依頼文が範囲や項目を狭めていても、節の項目を省かない",
                    "差分に限ってよいのは、節がそう書く項目だけ。文の照合は毎回、変えた文書の全体）",
-                   "作業者が --not-run で届けるときは、親がその commit で実行した試験の証拠",  # #39 の宣言の確かめ
+                   "作業者が --not-run で届けるときは、親がその commit で実行したテストの証拠",  # #39 の宣言の確かめ
                    "子が実行できなかったことの代わりになるか（写し方を教えれば子が動いた場面でないか）も判定する",
                    '最後の JSON に "deliver": "yes" か "no" を書く')
         verify = (ROOT / "skills" / "playbook-verify" / "SKILL.md").read_text()
@@ -3197,7 +3197,7 @@ class TestLaunch(unittest.TestCase):
                     self.assertNotIn(mark, prompt())
 
     def test_an_auditor_must_say_whether_to_deliver_and_the_record_keeps_it(self):
-        """監査役の報告は deliver（yes か no）を持つ。無いか値が違えば invalid-report（続きの起動でも）。no も、試験を実行できなかった
+        """監査役の報告は deliver（yes か no）を持つ。無いか値が違えば invalid-report（続きの起動でも）。no も、テストを実行できなかった
         not-run も、判定を記録（委任の記録の行と record.json の両方。work.py は両方を照らす）に残す（work.py が関門に数えないのは
         test_work の側で見る）。監査役でない子には deliver を求めない。"""
         recorded = lambda rec: json.loads((Path(rec["out"]) / "record.json").read_text())
@@ -3349,7 +3349,7 @@ class TestLaunch(unittest.TestCase):
             os.chmod(deep / "f", 0o444)
             os.chmod(deep, 0o555)
             os.chmod(shut, 0o000)  # 中身のある、読めないディレクトリ
-            # 残った場合も、試験の一時ディレクトリを消せるように
+            # 残った場合も、テストの一時ディレクトリを消せるように
             self.addCleanup(lambda: [os.chmod(d, 0o755) for d in (deep, shut) if d.is_dir() and not d.is_symlink()])
         with open(self.state / "delegations.jsonl", "a") as f:
             for r in rows:
@@ -3746,7 +3746,7 @@ class TestLaunch(unittest.TestCase):
         try:
             rc, rec = self.run_launch("claude", extra=["--out", str(Path(self.tmp.name) / "out-unlisted")])
         finally:
-            os.chmod(self.state / "delegations", 0o755)  # 試験の一時ディレクトリを消せるように
+            os.chmod(self.state / "delegations", 0o755)  # テストの一時ディレクトリを消せるように
         self.assertEqual((rc, rec["status"]), (0, "ok"), rec)
         self.assertEqual((rec["swept"]["removed"], len(rec["swept"]["problems"])), ([], 1), rec["swept"])
         self.assertIn("並べられない", rec["swept"]["problems"][0])
@@ -4345,7 +4345,7 @@ launch.claude_reads = claude_reads
         読めず、監査役が記録を読めないまま差分だけで判定した。ほかの場所の記録と子の out は読ませない。"""
         repo, wt = self.worktree()
         # macOS の一時ディレクトリは /var → /private/var の symlink の下にある。launcher は読める場所を解いた道筋で決めるので、
-        # 試験のホームも解いた道筋にする（実物のホーム /Users/<名前> は symlink でない）
+        # テストのホームも解いた道筋にする（実物のホーム /Users/<名前> は symlink でない）
         self.home = self.home.resolve()
         self.state = self.home / "state"  # 記録の置き場がホームの下にあるとき（実物の既定 ~/.local/state/bb-writ）
         mine, other = self.home / "outs" / "mine", self.home / "outs" / "other"
@@ -4367,16 +4367,16 @@ launch.claude_reads = claude_reads
                 self.assertFalse(readable(other, reads))
 
     def writable_dir(self, parent: Path):
-        """parent の下の使い捨てのディレクトリ。書けない環境（読み取り専用の審査役の sandbox の中など）では、理由を出して試験を飛ばす。"""
+        """parent の下の使い捨てのディレクトリ。書けない環境（読み取り専用の審査役の sandbox の中など）では、理由を出してテストを飛ばす。"""
         try:
             return tempfile.TemporaryDirectory(dir=parent)
         except OSError as e:
-            if e.errno != errno.EROFS:  # 読み取り専用のファイルシステム（sandbox の中）だけ。ほかの失敗は試験の失敗にする
+            if e.errno != errno.EROFS:  # 読み取り専用のファイルシステム（sandbox の中）だけ。ほかの失敗はテストの失敗にする
                 raise
-            self.skipTest(f"{parent} に書けない環境（{e.strerror}）。Grok の読み取り専用の試験は /tmp の外の書ける場所が要る")
+            self.skipTest(f"{parent} に書けない環境（{e.strerror}）。Grok の読み取り専用のテストは /tmp の外の書ける場所が要る")
 
     def grok_target(self):
-        """Grok の read-only は /tmp に書けるので、読み取り専用の試験の対象は /tmp の外に置く（実物のホームの下。launcher が見るのは試験の一時のホーム）。"""
+        """Grok の read-only は /tmp に書けるので、読み取り専用のテストの対象は /tmp の外に置く（実物のホームの下。launcher が見るのはテストの一時のホーム）。"""
         d = self.writable_dir(Path.home())
         self.addCleanup(d.cleanup)
         (Path(d.name) / "a.txt").write_text("x\n")
@@ -5194,12 +5194,12 @@ launch.claude_reads = claude_reads
             time.sleep(0.02)
 
     def start_codex_launcher(self, name, env, extra=()):
-        """launcher を裏で起こす。試験は try/finally で release_fakes に渡す（片付けの前に止める）。"""
+        """launcher を裏で起こす。テストは try/finally で release_fakes に渡す（片付けの前に止める）。"""
         return subprocess.Popen([sys.executable, str(LAUNCH), "--host", "codex", "--cwd", str(self.cwd), "--prompt-file", str(self.prompt),
                                  "--out", str(self.state / name), *extra], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
 
     def release_fakes(self, *procs):
-        """待たせた偽の codex plugin を .go で終わらせ、起こした launcher を止める（試験が落ちた道でも、一時の置き場を消す前に）。
+        """待たせた偽の codex plugin を .go で終わらせ、起こした launcher を止める（テストが落ちた道でも、一時の置き場を消す前に）。
         add・一覧を待つ段の launcher は TERM でそのまま止まり、偽の codex plugin には伝わらないので、先に .go を置く。
         子を待つ段の launcher は、TERM を子に伝えて片付ける。"""
         Path(str(self.args_file) + ".go").touch()
@@ -5213,13 +5213,13 @@ launch.claude_reads = claude_reads
             except subprocess.TimeoutExpired:
                 p.kill()
                 p.communicate()
-            except ValueError:  # 試験が読み終えた
+            except ValueError:  # テストが読み終えた
                 pass
 
     def test_a_stale_codex_copy_from_this_launchers_local_marketplace_is_reinstalled_with_add_only(self):
         # remove は写しと設定を消し、入れ直すまでプラグインが無い状態を作る。add だけで写しは置き換わる。
         # 一覧も add も、親の環境の CODEX_HOME でなく、専用ログインに向ける
-        for mp, parent in (("bb-writ", None), ("mine", None), ("bb-writ", "試験のホームの .codex")):
+        for mp, parent in (("bb-writ", None), ("mine", None), ("bb-writ", "テストのホームの .codex")):
             with self.subTest(marketplace=mp, parent_codex_home=parent):
                 home = self.reset_codex_login()
                 self.stale_codex_copy(mp)
@@ -5265,7 +5265,7 @@ launch.claude_reads = claude_reads
         loop = Path(self.tmp.name) / "loop-a"
         loop.symlink_to(Path(self.tmp.name) / "loop-b")
         (Path(self.tmp.name) / "loop-b").symlink_to(loop)
-        cases = [  # (場面, 専用ログインの config.toml, 試験のホームの .codex/config.toml, 偽の一覧の動き, 理由に在る句)
+        cases = [  # (場面, 専用ログインの config.toml, テストのホームの .codex/config.toml, 偽の一覧の動き, 理由に在る句)
             ("config.toml が無い（一覧が空）", None, None, "", ["登録が無い"]),
             ("sourceType が git", self.local_marketplace(source_type="git"), None, "", ['sourceType = "git"', json.dumps(str(ROOT))]),
             ("source が別のディレクトリ", self.local_marketplace(source=self.cwd), None, "", ['sourceType = "local"', json.dumps(str(self.cwd))]),
@@ -5276,7 +5276,7 @@ launch.claude_reads = claude_reads
             ("source が symlink の輪", self.local_marketplace(source=loop), None, "", []),
             ("条件を満たすのは別の名前の項目", self.local_marketplace(source_type="git") + "\n" + self.local_marketplace("mine"), None, "", []),
             ("条件を満たすのは名前が前方一致する項目（bb-writ-dev）", self.local_marketplace("bb-writ-dev"), None, "", ["登録が無い"]),
-            ("条件を満たすのは試験のホームの .codex/config.toml", None, ok, "", ["登録が無い"]),
+            ("条件を満たすのはテストのホームの .codex/config.toml", None, ok, "", ["登録が無い"]),
             ("一覧が 1 で終わる", ok, None, "fail", [unread, "failed to load marketplace(s)"]),
             ("一覧が条件を満たす答えを出してから 1 で終わる", ok, None, "answer-fail", [unread, "終了コード 1"]),
             ("一覧が JSON でない", ok, None, "out:not json", [unread]),
@@ -5366,7 +5366,7 @@ launch.claude_reads = claude_reads
         home = self.reset_codex_login()
         self.stale_codex_copy()
         (home / "config.toml").write_text(self.local_marketplace())
-        env = self.launch_env(env_extra={"FAKE_ADD": "gap"})  # 偽の add は、写しが無い瞬間を、試験が .go を置くまで引き延ばす
+        env = self.launch_env(env_extra={"FAKE_ADD": "gap"})  # 偽の add は、写しが無い瞬間を、テストが .go を置くまで引き延ばす
         first = second = None
         try:
             first = self.start_codex_launcher("first", env)
@@ -5427,7 +5427,7 @@ launch.claude_reads = claude_reads
         self.assertEqual(len(self.plugin_changes()), 2, "2 つ目の launcher が入れ直していない")
 
     def test_a_reinstall_that_does_not_finish_is_stopped_at_the_limit(self):
-        # 一覧も add も、終わらなければ上限で止める（試験では 4 秒。上限は add の前の一覧にも掛かるので、偽の codex の起動が遅い機械でも
+        # 一覧も add も、終わらなければ上限で止める（テストでは 4 秒。上限は add の前の一覧にも掛かるので、偽の codex の起動が遅い機械でも
         # 一覧が先に止まらない長さにする）。launcher がそこで止まり続けない。止めた一覧がそれまでに出した答えは使わない
         unread = "登録を確かめられなかった"
         for name, fake, recorded, said in (("add が終わらない", {"FAKE_ADD": "hang"}, {"marketplace": "bb-writ", "exit": None}, None),
@@ -5477,7 +5477,7 @@ launch.claude_reads = claude_reads
                 self.assertIn("写しが無い", why)
                 self.assertIn("手で入れ直す: ", why)  # 手の案内（実行したことの句とは別に、もう 1 回コマンドが在る）
                 # 手のコマンドは専用ログインに向ける（CODEX_HOME が無いと、利用者の既定のログインに入れてしまう）。一時の置き場が symlink の
-                # 下でも、launcher が書く道筋と試験の home の綴りは違いうるので、解いて比べる
+                # 下でも、launcher が書く道筋とテストの home の綴りは違いうるので、解いて比べる
                 manual = why.split("手で入れ直す: ", 1)[-1]
                 self.assertTrue(manual.startswith("CODEX_HOME="), "手で入れ直すコマンドに CODEX_HOME が無い: " + manual)
                 given, command = manual[len("CODEX_HOME="):].split(" ", 1)
@@ -5538,7 +5538,7 @@ launch.claude_reads = claude_reads
 
     def test_no_reinstall_without_the_lock_on_the_codex_login(self):
         # 専用ログインのディレクトリの排他を取れない環境では、排他なしで比べる。違えば入れ直さずに、手のコマンドを出して止め、
-        # 同じなら子を起動する（開けないときも flock が失敗するときも、同じ 1 つの枝。試験が作れるのは開けないときだけ）
+        # 同じなら子を起動する（開けないときも flock が失敗するときも、同じ 1 つの枝。テストが作れるのは開けないときだけ）
         for name, stale in (("写しが古い", True), ("写しが同じ", False)):
             with self.subTest(name):
                 home = self.reset_codex_login()
@@ -5583,7 +5583,7 @@ launch.claude_reads = claude_reads
         out = self.state / 'existing'
         self.run_launch('codex', extra=['--out', str(out)])
         record = (out / 'record.json').read_text()
-        env = self.launch_env()  # 拒否が退行しても、本物の codex と専用ログインに届かない（偽の CLI・試験のホームと設定）
+        env = self.launch_env()  # 拒否が退行しても、本物の codex と専用ログインに届かない（偽の CLI・テストのホームと設定）
         p = subprocess.run([sys.executable, str(LAUNCH), '--host', 'codex', '--cwd', str(self.cwd),
                             '--prompt-file', str(self.prompt), '--out', str(out)],
                            env=env, capture_output=True, text=True)

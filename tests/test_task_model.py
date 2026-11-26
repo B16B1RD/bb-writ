@@ -8,8 +8,8 @@ renew が 3 で拒否された。直し（d7cb680）は、期限が切れて MAX
 延ばし、また子を待つ間に切れた後に使うと、task resume は期限の内かだけを見て担当を取り、task cleanup が作業場所を消す（実物でも再現した）。
 一覧が決めたことを、取る時に決め直していなかった。直しは、--take-over の無い task resume の claim_at が、一覧と同じ maybe_waiting で、
 取る時に拒否する（--take-over は、利用者にそのタスクの続きか、捨てることを頼まれたセッションが付ける）。
-道具は Python の標準機能だけの、明示状態の幅優先の全探索（依存が要らず、試験に置ける）。
-直しを戻した版をフラグで作り、それぞれが反例を出すことも試す。同じ直しを実物の work.py の写しに戻し、その不具合を見る試験が
+道具は Python の標準機能だけの、明示状態の幅優先の全探索（依存が要らず、テストに置ける）。
+直しを戻した版をフラグで作り、それぞれが反例を出すことも試す。同じ直しを実物の work.py の写しに戻し、その不具合を見るテストが
 落ちることは、tests/test_replay.py が確かめる（フラグと 1 対 1）。
 
 約束（破れたときの被害）:
@@ -45,7 +45,7 @@ renew が 3 で拒否された。直し（d7cb680）は、期限が切れて MAX
 - 持ち主が自分のタスクを task resume で取り直すこと、途中で止まった task cleanup の続き（task resume が受け持つ。形ごとの扱いは、
   playbook-parallel の「再開する」「片付ける」と、work.py の task_command の注釈）。
 
-実物との突き合わせ（2026-11-24、本物の git と work.py）: モデルの分岐は、tests/test_parallel.py の次の試験が実物で通る。一覧は、手放した・
+実物との突き合わせ（2026-11-24、本物の git と work.py）: モデルの分岐は、tests/test_parallel.py の次のテストが実物で通る。一覧は、手放した・
 切れて 24 時間を過ぎたタスクを出し、切れて間もないタスクを出さない（test_a_task_whose_owner_may_still_be_waiting_is_not_offered_for_closing・
 test_a_new_task_reports_the_tasks_nobody_closed）、生きた担当の task resume は 3（test_resume_keeps_uncommitted_changes_and_refuses_live_holder）、
 古い一覧からの task resume は、切れて間もない担当を取らず、切れて 24 時間を過ぎた担当を取って閉じる
@@ -64,7 +64,7 @@ import sys
 import unittest
 from collections import deque
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).resolve().parent)); import process_limit  # noqa: E402,F401  試験に上限を掛ける（直に走らせても）
+sys.path.insert(0, str(Path(__file__).resolve().parent)); import process_limit  # noqa: E402,F401  テストに上限を掛ける（直に走らせても）
 from model_tie import drift  # noqa: E402
 
 WORK = Path(__file__).resolve().parents[1] / "scripts" / "work.py"

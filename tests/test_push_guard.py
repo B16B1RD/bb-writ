@@ -1,6 +1,6 @@
 """入口を呼んだセッションで、関門（work.py op run）を通さない外へ出すコマンドを拒否する hook（scripts/push_guard.py）。
 
-見ないこと: 会話記録の符号化の指定（encoding・errors="replace"）。不正なバイトのある記録で入口の印を読めるかは試験で固定しない。
+見ないこと: 会話記録の符号化の指定（encoding・errors="replace"）。不正なバイトのある記録で入口の印を読めるかはテストで固定しない。
 git push の試すだけの指定は完全一致で比べる（短い引数をまとめた -nq・-nv の dry-run は、試すだけと読まずに止める。
 誤って止める所）。
 語に続く << の前で語を切ることは、崩れた入力でしか差が出ないので例を置かない。
@@ -14,7 +14,7 @@ import time
 import unittest
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent)); import process_limit  # noqa: E402,F401  試験に上限を掛ける（直に走らせても）
+sys.path.insert(0, str(Path(__file__).resolve().parent)); import process_limit  # noqa: E402,F401  テストに上限を掛ける（直に走らせても）
 
 ROOT = Path(__file__).resolve().parents[1]
 GUARD = ROOT / "scripts" / "push_guard.py"
@@ -465,7 +465,7 @@ class TestPushGuard(unittest.TestCase):
 
     def test_the_child_search_is_quick_with_many_sessions(self):
         # セッションの置き場が 300 個でも、時間の上限（5 秒。CI の遅い OS では、Python の起動だけで 1 秒に近づく）の中で終わる。
-        # 全部の子の会話記録を読む実装との違いは、この試験では見分けない
+        # 全部の子の会話記録を読む実装との違いは、このテストでは見分けない
         for i in range(300):
             self.parent(f"s{i:03}")
             self.child(f"s{i:03}", f"f{i:016x}", CONTINUED)

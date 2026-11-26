@@ -32,12 +32,12 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).resolve().parent)); import process_limit  # noqa: E402,F401  試験に上限を掛ける（直に走らせても）
+sys.path.insert(0, str(Path(__file__).resolve().parent)); import process_limit  # noqa: E402,F401  テストに上限を掛ける（直に走らせても）
 
 try:
     from hypothesis import given, settings, strategies as st, HealthCheck
     from hypothesis.configuration import set_hypothesis_home_dir
-except ImportError:  # 試験だけの依存。無ければ TestInputShapes だけ飛ばす（理由は unittest の出力に出る）
+except ImportError:  # テストだけの依存。無ければ TestInputShapes だけ飛ばす（理由は unittest の出力に出る）
     given = None
 else:
     # Hypothesis は、database=None でも置き場（局所のモジュールの定数のキャッシュ、文字の表など）を、import した時点の
@@ -154,7 +154,7 @@ if given is not None:
     WIDE = int(os.environ.get("BB_WRIT_PBT_EXAMPLES", "0"))
     SETTINGS = settings(max_examples=WIDE or 200, derandomize=not WIDE, database=None, deadline=None,
                         suppress_health_check=list(HealthCheck))
-    PROSE = ["試験を足す", "push しない", "x", "作業場所は main"]
+    PROSE = ["テストを足す", "push しない", "x", "作業場所は main"]
     CONTENT = st.one_of(
         st.sampled_from(PROSE),
         st.sampled_from(PROSE).map(lambda s: "  " + s),            # 字下げした続き
@@ -212,9 +212,9 @@ class TestInputShapes(unittest.TestCase):
             pass
     else:
         def test_running_the_properties_leaves_nothing_in_the_repository(self):
-            # Hypothesis は、sys.modules にある局所のモジュール（全試験では test_launch が読み込む launch.py から入る scripts/work.py）
+            # Hypothesis は、sys.modules にある局所のモジュール（全テストでは test_launch が読み込む launch.py から入る scripts/work.py）
             # の定数のキャッシュなどを、置き場に書く。task cleanup は無視されたファイルも残っていれば片付けを拒むので、
-            # リポジトリの写しで work.py を sys.modules に入れてから性質の試験を回し、次の 3 つを見る。
+            # リポジトリの写しで work.py を sys.modules に入れてからプロパティテストを回し、次の 3 つを見る。
             # 置き場に work.py の定数のキャッシュが書かれた（この場面を作れている。キャッシュの 1 行目は「# file: <読み込んだファイルのパス>」）、
             # 写しに何も増えない、子が終わると置き場が消える（置き場の片付けはプロセスの終わりなので、子は unittest.main の後に数える）。
             # 守らないもの（どれも落ちる側に倒れ、誤って通らない）: 子の時間切れと、子が終わり際に stdout へ書いたときは、
@@ -234,7 +234,7 @@ class TestInputShapes(unittest.TestCase):
                         "sys.exit(0 if r.wasSuccessful() and r.testsRun == 1 else 1)")
                 env = {k: v for k, v in os.environ.items() if k not in ("HYPOTHESIS_STORAGE_DIRECTORY", "BB_WRIT_PBT_EXAMPLES")}
                 run = subprocess.run([sys.executable, "-B", "-c", code], cwd=copy, env=env, capture_output=True, text=True, timeout=300)
-                self.assertEqual(run.returncode, 0, "子の性質の試験が落ちたか、回ったのが 1 件でなかった:\n" + run.stdout[-500:] + run.stderr[-2000:])
+                self.assertEqual(run.returncode, 0, "子のプロパティテストが落ちたか、回ったのが 1 件でなかった:\n" + run.stdout[-500:] + run.stderr[-2000:])
                 home, cached = run.stdout.split("\n")[-3:-1]
                 self.assertGreater(int(cached), 0, f"置き場 {home} に scripts/work.py の定数のキャッシュが書かれず、確かめる場面を作れていない"
                                    "（一時ディレクトリのパスに test・tests の段があると、Hypothesis はそこのモジュールを局所と見なさない）")

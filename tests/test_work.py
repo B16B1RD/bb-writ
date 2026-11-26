@@ -13,27 +13,27 @@ import textwrap
 import time
 import unittest
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).resolve().parent)); import process_limit  # noqa: E402,F401  試験に上限を掛ける（直に走らせても）
+sys.path.insert(0, str(Path(__file__).resolve().parent)); import process_limit  # noqa: E402,F401  テストに上限を掛ける（直に走らせても）
 
 WORK = Path(__file__).resolve().parents[1] / "scripts" / "work.py"
 
 
 
 def with_risk(t, args):
-    """--reviewed を渡す呼び出しに、push・pr に要る危険度の宣言（この試験の外の約束）を足す。宣言そのものを試す試験は auto_risk を偽にする。"""
+    """--reviewed を渡す呼び出しに、push・pr に要る危険度の宣言（このテストの外の約束）を足す。宣言そのものを試すテストは auto_risk を偽にする。"""
     if "--reviewed" not in args or "--risk" in args or not getattr(t, "auto_risk", True):
         return args
     i = args.index("--") if "--" in args else len(args)
-    return (*args[:i], "--risk", "低:試験の外", *args[i:])
+    return (*args[:i], "--risk", "低:テストの外", *args[i:])
 
 
-FILLED_NOTE = ("# 作業の記録\n\n- 目的: 試験の外\n- 制約: 試験の外\n- できたと分かる確かめ方（述語）: 試験の外\n"
-               "- 指摘の扱い（審査の指摘ごとに、対応する・記録のみ・退ける と理由を、直す前に）: 試験の外\n")
+FILLED_NOTE = ("# 作業の記録\n\n- 目的: テストの外\n- 制約: テストの外\n- できたと分かる確かめ方（述語）: テストの外\n"
+               "- 指摘の扱い（審査の指摘ごとに、対応する・記録のみ・退ける と理由を、直す前に）: テストの外\n")
 
 
 def decl(key):
-    """push・pr に要る、届ける前の審査の宣言（この試験の外の約束）。"""
-    return ("--reviewed", "none:試験の外", "--risk", "低:試験の外") if key.split(":")[0] in ("push", "pr") else ()
+    """push・pr に要る、届ける前の審査の宣言（このテストの外の約束）。"""
+    return ("--reviewed", "none:テストの外", "--risk", "低:テストの外") if key.split(":")[0] in ("push", "pr") else ()
 
 
 class TestWork(unittest.TestCase):
@@ -42,7 +42,7 @@ class TestWork(unittest.TestCase):
         self.dir = Path(self.tmp.name) / "wt"
         self.dir.mkdir()
         # 利用者の全体の Git 設定（core.hooksPath・commit.gpgsign など）を読まない。
-        # 切り離しそのものを確かめる試験は無い（外しても、全体の設定が試験の git の動きを変えない環境では落ちない）
+        # 切り離しそのものを確かめるテストは無い（外しても、全体の設定がテストの git の動きを変えない環境では落ちない）
         self.env = {**os.environ, "BB_WRIT_STATE_DIR": str(Path(self.tmp.name) / "state"), "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}
 
     def tearDown(self):
@@ -431,7 +431,7 @@ elif sys.argv[1:3] == ["run", "list"]:  # Actions の実行。FAKE_GH_RUNS は F
     a = sys.argv[3:]
     mine = "--commit" in a and a[a.index("--commit") + 1] == os.environ.get("FAKE_GH_RUNS_COMMIT") and "-R" in a and a[a.index("-R") + 1] == "B16B1RD/demo"
     other = '[{"name": "old", "status": "completed", "conclusion": "failure", "url": "u"}]'  # 別の commit の失敗した実行
-    print(os.environ.get("FAKE_GH_RUNS", "[]") if mine else other if os.environ.get("FAKE_GH_RUNS_COMMIT") else "[]")  # 指定の無い試験は実行なし
+    print(os.environ.get("FAKE_GH_RUNS", "[]") if mine else other if os.environ.get("FAKE_GH_RUNS_COMMIT") else "[]")  # 指定の無いテストは実行なし
 """
 
 FAKE_SSH = """#!/usr/bin/env python3
@@ -475,7 +475,7 @@ class TestAccountCheck(unittest.TestCase):
         g("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "init", cwd=self.repo)
         g("remote", "add", "origin", "https://github.com/B16B1RD/demo.git", cwd=self.repo)
         g("worktree", "add", "-q", "-b", "feat", str(self.wt), cwd=self.repo)
-        # op run を w() を通さずに起こす試験のため、最初の HEAD を対象にした審査役の記録を置く（w() は渡した commit の分を置く）
+        # op run を w() を通さずに起こすテストのため、最初の HEAD を対象にした審査役の記録を置く（w() は渡した commit の分を置く）
         TestAccountCheck.review_record(self, g("rev-parse", "HEAD", cwd=self.wt).stdout.decode().strip())
         TestAccountCheck.review_record(self, g("rev-parse", "HEAD", cwd=self.wt).stdout.decode().strip(), audit=True)  # 監査役も
 
@@ -484,9 +484,9 @@ class TestAccountCheck(unittest.TestCase):
 
     def w(self, *args):
         args = with_risk(self, args)
-        if "--reviewed" in args and getattr(self, "launcher_reviews", True):  # 審査役の記録との照合を試験しない試験では、記録を先に置く
+        if "--reviewed" in args and getattr(self, "launcher_reviews", True):  # 審査役の記録との照合をテストしないテストでは、記録を先に置く
             TestAccountCheck.review_record(self, args[args.index("--reviewed") + 1])
-        if "--reviewed" in args and getattr(self, "launcher_audits", True):  # 監査役の記録との照合を試験しない試験では、HEAD の監査役の記録を先に置く
+        if "--reviewed" in args and getattr(self, "launcher_audits", True):  # 監査役の記録との照合をテストしないテストでは、HEAD の監査役の記録を先に置く
             TestAccountCheck.review_record(self, "HEAD", audit=True)
         p = subprocess.run([sys.executable, str(WORK), *args], env=self.env, capture_output=True, text=True, errors="replace",
                            cwd=self.tmp.name, timeout=300)  # 相対の out を解く場所を決める。止まる退行は止まらずに落とす
@@ -512,7 +512,7 @@ class TestAccountCheck(unittest.TestCase):
 
     def claim(self):
         r = self.w("claim", "--dir", str(self.wt), "--holder", "A")[1]
-        if getattr(self, "fill_note", True):  # push・pr に要る記録の必須の欄（この試験の外の約束）。記録そのものを試す試験は偽にする
+        if getattr(self, "fill_note", True):  # push・pr に要る記録の必須の欄（このテストの外の約束）。記録そのものを試すテストは偽にする
             Path(r["note"]["path"]).write_text(FILLED_NOTE, encoding="utf-8")
         return r["token"]
 
@@ -537,7 +537,7 @@ class TestAccountCheck(unittest.TestCase):
     def test_push_from_the_checkout_is_allowed_and_records_the_account(self):
         tok = self.claim()
         head = subprocess.run(["git", "rev-parse", "HEAD"], env=self.env, cwd=self.wt, check=True, capture_output=True, text=True).stdout.strip()
-        rc, r = self.begin(tok, "push:feat", "--from", str(self.repo), "--verified", head, "--reviewed", "none:試験の外")
+        rc, r = self.begin(tok, "push:feat", "--from", str(self.repo), "--verified", head, "--reviewed", "none:テストの外")
         self.assertEqual((rc, r["op"]["account"]), (0, "B16B1RD"))
 
     def test_checkout_account_without_write_is_refused_for_push_merge_release(self):
@@ -573,7 +573,7 @@ class TestAccountCheck(unittest.TestCase):
         self.env["FAKE_GH_UPSTREAM"] = "READ"
         tok = self.claim()
         head = subprocess.run(["git", "rev-parse", "HEAD"], env=self.env, cwd=self.wt, check=True, capture_output=True, text=True).stdout.strip()
-        rc, r = self.begin(tok, "push:feat", "--from", str(self.repo), "--verified", head, "--reviewed", "none:試験の外")
+        rc, r = self.begin(tok, "push:feat", "--from", str(self.repo), "--verified", head, "--reviewed", "none:テストの外")
         self.assertEqual((rc, r["op"]["account"]), (0, "B16B1RD"))
         self.assertEqual(self.begin(tok, "comment:issue-1", "--from", str(self.repo))[0], 0)
         for key in ("merge:pr-1", "release:v1"):
@@ -586,7 +586,7 @@ class TestAccountCheck(unittest.TestCase):
         self.env["FAKE_GH_UPSTREAM"] = "NONE"
         tok = self.claim()
         head = subprocess.run(["git", "rev-parse", "HEAD"], env=self.env, cwd=self.wt, check=True, capture_output=True, text=True).stdout.strip()
-        self.assertEqual(self.begin(tok, "pr:feat", "--from", str(self.repo), "--verified", head, "--reviewed", "none:試験の外")[0], 5)
+        self.assertEqual(self.begin(tok, "pr:feat", "--from", str(self.repo), "--verified", head, "--reviewed", "none:テストの外")[0], 5)
 
     def test_a_release_waits_for_the_ci_of_the_commit_to_pass(self):
         """push の直後に Release を出し、macOS の job が時間切れで打ち切られた（cancelled）のを 3 回見なかった。"""
@@ -614,7 +614,7 @@ class TestAccountCheck(unittest.TestCase):
                     self.assertIn(word, r["reason"])
                     self.assertNotIn("op", r)  # 記録を残さない（通ったら同じ鍵で出し直せる）
         self.env["FAKE_GH_RUNS"] = json.dumps([run("test", "completed", "failure")])
-        rc, r = self.begin(tok, "push:feat", "--from", str(self.repo), "--verified", head, "--reviewed", "none:試験の外")
+        rc, r = self.begin(tok, "push:feat", "--from", str(self.repo), "--verified", head, "--reviewed", "none:テストの外")
         self.assertEqual(rc, 0, r)  # push は CI を起こす側なので止めない
 
     def test_push_checks_the_push_url_not_the_fetch_url(self):
@@ -623,7 +623,7 @@ class TestAccountCheck(unittest.TestCase):
         subprocess.run(["git", "remote", "set-url", "--push", "origin", "https://github.com/B16B1RD/demo.git"], env=self.env, cwd=self.repo, check=True)
         tok = self.claim()
         head = subprocess.run(["git", "rev-parse", "HEAD"], env=self.env, cwd=self.wt, check=True, capture_output=True, text=True).stdout.strip()
-        rc, r = self.begin(tok, "push:feat", "--from", str(self.repo), "--verified", head, "--reviewed", "none:試験の外")
+        rc, r = self.begin(tok, "push:feat", "--from", str(self.repo), "--verified", head, "--reviewed", "none:テストの外")
         self.assertEqual((rc, r["op"]["account"]), (0, "B16B1RD"))
 
     def test_external_op_needs_from(self):
@@ -645,7 +645,7 @@ class TestAccountCheck(unittest.TestCase):
         head = subprocess.run(["git", "rev-parse", "HEAD"], env=self.env, cwd=self.wt, check=True, capture_output=True, text=True).stdout.strip()
         for i, url in enumerate(("git@github.com-work:B16B1RD/demo.git", "ssh://git@gh443/B16B1RD/demo.git")):  # 443 番の ssh.github.com を指す別名も
             subprocess.run(["git", "remote", "set-url", "origin", url], env=self.env, cwd=self.repo, check=True)
-            rc, r = self.begin(tok, f"push:feat@{i}", "--from", str(self.repo), "--verified", head, "--reviewed", "none:試験の外")
+            rc, r = self.begin(tok, f"push:feat@{i}", "--from", str(self.repo), "--verified", head, "--reviewed", "none:テストの外")
             self.assertEqual((rc, r["op"]["account"]), (0, "B16B1RD"), url)
 
     def test_every_github_url_form_is_checked_against_the_repository(self):
@@ -763,7 +763,7 @@ class TestAccountCheck(unittest.TestCase):
         tok = self.claim()
         for i, (perm, code) in enumerate((("MAINTAIN", 0), ("TRIAGE", 5))):
             self.env["FAKE_GH_MAP"] = f"{Path(self.tmp.name).resolve() / 'personal'}=B16B1RD:{perm}"
-            self.assertEqual(self.begin(tok, f"push:feat@{i}", "--from", str(self.repo), "--verified", self.head_of_wt(), "--reviewed", "none:試験の外")[0], code, perm)
+            self.assertEqual(self.begin(tok, f"push:feat@{i}", "--from", str(self.repo), "--verified", self.head_of_wt(), "--reviewed", "none:テストの外")[0], code, perm)
 
     def test_other_operations_follow_the_remotes_gh_can_choose(self):
         """push 以外は gh の既定のリポジトリに出る。origin が GitHub でなくても、GitHub の remote があれば確かめる。"""
@@ -816,15 +816,15 @@ class TestAccountCheck(unittest.TestCase):
         tok = self.claim()
         for i, (key, code) in enumerate((("B16B1RD", 0), ("b16b1rd", 0), ("work-account", 5), ("B16B1RD/demo", 5), ("", 5))):  # deploy key・鍵なし
             self.env["FAKE_SSH_KEY"] = key
-            rc, r = self.begin(tok, f"push:feat@{i}", "--from", str(self.repo), "--verified", self.head_of_wt(), "--reviewed", "none:試験の外")
+            rc, r = self.begin(tok, f"push:feat@{i}", "--from", str(self.repo), "--verified", self.head_of_wt(), "--reviewed", "none:テストの外")
             self.assertEqual(rc, code, key)
             if code:
                 self.assertIn("鍵のアカウント" + (" " + key if key else "が分からない"), r["reason"], key)
                 self.assertIn("Permission denied" if not key else "違う", r["reason"], key)
         self.env["FAKE_SSH_KEY"], self.env["FAKE_SSH_KEYS"] = "work-account", "work=B16B1RD"  # 鍵は別名の Host ブロックで決まる
-        self.assertEqual(self.begin(tok, "push:feat@alias-key", "--from", str(self.repo), "--verified", self.head_of_wt(), "--reviewed", "none:試験の外")[0], 0)
+        self.assertEqual(self.begin(tok, "push:feat@alias-key", "--from", str(self.repo), "--verified", self.head_of_wt(), "--reviewed", "none:テストの外")[0], 0)
         self.set_origin("origin", "https://github.com/B16B1RD/demo.git")  # https の push は鍵を使わない
-        self.assertEqual(self.begin(tok, "push:feat@https", "--from", str(self.repo), "--verified", self.head_of_wt(), "--reviewed", "none:試験の外")[0], 0)
+        self.assertEqual(self.begin(tok, "push:feat@https", "--from", str(self.repo), "--verified", self.head_of_wt(), "--reviewed", "none:テストの外")[0], 0)
 
     def test_git_ssh_command_and_core_ssh_command_are_used(self):
         """git が push に使う ssh（GIT_SSH_COMMAND > core.sshCommand > GIT_SSH）で解決する。既定の ssh では別名が分からない。"""
@@ -836,20 +836,20 @@ class TestAccountCheck(unittest.TestCase):
         tok = self.claim()
         self.assertIn("skipped", self.w("check", "--dir", str(self.wt), "--from", str(self.repo))[1])
         subprocess.run(["git", "config", "core.sshCommand", f"{wrap} -o X=y"], env=self.env, cwd=self.repo, check=True)
-        rc, r = self.begin(tok, "push:feat@core", "--from", str(self.repo), "--verified", self.head_of_wt(), "--reviewed", "none:試験の外")
+        rc, r = self.begin(tok, "push:feat@core", "--from", str(self.repo), "--verified", self.head_of_wt(), "--reviewed", "none:テストの外")
         self.assertEqual((rc, r["op"]["account"]), (0, "B16B1RD"))  # 飛ばした場合は account が無い
         subprocess.run(["git", "config", "core.sshCommand", str(self.bin / "ssh")], env=self.env, cwd=self.repo, check=True)
         self.env["GIT_SSH_COMMAND"] = str(wrap)  # 環境変数が設定より優先
-        rc, r = self.begin(tok, "push:feat@env", "--from", str(self.repo), "--verified", self.head_of_wt(), "--reviewed", "none:試験の外")
+        rc, r = self.begin(tok, "push:feat@env", "--from", str(self.repo), "--verified", self.head_of_wt(), "--reviewed", "none:テストの外")
         self.assertEqual((rc, r["op"]["account"]), (0, "B16B1RD"))  # 飛ばした場合は account が無い
         del self.env["GIT_SSH_COMMAND"]
         subprocess.run(["git", "config", "core.sshCommand", str(wrap)], env=self.env, cwd=self.repo, check=True)
         self.env["GIT_SSH"] = str(self.bin / "ssh")  # 設定が GIT_SSH より優先
-        rc, r = self.begin(tok, "push:feat@core-over-git-ssh", "--from", str(self.repo), "--verified", self.head_of_wt(), "--reviewed", "none:試験の外")
+        rc, r = self.begin(tok, "push:feat@core-over-git-ssh", "--from", str(self.repo), "--verified", self.head_of_wt(), "--reviewed", "none:テストの外")
         self.assertEqual((rc, r["op"]["account"]), (0, "B16B1RD"))
         subprocess.run(["git", "config", "--unset", "core.sshCommand"], env=self.env, cwd=self.repo, check=True)
         self.env["GIT_SSH"] = str(wrap)
-        rc, r = self.begin(tok, "push:feat@git-ssh", "--from", str(self.repo), "--verified", self.head_of_wt(), "--reviewed", "none:試験の外")
+        rc, r = self.begin(tok, "push:feat@git-ssh", "--from", str(self.repo), "--verified", self.head_of_wt(), "--reviewed", "none:テストの外")
         self.assertEqual((rc, r["op"]["account"]), (0, "B16B1RD"))  # 飛ばした場合は account が無い
 
     def test_internal_ops_need_no_account(self):
@@ -899,7 +899,7 @@ class TestVerifiedCommit(unittest.TestCase):
         verified = self.head()
         subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "after"], env=self.env, cwd=self.wt, check=True)
         tok = self.claim()
-        rc, r = self.begin(tok, "pr:feat", "--from", str(self.repo), "--verified", verified, "--reviewed", "none:試験の外")
+        rc, r = self.begin(tok, "pr:feat", "--from", str(self.repo), "--verified", verified, "--reviewed", "none:テストの外")
         self.assertEqual(rc, 6)
         self.assertIn(self.head(), r["reason"])
         self.assertEqual(self.w("op", "pending", "--dir", str(self.wt))[1]["pending_ops"], [])  # 記録されない
@@ -982,7 +982,7 @@ class TestReviewedCommit(unittest.TestCase):
         self.review_record(self.head(), record={"interrogate": "true"}, interrogate=True)
         self.assertEqual(self.publish(tok, "push:feat@1", "--reviewed", self.head(), "--risk", "中:普通のコード")[0], 6)
         self.assertEqual(self.ops_file(), before)
-        self.assertEqual(self.publish(tok, "push:feat@1", "--reviewed", self.head(), "--risk", "低:試験だけ")[0], 0)  # 低は (5) の子で足りる
+        self.assertEqual(self.publish(tok, "push:feat@1", "--reviewed", self.head(), "--risk", "低:テストだけ")[0], 0)  # 低は (5) の子で足りる
         self.review_record(self.head(), interrogate=True)
         self.assertEqual(self.publish(tok, "pr:feat", "--reviewed", self.head(), "--risk", "中:普通のコード")[0], 0)
         self.commit("src/fix.py")  # 前の commit の審査役は、新しい commit の審査に数えない
@@ -1092,7 +1092,7 @@ class TestReviewedCommit(unittest.TestCase):
 
     def test_push_and_pr_of_a_commit_after_the_review_are_refused(self):
         reviewed = self.head()
-        self.commit("docs.md")  # 試験に触れない変更でも、審査の後に変えたら出せない
+        self.commit("docs.md")  # テストに触れない変更でも、審査の後に変えたら出せない
         tok = self.claim()
         before = self.ops_file()
         for key in ("push:feat@1", "pr:feat"):
@@ -1103,7 +1103,7 @@ class TestReviewedCommit(unittest.TestCase):
         self.assertEqual(self.ops_file(), before)  # 拒否は何も記録しない
 
     def test_a_commit_after_the_review_goes_out_when_the_change_since_is_declared_low(self):
-        # 中の変更で、審査を通した後の文と試験だけの直しのたびに --interrogate の審査役を HEAD で立て直し、14 回続いた（#34）。
+        # 中の変更で、審査を通した後の文とテストだけの直しのたびに --interrogate の審査役を HEAD で立て直し、14 回続いた（#34）。
         # 審査を通した祖先と、そこから HEAD までの差分の危険度の宣言で出す。差分の中身（文だけか）は見ない（宣言は監査役が確かめる）
         self.auto_risk = self.launcher_reviews = self.launcher_audits = False
         tok = self.claim()
@@ -1121,7 +1121,7 @@ class TestReviewedCommit(unittest.TestCase):
             for delta in ("低", "低: ", "low:文だけ", "低 文だけ"):
                 rc, r = self.publish(tok, key, "--reviewed", reviewed, "--delta", delta, "--risk", "中:普通のコード")
                 self.assertEqual((rc, "--delta" in r["reason"]), (2, True), (key, delta))
-            rc, r = self.publish(tok, key, "--reviewed", reviewed, "--delta", "低:文と試験だけ", "--risk", "中:普通のコード")
+            rc, r = self.publish(tok, key, "--reviewed", reviewed, "--delta", "低:文とテストだけ", "--risk", "中:普通のコード")
             self.assertEqual((rc, "監査役" in r["reason"]), (6, True), key)  # HEAD の監査役は、宣言があっても要る
         self.review_record(self.head(), audit=True)
         rc, r = self.publish(tok, "push:feat@1", "--reviewed", "none:文書だけ", "--delta", "低:文だけ", "--risk", "低:文書だけ")
@@ -1130,9 +1130,9 @@ class TestReviewedCommit(unittest.TestCase):
         rc, r = self.publish(tok, "pr:feat", "--reviewed", self.head(), "--delta", "低:文だけ", "--risk", "中:普通のコード")
         self.assertEqual((rc, "--delta" in r["reason"]), (2, True))  # HEAD そのものの審査に、差分の宣言は要らない
         self.assertEqual(self.ops_file(), before)  # どの拒否も何も記録しない
-        self.assertEqual(self.publish(tok, "push:feat@1", "--reviewed", reviewed, "--delta", "低:文と試験だけ", "--risk", "中:普通のコード")[0], 0)
+        self.assertEqual(self.publish(tok, "push:feat@1", "--reviewed", reviewed, "--delta", "低:文とテストだけ", "--risk", "中:普通のコード")[0], 0)
         rec = json.loads(self.ops_file().decode().splitlines()[-1])
-        self.assertEqual((rec["reviewed"], rec["delta"], rec["risk"]), (reviewed, "低: 文と試験だけ", "中: 普通のコード"))
+        self.assertEqual((rec["reviewed"], rec["delta"], rec["risk"]), (reviewed, "低: 文とテストだけ", "中: 普通のコード"))
         marker = Path(self.tmp.name) / "pushed"  # op run も同じ宣言で通り、中なら走らない
         run = lambda key, delta: self.w("op", "run", "--dir", str(self.wt), "--token", tok, "--key", key, "--what", "x", "--from", str(self.repo),
                                         "--verified", self.head(), "--reviewed", reviewed, "--delta", delta, "--risk", "中:普通のコード",
@@ -1429,13 +1429,13 @@ TRIAGE_LINE = "- 指摘の扱い（審査の指摘ごとに、対応する・記
 
 
 class TestNotRunDeclaration(unittest.TestCase):
-    """子が sandbox のせいで対象の試験・検査を実行できずに not-run で返ったとき、作業者が --not-run <理由> で宣言すれば、
-    その記録（not-run で、実行の欄に no と書いたもの）を push・pr の審査役・監査役に数える（#39。headless Chrome の試験では、
-    子を何回立てても ok の記録ができず、作業者が関門の外で出した）。宣言の真偽と、親が試験を実行したかは見ない（監査役が判定する）。"""
+    """子が sandbox のせいで対象のテスト・検査を実行できずに not-run で返ったとき、作業者が --not-run <理由> で宣言すれば、
+    その記録（not-run で、実行の欄に no と書いたもの）を push・pr の審査役・監査役に数える（#39。headless Chrome のテストでは、
+    子を何回立てても ok の記録ができず、作業者が関門の外で出した）。宣言の真偽と、親がテストを実行したかは見ない（監査役が判定する）。"""
     setUp, tearDown, w, claim, head = TestAccountCheck.setUp, TestAccountCheck.tearDown, TestAccountCheck.w, TestAccountCheck.claim, TestVerifiedCommit.head
     review_record, commit, publish, ops_file = TestAccountCheck.review_record, TestReviewedCommit.commit, TestReviewedCommit.publish, TestReviewedCommit.ops_file
     begin = TestAccountCheck.begin
-    launcher_reviews = launcher_audits = False  # 記録はこの試験が置く
+    launcher_reviews = launcher_audits = False  # 記録はこのテストが置く
     WHY = "headless Chrome が子の sandbox で起動しない（終了コード 134）"
 
     def could_not_run(self, commit, **over):
@@ -1609,7 +1609,7 @@ class TestPremiseAfterRounds(unittest.TestCase):
     push・pr は、記録の仕組みの要否の欄が空なら拒否する。審査の周ごとに仕組みへ直しを足し、仕組みが目的に要るかを誰も問わないまま
     周が止まらなかった。照らすのは欄が空かどうかだけで、比べた値の真偽は見ない。拒否は note.empty の欄の名前で見る。"""
     setUp, tearDown, w, review_record = TestAccountCheck.setUp, TestAccountCheck.tearDown, TestAccountCheck.w, TestAccountCheck.review_record
-    launcher_reviews = False  # 審査役の記録は、この試験が置く
+    launcher_reviews = False  # 審査役の記録は、このテストが置く
 
     def start(self):
         r = self.w("task", "start", "--dir", str(self.repo), "--holder", "A")[1]
@@ -1732,7 +1732,7 @@ class TestPremiseAfterRounds(unittest.TestCase):
         self.assertEqual(self.delta("push:feat@a", heads[2], premise="比べた")[0], 0)
 
     def test_rounds_count_children_that_could_not_run_only_with_the_declaration(self):
-        # ブラウザで試験するリポジトリでは審査がすべて not-run になり、数えないと 3 周の関門が働かない（#39）。宣言の無い push は今のとおり
+        # ブラウザでテストするリポジトリでは審査がすべて not-run になり、数えないと 3 周の関門が働かない（#39）。宣言の無い push は今のとおり
         self.start()
         heads = [self.commit(f"a{i}") for i in range(3)]
         for h in heads[:2]:
@@ -2410,7 +2410,7 @@ class TestOpRun(unittest.TestCase):
                         "for i in range(2000): print('late output', i)\n"  # 親が止められた後に書く（パイプなら SIGPIPE で死んだ）
                         f"open({str(done)!r}, 'w')\nsys.exit(3)")
                 p = subprocess.Popen([sys.executable, str(WORK), "op", "run", "--dir", str(self.wt), "--token", tok, "--key", key,
-                                      "--what", "x", "--from", str(self.repo), "--verified", self.head(), "--reviewed", self.head(), "--risk", "低:試験の外",
+                                      "--what", "x", "--from", str(self.repo), "--verified", self.head(), "--reviewed", self.head(), "--risk", "低:テストの外",
                                       *self.script(body)], env=self.env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 for _ in range(200):
                     if [o for o in self.pending() if o == key] and self.w("op", "pending", "--dir", str(self.wt))[1]["pending_ops"][0].get("running"):
@@ -2468,9 +2468,9 @@ class TestOpRun(unittest.TestCase):
 
     def start_run(self, tok, key, body, env=None, **kw):
         p = subprocess.Popen([sys.executable, str(WORK), "op", "run", "--dir", str(self.wt), "--token", tok, "--key", key,
-                              "--what", "x", "--from", str(self.repo), "--verified", self.head(), "--reviewed", self.head(), "--risk", "低:試験の外",
+                              "--what", "x", "--from", str(self.repo), "--verified", self.head(), "--reviewed", self.head(), "--risk", "低:テストの外",
                               *self.script(body)], env={**self.env, **(env or {})}, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, **kw)
-        self.addCleanup(p.stdout.close)  # 読み切らない試験もある。閉じないと ResourceWarning が出る
+        self.addCleanup(p.stdout.close)  # 読み切らないテストもある。閉じないと ResourceWarning が出る
         return p
 
     def wait_running(self, key):
@@ -2832,7 +2832,7 @@ class TestOpRun(unittest.TestCase):
         self.assertFalse(log.is_file())
 
     def test_the_gate_gives_up_after_a_while(self):
-        # 試験だけが使う止まり所は、開かれなければ 60 秒（偽の時計）で先へ進む。60 秒を待たずに確かめるので、関数と時計を名前で差し替える
+        # テストだけが使う止まり所は、開かれなければ 60 秒（偽の時計）で先へ進む。60 秒を待たずに確かめるので、関数と時計を名前で差し替える
         # （gate・time の名前を変えたら、ここも直す）。無い場所・書けない場所では待たないことは
         # test_a_gate_place_that_is_missing_or_unwritable_does_not_hold_op_run が op run で見る
         work = self.work_module()
@@ -2847,7 +2847,7 @@ class TestOpRun(unittest.TestCase):
         self.assertLessEqual(next(clock), 80)  # 60 秒を少し過ぎたところで諦めた
 
     def test_a_gate_place_that_is_missing_or_unwritable_does_not_hold_op_run(self):
-        """試験だけが使う止まり所の環境変数が、無い場所か書けない場所を指していても、op run は止まり所で待たずに終わる（待つと 1 か所 60 秒）。"""
+        """テストだけが使う止まり所の環境変数が、無い場所か書けない場所を指していても、op run は止まり所で待たずに終わる（待つと 1 か所 60 秒）。"""
         tok = self.claim()
         gate = Path(self.tmp.name) / "gate9"
         gate.mkdir()
@@ -2885,7 +2885,7 @@ class TestOpRun(unittest.TestCase):
         """表示の途中で op run が止められても、記録できた出力の全体を残さない。"""
         tok = self.claim()
         p = subprocess.Popen([sys.executable, str(WORK), "op", "run", "--dir", str(self.wt), "--token", tok, "--key", "push:feat@1",
-                              "--what", "x", "--from", str(self.repo), "--verified", self.head(), "--reviewed", self.head(), "--risk", "低:試験の外",
+                              "--what", "x", "--from", str(self.repo), "--verified", self.head(), "--reviewed", self.head(), "--risk", "低:テストの外",
                               *self.script("print('SECRET' * 2_000_000)")], env=self.env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
         self.addCleanup(p.stderr.close)
         p.stderr.read(1024)  # 表示が始まった
@@ -2985,7 +2985,7 @@ class TestOpRun(unittest.TestCase):
 
     def test_a_lock_file_that_vanishes_while_checking_is_skipped(self):
         """ロックを並べた後、開く前に監督役が消したロックは、動いているとみなさない（op run を止めない）。消える時機は、work.py のプロセスの
-        os.open が、試験の置いたロックを開くときに作る。"""
+        os.open が、テストの置いたロックを開くときに作る。"""
         tok = self.claim()
         lock = self.lease_file().parent / "running-x.lock"
         lock.write_text("push:x")
@@ -3004,7 +3004,7 @@ class TestOpRun(unittest.TestCase):
                 os.open = _vanish
         """))
         p = subprocess.run([sys.executable, str(WORK), "op", "run", "--dir", str(self.wt), "--token", tok, "--key", "pr:feat", "--what", "x",
-                            "--from", str(self.repo), "--verified", self.head(), "--reviewed", "none:x", "--risk", "低:試験の外",
+                            "--from", str(self.repo), "--verified", self.head(), "--reviewed", "none:x", "--risk", "低:テストの外",
                             *self.script("print(1)")], env={**self.env, "PYTHONPATH": str(site)}, capture_output=True, text=True)
         self.assertTrue(Path(str(lock) + ".tried").exists(), "消える場面を作れなかった")
         self.assertEqual(p.returncode, 0, p.stdout + p.stderr[-500:])
@@ -3042,7 +3042,7 @@ class TestOpRun(unittest.TestCase):
         for name in ("after-begin", "relay", "relay-told", "before-check", "before-start", "before-done"):
             (gate / name).write_text("")
         p = subprocess.Popen([sys.executable, str(WORK), "op", "run", "--dir", str(self.wt), "--token", tok, "--key", "push:feat@1",
-                              "--what", "x", "--from", str(self.repo), "--verified", self.head(), "--reviewed", self.head(), "--risk", "低:試験の外",
+                              "--what", "x", "--from", str(self.repo), "--verified", self.head(), "--reviewed", self.head(), "--risk", "低:テストの外",
                               *self.script("print('SECRET')")], env={**self.env, "BB_WRIT_SUPERVISE_GATE": str(gate)},
                              stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
         self.wait_file(gate / "at-before-print")
@@ -3171,7 +3171,7 @@ class TestOpRun(unittest.TestCase):
         for name in ("after-begin", "relay", "relay-told", "before-check", "before-start", "before-done"):
             (gate / name).write_text("")
         p = subprocess.Popen([sys.executable, str(WORK), "op", "run", "--dir", str(self.wt), "--token", tok, "--key", "push:feat@1",
-                              "--what", "x", "--from", str(self.repo), "--verified", self.head(), "--reviewed", self.head(), "--risk", "低:試験の外",
+                              "--what", "x", "--from", str(self.repo), "--verified", self.head(), "--reviewed", self.head(), "--risk", "低:テストの外",
                               *self.script("raise SystemExit(7)")], env={**self.env, "BB_WRIT_SUPERVISE_GATE": str(gate)},
                              stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
         self.wait_file(gate / "at-before-print")
@@ -3182,7 +3182,7 @@ class TestOpRun(unittest.TestCase):
             (gate / name).unlink(missing_ok=True)
             (gate / f"at-{name}").unlink(missing_ok=True)
         p = subprocess.Popen([sys.executable, str(WORK), "op", "run", "--dir", str(self.wt), "--token", tok, "--key", "push:feat@2",
-                              "--what", "x", "--from", str(self.repo), "--verified", self.head(), "--reviewed", self.head(), "--risk", "低:試験の外",
+                              "--what", "x", "--from", str(self.repo), "--verified", self.head(), "--reviewed", self.head(), "--risk", "低:テストの外",
                               *self.script("print('fine')")], env={**self.env, "BB_WRIT_SUPERVISE_GATE": str(gate)},
                              stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
         self.wait_file(gate / "at-before-print")
@@ -3203,7 +3203,7 @@ class TestOpRun(unittest.TestCase):
                     (gate / name).write_text("")
                 key = f"push:feat@{n}"
                 p = subprocess.Popen([sys.executable, str(WORK), "op", "run", "--dir", str(self.wt), "--token", tok, "--key", key,
-                                      "--what", "x", "--from", str(self.repo), "--verified", self.head(), "--reviewed", self.head(), "--risk", "低:試験の外",
+                                      "--what", "x", "--from", str(self.repo), "--verified", self.head(), "--reviewed", self.head(), "--risk", "低:テストの外",
                                       *self.script("print(1)")], env={**self.env, "BB_WRIT_SUPERVISE_GATE": str(gate)},
                                      stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
                 self.wait_file(gate / "at-before-print")
@@ -3292,7 +3292,7 @@ class TestOpRun(unittest.TestCase):
             (gate / name).write_text("")
         f = self.lease_file().parent / "ops.jsonl"
         p = subprocess.Popen([sys.executable, str(WORK), "op", "run", "--dir", str(self.wt), "--token", tok, "--key", "push:feat@1",
-                              "--what", "x", "--from", str(self.repo), "--verified", self.head(), "--reviewed", self.head(), "--risk", "低:試験の外",
+                              "--what", "x", "--from", str(self.repo), "--verified", self.head(), "--reviewed", self.head(), "--risk", "低:テストの外",
                               *self.script("print(1)")], env={**self.env, "BB_WRIT_SUPERVISE_GATE": str(gate)},
                              stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
         self.wait_file(gate / "at-before-print")
@@ -3315,7 +3315,7 @@ class TestOpRun(unittest.TestCase):
             (gate / name).write_text("")
         f = self.lease_file().parent / "ops.jsonl"
         p = subprocess.Popen([sys.executable, str(WORK), "op", "run", "--dir", str(self.wt), "--token", tok, "--key", "push:feat@1",
-                              "--what", "x", "--from", str(self.repo), "--verified", self.head(), "--reviewed", self.head(), "--risk", "低:試験の外",
+                              "--what", "x", "--from", str(self.repo), "--verified", self.head(), "--reviewed", self.head(), "--risk", "低:テストの外",
                               *self.script("print(1)")], env={**self.env, "BB_WRIT_SUPERVISE_GATE": str(gate)},
                              stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
         self.wait_file(gate / "at-before-print")
@@ -3364,7 +3364,7 @@ class TestOpRun(unittest.TestCase):
             (gate / name).write_text("")
         f = self.lease_file().parent / "ops.jsonl"
         p = subprocess.Popen([sys.executable, str(WORK), "op", "run", "--dir", str(self.wt), "--token", tok, "--key", "push:feat@1",
-                              "--what", "x", "--from", str(self.repo), "--verified", self.head(), "--reviewed", self.head(), "--risk", "低:試験の外",
+                              "--what", "x", "--from", str(self.repo), "--verified", self.head(), "--reviewed", self.head(), "--risk", "低:テストの外",
                               *self.script("print(1)")], env={**self.env, "BB_WRIT_SUPERVISE_GATE": str(gate)},
                              stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
         self.wait_file(gate / "at-before-print")
@@ -3389,7 +3389,7 @@ class TestOpRun(unittest.TestCase):
                     (gate / name).write_text("")
                 key = f"push:feat@{n}"
                 p = subprocess.Popen([sys.executable, str(WORK), "op", "run", "--dir", str(self.wt), "--token", tok, "--key", key,
-                                      "--what", "x", "--from", str(self.repo), "--verified", self.head(), "--reviewed", self.head(), "--risk", "低:試験の外",
+                                      "--what", "x", "--from", str(self.repo), "--verified", self.head(), "--reviewed", self.head(), "--risk", "低:テストの外",
                                       *self.script("print(1)")], env={**self.env, "BB_WRIT_SUPERVISE_GATE": str(gate)},
                                      stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
                 self.wait_file(gate / "at-before-print")
@@ -3469,7 +3469,7 @@ class TestOpRun(unittest.TestCase):
         for name in ("after-begin", "relay", "relay-told", "before-check", "before-start"):
             (gate / name).write_text("")
         p = subprocess.Popen([sys.executable, str(WORK), "op", "run", "--dir", str(self.wt), "--token", tok, "--key", "push:feat@1",
-                              "--what", "x", "--from", str(self.repo), "--verified", self.head(), "--reviewed", self.head(), "--risk", "低:試験の外",
+                              "--what", "x", "--from", str(self.repo), "--verified", self.head(), "--reviewed", self.head(), "--risk", "低:テストの外",
                               *self.script("print(1)")], env={**self.env, "BB_WRIT_SUPERVISE_GATE": str(gate)},
                              stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
         self.wait_file(gate / "at-before-done")

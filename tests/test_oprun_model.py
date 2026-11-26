@@ -3,24 +3,24 @@
 審査が 1 周に 1 つずつ交互実行を見つけ、そのたびに直していたため、このモデルが写す範囲は 1 回の全探索でたどる。
 範囲は担当 2・鍵 2・token 3。担当の期限切れはいつでも起こせる（実際の時間を写さない、保守的な写し方）。
 過去の修正を戻した版をフラグで作り、それぞれが反例を出すことも試す（一度も落ちたことのない検査は、何も確かめていない）。
-同じ修正を実物の work.py の写しに戻し、その不具合を見る試験が落ちることは、tests/test_replay.py が確かめる（フラグと 1 対 1）。
+同じ修正を実物の work.py の写しに戻し、その不具合を見るテストが落ちることは、tests/test_replay.py が確かめる（フラグと 1 対 1）。
 TLA+ の同じモデル（TLC）とは、2026-11-15 の版（持ち主の照合が期限を見ない Issue #31 の変更）で、状態数（TLC_STATES）と、
 戻した版 4 つの違反と反例の動作の数が一致した（TLC は行き詰まりの検査を外して流す。token を使い切った終わりの状態は行き詰まりになり、
 このモデルも行き詰まりは見ない）。TLA+ の HolderKeepsAccess は ENABLED で書くので、Next から外しただけの動作も可能と数える
 （ここでは successors で見るので、外すと破れる）。TLA+ のモデルはリポジトリに無い（最初の版は Issue #19 の付録）。
 2026-11-24 の版は、コマンドの終了コード（cmd の ok・fail）・done の result（res）・照合に拒否された op run のコマンド（stray）と、
 b908b17・d5923ce を戻すフラグ 3 つを足した。TLC とは照らしていない（その場で TLC を使えなかった）。代わりに、今の版の状態を、TLC と
-照らした変数へ写した数（cmd の ok・fail を exited に畳み、res と stray を落とす）が TLC_STATES と同じことを試験で確かめる（足した値と
+照らした変数へ写した数（cmd の ok・fail を exited に畳み、res と stray を落とす）が TLC_STATES と同じことをテストで確かめる（足した値と
 動作が、照らした版の動きを変えていない）。足したフラグの反例の動作の数は、TLC と照らしていない。足した分岐は、tests/test_replay.py の
 場面（test_work.py の test_a_second_op_run_right_after_the_first_begins_is_refused・test_only_external_begin_and_the_running_done_are_refused_while_running・
 test_refused_begin_does_not_run_the_command・test_failed_command_is_recorded_with_its_exit_code）が、今の work.py で通り、戻した写しで落ちる。
 モデル（MODEL_PARTS の関数と、それが読む定数）を変えると、その本文のハッシュ（MODELED_MODEL）が変わって落ちる。全探索を通し、
 写した数が TLC_STATES のままかを見てから、MODELED_MODEL と MODELED_STATES を書き換える。写した数が変わる変更（照らした版の動きを
 変える変更）は、TLA+ のモデルに同じ変更を入れて TLC と照らしてから TLC_STATES も書き換える（TLC は CI に置かないので、照らし直したかは
-試験で確かめない）。
+テストで確かめない）。
 
 MODELED は、モデルが写す経路の関数と、その本文のハッシュ（tests/model_tie.py）。MODELED_AT は、ハッシュを最後に進めたときに読んだ
-commit の記録で、試験は確かめない（work.py と同じ commit で進めると、自分を含む commit は書けない。その親を書く）。
+commit の記録で、テストは確かめない（work.py と同じ commit で進めると、自分を含む commit は書けない。その親を書く）。
 ハッシュは、写す関数が変わったことを知らせて、モデルを見直させるためのもの。ハッシュを進めたときにモデルと照らしたかは確かめない。
 dispatch は claim・release・op done の分岐だけを、op_step は担当の token の照合と同じ鍵の begin・done の拒否だけを写すが、
 ハッシュは関数全体に掛ける（op_step は --reviewed などの写さない照合でも変わる）。locked は作業場所の排他、run_lock は鍵ごとに
@@ -39,7 +39,7 @@ op_step の check_token）。
 run_holder が外れたロックのファイルを消すのは、モデルでは独立した動作（Gc）で、実コードのように呼ぶたびにすぐ消すとは限らない
 （実コードの動きはモデルの動きに含まれ、写しすぎは不変条件を破る側にしか働かない）。
 照合に拒否された op run のコマンド（RunRefused。d5923ce を戻した版だけで起きる）は、鍵も記録も持たない 1 つの外部操作として写す。
-写さない経路（ハッシュも掛けない。変えても、この試験は落ちない）: task_command（task start・resume の claim、cleanup の
+写さない経路（ハッシュも掛けない。変えても、このテストは落ちない）: task_command（task start・resume の claim、cleanup の
 担当の削除。タスクの持ち主と閉じる側の間は tests/test_task_model.py が写す。claim_at の take_over が偽の拒否（--take-over の無い
 task resume が、期限が切れて MAX_LEASE_MIN 以内の担当を取らない）もそちらが写し、ここの Claim は dispatch の claim（take_over は真））・
 current_lease・integrate の排他と照合、pending
@@ -55,12 +55,12 @@ import sys
 import unittest
 from collections import deque
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).resolve().parent)); import process_limit  # noqa: E402,F401  試験に上限を掛ける（直に走らせても）
+sys.path.insert(0, str(Path(__file__).resolve().parent)); import process_limit  # noqa: E402,F401  テストに上限を掛ける（直に走らせても）
 from model_tie import body, drift, fingerprint  # noqa: E402
 
 WORK = Path(__file__).resolve().parents[1] / "scripts" / "work.py"
 
-MODELED_AT = "982b555"
+MODELED_AT = "53be7d3"
 TLC_STATES = 84981  # TLC と照らした版の状態数（TLC_FIELDS に写した数）
 MODELED_STATES = 222085
 MODELED_MODEL = "0bad1c49061cf3a4"
@@ -69,7 +69,7 @@ MODELED = {
     "write": "00c93a6aa7ceb1e8",
     "locked": "0a22de1033650c4d",
     "ops": "19f01a5bc3cb84ad",
-    "op_step": "a2fbae41588d3021",
+    "op_step": "1550ba5e3d424b54",
     "run_lock": "fdd3edfffe9c0b10",
     "alive": "f1f9574a8ad75670",
     "check_token": "6297f65bcd57f11c",
@@ -84,7 +84,7 @@ MODELED = {
 }
 
 
-MODEL_PARTS = ("init", "held_key", "successors", "violated")  # この試験のモデル。変えたら、TLC と照らした変数へ写した数を見直す
+MODEL_PARTS = ("init", "held_key", "successors", "violated")  # このテストのモデル。変えたら、TLC と照らした変数へ写した数を見直す
 
 
 def model_fingerprint() -> str:
@@ -285,7 +285,7 @@ def check(f, seen=None):
     return None, len(parent), []
 
 
-STEPS = {  # work.py の言葉で。文の言い回しは試験しない（番号付きの手順で出ることだけを試す）
+STEPS = {  # work.py の言葉で。文の言い回しはテストしない（番号付きの手順で出ることだけを試す）
     "Expire": "担当の期限が切れる（延長が間に合わない）",
     "Claim": "{a} が担当を取る（claim_at。token {t}）",
     "Release": "{a} が担当を手放す（dispatch の release）",
@@ -337,7 +337,7 @@ class TestOpRunModel(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.seen = set()
-        cls.now = check(NOW, cls.seen)  # 今の版の全探索は 1 回だけ（下の試験が同じ結果を使う）
+        cls.now = check(NOW, cls.seen)  # 今の版の全探索は 1 回だけ（下のテストが同じ結果を使う）
 
     def test_the_modeled_code_keeps_the_invariants_in_every_interleaving(self):
         bad, n, trace = self.now
@@ -385,7 +385,7 @@ class TestFingerprint(unittest.TestCase):
         self.src = WORK.read_text(encoding="utf-8")
 
     def changed(self, old, new):
-        self.assertEqual(self.src.count(old), 1, f"work.py に {old!r} がちょうど 1 つ無い（試験の前提が古い）")
+        self.assertEqual(self.src.count(old), 1, f"work.py に {old!r} がちょうど 1 つ無い（テストの前提が古い）")
         mutated = self.src.replace(old, new)
         return [name for name in MODELED if fingerprint(mutated, name) != fingerprint(self.src, name)]
 

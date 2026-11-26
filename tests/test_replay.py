@@ -1,12 +1,12 @@
-"""実際に起きた不具合ごとに、scripts/work.py の写しに直しを戻す差分を当て、その不具合を見る実物の試験（場面。偽の CLI・本物の git・
+"""実際に起きた不具合ごとに、scripts/work.py の写しに直しを戻す差分を当て、その不具合を見る実物のテスト（場面。偽の CLI・本物の git・
 kill）が、戻した写しで落ち、戻さない写しで通ることを確かめる。
 
 モデル（tests/test_oprun_model.py・tests/test_task_model.py）は、同じ直しを戻したフラグ（REVERTED）で、全部の順序から反例を出す。
 ただしモデルが実物に結ばれているのは、写す関数の本文のハッシュ（MODELED）だけなので、直しを戻してハッシュだけを進めると、モデルの
-試験は通り続ける。この試験は、その迂回を実物で落とす:
+テストは通り続ける。このテストは、その迂回を実物で落とす:
 - 戻す差分は、今の work.py の文と、戻した文の組。今の文が work.py にちょうど 1 つ無ければ落ちる（直しが戻されたか、書き方が変わった）。
-  書き方を変えたときは、新しい書き方に合わせて戻す差分を書き直し、その差分で場面が落ちることを、この試験で確かめる。
-- 場面の試験を消すか弱めて、戻した写しで通るようになったら落ちる（直しを確かめる試験が無くなった）。
+  書き方を変えたときは、新しい書き方に合わせて戻す差分を書き直し、その差分で場面が落ちることを、このテストで確かめる。
+- 場面のテストを消すか弱めて、戻した写しで通るようになったら落ちる（直しを確かめるテストが無くなった）。
 - 直しが何か所かにあれば、箇所ごとに戻す差分と場面を書き、1 か所ずつ戻す（どの 1 か所を戻しても、その箇所の場面が全部落ちる）。
   箇所の分け方が足りているか（直しの全部の箇所を挙げたか）は確かめない。
 - モデルの戻したフラグと、この表の行は対応する: どのフラグも、ちょうど 1 つの行が名指しする（フラグだけを足すと落ちる）。どの行も、
@@ -26,13 +26,13 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).resolve().parent)); import process_limit  # noqa: E402,F401  試験に上限を掛ける（直に走らせても）
+sys.path.insert(0, str(Path(__file__).resolve().parent)); import process_limit  # noqa: E402,F401  テストに上限を掛ける（直に走らせても）
 import test_oprun_model  # noqa: E402
 import test_task_model  # noqa: E402
 
 TESTS = Path(__file__).resolve().parent
 WORK = TESTS.parent / "scripts" / "work.py"
-TIMEOUT = 600  # 1 回の起動の上限（秒）。場面が止まる退行で、試験全体を止めない
+TIMEOUT = 600  # 1 回の起動の上限（秒）。場面が止まる退行で、テスト全体を止めない
 MODELS = {"test_oprun_model": test_oprun_model, "test_task_model": test_task_model}
 
 # 不具合ごとに: 直しを戻したモデルのフラグと、直しの箇所ごとの、戻す差分（今の文, 戻した文）と、戻した写しで落ちる場面。
@@ -171,7 +171,7 @@ class TestReplay(unittest.TestCase):
         lines = out.strip().splitlines()
         self.assertTrue(lines, err[-3000:])
         res = json.loads(lines[-1])
-        self.assertEqual(res["ran"], len(names), f"場面の試験が見つからないか、数が違う: {names}\n{err[-3000:]}")
+        self.assertEqual(res["ran"], len(names), f"場面のテストが見つからないか、数が違う: {names}\n{err[-3000:]}")
         res["log"] = err
         return res
 
@@ -200,7 +200,7 @@ class TestReplay(unittest.TestCase):
                     work = self.copy(f"{bug.strip('#')}-{name}", reverted(src, site["revert"]))
                     res = self.run_scenarios(work, site["scenarios"])
                     self.assertEqual(res["bad"], sorted(site["scenarios"]), f"直しの 1 か所（{bug} の {name}）を戻した写しで、通ってしまった場面が"
-                                     f"ある（その箇所を確かめる試験が無くなった）:\n{res['log'][-3000:]}")
+                                     f"ある（その箇所を確かめるテストが無くなった）:\n{res['log'][-3000:]}")
 
     def test_a_missing_fix_is_reported(self):
         with self.assertRaises(LookupError):

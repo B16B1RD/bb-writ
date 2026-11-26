@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""専用ログインの実 CLI で並行開発を確認する。CI の単体試験には含めない。
+"""専用ログインの実 CLI で並行開発を確認する。CI の単体テストには含めない。
 
 実行: python3 -B tests/verify_parallel_live.py --out <証拠のディレクトリ>
-作成する試験用 Git リポジトリでのみ commit し、外部には push しない。
+作成するテスト用 Git リポジトリでのみ commit し、外部には push しない。
 """
 import argparse
 import concurrent.futures
@@ -54,7 +54,7 @@ def main():
     # この fixture の実効名義を、最初の commit より前に固定する。
     run(['git', '-C', repo, 'config', 'user.name', 'Parallel verification'])
     run(['git', '-C', repo, 'config', 'user.email', 'verification'])
-    (repo / 'README.md').write_text('並行開発の使い捨て試験リポジトリ。外部操作なし。\n')
+    (repo / 'README.md').write_text('並行開発の使い捨てテストリポジトリ。外部操作なし。\n')
     run(['git', '-C', repo, 'add', 'README.md'])
     run(['git', '-C', repo, 'commit', '-qm', 'test: 並行検証の初期状態'])
     results = []
@@ -63,14 +63,14 @@ def main():
         return json.loads(run([sys.executable, '-B', ROOT / 'scripts/work.py', *words], env=env))
 
     def session(host, name):
-        instructions = f'''この試験では開発中の bb-writ を使う。スキルの正本は {ROOT}/skills/ 以下。キャッシュの古いバージョンを使わない。
+        instructions = f'''このテストでは開発中の bb-writ を使う。スキルの正本は {ROOT}/skills/ 以下。キャッシュの古いバージョンを使わない。
 bb-writ の入口と playbook-feature、playbook-parallel を読み、次の依頼を実行する。
 「{name}.txt を作り、内容を {name} の一行にする」。
 独立した新規タスクとして作業場所を自動確保し、その中で変更・検証・commit する。
 work.py は {ROOT}/scripts/work.py。元の checkout は {repo}。
-この試験の状態は BB_WRIT_STATE_DIR={evidence / 'state'} にある。同じ値を全 work.py 呼出しに渡す。
+このテストの状態は BB_WRIT_STATE_DIR={evidence / 'state'} にある。同じ値を全 work.py 呼出しに渡す。
 他のセッションも別タスクを実行している。元の checkout には書かない。
-試験終了時点では統合と片付けは行わず、作業場所・ブランチ・検証した commit を報告して担当を release する。
+テスト終了時点では統合と片付けは行わず、作業場所・ブランチ・検証した commit を報告して担当を release する。
 委任と外部操作は禁止。既存の利用者設定、認証情報、他リポジトリは読まない。
 最後に JSON コードブロックで conclusion、evidence（what と where）、unknowns を報告する。
 '''

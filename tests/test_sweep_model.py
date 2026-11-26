@@ -1,7 +1,7 @@
 """子の一時の置き場の片付け・最初の起動・続きの起動（scripts/launch.py）を状態機械に写し、モデルが写す段の交互実行と kill -9 を全部たどる。
 
 審査が 3 周、同じ処理の順序と止め方（排他の後の古い記録、途中で止まった片付けの後の続き、排他の取り方）を 1 つずつ見つけたので、
-このモデルが写す範囲は 1 回の全探索でたどる。道具は Python の標準機能だけの、明示状態の幅優先の全探索（依存が要らず、試験に置ける）。
+このモデルが写す範囲は 1 回の全探索でたどる。道具は Python の標準機能だけの、明示状態の幅優先の全探索（依存が要らず、テストに置ける）。
 
 約束（破れたときの被害）:
 - A1 子は、消し終えた置き場では動かない（続きの子が、前の起動で写した対象を全部失ったまま続きを始める）。記録の行が何であっても。
@@ -36,7 +36,7 @@ kill -9 は、動いているどれにも、どの段の間にも。偽の行は
 - 外で起こること: 時計が進む、タスクの作業場所が片付けられる（task cleanup）、kill -9（持っていた排他は OS が放すものとして写す）。
 
 省いたもの（これらに触れる性質は、このモデルでは確かめていない）:
-- 状態の置き場の中の名前の付け替え（改名・symlink への差し替え）。remove_tree が fd から降りること、symlink の置き場。試験は
+- 状態の置き場の中の名前の付け替え（改名・symlink への差し替え）。remove_tree が fd から降りること、symlink の置き場。テストは
   tests/test_launch.py の test_a_directory_swapped_for_a_link_during_the_sweep_is_not_followed など。排他の後の付け替えは守らない範囲。
 - 置き場が 2 つ以上あるとき（片付けは置き場ごとに独立に決める。排他を取れない環境で全部をやめる分岐は写さない）。Grok の続きが、前の home の
   排他を持ったまま新しい home を作ること（2 つの置き場の、それぞれ 1 つの場面として写る）。
@@ -46,21 +46,21 @@ kill -9 は、動いているどれにも、どの段の間にも。偽の行は
 - record.json を書いてから delegations.jsonl に足すまでの間の kill（続きは record.json から、片付けは delegations.jsonl から読む）。
 - 子が置き場の中でしたこと、SIGTERM の中継、時間切れ。
 
-実物との突き合わせ（2026-11-10、偽の CLI で scripts/launch.py を動かした）: モデルの分岐は、それぞれ tests/test_launch.py の次の試験が
+実物との突き合わせ（2026-11-10、偽の CLI で scripts/launch.py を動かした）: モデルの分岐は、それぞれ tests/test_launch.py の次のテストが
 実物で通る。使っていない対象の置き場を消す（test_the_launcher_removes_its_leftovers_after_the_retention・
 test_places_of_a_cleaned_up_task_go_without_waiting）、ほかの launcher が持つ置き場を飛ばす
 （test_a_place_in_use_is_kept_whatever_the_records_say）、排他の後に記録を読み直す
 （test_a_place_used_again_while_the_sweep_was_deciding_is_kept）、続きの拒否 3 つ（無い: test_a_resume_is_refused_once_its_place_is_gone、
 対象: test_a_place_due_for_removal_cannot_be_continued_even_before_it_is_removed、使用中:
 test_a_resume_waits_while_another_launcher_holds_its_place）、開いた後に消された置き場（test_a_place_swept_just_before_a_resume_takes_it_is_not_used）。
-試験に無い場面は、片付けを 1 つ消したところで kill -9 して半分の置き場を作り、続きを起動して比べた（1 回きりの確かめで、試験には残して
+テストに無い場面は、片付けを 1 つ消したところで kill -9 して半分の置き場を作り、続きを起動して比べた（1 回きりの確かめで、テストには残して
 いない）。7 場面のうち 5 つは、モデルの予想どおりだった: 正直な範囲（作業場所が無くなった置き場・8 日前の置き場）では、続きは拒否され、
 次の片付けが残りを消した。作業場所を同じ道筋に作り直す・（8 日前の置き場に）いまの時刻の偽の行を足す・時計を 8 日戻す、のそれぞれ
 では、続きの子が半分の置き場で起きた。残りの 2 つは予想と違い、原因は 1 つで、モデルを直した: 対象の作業場所が無いまま続きの照合を
 通った場合（行を消す・いまの時刻の行を足す、の偽の行）、モデルは子を起こしたが、実物は子を起こせずに失敗の行を書いて終わった
 （今は、そう写してある）。
 
-外しても、このモデルの試験が落ちない判定（2026-11-10 に注入して確かめた）: 続きが、対象の無くなった作業場所の置き場を拒む判定（place_due の
+外しても、このモデルのテストが落ちない判定（2026-11-10 に注入して確かめた）: 続きが、対象の無くなった作業場所の置き場を拒む判定（place_due の
 作業場所の有無）は、このモデルの約束には要らない。対象が無ければ子は起きないので、A2 は破れない（拒否の理由を、分かる文で先に出すための
 判定で、tests/test_launch.py の test_a_place_due_for_removal_cannot_be_continued_even_before_it_is_removed が実物で見る）。対象が無いと子が
 起きない分岐（nochild）を外すと、モデルは実物より多くの動き（実物では起きない子）を許すだけで、正直な範囲の合否は変わらない。
@@ -78,7 +78,7 @@ import sys
 import unittest
 from collections import deque
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).resolve().parent)); import process_limit  # noqa: E402,F401  試験に上限を掛ける（直に走らせても）
+sys.path.insert(0, str(Path(__file__).resolve().parent)); import process_limit  # noqa: E402,F401  テストに上限を掛ける（直に走らせても）
 from model_tie import drift  # noqa: E402
 
 LAUNCH = Path(__file__).resolve().parents[1] / "scripts" / "launch.py"
