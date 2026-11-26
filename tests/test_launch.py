@@ -694,7 +694,7 @@ def load_launch():
 
 
 def claude_readable(p, fs) -> bool:
-    """読み取り専用の Claude Code の子の Bash が p を読めるか。denyRead・allowRead のうち p を含む最も深い規則で決まる
+    """Claude Code の子の Bash が p を読めるか（読み取り専用の子にも書く子にも使う）。denyRead・allowRead のうち p を含む最も深い規則で決まる
     （同じ深さに両方あるときは拒否に倒すが、実物でどちらが勝つかは確かめていない。テストは、並べないことを別に見る）
     （allowRead は拒んだ中を戻し、その中の denyRead はまた拒む。2.1.327 の実物の子で、ホームの拒否・~/.local の戻し・その中の
     状態の置き場の拒否・その中の対象の戻しが、この順で効いた）。"""
@@ -4458,6 +4458,39 @@ launch.claude_reads = claude_reads
         reads = json.loads(argv[argv.index("--settings") + 1])["sandbox"]["filesystem"]["denyRead"]
         self.assertEqual(sorted(reads), sorted([str(home / ".ssh"), str(self.cfg)]))  # 在るものだけ。.npmrc・.cargo の認証情報は書く子に読ませる
         self.assertEqual(json.loads(argv[argv.index("--settings") + 1])["sandbox"]["filesystem"]["allowRead"], [])  # 無い ~/.config/git は渡さない
+
+    def test_a_claude_writer_reads_the_launchers_own_scripts_when_they_sit_under_a_denied_place(self):
+        # プラグインを普通に入れた構成（~/.claude/plugins/cache/bb-writ/bb-writ/<バージョン>/）では、launcher の置き場が拒む置き場の下に在り、
+        # 書く子が依頼文どおりの work.py claim を開けなかった（#85）。launcher 自身の scripts だけを戻し、拒む置き場とその中のほかは拒んだまま
+        home = self.home.resolve()  # 一時の置き場が symlink の下（macOS の /var）でも、ホームは symlink を通らない道筋で渡す
+        self.home = home
+        (home / ".claude").mkdir()
+        (home / ".claude" / ".credentials.json").write_text("x")
+        outside = Path(tempfile.mkdtemp(dir=self.tmp.name, prefix="outside-")).resolve()  # 偽のホームの外
+        cases = (("~/.claude の下", home / ".claude" / "plugins" / "cache" / "bb-writ" / "bb-writ" / "9.9.9", None),
+                 ("別の拒む置き場（~/.codex）の下", home / ".codex" / "plugins" / "cache" / "bb-writ" / "bb-writ" / "9.9.9", None),
+                 ("ホームの外の symlink の綴りで起こす", home / ".claude" / "plugins" / "cache" / "bb-writ" / "bb-writ" / "9.9.8", outside / "link"))
+        for name, base, link in cases:
+            with self.subTest(name):
+                shutil.copytree(ROOT / "scripts", base / "scripts", ignore=shutil.ignore_patterns("__pycache__"))
+                (base / "skills" / "x").mkdir(parents=True)
+                (base / "skills" / "x" / "SKILL.md").write_text("x")  # 写しの置き場の scripts の外
+                if link:
+                    link.symlink_to(base, target_is_directory=True)
+                launcher = (link or base) / "scripts" / "launch.py"
+                self.args_file.unlink(missing_ok=True)
+                p = subprocess.run([sys.executable, str(launcher), "--host", "claude", "--cwd", str(self.cwd), "--prompt-file", str(self.prompt), "--write"],
+                                   env=self.launch_env(), capture_output=True, text=True, timeout=120)
+                rec = json.loads(p.stdout)
+                self.assertEqual((p.returncode, rec["status"]), (0, "ok"), rec)
+                argv = json.loads(self.args_file.read_text())
+                fs = json.loads(argv[argv.index("--settings") + 1])["sandbox"]["filesystem"]
+                # 偽のホームに ~/.config/git は無いので、戻すのは写しの（実の道筋の）scripts ちょうど 1 つ
+                self.assertEqual(fs["allowRead"], [str(base / "scripts")], "allowRead が launcher 自身の scripts ちょうど 1 つでない")
+                self.assertTrue({str(home / ".claude"), str(self.cfg)} <= set(fs["denyRead"]), fs)  # 拒む置き場は拒んだまま
+                self.assertTrue(claude_readable(base / "scripts" / "work.py", fs), fs)
+                for secret in (home / ".claude" / ".credentials.json", base / "skills" / "x" / "SKILL.md"):  # 認証情報と、scripts の外
+                    self.assertFalse(claude_readable(secret, fs), secret)
 
     def test_grok_read_only_denies_the_credential_places_keeps_what_it_runs_and_gets_a_narrow_env(self):
         # 読み取り専用の Grok の子は、ホームの認証情報の置き場を読め、親の環境（SSH_AUTH_SOCK・トークン）がそのまま渡っていた（#43）。

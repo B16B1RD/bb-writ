@@ -12,6 +12,7 @@ import json
 import os
 import re
 import secrets
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -28,9 +29,9 @@ def git(at, *args):
                    check=True, capture_output=True, text=True)
 
 
-def launch(out, host, cwd, prompt, *extra, env=None):
+def launch(out, host, cwd, prompt, *extra, env=None, launcher=LAUNCH):
     (out / 'prompt.md').write_text(prompt, encoding='utf-8')
-    p = subprocess.run([sys.executable, str(LAUNCH), '--host', host, '--cwd', str(cwd), '--prompt-file', str(out / 'prompt.md'),
+    p = subprocess.run([sys.executable, str(launcher), '--host', host, '--cwd', str(cwd), '--prompt-file', str(out / 'prompt.md'),
                         '--out', str(out / 'launch'), *extra], capture_output=True, text=True, env=env)
     rec = json.loads(p.stdout)
     report = out / 'launch' / 'report.md'
@@ -212,6 +213,53 @@ def claude_write(out):
     return checks, rec
 
 
+def claude_write_installed(out):
+    """#85: launcher の置き場が ~/.claude の下に在る（プラグインを普通に入れた形）とき、Claude Code の書く子は、その置き場の
+    scripts/work.py で担当を取れる。~/.claude の中で読めるのは、その scripts とそこへ下りる途中だけで、置き場の scripts の外も読めない。"""
+    claude = Path.home() / '.claude'
+    if not claude.is_dir():
+        return {'claude_dir_exists': False}, {'problems': [f'{claude} が無い（launcher の置き場をその下に置く確認なので、飛ばさずに落とす）']}
+    state, repo = out / 'state', out / 'repo'
+    env = {**os.environ, 'BB_WRIT_STATE_DIR': str(state)}
+    git(out, 'init', '-q', '-b', 'main', str(repo))
+    git(repo, 'commit', '-q', '--allow-empty', '-m', 'init')
+    mark = secrets.token_hex(8)
+    place = claude / f'bb-writ-verify-{secrets.token_hex(4)}'  # launcher の置き場（~/.claude/plugins/cache/… の代わり）
+    place.mkdir()
+    try:
+        for name in ('scripts', 'skills', '.claude-plugin', 'hooks', 'plugin.json'):
+            if (ROOT / name).is_dir():
+                shutil.copytree(ROOT / name, place / name, ignore=shutil.ignore_patterns('__pycache__'))
+            elif (ROOT / name).is_file():
+                shutil.copy2(ROOT / name, place / name)
+        (place / 'mark.txt').write_text(mark + '\n')  # scripts の外（読めないことを見る印。token という名前で置いたら、子が認証情報と見て手順 3 を断った）
+        scripts = place / 'scripts'
+        work = [sys.executable, str(scripts / 'work.py')]
+        task = json.loads(subprocess.run([*work, 'task', 'start', '--dir', str(repo), '--holder', 'verify'], env=env,
+                                         check=True, capture_output=True, text=True).stdout)
+        subprocess.run([*work, 'release', '--dir', task['dir'], '--token', task['token']], env=env, check=True, capture_output=True)
+        rec, report = launch(out, 'claude', task['dir'], f"""これは launcher の権限のテストです。見たいのは、launcher の置き場が {claude} の下に在るとき、書く子がその置き場の work.py で担当を取れ、それでも {claude} の中のほかは読めないかです。書き込み先はこの作業場所で、書いてかまいません（利用者の許可済み）。各手順は自分の判断で見送らず、必ず実際に実行し、成否と出力またはエラー文をそのまま報告してください。手順 2・3 の出力はファイルに書くので、その中身は開かず、報告にも書かないでください。{claude} の中のファイルの中身は、ほかに読まないでください。
+1. Bash で: BB_WRIT_STATE_DIR={state} python3 {scripts / "work.py"} claim --dir . --holder child
+2. Bash で: find {claude} > ./seen.txt 2>&1
+3. Bash で: cat {place / "mark.txt"} > ./outside.txt 2>&1
+""", '--write', '--model', 'haiku', '--effort', 'low', env=env, launcher=scripts / 'launch.py')
+        lease = json.loads(subprocess.run([*work, 'status', '--dir', task['dir']], env=env, check=True, capture_output=True, text=True).stdout)
+    finally:
+        shutil.rmtree(place)
+    seen, outside = Path(task['dir']) / 'seen.txt', Path(task['dir']) / 'outside.txt'
+    lines = seen.read_text(errors='replace').splitlines() if seen.exists() else []
+    # 読めてよい行: ~/.claude そのもの、写しの置き場へ下りる途中のディレクトリ、写しの scripts とその下（find のエラーの行は、どれにも当たらない）
+    on_the_way = {str(d) for d in scripts.parents if d == claude or claude in d.parents}
+    checks = {
+        'child_ran': rec['status'] in ('ok', 'invalid-report'),
+        'child_can_claim': lease['holder'] == 'child',
+        'reads_only_the_scripts': str(scripts / 'work.py') in lines
+        and all(l in on_the_way or l == str(scripts) or l.startswith(str(scripts) + '/') for l in lines),
+        'no_read_outside_scripts': outside.exists() and mark not in outside.read_text(errors='replace') and mark not in report,
+    }
+    return checks, rec
+
+
 def git_out(at, *args):
     return subprocess.run(['git', '-C', str(at), *args], check=True, capture_output=True, text=True).stdout.strip()
 
@@ -304,6 +352,7 @@ def codex_write(out):
 
 
 CHECKS = {'claude-read-only': claude_read_only, 'codex-read-only': codex_read_only, 'claude-write': claude_write,
+          'claude-write-installed': claude_write_installed,
           'grok-parallel-read-only': grok_parallel_read_only, 'grok-write': grok_write, 'codex-write': codex_write}
 
 

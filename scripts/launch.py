@@ -159,11 +159,17 @@ def outs_of_place(cwd: Path) -> list[Path]:
 
 
 def secret_reads(cfg: Path) -> dict:
-    """書く子の Bash に読ませない認証情報の置き場（専用ログインの置き場は ~/.config の外にも置ける）。Git の設定だけは読ませる。
-    在るものだけを渡す（無い場所を渡すと、sandbox がホームに空の場所を作り、時間切れで止めると残る）。"""
+    """書く子の Bash に読ませない認証情報の置き場（専用ログインの置き場は ~/.config の外にも置ける）。拒んだ中から戻すのは 2 つ:
+    Git の設定（~/.config/git）と、拒む置き場の下に在る launcher 自身の scripts（プラグインを普通に入れると ~/.claude の下に在り、
+    子が依頼文どおりの work.py で担当を取って返せなかった。#85）。launcher の置き場のほか（skills など）は戻さない。
+    在るものだけを渡す（無い場所を渡すと、sandbox がホームに空の場所を作り、時間切れで止めると残る）。
+    守らない範囲: scripts は実の道筋で、拒む置き場は渡す綴りのままで比べるので、拒む置き場への道筋が symlink を通る（~/.claude
+    そのものが symlink など）と、下に在ると見なさず戻さない。"""
     git = Path.home() / ".config" / "git"
-    return {"denyRead": [str(Path.home() / p) for p in SECRET_PLACES if os.path.lexists(Path.home() / p)] + [str(cfg)],
-            "allowRead": [str(git)] if os.path.lexists(git) else []}
+    deny = [Path.home() / p for p in SECRET_PLACES if os.path.lexists(Path.home() / p)] + [cfg]
+    scripts = Path(__file__).resolve().parent
+    allow = ([git] if os.path.lexists(git) else []) + ([scripts] if any(p in scripts.parents for p in deny) else [])
+    return {"denyRead": [str(p) for p in deny], "allowRead": [str(p) for p in allow]}
 
 
 def git_config_files() -> set[Path]:
