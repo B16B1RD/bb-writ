@@ -4,6 +4,20 @@ bb-writ を使う人に向けて、バージョンごとに変わったことを
 
 commit ごとの細かい変更は、各バージョンの末尾の「commit の一覧」（前のバージョンのタグとの比較）で見られる。
 
+## 0.35.2 - 2026-11-26
+
+### 変えたこと
+
+- Claude Code の入口の指揮者は、`Agent` ツールの子を待つ間は返答を終えない。ほかにすることが無ければ、子に書かせた報告のファイルができるのを、1 回の呼び出しで最大約 9 分待つループで待つ（`conduct`）。0.34.1 では「`Agent` の子の終わりは知らせで届く」としていたため、指揮者が子を待って返答を終え、子の終わりの知らせが指揮者でなく呼んだセッションに届いて、指揮者が止まっていた。launcher の背景の子を待つ形は変えない。
+- version の意味の「版」を「バージョン」に、test の意味の「試験」を「テスト」に、README のほかの文書でもそろえた（CHANGELOG の前置き・AGENTS.md・docs・スキル・スクリプト・テスト・workflow。#83・#84）。「性質の試験」は「プロパティテスト」にした。スキルの description（`create-property-test-skill`・`playbook-eval`・`principle-test-behavior-not-implementation`）と、`launch.py`・`work.py` が出す文の一部も変わった。CHANGELOG の過去のリリースの節は、出した時点の記録として残した。
+- `playbook-eval` の、候補に測られていると悟らせる語の並びに「テスト」を足した。
+
+### 守らないこと
+
+- `Agent` の子を待つ形は、指揮者が本文を読んで従うかに拠る。launcher もテストも強制しない。
+
+commit の一覧：https://github.com/B16B1RD/bb-writ/compare/bb-writ--v0.35.1...bb-writ--v0.35.2
+
 ## 0.35.1 - 2026-11-26
 
 ### 変えたこと
