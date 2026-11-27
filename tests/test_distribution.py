@@ -65,11 +65,13 @@ class TestSkills(unittest.TestCase):
             self.assertNotIn("playbooks/", text, p)
 
     def test_the_entry_forks_and_hands_over_to_the_body(self):
-        """入口は、Claude Code では fork した子（指揮者）として、frontmatter の model で動く。frontmatter の model だけだと
+        """入口は、Claude Code では fork した子（指揮者）として、frontmatter の model と effort で動く（effort を書かないと、
+        利用者の設定の effort で動いた。#96。利用者の環境変数 CLAUDE_CODE_EFFORT_LEVEL は frontmatter より強いと公式の文書にある）。frontmatter の model だけだと
         そのターンしか効かず、次の入力でセッションのモデルに戻った（2026-11-19 の実測）。進め方は本体 `conduct` にあり、入口はそれを呼ぶ。
         本体は fork しない（本体が fork すると、指揮者の中にもう 1 人の指揮者が立つ）。
-        確かめるのは、入口の frontmatter の 2 行、入口の本文の最初の段落の「最初に、」で始まる文が本体の名前を挙げること、本体の frontmatter にその 2 つの
-        キーが無いことだけ（fork した子が実際にそのモデルで動くかは、実物の CLI で確かめる。本体の文が残っているかも見ない）。"""
+        確かめるのは、入口の frontmatter の 3 行（effort は 1 回だけ）、入口の本文の最初の段落の「最初に、」で始まる文が本体の名前を挙げること、
+        本体の frontmatter にその 3 つのキーが無いことだけ（fork した子が実際にそのモデルと effort で動くかは、実物の CLI で確かめる。
+        本体の文が残っているかも見ない）。"""
         # 探索の入口 unknowns と本体 explore も同じ形（#58。frontmatter の model だけでは、2 ターン目からセッションのモデルで動いた）
         for entry, body in (("bb-writ", "conduct"), ("unknowns", "explore")):
             with self.subTest(entry=entry):
@@ -77,6 +79,9 @@ class TestSkills(unittest.TestCase):
                 head = text.split("---", 2)[1]
                 self.assertIn("\ncontext: fork\n", head)
                 self.assertIn("\nmodel: fable\n", head)
+                # effort を書かないと、指揮者は利用者の設定の effort で動いた（#96）。値は、Fable の指揮者で比べて決めた medium。
+                # 同じ鍵の 2 回書きは後ろが勝ちうるので、1 つだけであることも見る
+                self.assertEqual(re.findall(r"^effort:\s*(\S+)\s*$", head, re.M), ["medium"])
                 paragraphs = [p for p in skill_body(self, text, entry).split("\n\n") if p.strip() and not p.lstrip().startswith("#")]
                 first = [s for s in paragraphs[0].split("。") if s.startswith("最初に、")]  # 最初に読む先を言う文（書き換えたら、ここの目印も直す）
                 self.assertEqual(len(first), 1, paragraphs[0][:80])
@@ -84,6 +89,7 @@ class TestSkills(unittest.TestCase):
                 body_head = (ROOT / "skills" / body / "SKILL.md").read_text(encoding="utf-8").split("---", 2)[1]
                 self.assertNotIn("\ncontext:", body_head)
                 self.assertNotIn("\nmodel:", body_head)
+                self.assertNotIn("\neffort:", body_head)  # 指揮者が本体を読み込んだときに effort が置き換わりうる
 
     def test_the_entry_conductor_definition_resolves_and_bounds_the_context(self):
         """入口の指揮者は、入口の frontmatter の agent が指すエージェント定義で動き、その autoCompactWindow で要約される（#93）。
