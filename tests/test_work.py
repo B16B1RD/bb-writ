@@ -1037,6 +1037,28 @@ class TestReviewedCommit(unittest.TestCase):
         self.review_record(self.head(), audit=True)
         self.assertEqual(self.publish(tok, "push:feat@1", "--reviewed", "none:文書だけ")[0], 0)
 
+    def test_the_audit_that_opened_an_integration_also_opens_the_push_of_the_same_commit(self):
+        # integrate の前に立てた監査役の記録は、統合した commit を後で push するときも、そのまま数える（関門は commit だけで探す。#97）
+        self.launcher_audits = False
+        rc, task = self.w("task", "start", "--dir", str(self.repo), "--holder", "A")
+        self.assertEqual(rc, 0, task)
+        at = Path(task["dir"])
+        (at / "src.py").write_text("x\n", encoding="utf-8")
+        for cmd in (["git", "add", "src.py"], ["git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "src"]):
+            subprocess.run(cmd, env=self.env, cwd=at, check=True)
+        rev = lambda ref, cwd: subprocess.run(["git", "rev-parse", ref], env=self.env, cwd=cwd, check=True, capture_output=True, text=True).stdout.strip()
+        head, main = rev("HEAD", at), rev("main", self.repo)
+        audit = self.review_record(head, audit=True)
+        rc, r = self.w("integrate", "--dir", str(at), "--token", task["token"], "--expected", main, "--verified", head)
+        self.assertEqual((rc, r.get("commit")), (0, head), r)
+        rc, c = self.w("claim", "--dir", str(self.repo), "--holder", "A")
+        Path(c["note"]["path"]).write_text(FILLED_NOTE, encoding="utf-8")
+        rc, r = self.w("op", "begin", "--dir", str(self.repo), "--token", c["token"], "--key", "push:main", "--what", "x",
+                       "--from", str(self.repo), "--verified", head, "--reviewed", head)
+        self.assertEqual(rc, 0, r)
+        recs = {json.loads(x)["key"]: json.loads(x) for x in self.ops_file().decode().splitlines()}
+        self.assertEqual(recs["push:main"]["audits"], [audit])  # 統合の前の監査役の記録で通った
+
     def test_an_audit_does_not_count_as_a_review(self):
         # 監査役は push ごとに立てる。審査役の代わりにすると、審査を通した commit の宣言が監査だけで通る
         self.launcher_reviews = self.launcher_audits = False
@@ -3763,6 +3785,8 @@ class TestQuietGit(unittest.TestCase):
         os.utime(nested / "b.txt", (time.time() + 5, time.time() + 5))
         self.marker.unlink(missing_ok=True)
         head, target = self.git("rev-parse", "HEAD", cwd=wt), self.git("rev-parse", "main", cwd=self.repo)
+        self.wt = wt
+        TestAccountCheck.review_record(self, head, audit=True)  # 統合の監査の関門（#97）を通す
         rc, out = self.work("integrate", "--dir", str(wt), "--token", token, "--expected", target, "--verified", head)
         self.assertEqual(rc, 0, out)  # 統合まで進んだ
         self.assertFalse(self.marker.exists(), out)

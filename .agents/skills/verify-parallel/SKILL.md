@@ -35,6 +35,7 @@ description: bb-writ の worktree 分離、再開、直列統合、片付けを�
 - cleanup の「タスクのブランチが変更されている」の直前のブランチ照合を無効にする → `test_cleanup_does_not_delete_commits_on_detached_task_branch` が失敗すること。
 - integrate の `git(dest, 'merge', '--ff-only', '--no-overwrite-ignore', head, fds=(rf, wf))` から `fds` を除く → `test_integration_holds_repository_lock_until_git_finishes_after_parent_kill` が失敗すること。
 - 同じ merge から `--no-overwrite-ignore` を除く → `test_integration_preserves_ignored_files_at_target` が失敗すること。
+- integrate の `if not audits:` を `if False:` にする → `test_integrate_refuses_a_commit_no_auditor_passed_and_leaves_the_target_as_it_was` が失敗すること。
 
 各失敗の出力と終了コードを証拠として残す。通ってしまったら、その検査を根拠にしない。コピーを削除し、正本で元のテストが通ることも確認する。
 

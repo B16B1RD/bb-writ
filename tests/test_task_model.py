@@ -42,6 +42,8 @@ renew が 3 で拒否された。直し（d7cb680）は、期限が切れて MAX
 - claim（作業場所を名指しして取る。書く子と、子の後の親が使い、期限の切れた担当を取る）で、閉じるタスクを取ること（手引きの片付けは
   task resume を使う）。
 - 未保存の変更・終わっていない操作・書き込めないディレクトリによる task cleanup の拒否（消し始める前に拒み、何も変えない）、統合先が動くこと、読めない担当の記録（unreadable）、統合の記録。
+- 担当の外の照合による integrate の拒否（検証した commit・統合先・未保存の変更・監査役の記録。fast-forward の前に拒み、何も変えない）。
+  OwnerCanAct の「統合し」は、それらが揃った場面を写す。
 - 持ち主が自分のタスクを task resume で取り直すこと、途中で止まった task cleanup の続き（task resume が受け持つ。形ごとの扱いは、
   playbook-parallel の「再開する」「片付ける」と、work.py の task_command の注釈）。
 
@@ -79,7 +81,7 @@ MODELED = {
     "claim_at": "d13a239d32440d08",
     "unclosed_tasks": "c1b08c620e752898",
     "task_command": "f543434ae920f488",
-    "integrate": "be70176842d82a73",
+    "integrate": "0a1cc127a5fb8cfd",
     "dispatch": "7b2ce7ae7c39483f",
 }
 

@@ -53,9 +53,24 @@ class TestParallel(unittest.TestCase):
         self.git(at, 'commit', '-qm', '変更')
         return self.git(at, 'rev-parse', 'HEAD')
 
-    def integrate(self, task, expected, verified, code=0):
+    def audit(self, commit, **over):
+        """launcher が監査役（--audit）を立て、ok で返って届けてよい（deliver: yes）と判定したときの、委任の記録の 1 行と out の
+        record.json（launch.py が書く形）。over で欄を変える（... はその欄を書かない）。out の道筋を返す。"""
+        place = Path(self.env['BB_WRIT_STATE_DIR']) / 'delegations'
+        place.mkdir(parents=True, exist_ok=True)
+        out = Path(tempfile.mkdtemp(prefix='audit-', dir=place))
+        rec = {'host': 'claude', 'write': False, 'out': str(out), 'head': commit, 'status': 'ok', 'audit': True, 'deliver': 'yes', **over}
+        rec = {k: v for k, v in rec.items() if v is not ...}
+        (out / 'record.json').write_text(json.dumps(rec), encoding='utf-8')
+        with open(place.parent / 'delegations.jsonl', 'a', encoding='utf-8') as f:
+            f.write(json.dumps(rec) + '\n')
+        return str(out)
+
+    def integrate(self, task, expected, verified, *more, code=0, audit=True):
+        if audit:  # 統合の監査の関門（#97）を試さないテストでは、検証した commit の監査役の記録を先に置く
+            self.audit(verified)
         return self.w('integrate', '--dir', task['dir'], '--token', task['token'],
-                      '--expected', expected, '--verified', verified, code=code)
+                      '--expected', expected, '--verified', verified, *more, code=code)
 
     def journal(self, **over):
         rr = next((Path(self.tmp.name) / 'state' / 'work').glob('repo-*'))
@@ -320,6 +335,62 @@ class TestParallel(unittest.TestCase):
         self.integrate(a, expected, head, code=6)
         hooks.unlink()
         self.assertEqual(self.w('task', 'list', '--dir', self.repo)['integration'], None)
+
+    def test_integrate_refuses_a_commit_no_auditor_passed_and_leaves_the_target_as_it_was(self):
+        """push・PR をしない仕事でも、統合する commit を対象にした監査役（返す前の判定）の記録が無ければ、integrate は 6 で拒み、
+        統合先を動かさず、統合の記録も残さない（#97。指揮者が返す前の監査を飛ばして、手元の main に入れて返した）。"""
+        a = self.start()
+        head = self.change(a, 'a')
+        main = self.git(self.repo, 'rev-parse', 'main')
+        got = self.integrate(a, main, head, code=6, audit=False)
+        self.assertIn(f'統合する commit {head} を対象にした監査役', got['reason'])
+        self.assertIn('--audit', got['reason'])
+        self.assertEqual(self.git(self.repo, 'rev-parse', 'main'), main)
+        self.assertFalse((self.repo / 'a').exists())
+        self.assertIsNone(self.w('task', 'list', '--dir', self.repo)['integration'])
+        self.assertEqual(self.integrate(a, main, head)['commit'], head)  # 記録を置けば、同じ担当で統合できる
+        self.assertEqual(self.git(self.repo, 'rev-parse', 'main'), head)
+
+    def test_integrate_counts_only_an_audit_of_that_commit_that_said_deliver_yes(self):
+        """数えるのは、統合する commit を対象に ok で返り、届けてよい（deliver: yes）と判定した監査役の記録だけ（push・pr の関門と同じ）。
+        差し戻し（deliver: no）、deliver の無い記録、監査役でない読み取り専用の子、ほかの commit の監査、record.json と食い違う行では通らない。"""
+        a = self.start()
+        base = self.git(self.repo, 'rev-parse', 'main')
+        head = self.change(a, 'a')
+        self.audit(head, deliver='no')
+        self.audit(head, deliver=...)  # 判定を書く前の launcher の記録
+        self.audit(head, audit=...)  # 審査役・確かめ役（監査役でない）
+        self.audit(base)  # 統合先の commit の監査
+        out = self.audit(head)
+        (Path(out) / 'record.json').write_text(json.dumps({**json.loads((Path(out) / 'record.json').read_text()), 'deliver': 'no'}))
+        got = self.integrate(a, base, head, code=6, audit=False)
+        self.assertIn('deliver: yes', got['reason'])
+        self.assertEqual(self.git(self.repo, 'rev-parse', 'main'), base)
+        self.audit(head)
+        self.assertEqual(self.integrate(a, base, head, audit=False)['commit'], head)
+        self.assertEqual(self.git(self.repo, 'rev-parse', 'main'), head)
+
+    def test_integrate_counts_an_audit_that_could_not_run_only_with_the_declaration(self):
+        """監査役が sandbox のせいで対象のテストを実行できずに not-run で返り、実行の欄に no と書いた記録は、--not-run <理由> の宣言が
+        あるときだけ数える（op run の --not-run と同じ）。宣言が無ければ、拒否の理由が宣言のしかたを示す。宣言は出力の not_run に残る。
+        理由が空の宣言は 2 で拒む。"""
+        why = 'headless Chrome が子の sandbox で起動しない（終了コード 134）'
+        a = self.start()
+        base = self.git(self.repo, 'rev-parse', 'main')
+        head = self.change(a, 'a')
+        self.audit(head, status='not-run', execution='no')
+        got = self.integrate(a, base, head, code=6, audit=False)
+        self.assertIn('--not-run <子が実行できなかった理由> を付けて integrate する', got['reason'])
+        self.assertIn('--not-run の後に', self.integrate(a, base, head, '--not-run', ' \n', code=2, audit=False)['reason'])
+        self.assertEqual(self.git(self.repo, 'rev-parse', 'main'), base)
+        got = self.integrate(a, base, head, '--not-run', f' {why}\n', audit=False)
+        self.assertEqual((got['commit'], got['not_run']), (head, why))
+        self.assertEqual(self.git(self.repo, 'rev-parse', 'main'), head)
+        b = self.start()  # 実行の欄の無い not-run（launcher が読んだだけとして not-run にした報告）は、宣言があっても数えない
+        bh = self.change(b, 'b')
+        self.audit(bh, status='not-run', execution=...)
+        self.assertIn('監査役', self.integrate(b, head, bh, '--not-run', why, code=6, audit=False)['reason'])
+        self.assertNotIn('not_run', self.integrate(b, head, bh))
 
     def test_integrate_waits_for_an_op_run_in_the_checkout(self):
         a = self.start()
@@ -1957,6 +2028,7 @@ class TestParallel(unittest.TestCase):
         return marker, finish
 
     def integrating(self, a, head):
+        self.audit(head)  # integrate() と同じく、統合の監査の関門を通す
         p = subprocess.Popen([sys.executable, '-B', str(WORK), 'integrate', '--dir', a['dir'],
                               '--token', a['token'], '--expected', a['base'], '--verified', head],
                              env=self.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)

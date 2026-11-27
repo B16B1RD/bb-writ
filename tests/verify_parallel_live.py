@@ -104,6 +104,17 @@ def main():
     def work(*words):
         return json.loads(run([sys.executable, '-B', ROOT / 'scripts/work.py', *words], env=env))
 
+    def audited(commit):
+        """この台本は指揮者の代わりに統合する。integrate は統合する commit を対象にした監査役の記録を求める（#97）が、ここで確かめるのは
+        作業場所の分離・再開・統合・片付けで、監査役の CLI は起動しない。launcher が監査役を ok・deliver: yes で返したときの記録の形を、
+        この fixture の状態ディレクトリにだけ置く（関門そのものは tests/test_parallel.py が試す）。"""
+        out = evidence / 'state' / 'delegations' / ('audit-' + commit)
+        out.mkdir(parents=True, exist_ok=True)
+        rec = {'host': 'claude', 'write': False, 'out': str(out), 'head': commit, 'status': 'ok', 'audit': True, 'deliver': 'yes'}
+        (out / 'record.json').write_text(json.dumps(rec))
+        with open(evidence / 'state' / 'delegations.jsonl', 'a', encoding='utf-8') as f:
+            f.write(json.dumps(rec) + '\n')
+
     def session(host, name):
         instructions = f'''このテストでは開発中の bb-writ を使う。スキルの正本は {ROOT}/skills/ 以下。キャッシュの古いバージョンを使わない。
 bb-writ の入口と playbook-feature、playbook-parallel を読み、次の依頼を実行する。
@@ -193,6 +204,7 @@ work.py は {ROOT}/scripts/work.py。元の checkout は {repo}。
                     if f.exists():
                         assert f.read_text().strip() == n
                 verified = run(['git', '-C', task['dir'], 'rev-parse', 'HEAD'])
+                audited(verified)
                 work('integrate', '--dir', task['dir'], '--token', resumed['token'], '--expected', expected, '--verified', verified)
                 work('task', 'cleanup', '--dir', task['dir'], '--token', resumed['token'], '--saved', 'main')
             for n in names:

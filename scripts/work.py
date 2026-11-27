@@ -33,7 +33,10 @@
                      task cleanup が、Git の登録が消えた作業場所の残りだと記録に書いていて、いまも Git の登録が無ければ、照合の後に、
                      作業場所の道筋に在るものを消す（止まった後にそこへ書かれたものも、消して置き直したものも、確かめずに消す）。
                      消せなければ、最初に消せなかった項目の道筋を出して拒否（6）
-  work.py integrate --dir <worktree> --token <t> --expected <統合先commit> --verified <検証済みcommit> → 排他・照合して fast-forward
+  work.py integrate --dir <worktree> --token <t> --expected <統合先commit> --verified <検証済みcommit> [--not-run <理由>] → 排他・照合して fast-forward。
+                     照合の後、統合する commit を対象にした監査役（返す前の判定）の記録が無ければ、fast-forward の前に拒否する（6。下の push・pr と
+                     同じ数え方。push・PR をしない仕事で、指揮者が返す前の監査を飛ばして返したため。#97）。--not-run は op run と同じ宣言で、
+                     not-run で execution が no の監査役の記録も数え、出力の not_run に残す（理由が空なら 2）
   work.py task cleanup --dir <worktree> --token <t> --saved <別のブランチかタグ> → 変更が保存先に入っていれば片付け（squash・rebase の統合も可）。
                      項目を持つのに書き込めないディレクトリがあれば、消し始める前に、その道筋を出して拒否（6）。git worktree remove が
                      作業場所を消している途中で止まり、Git の登録だけを消したら、片付けの途中の記録に、登録が消えた残りだと書いて拒否し（6）、task resume で
@@ -60,7 +63,7 @@ commit を書いたときは、launcher の委任の記録（delegations.jsonl�
 無ければ拒否する（6）。通ったら、その子の記録の場所を reviews に残す。審査の中身（子が十分に攻めたか）と none: の理由の真偽は確かめない。
 短い往復で審査を忘れたまま、または書き手が自分の確かめを審査の代わりにして出すのを止める。
 push・pr は、--reviewed（none: を含む）に関わらず、作業場所の HEAD を対象に launcher に --audit を付けて起動し ok で返った
-読み取り専用の監査役（返す前の判定）の記録が無ければ拒否する（6）。監査役の記録は審査の記録にも周の数にも数えない。
+読み取り専用の監査役（返す前の判定）の記録が無ければ拒否する（6。integrate も、統合する commit で同じ記録を求める）。監査役の記録は審査の記録にも周の数にも数えない。
 監査役の記録は、判定の deliver が行と record.json の両方で yes（届けてよい）のものだけを数える。何を挙げたかは見ない。
 push・pr に --not-run <理由>（子が sandbox のせいで対象のテスト・検査を実行できなかった理由）を付けると、その commit を対象に
 not-run で返り、子が実行の欄に実行できなかった（execution が no）と書いた記録も、審査役・--interrogate の審査役・監査役と審査の周に数える
@@ -275,10 +278,10 @@ def reviews_of(commit: str, cwd=None, not_run: bool = False) -> tuple:
     return found, judges, audits, (f"委任の記録 {f} に、読めない行か、out の record.json を読めない行が {broken} 行ある" if broken else "")
 
 
-def not_run_hint(commit: str, cwd=None, role: int = 0) -> str:
+def not_run_hint(commit: str, cwd=None, role: int = 0, then: str = "op run") -> str:
     """その役（0: 審査役、1: --interrogate の審査役、2: 監査役。reviews_of の並びの番号）の記録が無いと拒否するとき（宣言があって拒否されるときは、
     数える記録が無いので空を返す）、
-    その commit に、その役の子が実行できずに not-run で返った記録（execution が no）があれば、宣言のしかたを示す文。
+    その commit に、その役の子が実行できずに not-run で返った記録（execution が no）があれば、宣言のしかたを示す文（then は宣言を付けるコマンド）。
     関門の外で出す（素の git push・gh pr create）道へ行かせないため。宣言しても通らない場面（ほかの役の not-run だけがある）では出さない。"""
     found = reviews_of(commit, cwd, not_run=True)[role]
     if not found:
@@ -287,7 +290,7 @@ def not_run_hint(commit: str, cwd=None, role: int = 0) -> str:
             f"（{found[0]}）。"
             "sandbox のせいで子が実行できない（headless Chrome・Node の子プロセス・127.0.0.1 など。写し方を教えれば動くものは除く）なら、"
             "関門の外で出さず、親が HEAD で同じテストを実行して証拠（コマンド・終了コード・出力）を作業の記録に書き、"
-            "--not-run <子が実行できなかった理由> を付けて op run する（監査役はその証拠を判定する。`playbook-deliver`）")
+            f"--not-run <子が実行できなかった理由> を付けて {then} する（監査役はその証拠を判定する。`playbook-deliver`）")
 
 
 def task_place(d: Path) -> tuple:
@@ -1236,6 +1239,11 @@ def task_command(a):
 
 
 def integrate(a):
+    not_run = None
+    if a.not_run is not None:
+        if not a.not_run.strip():
+            return out({'ok': False, 'reason': '--not-run の後に、子が対象のテスト・検査を実行できなかった理由を書く（headless Chrome が子の sandbox で起動しない、など）'}, 2)
+        not_run = a.not_run.strip()
     repo = checkout_of(a.dir)
     rr, wr = root(repo), root(a.dir)
     if rr == wr:
@@ -1274,6 +1282,16 @@ def integrate(a):
             raise ValueError('作業場所か統合先に未 commit の変更がある。変更は保持する')
         if sh(['git', 'merge-base', '--is-ancestor', target, head], repo)[0]:
             raise ValueError('統合先が作業場所に入っていない。最新の統合先を取り込み、再検証する')
+        _, _, audits, unread = reviews_of(head, not_run=bool(not_run))
+        if not audits:
+            return out({'ok': False, 'reason': f"統合する commit {head} を対象にした監査役（返す前の判定）の記録が無い。push・PR をしない統合でも要る。"
+                        "launcher（launch.py）に --audit を付け、この commit を checkout した未 commit の変更が無い場所を --cwd にして、"
+                        "`playbook-verify` の「返す前の判定」の依頼文で立て、status が ok で返り、届けてよい（deliver: yes）と判定した記録が要る"
+                        "（差し戻しの deliver: no の記録と、deliver の無い更新前の launcher の記録は数えない。差し戻しなら挙がった項目を閉じてから立て直す）。"
+                        "launcher が unavailable で返るなら（専用ログインが無いなど）、その problems の理由に従い、"
+                        "bb-writ の README の「任意機能の準備」で専用ログインを用意する"
+                        + not_run_hint(head, role=2, then="integrate")
+                        + (f"。{unread}" if unread else "")}, 6)
         write(journal_file, {'dir': str(a.dir.resolve()), 'expected': target, 'verified': head, 'target': ref})
         try:
             git(dest, 'merge', '--ff-only', '--no-overwrite-ignore', head, fds=(rf, wf))
@@ -1283,7 +1301,7 @@ def integrate(a):
         if git(repo, 'rev-parse', ref) != head or not clean(dest):
             raise ValueError('統合後の実物が検証した commit と一致しない。記録と差分を照合する')
         journal_file.unlink()
-        return out({'ok': True, 'commit': head, 'target': ref})
+        return out({'ok': True, 'commit': head, 'target': ref, **({'not_run': not_run} if not_run else {})})
 
 
 def op_step(a, r: Path, live, now: float, action: str):
@@ -1830,6 +1848,8 @@ def main() -> int:
     i.add_argument('--token', required=True)
     i.add_argument('--expected', required=True, help='検証時の統合先の完全な commit ID')
     i.add_argument('--verified', required=True, help='検証した作業場所の完全な commit ID')
+    i.add_argument('--not-run', dest='not_run', help='監査役が sandbox のせいで対象のテスト・検査を実行できなかった理由（op run の --not-run と同じ。'
+                   '付けると、統合する commit を対象に not-run で返り、実行の欄に no と書いた監査役の記録も数える）')
     for name in ("claim", "renew", "release", "status"):
         s = sub.add_parser(name)
         s.add_argument("--dir", type=Path, required=True)
