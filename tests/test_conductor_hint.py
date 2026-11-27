@@ -1,5 +1,5 @@
 """入口を呼んだセッションで、hook が発火するたびに（利用者の入力のほか、指揮者の終わりの知らせ・子からの伝言でも）、指揮者への返事と
-続きは、親が進めず・渡さずに、利用者が指揮者に直接打つよう案内する hook（scripts/conductor_hint.py）。
+続きは、親が自分で進めずに、印を付けた原文で指揮者に渡すよう案内する hook（scripts/conductor_hint.py）。
 
 見ないこと: 案内の文面（どの言い回しで親が従うかは、実物で数える）。additionalContext が空でない文であることだけを見る。
 ただし、どの案内が付いたか（失敗の案内・いつもの案内・unknowns の案内）は、それぞれの目印の語で見分ける。
@@ -225,6 +225,22 @@ class TestConductorHint(unittest.TestCase):
             got = ctx(notice(CONDUCTOR, "failed"))
             self.assertIn(FAIL, got)
             self.assertIn("探索の入口 unknowns", got)
+
+    def test_the_relay_the_hint_asks_for_has_the_shape_the_children_accept(self):
+        """親が付ける印と、指揮者・探索の子が利用者の言葉として受け取る印が同じ（ずれると、渡した返事を子が断る）。"""
+        unknowns_tool = {"type": "assistant", "message": {"role": "assistant", "content": [
+            {"type": "tool_use", "id": "toolu_u", "name": "Skill", "input": {"skill": "bb-writ:unknowns"}}]}}
+        for kind, prompt_rows in (("bb-writ", (BY_SKILL_TOOL,)), ("unknowns", (unknowns_tool,))):
+            with self.subTest(kind):
+                ctx = self.run_hint(self.stdin(self.transcript(*prompt_rows)))["hookSpecificOutput"]["additionalContext"]
+                self.assertIn("「bb-writ: 利用者の入力（原文のまま）」", ctx)
+                self.assertIn("「このセッションがしたこと:」", ctx)
+                self.assertIn("SendMessage", ctx)
+        for skill in ("bb-writ", "conduct", "unknowns", "explore"):
+            with self.subTest(skill):
+                body = (ROOT / "skills" / skill / "SKILL.md").read_text(encoding="utf-8")
+                self.assertIn("`bb-writ: 利用者の入力（原文のまま）`", body)
+                self.assertIn("「このセッションがしたこと」", body)
 
     def test_input_it_cannot_judge_ends_quietly(self):  # R9
         for name, raw in (("JSON でない", "A で"), ("空", ""), ("JSON の配列", "[1, 2]"),
