@@ -300,7 +300,7 @@ Grok Build には、ログインの状態を見るコマンドが無い（`grok 
 この節は、bb-writ 自体を直す人向け。
 
 - 手元の作業ツリーを Claude Code で試すには、配布版の代わりに `claude plugin marketplace add <このリポジトリのパス>` で登録する。作業ツリーへの編集は、次のセッションか `/reload-plugins` で反映する。
-- 置き場：スキルは `skills/<名前>/SKILL.md`（上の一覧と同じ名前）。補助スクリプトは `scripts/launch.py`（別系統の CLI の起動と報告の検査）と `scripts/work.py`（担当の貸し出しと外部操作の記録）で、標準ライブラリだけを使う。
+- 置き場：スキルは `skills/<名前>/SKILL.md`（上の一覧と同じ名前）。入口が Claude Code で fork する指揮者のエージェント定義は `agents/conductor.md`。補助スクリプトは `scripts/launch.py`（別系統の CLI の起動と報告の検査）と `scripts/work.py`（担当の貸し出しと外部操作の記録）で、標準ライブラリだけを使う。
 - 必要な内容は、すべて SKILL.md の本文に入れる。プラグイン内の別ファイルを読ませると、Claude Code が承認を求めるため。
 - 並行開発の仕組み（作業場所の分離・再開・統合・片付け）を変えたときは、このリポジトリの検証スキル `verify-parallel`（`.agents/skills/verify-parallel/`。Claude Code は `.claude/skills/` の symlink から読む）で、実際の CLI を使って確かめる。配布物（`skills/`）には含めない。
 - テスト：`python3 -B tests/run.py`（テストごとに別のプロセスで並べて回す。順に回すなら `python3 -B -m unittest discover -s tests -t .`）。入力の形のプロパティテスト（`tests/test_properties.py`）は Hypothesis を使い、無ければ飛ばす。入れるときは `pip install -r tests/requirements.txt`（テストだけの依存）。

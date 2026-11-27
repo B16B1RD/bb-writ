@@ -111,7 +111,7 @@ class TestSkills(unittest.TestCase):
         """要約の後、fork の最初のメッセージ（入口の本文）は戻らず、呼び直すのは本体の conduct だけ。定義の本文は指揮者の
         システムプロンプトで要約されないので、入口の「Claude Code では次のとおりにする」の決まりを、同じ文で持つ（#93 の審査）。
         確かめるのは、入口のその節の箇条が定義の本文にそのまま在ることと、定義の本文が conduct の呼び直し・直接立てられたときに止まる
-        条件・要約の後に依頼を会話記録から読み直すことを言う文を持つことだけ（従うかは実物の CLI で確かめる）。"""
+        条件・要約に依頼と伝言の原文を残すことを言う文を持つことだけ（従うかは実物の CLI で確かめる）。"""
         entry = (ROOT / "skills" / "bb-writ" / "SKILL.md").read_text(encoding="utf-8")
         lead = "そのため、Claude Code では次のとおりにする。\n\n"
         self.assertEqual(entry.count(lead), 1)
@@ -122,9 +122,10 @@ class TestSkills(unittest.TestCase):
         body = skill_body(self, definition.read_text(encoding="utf-8"), definition.name)
         self.assertIn(rules, body)
         self.assertIn("`bb-writ:conduct` を Skill ツールで呼び直して", body)
-        # 定義だけが持つ 2 つ: 直接立てられたら止まる。要約の後は依頼の原文を会話記録から読み直す（要約に残らないことがあった）
+        # 定義だけが持つ 2 つ: 直接立てられたら止まる。要約に依頼と伝言の原文を残す（要約役が従わず落とすこともあり、
+        # そのときは写した決まりの「依頼が届いていなければ止まる」で止まる）
         self.assertIn("Agent ツールの依頼として始まったとき（会話のどこにも入口の本文が無く、会話の最初が要約でもない）は、何もせずに", body)
-        self.assertIn("依頼の原文は、要約の末尾が示す会話記録（`.jsonl`）から読み直す: 最初の行（入口の本文と、渡された依頼）だけを `head -n 1` で読む", body)
+        self.assertIn("利用者の依頼の原文（入口に渡された引数と、伝言で届いた利用者の入力）と、作業の記録（note.md）の道筋を、要約に一字も変えずに残す", body)
 
     def test_entry_keeps_what_to_ask_and_review_rules_within_the_compaction_head(self):
         """Claude Code は要約の後、呼んだスキルを先頭 5,000 トークンまで戻す（合計の枠を超えた古いものは落ちる）。
