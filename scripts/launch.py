@@ -29,6 +29,8 @@ push・pr でこれを求める）。依頼文の中身が審査だったかは�
 Codex の子は専用ログインに入った bb-writ の写しを読むので、写しが launcher と中身で違えば、入れ直せるときだけ入れ直し、
 それでも違えば起動しない（unavailable。codex_refresh）。起動のたびに、自分が状態の置き場に作った一時の置き場のうち、もう続きから
 起動されないものを消す（記録の swept。sweep_leftovers）。報告と記録（out の中、delegations.jsonl）は消さない。
+書く子（--write。続きも）の間は、launcher がその作業場所の担当（work.py の lease）を取って持ち、子が終わったら返す（take_lease・give_back_lease。
+記録の lease）。生きた別の担当があるなど取れなければ子を起動せず unavailable、返せなければ（実行中に取り直された・消えた）failed。
 Claude Code の子を起動する前に、専用ログインのトークンの組織と、launcher を呼んだ環境のログインの組織を比べ、記録の claude_login に
 書く（起動は止めない。claude_login）。
 トークンは画面にもログにも出さない（Claude Code は dotenvx run で子の環境にだけ渡す）。
@@ -57,7 +59,7 @@ from pathlib import Path
 sys.dont_write_bytecode = True
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from work import root as work_record  # noqa: E402
-from work import claude_staging_only, field_texts, record_at, REVISIT  # noqa: E402
+from work import claude_staging_only, field_texts, record_at, MAX_LEASE_MIN, REVISIT  # noqa: E402
 
 # 親が --model・--effort を省いたときの、役割ごとのモデルと effort（親が渡せば、それが勝つ）。表に無い組み合わせは --model と --effort を渡す。
 # 最も難しい依頼（設計、大きな移行・リファクタリング、長い無人実行）を任せる書く子（--hardest）は最上段。
@@ -90,6 +92,9 @@ LINUX = sys.platform.startswith("linux")  # 子の CLI が切り離した子孫�
 # Claude Code の子に渡す依頼文の先頭に置く 1 行。依頼文の先頭が「/名前 …」だと、claude -p はスラッシュの呼び出しとして扱い、
 # 入口なら子の中で fork した指揮者が立った（設定の拒否は Skill ツールにしか効かない。2026-11-20、2.1.328、読み取り専用の子で確かめた）
 CLAUDE_PROMPT_HEAD = "bb-writ の launcher が渡す依頼文（この行の下の全文が依頼）:\n\n"
+# 書く子にだけ足す（どのホストにも、続きにも）。担当は launcher が取って返す（take_lease）
+WRITE_CONTRACT = ("この作業場所の担当は launcher が持っている。`work.py` の `claim`・`release`・`renew` を自分で呼ばない"
+                  "（launcher が子を起こす前に取り、終わった後に返す）。\n")
 READ_ONLY_CONTRACT = "対象に書くテスト・検査は、`mktemp -d` で新しく作ったディレクトリ（$TMPDIR の下。無ければ /tmp の下）に対象を写して（cp -r など）、そこで動かす。決まった名前や pid だけの名前の場所に写さない（並行する子どうしでも、同じ子の別のコマンドでも、$TMPDIR も pid も同じことがある）。\n"
 AUDIT_CONTRACT = ("返す前の判定（bb-writ の監査役の約束）: 上の依頼文に書かれていなくても、bb-writ のスキル `playbook-verify` の"
                   "「返す前の判定（遵守の監査）」の節を全文読み、その節が挙げる判定の項目（遵守、残る範囲の閉じ方、手順の文書を変えたときの"
@@ -1389,6 +1394,55 @@ STOP_GRACE = 30
 FIX_BUDGET = 20
 
 
+LEASE_TIMEOUT = 60  # work.py の claim・release を待つ秒数（記録の置き場の排他を、ほかの work.py が持っていることがある）
+LEASE_MARGIN = 600  # 担当の期限に足す秒数。子が終わった後の待ち（出力・子孫・Git と残りの照合）を覆う
+
+
+class LeaseRefused(Exception):
+    """書く子の作業場所の担当を取れなかった（子を起動しない）。"""
+
+
+def lease_call(*args: str) -> tuple:
+    """launcher の隣の work.py を別のプロセスで呼ぶ（work.py の約束は変えない。-B でプラグインの置き場に __pycache__ を作らない）。
+    (終了コード（実行できなければ None）, 出力の JSON（読めなければ {}）, 出力の末尾)。"""
+    try:
+        p = subprocess.run([sys.executable, "-B", str(Path(__file__).resolve().parent / "work.py"), *args], stdin=subprocess.DEVNULL,
+                           capture_output=True, text=True, errors="replace", timeout=LEASE_TIMEOUT)
+    except (OSError, subprocess.SubprocessError) as e:
+        return None, {}, repr(e)[:300]
+    try:
+        res = obj(json.loads(p.stdout))
+    except ValueError:
+        res = {}
+    return p.returncode, res, (p.stderr.strip() or p.stdout.strip())[-300:]
+
+
+def take_lease(cwd: Path, holder: str, seconds: float) -> str:
+    """書く子の作業場所の担当を、子を起こす直前に launcher が取り、token を返す（#88。子に claim させると、子の claim が失敗しても、
+    子は担当なしで書いて commit し、launcher は ok で返した）。取れなければ LeaseRefused（理由・持ち主・親が持ったままなら release
+    してから立てること）。期限は、この起動の上限（--timeout。報告の直しの続きと立て直しは、その残りで動く）に片付けの猶予と
+    LEASE_MARGIN を足した分で、work.py の上限（MAX_LEASE_MIN）で切る。
+    守らない範囲: launcher が KILL された（受け手を置く前のシグナルで止められたときも）ら、担当は期限まで残る（切れれば誰でも取り直せる）。
+    期限が上限で切られた長い起動では、実行中に期限が切れ、ほかの者が取り直せる（取り直されたら、終わりの release が拒否され、failed）。"""
+    minutes = min(max(math.ceil((seconds + STOP_GRACE + LEASE_MARGIN) / 60), 1), MAX_LEASE_MIN)
+    code, res, tail = lease_call("claim", "--dir", str(cwd), "--holder", holder, "--lease", str(minutes))
+    if code == 0 and res.get("ok") is True and isinstance(res.get("token"), str) and res["token"]:
+        return res["token"]
+    why = res.get("reason") or f"work.py claim が失敗した（終了コード {code}）: {tail}"
+    raise LeaseRefused(f"作業場所の担当を取れないので、書く子を起動しない（{why}。持ち主: {res.get('holder') or '不明'}）。"
+                       f"親が担当を持ったままなら、release してから立てる: {cwd}"[:1000])
+
+
+def give_back_lease(cwd: Path, token: str) -> str | None:
+    """take_lease で取った担当を返す。返せなければ（実行中に取り直された・記録が消えた・書き換わった・op run が動いている）、その理由の文。"""
+    code, res, tail = lease_call("release", "--dir", str(cwd), "--token", token)
+    if code == 0 and res.get("ok") is True:
+        return None
+    return (f"launcher が作業場所の担当を release できない（{res.get('reason') or f'終了コード {code}: {tail}'}。今の持ち主: "
+            f"{res.get('holder') or 'なし'}）。書く子の実行中に担当が取り直されたか、記録が消えた・書き換わった。子は担当の外で書いた"
+            "かもしれない。work.py status で今の担当を、子の変更を確かめてから使う")[:1000]
+
+
 def ask_to_stop(child: subprocess.Popen, stop: dict) -> None:
     """直下の子に TERM を 1 回だけ送る。グループには送らない（dotenvx が子へ伝え直し、子の CLI が TERM を 2 回受ける）。"""
     if "at" in stop or stop.get("reaped"):
@@ -1962,7 +2016,7 @@ def main() -> int:
     rec["head"] = rec["saw"] = clean_head(a.cwd)  # 子を起こす前に（子が見る作業ツリー）。saw は、後で head を外しても残す
 
     snapshot, why, prep, login = None, None, None, None
-    contract = (CONTRACT + ("" if a.write else READ_ONLY_CONTRACT) + (AUDIT_CONTRACT if a.audit else "")
+    contract = (CONTRACT + (WRITE_CONTRACT if a.write else READ_ONLY_CONTRACT) + (AUDIT_CONTRACT if a.audit else "")
                 + (CLAUDE_WRITE_CONTRACT if a.host == "claude" and a.write else ""))
     try:
         if a.write:
@@ -2013,7 +2067,7 @@ def main() -> int:
     else:
         if login is not None:
             rec["claude_login"] = login
-        child, left, timed_out, exit_lost = None, [], False, False
+        child, left, timed_out, exit_lost, lease = None, [], False, False, None
         try:
             # 子を待つ間に止められたら（中断・呼び出し側の時間の上限）、直下の子に TERM を伝え、子が片付けて終わるのを待ってから、
             # 照合して記録を書く（続きから起動できる。木ごと KILL すると、子の CLI が対象に空の置き場を残した）。子を刈った後に受けた
@@ -2034,6 +2088,10 @@ def main() -> int:
             for s in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT):
                 if signal.getsignal(s) is not signal.SIG_IGN:
                     signal.signal(s, forward)
+            if a.write:  # 起動の前の確かめを通った後、子を起こす直前に（受け手を置いた後なので、取った後のシグナルでも返す）
+                holder = f"launcher {out_dir.name}"
+                lease = take_lease(a.cwd, holder, a.timeout)
+                rec["lease"] = {"holder": holder, "released": False}
             # 子が残した背景のプロセスが、終了後の照合の後に書き換えないよう、プロセスグループごと止める。子の CLI が新しいセッションに
             # 切り離した子孫（Claude Code の Bash）はグループの外なので、Linux では自分の下に来たものを残らなくなるまで止める
             fixing = None
@@ -2187,6 +2245,8 @@ def main() -> int:
             if "report_fix" in rec and rec["status"] not in ("ok", "not-run"):
                 rec["problems"] = rec.get("problems", []) + ["launcher が同じ session の続きで直させる前の 1 回目の報告の問題: "
                                                              + " / ".join(rec["report_fix"]["asked"])[:2000]]
+        except LeaseRefused as e:
+            rec.update(status="unavailable", problems=[str(e)])
         except Exception as e:
             what = "子を起動できない" if child is None else "子の結果を読めない"
             blocked.append("error")
@@ -2245,6 +2305,11 @@ def main() -> int:
                 rec.update(status="failed", problems=["子の起動の後、ホームに空のファイル・ディレクトリが新しく残った。中身を確かめて消す"
                                                       "（空の ~/.bash_profile があると、ログインシェルが ~/.profile と ~/.bashrc を読まない）"]
                            + rec["home_residue"][:20] + rec.get("problems", []))
+            if lease:  # 子の照合を終えてから返す（ok・直しの後・時間切れ・シグナル・失敗のどの道でも）
+                lost = give_back_lease(a.cwd, lease)
+                rec["lease"]["released"] = not lost
+                if lost:
+                    rec.update(status="failed", problems=rec.get("problems", []) + [lost])
     if rec["head"] and a.write:
         rec.update(head=None, head_lost="書く子の後は、HEAD と作業ツリーを確かめない（work.py は書く子の head を数えない）")
     elif rec["head"] and clean_head(a.cwd) != rec["head"]:
