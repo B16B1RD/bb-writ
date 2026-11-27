@@ -366,6 +366,15 @@ FAKE_CLAUDE = textwrap.dedent(r'''
     if mode == "move-remote":  # 親が子の実行中に fetch したのと同じく、リモート追跡の ref が動く
         subprocess.run(git + ["update-ref", "refs/remotes/origin/feat", subprocess.run(git + ["commit-tree", "-m", "x", "HEAD^{tree}"],
                        capture_output=True, text=True).stdout.strip()])
+    if mode in ("other-task-commit", "new-task", "loose-task-branch"):  # 並行するタスク（#87）。共有の .git の持ち主のリポジトリを引く
+        repo_dir = os.path.dirname(common())
+        if mode == "other-task-commit":  # ほかのタスクの書く子が、自分のブランチに commit した
+            subprocess.run(git + ["-C", repo_dir + "-other", "commit", "-q", "--allow-empty", "-m", "other"])
+        if mode == "new-task":  # 指揮者が task start で、ブランチと作業場所を作った
+            subprocess.run(git + ["-C", repo_dir, "worktree", "add", "-q", "-b", "bb-writ/t3", repo_dir + "-new"])
+        if mode == "loose-task-branch":  # どの作業場所にも checkout されていないタスクのブランチを動かす
+            evil = subprocess.run(git + ["commit-tree", "-m", "x", "HEAD^{tree}"], capture_output=True, text=True).stdout.strip()
+            subprocess.run(git + ["update-ref", "refs/heads/bb-writ/loose", evil])
     if mode == "tamper-main":  # 統合先を動かす
         evil = subprocess.run(git + ["commit-tree", "-m", "x", "HEAD^{tree}"], capture_output=True, text=True).stdout.strip()
         subprocess.run(git + ["update-ref", "refs/heads/main", evil])
@@ -4040,6 +4049,15 @@ class TestLaunch(unittest.TestCase):
         _, wt = self.worktree("move-remote")  # リモート追跡の ref は、子の実行中に親の fetch でも動くので数えない
         rc, rec = self.run_launch("claude", "move-remote", extra=["--write"], cwd=wt)
         self.assertEqual(rec["status"], "ok", rec)
+        for mode in ("other-task-commit", "new-task"):  # ほかの作業場所が checkout しているタスクのブランチは、並行する子と指揮者が正当に動かす（#87）
+            repo, wt = self.worktree(mode)
+            subprocess.run(["git", "-C", str(repo), "worktree", "add", "-q", "-b", "bb-writ/t2", str(repo) + "-other"], check=True)
+            rc, rec = self.run_launch("claude", mode, extra=["--write"], cwd=wt)
+            self.assertEqual(rec["status"], "ok", (mode, rec))
+        _, wt = self.worktree("loose-task-branch")  # どこにも checkout されていないタスクのブランチを動かすのは、今までどおり止める
+        rc, rec = self.run_launch("claude", "loose-task-branch", extra=["--write"], cwd=wt)
+        self.assertEqual(rec["status"], "failed", rec)
+        self.assertTrue(any(x.startswith("refs/heads/bb-writ/loose: ") for x in rec["problems"]), rec)
         self.assertEqual(list((self.cwd / "own" / ".git" / "worktrees").glob("*/config.worktree")), [])
         for mode in ("tamper-main", "tamper-config", "tamper-gitfile"):  # 統合先の ref、親の git で動く設定、作業場所の .git
             _, wt = self.worktree(mode)
@@ -5671,6 +5689,27 @@ class TestWait(unittest.TestCase):
             rc, r = self.wait(out, "--seconds", "30")
             self.assertEqual((rc, r["done"], r["status"], r["problems"]), (0, True, "failed", ["p1", "p2"]), r)
             self.assertLess(time.monotonic() - started, 15)  # 上限まで待たずに返る
+
+    def test_waiting_for_several_children_returns_when_any_one_finishes(self):
+        # launcher の子と Agent の子を同時に待つ場面で、1 つしか待てない --wait から、指揮者が 3 分ごとのループに戻った
+        with tempfile.TemporaryDirectory() as d:
+            a_out, b_out, report = Path(d) / "a", Path(d) / "b", Path(d) / "agent-report.md"
+            rc, r = self.wait(a_out, b_out, "--file", str(report), "--seconds", "0.3")  # どれもまだ無い
+            self.assertEqual((rc, r["done"], sorted(r["pending"])), (3, False, sorted(map(str, (a_out, b_out, report)))), r)
+            b_out.mkdir()
+            (b_out / "record.json").write_text(json.dumps({"status": "ok", "problems": []}), encoding="utf-8")
+            rc, r = self.wait(a_out, b_out, "--file", str(report), "--seconds", "30")
+            self.assertEqual((rc, r["done"], r["finished"], r["status"], r["out"]),
+                             (0, True, [{"out": str(b_out), "status": "ok", "problems": []}], "ok", str(b_out)), r)
+            self.assertEqual(sorted(r["pending"]), sorted(map(str, (a_out, report))), r)
+            report.write_text("書きかけ", encoding="utf-8")  # 書き足されている間の報告は、まだ終わっていない
+            rc, r = self.wait(a_out, "--file", str(report), "--seconds", "1")
+            self.assertEqual((rc, r["done"]), (3, False), r)
+            started = time.monotonic()
+            rc, r = self.wait(a_out, "--file", str(report), "--seconds", "30")  # 5 秒書き足されなければ終わり
+            self.assertEqual((rc, r["finished"], r["pending"]), (0, [{"file": str(report)}], [str(a_out)]), r)
+            self.assertNotIn("status", r)
+            self.assertLess(time.monotonic() - started, 15)
 
 
 if __name__ == "__main__":

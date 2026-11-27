@@ -480,22 +480,35 @@ def git_snapshot(own: Path, common: Path, cwd: Path) -> dict:
              common / "objects" / "info" / "alternates"]
     for d in (common / "hooks", common / "info"):
         files += sorted(f for f in d.rglob("*") if f.is_file() or f.is_symlink()) if d.is_dir() else []
+    elsewhere = set()  # ほかの作業場所が checkout しているブランチ。git を走らせず、共有の .git の worktrees/*/HEAD を読む
+    admin = common / "worktrees"
+    for d in sorted(admin.iterdir()) if admin.is_dir() and not admin.is_symlink() else []:
+        if d.is_dir() and not d.is_symlink() and d.resolve() != own.resolve():
+            h = read_head(d / "HEAD").strip()
+            if h.startswith("ref: "):
+                elsewhere.add(h[len("ref: "):])
     return {"refs": dict(r.split(" ", 1) for r in refs if " " in r),
             "files": {str(f): read_child_file(f)[0] for f in files},
-            "head": read_head(own / "HEAD")}
+            "head": read_head(own / "HEAD"), "elsewhere": elsewhere}
 
 
 def git_changes(before: dict, after: dict, common: Path) -> list[str]:
     """子が変えてよいのは、起動時に checkout していたブランチの ref と、その作業場所の HEAD・index だけ。
     ref は前後の値と戻すコマンドを添える（自動では戻さない。子の実行中に親や別のタスクが正当に動かしたかもしれない）。
     リモート追跡の ref（refs/remotes/）は数えない。git fetch が書く場所で、共有の .git では、子の実行中に親が流した fetch でも動く
-    （指揮者の fetch を、書く子の失敗に数えた）。work.py も launcher も、統合・CI の判定にリモート追跡の ref を使わない。"""
+    （指揮者の fetch を、書く子の失敗に数えた）。work.py も launcher も、統合・CI の判定にリモート追跡の ref を使わない。
+    子の実行の前か後に、ほかの作業場所が checkout しているタスクのブランチ（work.py が作る refs/heads/bb-writ/<タスク>）も数えない。
+    並行するタスクの書く子の commit、指揮者の task start（ブランチと作業場所を作る）・task cleanup（消す）で動く（並行を勧める手引きどおりに
+    書く子を 2 人立てると、一方の commit で、もう一方が failed になった。#87）。統合先（main など）は、ほかの作業場所が checkout していても
+    名前の形が違うので、今までどおり数える。どの作業場所にも checkout されていないタスクのブランチを動かしたときも数える。
+    子が自分で作業場所を足してタスクの名前のブランチを checkout すれば、そのブランチの変化は数えない（守らない範囲。子は統合先を動かせない）。"""
     head = before["head"].strip()
     mine = head[len("ref: "):] if head.startswith("ref: ") else None
+    others = {r for r in before.get("elsewhere", set()) | after.get("elsewhere", set()) if r.startswith("refs/heads/bb-writ/")}
     out = []
     for r in sorted(set(before["refs"]) | set(after["refs"])):
         old, new = before["refs"].get(r), after["refs"].get(r)
-        if r != mine and old != new and not r.startswith("refs/remotes/"):
+        if r != mine and old != new and not r.startswith("refs/remotes/") and r not in others:
             undo = f"git --git-dir {common} update-ref {r} {old}" if old else f"git --git-dir {common} update-ref -d {r}"
             out.append(f"{r}: {old or '(無し)'} → {new or '(削除)'}（戻すなら: {undo}）")
     out += sorted(f for f in set(before["files"]) | set(after["files"]) if before["files"].get(f) != after["files"].get(f))
@@ -1754,29 +1767,53 @@ def launcher_error(out_dir: Path) -> str:
 
 
 def wait_main(argv: list[str]) -> int:
-    """`launch.py --wait <out>`: 背景で起こした launcher の終わりを、最大 --seconds 秒（既定 540）待つ。
-    out の record.json が JSON として読めたら（launcher が書き終えたら）すぐ返り、1 行の JSON（done・status・problems の先頭 5 つ・out）を出して
-    終了コード 0。読めないまま上限に来たら done が偽の 1 行を出して終了コード 3（まだ動いているか、記録を書けずに止まった。止まったかは launcher の pid で見る）。
-    待つ側（指揮者）が、確かめる間隔を自分で決めて短い待ちをくり返さないための手段（3 分ごとに確かめ、そのたびに会話の全部を読み直していた）。
+    """`launch.py --wait <out>... [--file <道筋>]...`: 背景で起こした launcher と、Agent の子に書かせる報告のファイルの終わりを、
+    どれか 1 つが終わるまで、最大 --seconds 秒（既定 540）待つ。launcher の out は record.json が JSON として読めたら（書き終えたら）、
+    --file は在って空でなく、5 秒書き足されていなければ終わりと見る。どれかが終わればすぐ 1 行の JSON を出して終了コード 0
+    （done は真。finished に終わったもの、pending に待っているもの。終わった launcher が 1 つ目にあれば、その status・problems・out も上に出す）。
+    どれも終わらないまま上限に来たら、done が偽の 1 行を出して終了コード 3（まだ動いているか、記録を書けずに止まった。止まったかは launcher の pid で見る）。
+    待つ側（指揮者）が、確かめる間隔を自分で決めて短い待ちをくり返さないための手段（3 分ごとに確かめ、そのたびに会話の全部を読み直していた。
+    1 つしか待てなかった 0.35.4 では、launcher の子と Agent の子を同時に待つ場面で、指揮者が自分のループに戻った）。
     record.json は 1 回の書き込みで書くので、書きかけ（JSON として読めない）は、まだ終わっていないと見る。"""
     ap = argparse.ArgumentParser(prog="launch.py --wait")
-    ap.add_argument("out", type=Path)
+    ap.add_argument("out", type=Path, nargs="*")
+    ap.add_argument("--file", type=Path, action="append", default=[])
     ap.add_argument("--seconds", type=float, default=540)
     a = ap.parse_args(argv)
-    rec, deadline = a.out / "record.json", time.monotonic() + max(a.seconds, 0)
+    if not a.out and not a.file:
+        ap.error("待つ launcher の out か --file を 1 つ以上渡す")
+    deadline = time.monotonic() + max(a.seconds, 0)
+
+    def finished():
+        got = []
+        for o in a.out:
+            try:
+                r = obj(json.loads((o / "record.json").read_text(encoding="utf-8")))
+            except (OSError, ValueError):
+                continue
+            got.append({"out": str(o), "status": r.get("status"), "problems": list(r.get("problems") or [])[:5]})
+        for f in a.file:
+            try:
+                st = f.stat()
+            except OSError:
+                continue
+            if st.st_size > 0 and time.time() - st.st_mtime >= 5:
+                got.append({"file": str(f)})
+        return got
+
     while True:
-        try:
-            r = obj(json.loads(rec.read_text(encoding="utf-8")))
-        except (OSError, ValueError):
-            r = None
-        if r is not None:
-            print(json.dumps({"done": True, "status": r.get("status"), "problems": list(r.get("problems") or [])[:5], "out": str(a.out)}, ensure_ascii=False))
+        got = finished()
+        if got:
+            seen = {g.get("out") or g.get("file") for g in got}
+            line = {"done": True, "finished": got, "pending": [str(x) for x in [*a.out, *a.file] if str(x) not in seen]}
+            if "out" in got[0]:
+                line.update(status=got[0]["status"], problems=got[0]["problems"], out=got[0]["out"])
+            print(json.dumps(line, ensure_ascii=False))
             return 0
         if time.monotonic() >= deadline:
-            print(json.dumps({"done": False, "out": str(a.out), "waited_s": a.seconds}, ensure_ascii=False))
+            print(json.dumps({"done": False, "pending": [str(x) for x in [*a.out, *a.file]], "waited_s": a.seconds}, ensure_ascii=False))
             return 3
-        time.sleep(min(5, max(deadline - time.monotonic(), 0.05)))
-
+        time.sleep(min(2, max(deadline - time.monotonic(), 0.05)))
 
 def main() -> int:
     if sys.argv[1:2] == ["--wait"]:
