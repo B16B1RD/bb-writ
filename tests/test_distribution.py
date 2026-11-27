@@ -71,7 +71,7 @@ class TestSkills(unittest.TestCase):
         本体は fork しない（本体が fork すると、指揮者の中にもう 1 人の指揮者が立つ）。
         確かめるのは、入口の frontmatter の 3 行（effort は 1 回だけ）、入口の本文の最初の段落の「最初に、」で始まる文が本体の名前を挙げること、
         本体の frontmatter にその 3 つのキーが無いことだけ（fork した子が実際にそのモデルと effort で動くかは、実物の CLI で確かめる。
-        本体の文が残っているかも見ない）。"""
+        本体の文が残っているかも見ない。指揮者が途中で読み込むほかのスキルに effort が入る形も見ない）。"""
         # 探索の入口 unknowns と本体 explore も同じ形（#58。frontmatter の model だけでは、2 ターン目からセッションのモデルで動いた）
         for entry, body in (("bb-writ", "conduct"), ("unknowns", "explore")):
             with self.subTest(entry=entry):
