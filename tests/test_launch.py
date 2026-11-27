@@ -5025,6 +5025,27 @@ launch.claude_reads = claude_reads
         self.assertIn(f"claude setup-token のトークンを、{setup}", why)
         self.assertIn(section, why)
 
+    def test_only_a_missing_login_marks_the_record_even_when_the_cli_is_not_on_the_path(self):
+        """専用ログインそのものが無い（Claude Code の .env、Codex・Grok の auth.json）unavailable だけ、記録（行と record.json）の no_login を
+        真にする。CLI や dotenvx が PATH に無くても、ログインの無さを先に見る（基本機能だけの利用者は、たいてい dotenvx も無い）。
+        work.py の integrate は、この印で、監査役を起動できなかった記録を数える（#97）。鍵だけが無い・CLI だけが無いときは付けない。"""
+        only_git = Path(tempfile.mkdtemp(dir=self.tmp.name, prefix="only-git-"))
+        (only_git / "git").symlink_to(shutil.which("git"))  # 本物の git だけ（偽の CLI・dotenvx を置かない）
+        rc, rec = self.run_launch("codex", extra=["--audit"], path=str(only_git))
+        self.assertEqual((rec["status"], "no_login" in rec), ("unavailable", False), rec)  # ログインはあって CLI が無い
+        (self.cfg / ".env.keys").unlink()
+        rc, rec = self.run_launch("claude", extra=["--audit"])
+        self.assertEqual((rec["status"], "no_login" in rec), ("unavailable", False), rec)  # 鍵だけが無い（整え途中）
+        for host, login in (("claude", self.cfg / ".env"), ("codex", self.cfg / "codex-home" / "auth.json"),
+                            ("grok", self.cfg / "grok-auth" / "auth.json")):
+            login.unlink()
+            rc, rec = self.run_launch(host, extra=["--audit"], path=str(only_git))
+            self.assertEqual((rc, rec["status"], rec.get("no_login")), (2, "unavailable", True), (host, rec))
+            self.assertIn("専用ログインが無い", rec["problems"][0])
+            line = json.loads((self.state / "delegations.jsonl").read_text(encoding="utf-8").splitlines()[-1])
+            on_disk = json.loads((Path(rec["out"]) / "record.json").read_text(encoding="utf-8"))
+            self.assertEqual((line["out"], line.get("no_login"), on_disk.get("no_login")), (rec["out"], True, True), host)
+
     # 専用ログインの組織の確かめ（launcher の claude_login）。偽の値は実在しない形（英字を含め、大文字にすると別の文字列になる）
     LOGIN_ORG = "1a2b3c4d-1111-4111-8111-aaaaaaaaaaaa"  # 偽の claude auth status の orgId の既定
     TOKEN_ORG = "5e6f7a8b-3333-4333-8333-bbbbbbbbbbbb"

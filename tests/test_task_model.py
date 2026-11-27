@@ -81,7 +81,7 @@ MODELED = {
     "claim_at": "d13a239d32440d08",
     "unclosed_tasks": "c1b08c620e752898",
     "task_command": "f543434ae920f488",
-    "integrate": "0a1cc127a5fb8cfd",
+    "integrate": "870c2e8e8b9fd0ad",
     "dispatch": "7b2ce7ae7c39483f",
 }
 

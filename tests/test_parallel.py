@@ -14,6 +14,7 @@ import time
 import unittest
 
 WORK = Path(__file__).resolve().parents[1] / 'scripts' / 'work.py'
+LAUNCH = WORK.parent / 'launch.py'
 
 
 class TestParallel(unittest.TestCase):
@@ -65,6 +66,24 @@ class TestParallel(unittest.TestCase):
         with open(place.parent / 'delegations.jsonl', 'a', encoding='utf-8') as f:
             f.write(json.dumps(rec) + '\n')
         return str(out)
+
+    def launch_audit(self, task, cfg=None, flags=('--audit',), stubs=()):
+        """実物の launcher で監査役（--audit）を起動する。PATH には本物の git だけを置き（claude・dotenvx が無い）、設定の置き場は cfg
+        （無ければ空のディレクトリ。専用ログインの無い利用者）。flags で役を変える。stubs の名前は、在るかだけを見られる実行ファイルとして
+        PATH に置く（呼ばれたら 1 で終わり、ほかを呼ばない）。子は起動できずに返る。標準出力の記録を返す。"""
+        t = Path(self.tmp.name)
+        cfg = cfg or Path(tempfile.mkdtemp(dir=t, prefix='cfg-'))
+        bin_ = Path(tempfile.mkdtemp(dir=t, prefix='bin-'))
+        (bin_ / 'git').symlink_to(shutil.which('git'))
+        for name in stubs:
+            (bin_ / name).write_text('#!/bin/sh\nexit 1\n')
+            (bin_ / name).chmod(0o755)
+        prompt = t / 'audit.md'
+        prompt.write_text('返す前の判定をする\n')
+        p = subprocess.run([sys.executable, '-B', str(LAUNCH), '--host', 'claude', '--cwd', task['dir'], '--prompt-file', prompt, *flags],
+                           env={**self.env, 'PATH': str(bin_), 'BB_WRIT_CONFIG_DIR': str(cfg)}, capture_output=True, text=True, timeout=120)
+        self.assertEqual(p.returncode, 2, p.stdout + p.stderr)
+        return json.loads(p.stdout)
 
     def integrate(self, task, expected, verified, *more, code=0, audit=True):
         if audit:  # 統合の監査の関門（#97）を試さないテストでは、検証した commit の監査役の記録を先に置く
@@ -391,6 +410,47 @@ class TestParallel(unittest.TestCase):
         self.audit(bh, status='not-run', execution=...)
         self.assertIn('監査役', self.integrate(b, head, bh, '--not-run', why, code=6, audit=False)['reason'])
         self.assertNotIn('not_run', self.integrate(b, head, bh))
+
+    def test_integrate_lets_a_user_without_a_dedicated_login_in_with_the_auditor_the_launcher_could_not_start(self):
+        """専用ログインの無い利用者（README の基本機能だけ。たいてい dotenvx も無い）は、監査役を起動できない。実物の launcher を --audit で
+        起動し、専用ログインが無いせいで unavailable で返った記録（no_login）が統合する commit にあれば、integrate は通し、その記録を出力の
+        audit_unavailable に残す（#97。この関門で、基本機能だけの利用者が手元の main へ入れられなくなった）。"""
+        a = self.start()
+        base = self.git(self.repo, 'rev-parse', 'main')
+        head = self.change(a, 'a')
+        rec = self.launch_audit(a)
+        self.assertEqual((rec['status'], rec.get('no_login'), rec['head']), ('unavailable', True, head), rec)
+        got = self.integrate(a, base, head, audit=False)
+        self.assertEqual((got['commit'], got['audit_unavailable']), (head, rec['out']))
+        self.assertEqual(self.git(self.repo, 'rev-parse', 'main'), head)
+        b = self.start()  # 監査役が ok で返った統合には、audit_unavailable を出さない
+        self.assertNotIn('audit_unavailable', self.integrate(b, head, self.change(b, 'b')))
+
+    def test_integrate_does_not_count_an_unavailable_record_for_another_reason_or_of_another_shape(self):
+        """数えるのは、統合する commit を対象に、行と record.json の両方で、監査役（audit）・unavailable・no_login が真の読み取り専用の記録だけ。
+        鍵の .env.keys だけが無いか道具が無い（用意しかけた設定）、監査役でない子、ほかの commit、書く子、片側だけが no_login と言う記録では通らない。"""
+        a = self.start()
+        base = self.git(self.repo, 'rev-parse', 'main')
+        head = self.change(a, 'a')
+        half = Path(tempfile.mkdtemp(dir=self.tmp.name, prefix='cfg-'))
+        (half / '.env').write_text('X=1\n')
+        keyless = self.launch_audit(a, half, stubs=('claude', 'dotenvx'))
+        self.assertEqual(('no_login' in keyless, keyless['problems'][0].split(':')[0]), (False, '専用ログインの鍵が無い'), keyless)
+        self.assertNotIn('no_login', self.launch_audit(a, half))  # .env はあるが claude・dotenvx が PATH に無い
+        reader = self.launch_audit(a, flags=())  # 監査役でない読み取り専用の子
+        self.assertEqual((reader.get('no_login'), reader['audit'], reader['head']), (True, False, head), reader)
+        self.audit(base, status='unavailable', no_login=True, deliver=...)  # 統合先の commit の記録
+        self.audit(head, status='unavailable', no_login=True, deliver=..., write=True)
+        for row, disk in ((True, False), (..., True)):
+            out = Path(self.audit(head, status='unavailable', no_login=row, deliver=...))
+            body = {k: v for k, v in {**json.loads((out / 'record.json').read_text()), 'no_login': disk}.items() if v is not ...}
+            (out / 'record.json').write_text(json.dumps(body))
+        got = self.integrate(a, base, head, code=6, audit=False)
+        self.assertIn('no_login が真', got['reason'])  # 専用ログインを用意しない利用者に、この道を示す
+        self.assertIn('push・pr の関門には数えない', got['reason'])
+        self.assertEqual(self.git(self.repo, 'rev-parse', 'main'), base)
+        self.launch_audit(a)  # 同じ場所で、専用ログインが無いせいで起動できなかった監査役の記録を置けば通る
+        self.assertEqual(self.integrate(a, base, head, audit=False)['commit'], head)
 
     def test_integrate_waits_for_an_op_run_in_the_checkout(self):
         a = self.start()

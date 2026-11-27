@@ -24,6 +24,8 @@ push・pr でこれを求める）。依頼文の中身が審査だったかは�
 --audit は、読み取り専用の子が返す前の判定（スキルの要求を守ったかの監査）の子だという宣言で、記録の audit に残す
 （work.py が、すべての push・pr と integrate で、HEAD を対象にしたこの記録を求める）。依頼文の中身が監査だったかは見ない。
 監査役の報告は判定 deliver（yes か no）を持ち、無いか値が違えば invalid-report。値は記録の deliver に残し、work.py は yes だけを関門に数える。
+専用ログインが無い（Claude Code の .env、Codex・Grok の auth.json が無い）せいで起動できなかった unavailable の記録には、no_login を真で残す
+（NoLogin。道具が PATH に無くても、ログインの無さを先に見る）。work.py は、--audit のこの記録を integrate にだけ数え、push・pr には数えない。
 Codex の子は専用ログインに入った bb-writ の写しを読むので、写しが launcher と中身で違えば、入れ直せるときだけ入れ直し、
 それでも違えば起動しない（unavailable。codex_refresh）。起動のたびに、自分が状態の置き場に作った一時の置き場のうち、もう続きから
 起動されないものを消す（記録の swept。sweep_leftovers）。報告と記録（out の中、delegations.jsonl）は消さない。
@@ -898,18 +900,24 @@ def claude_login(cfg: Path) -> dict:
         return {"org": "unknown", "why": f"確かめの途中で想定外の失敗（{type(e).__name__}）"}
 
 
+class NoLogin(str):
+    """command() が返す起動できない理由のうち、専用ログインそのものが無いもの（記録の no_login。work.py の integrate が数える）。
+    鍵だけが無いなど、整え途中の設定は含めない（用意しかけた利用者は、整えれば監査役を起動できる）。"""
+
+
 def command(a, prompt: str, scratch: Path) -> tuple[list[str], dict, str | None]:
     cfg = config_dir()
     env = dict(os.environ)
     if a.host == "claude":
         env_file, keys = cfg / ".env", cfg / ".env.keys"
+        setup = (f"claude setup-token のトークンを、dotenvx set CLAUDE_CODE_OAUTH_TOKEN <トークン> --no-native -f {env_file} -fk {keys} で置く"
+                 "（手順と確かめ方は README の「任意機能の準備」の「Claude Code の専用ログイン」）")
+        # 専用ログインを道具より先に見る（基本機能だけの利用者は、たいてい dotenvx も無い。道具の不足に隠れると no_login が付かない）
+        if not env_file.is_file():
+            return [], env, NoLogin(f"専用ログインが無い: {env_file} が無い。{setup}")
         for tool in ("claude", "dotenvx"):
             if not shutil.which(tool):
                 return [], env, f"{tool} が PATH に無い"
-        setup = (f"claude setup-token のトークンを、dotenvx set CLAUDE_CODE_OAUTH_TOKEN <トークン> --no-native -f {env_file} -fk {keys} で置く"
-                 "（手順と確かめ方は README の「任意機能の準備」の「Claude Code の専用ログイン」）")
-        if not env_file.is_file():
-            return [], env, f"専用ログインが無い: {env_file} が無い。{setup}"
         if not keys.is_file():
             # dotenvx 2.25 から、OS の secret store が使えると、鍵の既定の置き場が .env.keys でなくそちらになった（2.38 から、非対話の実行ではファイル）
             return [], env, (f"専用ログインの鍵が無い: {env_file} はあるが {keys} が無い。dotenvx 2.25 以降は、--no-native を付けないと"
@@ -964,11 +972,11 @@ def command(a, prompt: str, scratch: Path) -> tuple[list[str], dict, str | None]
                "--resume" if a.resume else "--session-id", a.session]
         return cmd, env, None
     if a.host == "grok":
-        if not shutil.which("grok"):
-            return [], env, "grok が PATH に無い"
         login = cfg / "grok-auth"
         if not (login / "auth.json").is_file():
-            return [], env, f"専用ログインが無い: {login}/auth.json（GROK_HOME={login} grok login。README の「任意機能の準備」の「Grok Build の専用ログイン」）"
+            return [], env, NoLogin(f"専用ログインが無い: {login}/auth.json（GROK_HOME={login} grok login。README の「任意機能の準備」の「Grok Build の専用ログイン」）")
+        if not shutil.which("grok"):
+            return [], env, "grok が PATH に無い"
         src = a.grok_home and grok_session_dir(a.grok_home, a.session)
         if a.grok_home and not src:
             return [], env, f"前の home {a.grok_home} に session {a.session} の記録が 1 つだけ見つからない（symlink の下は見ない）"
@@ -1005,11 +1013,11 @@ def command(a, prompt: str, scratch: Path) -> tuple[list[str], dict, str | None]
                "--no-leader", "--no-auto-update", "--no-subagents", "--disable-web-search", "--disallowed-tools", "x_search",
                "-r" if a.resume else "-s", a.session]
         return cmd, env, None
-    if not shutil.which("codex"):
-        return [], env, "codex が PATH に無い"
     home = cfg / "codex-home"
     if not (home / "auth.json").is_file():
-        return [], env, f"専用ログインが無い: {home}/auth.json（CODEX_HOME={home} codex login。README の「任意機能の準備」の「Codex の専用ログイン」）"
+        return [], env, NoLogin(f"専用ログインが無い: {home}/auth.json（CODEX_HOME={home} codex login。README の「任意機能の準備」の「Codex の専用ログイン」）")
+    if not shutil.which("codex"):
+        return [], env, "codex が PATH に無い"
     why = codex_refresh(a, home)
     if why:
         return [], env, why
@@ -2001,7 +2009,7 @@ def main() -> int:
     if prep:
         rec.update(status="failed", problems=prep)
     elif why:
-        rec.update(status="unavailable", problems=[why])
+        rec.update(status="unavailable", problems=[why], **({"no_login": True} if isinstance(why, NoLogin) else {}))
     else:
         if login is not None:
             rec["claude_login"] = login

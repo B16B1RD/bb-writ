@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import signal
 import subprocess
 import sys
@@ -1058,6 +1059,40 @@ class TestReviewedCommit(unittest.TestCase):
         self.assertEqual(rc, 0, r)
         recs = {json.loads(x)["key"]: json.loads(x) for x in self.ops_file().decode().splitlines()}
         self.assertEqual(recs["push:main"]["audits"], [audit])  # 統合の前の監査役の記録で通った
+
+    def test_an_auditor_that_could_not_start_without_a_dedicated_login_opens_the_integration_but_not_the_push(self):
+        # 専用ログインが無いせいで起動できなかった監査役の記録（launcher の no_login）は、integrate だけが数える。同じ commit の push は、
+        # --reviewed none: でも審査を通した commit の宣言でも拒む（#97。push・PR は、専用ログインを用意してから使う任意機能）
+        self.launcher_audits = False
+        rc, task = self.w("task", "start", "--dir", str(self.repo), "--holder", "A")
+        self.assertEqual(rc, 0, task)
+        at = Path(task["dir"])
+        (at / "src.py").write_text("x\n", encoding="utf-8")
+        for cmd in (["git", "add", "src.py"], ["git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "src"]):
+            subprocess.run(cmd, env=self.env, cwd=at, check=True)
+        rev = lambda ref, cwd: subprocess.run(["git", "rev-parse", ref], env=self.env, cwd=cwd, check=True, capture_output=True, text=True).stdout.strip()
+        head, main = rev("HEAD", at), rev("main", self.repo)
+        only_git, empty = Path(self.tmp.name) / "only-git", Path(self.tmp.name) / "empty-cfg"
+        only_git.mkdir()
+        empty.mkdir()
+        (only_git / "git").symlink_to(shutil.which("git", path=self.env["PATH"]))
+        prompt = Path(self.tmp.name) / "audit.md"
+        prompt.write_text("返す前の判定をする\n", encoding="utf-8")
+        p = subprocess.run([sys.executable, "-B", str(WORK.parent / "launch.py"), "--host", "claude", "--cwd", str(at), "--prompt-file", str(prompt), "--audit"],
+                           env={**self.env, "PATH": str(only_git), "BB_WRIT_CONFIG_DIR": str(empty)}, capture_output=True, text=True, timeout=120)
+        rec = json.loads(p.stdout)
+        self.assertEqual((rec["status"], rec.get("no_login"), rec["head"]), ("unavailable", True, head), rec)
+        rc, r = self.w("integrate", "--dir", str(at), "--token", task["token"], "--expected", main, "--verified", head)
+        self.assertEqual((rc, r.get("audit_unavailable")), (0, rec["out"]), r)
+        rc, c = self.w("claim", "--dir", str(self.repo), "--holder", "A")
+        Path(c["note"]["path"]).write_text(FILLED_NOTE, encoding="utf-8")
+        before = self.ops_file()
+        for reviewed in ("none:文書だけ", head):
+            rc, r = self.w("op", "begin", "--dir", str(self.repo), "--token", c["token"], "--key", "push:main", "--what", "x",
+                           "--from", str(self.repo), "--verified", head, "--reviewed", reviewed)
+            self.assertEqual(rc, 6, (reviewed, r))
+            self.assertIn(f"作業場所の HEAD {head} を対象にした監査役", r["reason"], reviewed)
+        self.assertEqual(self.ops_file(), before)
 
     def test_an_audit_does_not_count_as_a_review(self):
         # 監査役は push ごとに立てる。審査役の代わりにすると、審査を通した commit の宣言が監査だけで通る

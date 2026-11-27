@@ -36,7 +36,8 @@
   work.py integrate --dir <worktree> --token <t> --expected <統合先commit> --verified <検証済みcommit> [--not-run <理由>] → 排他・照合して fast-forward。
                      照合の後、統合する commit を対象にした監査役（返す前の判定）の記録が無ければ、fast-forward の前に拒否する（6。下の push・pr と
                      同じ数え方。push・PR をしない仕事で、指揮者が返す前の監査を飛ばして返したため。#97）。--not-run は op run と同じ宣言で、
-                     not-run で execution が no の監査役の記録も数え、出力の not_run に残す（理由が空なら 2）
+                     not-run で execution が no の監査役の記録も数え、出力の not_run に残す（理由が空なら 2）。監査役を専用ログインが無いせいで
+                     起動できなかった記録（launcher の no_login。push・pr には数えない）も数え、それで通したら出力の audit_unavailable に残す
   work.py task cleanup --dir <worktree> --token <t> --saved <別のブランチかタグ> → 変更が保存先に入っていれば片付け（squash・rebase の統合も可）。
                      項目を持つのに書き込めないディレクトリがあれば、消し始める前に、その道筋を出して拒否（6）。git worktree remove が
                      作業場所を消している途中で止まり、Git の登録だけを消したら、片付けの途中の記録に、登録が消えた残りだと書いて拒否し（6）、task resume で
@@ -224,7 +225,7 @@ def read_regular(f: Path) -> bytes:
         return h.read()
 
 
-def reviews_of(commit: str, cwd=None, not_run: bool = False) -> tuple:
+def reviews_of(commit: str, cwd=None, not_run: bool = False, no_login: bool = False) -> tuple:
     """launcher の委任の記録（delegations.jsonl）のうち、その commit を対象に起動して ok で返った読み取り専用の子の記録の out と、
     そのうち --interrogate を付けて立てた審査役の out と、--audit を付けて立てた監査役（返す前の判定）の out と、読めないものの説明（無ければ空）。
     行と、out の record.json の両方で head・status・write が合い、status・execution が行と record.json で同じものだけを数え、interrogate・audit も両方で真のものだけをその役に数える。
@@ -235,9 +236,12 @@ def reviews_of(commit: str, cwd=None, not_run: bool = False) -> tuple:
     審査の中身（子が十分に攻めたか、何人か、依頼文が interrogate の観点を持っていたか）は見ない。手で書き足した記録も見分けない（忘れて飛ばすのを止める）。
     cwd を渡すと、その場所を --cwd にして立てた記録だけを数える（--delta の祖先の審査を、ほかの作業場所の審査で代えないため）。
     not_run が真なら（作業者が --not-run で、子が sandbox のせいで実行できなかったと宣言した）、status が not-run で、子が実行の欄に
-    実行できなかった（execution が no）と書いた記録も数える。実行の欄が無い報告（読んだだけ）は数えない。"""
+    実行できなかった（execution が no）と書いた記録も数える。実行の欄が無い報告（読んだだけ）は数えない。
+    no_login が真なら（integrate だけが渡す。push・pr は渡さない）、監査役を専用ログインが無いせいで起動できなかった記録（audit・no_login が
+    真で status が unavailable）も、監査役に数える。"""
     here = str(Path(cwd).resolve()) if cwd is not None else None
-    done = lambda e: e.get("status") == "ok" or (not_run and e.get("status") == "not-run" and e.get("execution") == "no")
+    done = lambda e: (e.get("status") == "ok" or (not_run and e.get("status") == "not-run" and e.get("execution") == "no")
+                      or (no_login and e.get("status") == "unavailable" and e.get("no_login") is True and e.get("audit") is True))
     match = lambda e: (isinstance(e, dict) and e.get("head") == commit and done(e) and e.get("write") is False
                        and isinstance(e.get("out"), str) and os.path.isabs(e["out"])
                        and (here is None or (isinstance(e.get("cwd"), str) and os.path.isabs(e["cwd"]) and str(Path(e["cwd"]).resolve()) == here)))
@@ -269,7 +273,7 @@ def reviews_of(commit: str, cwd=None, not_run: bool = False) -> tuple:
             continue
         if match(rec) and rec["out"] == e["out"] and (rec.get("status"), rec.get("execution")) == (e.get("status"), e.get("execution")):
             if e.get("audit") is True or rec.get("audit") is True:
-                if e.get("audit") is True and rec.get("audit") is True and e.get("deliver") == rec.get("deliver") == "yes":
+                if e.get("audit") is True and rec.get("audit") is True and (e.get("deliver") == rec.get("deliver") == "yes" or e["status"] == "unavailable"):
                     audits.append(e["out"])
                 continue
             found.append(e["out"])
@@ -1283,13 +1287,18 @@ def integrate(a):
         if sh(['git', 'merge-base', '--is-ancestor', target, head], repo)[0]:
             raise ValueError('統合先が作業場所に入っていない。最新の統合先を取り込み、再検証する')
         _, _, audits, unread = reviews_of(head, not_run=bool(not_run))
+        unlogged = []  # 専用ログインが無いせいで起動できなかった監査役の記録。integrate だけが数える（基本機能だけの利用者が手元へ統合できるように）
         if not audits:
+            _, _, unlogged, unread = reviews_of(head, not_run=bool(not_run), no_login=True)
+        if not audits and not unlogged:
             return out({'ok': False, 'reason': f"統合する commit {head} を対象にした監査役（返す前の判定）の記録が無い。push・PR をしない統合でも要る。"
                         "launcher（launch.py）に --audit を付け、この commit を checkout した未 commit の変更が無い場所を --cwd にして、"
                         "`playbook-verify` の「返す前の判定」の依頼文で立て、status が ok で返り、届けてよい（deliver: yes）と判定した記録が要る"
                         "（差し戻しの deliver: no の記録と、deliver の無い更新前の launcher の記録は数えない。差し戻しなら挙がった項目を閉じてから立て直す）。"
                         "launcher が unavailable で返るなら（専用ログインが無いなど）、その problems の理由に従い、"
-                        "bb-writ の README の「任意機能の準備」で専用ログインを用意する"
+                        "bb-writ の README の「任意機能の準備」で専用ログインを用意する。"
+                        "専用ログインを用意しないなら、そのまま --audit で起動して、専用ログインが無いせいで unavailable で返った記録（no_login が真）でも、"
+                        "統合は通る（push・pr の関門には数えない）"
                         + not_run_hint(head, role=2, then="integrate")
                         + (f"。{unread}" if unread else "")}, 6)
         write(journal_file, {'dir': str(a.dir.resolve()), 'expected': target, 'verified': head, 'target': ref})
@@ -1301,7 +1310,8 @@ def integrate(a):
         if git(repo, 'rev-parse', ref) != head or not clean(dest):
             raise ValueError('統合後の実物が検証した commit と一致しない。記録と差分を照合する')
         journal_file.unlink()
-        return out({'ok': True, 'commit': head, 'target': ref, **({'not_run': not_run} if not_run else {})})
+        return out({'ok': True, 'commit': head, 'target': ref, **({'not_run': not_run} if not_run else {}),
+                    **({'audit_unavailable': unlogged[0]} if unlogged else {})})
 
 
 def op_step(a, r: Path, live, now: float, action: str):
