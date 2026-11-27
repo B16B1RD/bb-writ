@@ -97,16 +97,21 @@ class TestSkills(unittest.TestCase):
         [definition] = [p for p in sorted((ROOT / "agents").glob("*.md")) if frontmatter(p).get("name") == name]
         keys = frontmatter(definition)
         self.assertEqual(set(keys), {"name", "description", "autoCompactWindow"})
-        # 200k のような書き方は 200 と読まれる（公式の文書）。300_000 を CLI が受けるかは確かめていないので、数字だけを通す
-        self.assertRegex(keys["autoCompactWindow"], r"^\d+$")
-        window = int(keys["autoCompactWindow"])
+        head = definition.read_text(encoding="utf-8").split("---", 2)[1]
+        self.assertEqual(len([line for line in head.splitlines() if ":" in line and not line.startswith((" ", "\t"))]), 3, head)  # 同じ鍵を 2 回書かない
+        # 200k のような書き方は 200 と読まれる（公式の文書）。300_000 や引用符で包んだ値を CLI が数として受けるかは確かめていないので、
+        # 引用符を外す前の行で、数字だけを通す
+        [raw] = re.findall(r"^autoCompactWindow:\s*(\S+)\s*$", head, re.M)
+        self.assertRegex(raw, r"^\d+$")
+        window = int(raw)
         self.assertGreaterEqual(window, 100000)
         self.assertLessEqual(window, 400000)
 
     def test_the_conductor_definition_repeats_the_entry_rules_that_must_survive_compaction(self):
         """要約の後、fork の最初のメッセージ（入口の本文）は戻らず、呼び直すのは本体の conduct だけ。定義の本文は指揮者の
         システムプロンプトで要約されないので、入口の「Claude Code では次のとおりにする」の決まりを、同じ文で持つ（#93 の審査）。
-        確かめるのは、入口のその節の箇条が定義の本文にそのまま在ることと、定義の本文が conduct の呼び直しを言うことだけ。"""
+        確かめるのは、入口のその節の箇条が定義の本文にそのまま在ることと、定義の本文が conduct の呼び直し・直接立てられたときに止まる
+        条件・要約の後に依頼を会話記録から読み直すことを言う文を持つことだけ（従うかは実物の CLI で確かめる）。"""
         entry = (ROOT / "skills" / "bb-writ" / "SKILL.md").read_text(encoding="utf-8")
         lead = "そのため、Claude Code では次のとおりにする。\n\n"
         self.assertEqual(entry.count(lead), 1)
@@ -117,6 +122,9 @@ class TestSkills(unittest.TestCase):
         body = skill_body(self, definition.read_text(encoding="utf-8"), definition.name)
         self.assertIn(rules, body)
         self.assertIn("`bb-writ:conduct` を Skill ツールで呼び直して", body)
+        # 定義だけが持つ 2 つ: 直接立てられたら止まる。要約の後は依頼の原文を会話記録から読み直す（要約に残らないことがあった）
+        self.assertIn("Agent ツールの依頼として始まったとき（会話のどこにも入口の本文が無く、会話の最初が要約でもない）は、何もせずに", body)
+        self.assertIn("依頼の原文は、要約の末尾が示す会話記録（`.jsonl`）から読み直す", body)
 
     def test_entry_keeps_what_to_ask_and_review_rules_within_the_compaction_head(self):
         """Claude Code は要約の後、呼んだスキルを先頭 5,000 トークンまで戻す（合計の枠を超えた古いものは落ちる）。

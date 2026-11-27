@@ -81,7 +81,7 @@ python3 <launch.py> --resume <前の記録の out> --prompt-file <続きの依�
 
 ## Codex
 
-- **入口:** 入口の frontmatter の `context`・`model` は使われず、入口は呼んだセッションの中で読まれ、続けて本体の SKILL.md を読む（題材のリポジトリの `.agents/skills/` に置いた写しで確かめた。プラグインとして入れた形では確かめていない）。
+- **入口:** 入口の frontmatter の `context`・`model`・`agent` は使われず（`agent` は確かめていない）、入口は呼んだセッションの中で読まれ、続けて本体の SKILL.md を読む（題材のリポジトリの `.agents/skills/` に置いた写しで確かめた。プラグインとして入れた形では確かめていない）。
 - **同じ系統の委任:** 新しい文脈が要るときは `codex exec` を別プロセスで起動する。Codex 自身のサブエージェント機能はバージョンと設定で有効・無効が変わるので、使えるかはその場で確かめ、使えなければそう書く。
 - **launcher の書く子:** `--add-dir` で渡すのは、作業場所の記録と、Git の共通ディレクトリのうち commit に要る `objects`・自分のブランチの ref と reflog・その worktree の管理ディレクトリだけ（共通の `config`・`hooks`・`main` には書けない）。
 - **非対話実行:** `codex exec --json -m <model> -c model_reasoning_effort="<effort>" [-s read-only|workspace-write|danger-full-access] [-C <dir>] [--add-dir <dir>] "<依頼>" < /dev/null`。stdin を閉じないと「Reading additional input from stdin...」で待ち続ける。承認を Codex 自身の自動レビューに任せるなら `--approve-for-me`（workspace-write を含むので `-s` と併用できない）。sandbox の中でネットワークが要るなら `-c sandbox_workspace_write.network_access=true`、作業領域の外に書く場所は `--add-dir`。構造化した結果が要るなら `--output-schema <file>`。利用者の設定と AGENTS を切るなら `--ignore-user-config`・`--ignore-rules`。Git 管理外で動かすなら `--skip-git-repo-check`。launcher の読み取り専用の子は `-s` でなく権限の profile で起動するので、`-s`（`sandbox_mode`）を一緒に渡さない（対象の `.codex/config.toml` の `sandbox_mode` も profile を変えうる）。
@@ -92,7 +92,7 @@ python3 <launch.py> --resume <前の記録の out> --prompt-file <続きの依�
 ## Grok Build
 
 - **プラグイン:** root の `plugin.json` を読む。`grok plugin install B16B1RD/bb-writ --trust`（手元なら `grok plugin install <ディレクトリ> --trust`。`--trust` が無いと導入せずに止まる）。手元のディレクトリからの導入は写しで、`grok plugin update` は「local symlink, already live」と表示しても変更を取り込まない。`grok plugin uninstall bb-writ`（プラグインの名前）→ `install` で入れ直す。Git から入れた場合、`update` は既定のブランチの最新の commit に追従する。Claude 互換（既定で有効）で `~/.claude` のプラグインも読み、両方あれば Grok に入れたほうが使われる。スキルの `allowed-tools`・`model`・`effort` は適用されない（公式文書 https://docs.x.ai/build/features/skills-plugins-marketplaces）。
-- **入口:** 入口の名前の無い普通の依頼文でも、最初に入口を読む。明示するなら `/bb-writ <依頼>`。frontmatter の `context`・`model` は使われない。入口は書く子を立てず、成果物を自分で書く（読み取り専用の確かめ役・監査役は立てる）。
+- **入口:** 入口の名前の無い普通の依頼文でも、最初に入口を読む。明示するなら `/bb-writ <依頼>`。frontmatter の `context`・`model`・`agent` は使われない（`agent` は 1.0.94 で、プラグインとして入れた形で確かめた）。入口は書く子を立てず、成果物を自分で書く（読み取り専用の確かめ役・監査役は立てる）。
 - **同じ系統の委任:** 新しい文脈が要るときは `grok -p` を別プロセスで起動する（launcher の `--host grok`）。Grok 自身のサブエージェントは、launcher では `--no-subagents` で切る。
 - **非対話実行:** `grok -p "<依頼>" --output-format json -m <model> --effort <effort> --cwd <dir> < /dev/null`。結果は 1 つの JSON（`text`・`sessionId`・`stopReason`・`modelUsage`・`total_cost_usd`・`num_turns`）。認証が無ければ `{"type":"error","message":"Not signed in…"}` で終了コード 1。`modelUsage` のモデル名は指定に `-build` が付いたもの。`grok models` は認証が通っていても「not authenticated」と表示するので、ログインの検査に使わない。
 - **専用ログインと隔離:** `GROK_HOME=~/.config/bb-writ/grok-auth`（`GROK_HOME=… grok login`）。launcher は親の `GROK_*`・`XAI_API_KEY`（あると専用ログインの代わりに別料金の API へ落ちる）を渡さず、Claude 互換の読み込み（`GROK_{CLAUDE,CURSOR}_{AGENTS,SKILLS,RULES,HOOKS,MCPS}_ENABLED=false`）と `GROK_MEMORY` を切る（切らないと子が利用者の `~/.claude` の個人設定に従う）。起動ごとに使い捨ての `GROK_HOME`（`~/.local/state/bb-writ/grok-homes/` の下）を作り、専用ログインからは `auth.json` だけを symlink で共有する。
