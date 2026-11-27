@@ -71,7 +71,7 @@ from model_tie import drift  # noqa: E402
 
 WORK = Path(__file__).resolve().parents[1] / "scripts" / "work.py"
 
-MODELED_AT = "73d2ddb"
+MODELED_AT = "ec1e12d"
 MODELED = {
     "alive": "f1f9574a8ad75670",
     "maybe_waiting": "b5093f786995e028",
