@@ -81,7 +81,7 @@ python3 <launch.py> --resume <前の記録の out> --prompt-file <続きの依�
 
 ## Codex
 
-- **入口:** 入口の frontmatter の `context`・`model`・`agent` は使われず（`agent` は確かめていない）、入口は呼んだセッションの中で読まれ、続けて本体の SKILL.md を読む（題材のリポジトリの `.agents/skills/` に置いた写しで確かめた。プラグインとして入れた形では確かめていない）。
+- **入口:** 入口の frontmatter の `context`・`model` は使われず（`agent` は確かめていない）、入口は呼んだセッションの中で読まれ、続けて本体の SKILL.md を読む（題材のリポジトリの `.agents/skills/` に置いた写しで確かめた。プラグインとして入れた形では確かめていない）。
 - **同じ系統の委任:** 新しい文脈が要るときは `codex exec` を別プロセスで起動する。Codex 自身のサブエージェント機能はバージョンと設定で有効・無効が変わるので、使えるかはその場で確かめ、使えなければそう書く。
 - **launcher の書く子:** `--add-dir` で渡すのは、作業場所の記録と、Git の共通ディレクトリのうち commit に要る `objects`・自分のブランチの ref と reflog・その worktree の管理ディレクトリだけ（共通の `config`・`hooks`・`main` には書けない）。
 - **非対話実行:** `codex exec --json -m <model> -c model_reasoning_effort="<effort>" [-s read-only|workspace-write|danger-full-access] [-C <dir>] [--add-dir <dir>] "<依頼>" < /dev/null`。stdin を閉じないと「Reading additional input from stdin...」で待ち続ける。承認を Codex 自身の自動レビューに任せるなら `--approve-for-me`（workspace-write を含むので `-s` と併用できない）。sandbox の中でネットワークが要るなら `-c sandbox_workspace_write.network_access=true`、作業領域の外に書く場所は `--add-dir`。構造化した結果が要るなら `--output-schema <file>`。利用者の設定と AGENTS を切るなら `--ignore-user-config`・`--ignore-rules`。Git 管理外で動かすなら `--skip-git-repo-check`。launcher の読み取り専用の子は `-s` でなく権限の profile で起動するので、`-s`（`sandbox_mode`）を一緒に渡さない（対象の `.codex/config.toml` の `sandbox_mode` も profile を変えうる）。

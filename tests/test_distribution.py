@@ -124,7 +124,7 @@ class TestSkills(unittest.TestCase):
         self.assertIn("`bb-writ:conduct` を Skill ツールで呼び直して", body)
         # 定義だけが持つ 2 つ: 直接立てられたら止まる。要約の後は依頼の原文を会話記録から読み直す（要約に残らないことがあった）
         self.assertIn("Agent ツールの依頼として始まったとき（会話のどこにも入口の本文が無く、会話の最初が要約でもない）は、何もせずに", body)
-        self.assertIn("依頼の原文は、要約の末尾が示す会話記録（`.jsonl`）から読み直す", body)
+        self.assertIn("依頼の原文は、要約の末尾が示す会話記録（`.jsonl`）から読み直す: 最初の行（入口の本文と、渡された依頼）だけを `head -n 1` で読む", body)
 
     def test_entry_keeps_what_to_ask_and_review_rules_within_the_compaction_head(self):
         """Claude Code は要約の後、呼んだスキルを先頭 5,000 トークンまで戻す（合計の枠を超えた古いものは落ちる）。
