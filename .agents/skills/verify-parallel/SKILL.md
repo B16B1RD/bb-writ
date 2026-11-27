@@ -7,7 +7,7 @@ description: bb-writ の worktree 分離、再開、直列統合、片付けを�
 
 ## 準備
 
-リポジトリのルートで実行する。Python 3.9 以上、Git、Claude Code、Codex、dotenvx と bb-writ 専用の両 CLI のログインが必要。普段のログインをコピーしない。`tests/verify_parallel_live.py` は専用ログインで Claude Code 2 セッション、続いて Claude Code と Codex を同時起動する。モデルは小さな実装用の sonnet / gpt-6-sol、effort は medium。外部モデルに送るのはこのプラグインと生成したテスト用ファイル。GitHub には送らない。
+リポジトリのルートで実行する。Python 3.9 以上、Git、Claude Code、Codex、dotenvx と bb-writ 専用の両 CLI のログインが必要。普段のログインをコピーしない。`tests/verify_parallel_live.py` は専用ログインで Claude Code 2 セッション、続いて Claude Code と Codex を同時起動する。Claude Code のセッションは `sonnet`・effort `medium` で起動するが、依頼文が入口のスラッシュコマンドなので、作業は入口が fork した指揮者が、入口の frontmatter の `model` のモデルで行う（結果の `model_effective` に出るのは、そのモデル）。Codex のセッションは `gpt-6-sol`・effort `medium`。外部モデルに送るのはこのプラグインと生成したテスト用ファイル。GitHub には送らない。
 
 証拠の置き場は担当の `note.evidence_dir` の下で、毎回新しい名前にする。テスト用 Git リポジトリもそこに作る。正式な開発 checkout としてその場所でのみテスト用 commit を作り、`/tmp` のコピーでは commit しない。利用者の checkout は編集しない。
 
@@ -21,7 +21,7 @@ description: bb-writ の worktree 分離、再開、直列統合、片付けを�
 2. `python3 -B tests/verify_parallel_live.py --out <note.evidence_dir の下の新しいディレクトリ>`。数分かかる。両方の組み合わせで `result: passed` が出て、`result.json` の `status` が `passed` になること。
 3. `<out>/repo` の main に `0-a.txt`・`0-b.txt`・`2-a.txt`・`2-b.txt` があり、それぞれファイル名から `.txt` を取った一行であること。`remaining-tasks.json` の tasks は空、`git -C <out>/repo status --porcelain` は空であること。
 
-スキルの選択も確かめる。Claude の JSONL は本文を引用せず、最初の `tool_use` の種類と `Skill` のスキル名だけを観測する。入口と feature 手引きが使われ、作業分離は生成された worktree と成果物で判断する。実 CLI テストは手引きの正本の場所を明示するので、自然言語だけでの暗黙の選択を証明したことにはしない。ドライバーは読むだけの反例も、新しい読み取り専用セッションで `/bb-writ:bb-writ README.md を読んで説明して。変更はしないで。委任も不要。` と頼み、investigation の選択と、タスクが増えないこと（`task list` が空のまま）を確認する。
+スキルの選択も確かめる。検査は、Claude Code の JSONL の本文を引用せず、`tool_use` の道具の名前と `Skill` のスキル名だけを観測する。Claude Code のセッションには、依頼文を入口のスラッシュコマンド `/bb-writ:bb-writ …` として渡す（launcher が子の依頼文の先頭に置く 1 行は、このセッションが利用者のセッションの代わりなので外す）。Claude Code の書くセッションは、最初の 2 つのツール呼び出しが、本体 `bb-writ:conduct`、feature 手引き `bb-writ:playbook-feature` の順であることを確かめ、作業分離は生成された worktree と成果物で判断する。Codex のセッションには、依頼文で入口と手引き（playbook-feature・playbook-parallel）の名前とスキルの正本の場所を挙げる（Claude Code の依頼文は「{name}.txt を作り…」から後だけで、正本の場所の行は渡らない）。入口を明示して渡すので、自然言語だけでの暗黙の選択を証明したことにはしない。ドライバーは読むだけの反例も、新しい読み取り専用セッションで `/bb-writ:bb-writ README.md を読んで説明して。変更はしないで。委任も不要。` と頼み、investigation の手引きが呼ばれたこと（順は見ない）と、タスクが増えないこと（`task list` が空のまま）を確認する。
 
 ## 証拠
 

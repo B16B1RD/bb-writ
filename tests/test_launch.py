@@ -1904,6 +1904,139 @@ class TestLaunch(unittest.TestCase):
                         self.assertEqual([c for c in cmd if not isinstance(c, str)], [], cmd)
         self.assertGreater(seen, 0, "台本が command() に渡す名前空間を 1 つも見つけられない（組み方を変えたなら、このテストも直す）")
 
+    def load_parallel_live(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("verify_parallel_live", ROOT / "tests" / "verify_parallel_live.py")
+        live = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(live)  # 直下は launcher を読み込むだけで、CLI を起動しない
+        return live
+
+    def test_live_parallel_check_reads_tool_names_and_skills_from_every_event_shape(self):
+        # 台本は CI で動かないので、message が文字列の event（permission_denied）で読み方が落ちるのに、実機で流すまで気づけなかった。
+        # CLI は文字列の中の U+2028・U+0085 をエスケープせずに出し、splitlines() はそこでも割る（launcher の parse_claude は割らない）。
+        # 見るのは台本の関数（tool_calls・下の start_problems）だけで、台本の main() がこれらを呼ぶこと（つなぎ）は見ない
+        # （単体テストは main() を動かさない。つなぎは実機で流して確かめる）
+        live = self.load_parallel_live()
+
+        def use(name, **given):
+            return {"type": "tool_use", "id": "t", "name": name, "input": given}
+        events = [
+            {"type": "system", "subtype": "init", "session_id": "s", "tools": ["Skill", "Bash"]},
+            {"type": "assistant", "message": {"role": "assistant", "content": [{"type": "thinking", "thinking": "x"}, {"type": "text", "text": "x"}]}},
+            {"type": "assistant", "parent_tool_use_id": None, "message": {"role": "assistant", "content": [use("Skill", skill="bb-writ:conduct")]}},
+            {"type": "user", "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t", "content": "x"}]}},
+            {"type": "system", "subtype": "permission_denied", "message": "x", "tool_name": "Skill"},
+            {"type": "rate_limit_event", "rate_limit_info": {"status": "allowed"}},
+            {"type": "assistant", "parent_tool_use_id": "p", "message": {"role": "assistant",
+                                                                         "content": [use("Skill", skill="bb-writ:playbook-feature"), use("Bash", command="x")]}},
+            {"type": "user", "parent_tool_use_id": "p", "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t", "content": [{"type": "text", "text": "x"}]}]}},
+            {"type": "assistant", "message": {"role": "assistant", "content": [use("Bash", command="echo a\u2028b\u0085c")]}},
+            {"type": "assistant", "message": {"role": "assistant", "content": [use("Read", file_path="x", skill="bb-writ:conduct")]}},
+            {"type": "result", "subtype": "success", "result": "x", "modelUsage": {}},
+        ]
+        stdout = "\n".join(json.dumps(e, ensure_ascii=False) for e in events) + "\n"
+        self.assertIn("\u2028", stdout)  # エスケープされずに出る形
+        self.assertEqual(live.tool_calls(stdout), [{"tool": "Skill", "skill": "bb-writ:conduct"}, {"tool": "Skill", "skill": "bb-writ:playbook-feature"},
+                                                   {"tool": "Bash", "skill": None}, {"tool": "Bash", "skill": None},
+                                                   {"tool": "Read", "skill": None}])  # スキル名は道具が Skill のときだけ
+
+    def test_live_parallel_check_wants_the_body_then_the_feature_playbook_first(self):
+        # 台本は CI で動かないので、入口を fork する入口と本体に分けた後も、最初の呼び出しを feature 手引きと求めたまま落ちていた（#86）。
+        # 本体は最初のツール呼び出しで手引きを呼ぶので、最初の 2 つの順を見る（列のどこかに在る、には緩めない）。
+        # 見ない範囲は上のテストと同じ（台本の main() がこの関数を呼ぶことは見ない）
+        live = self.load_parallel_live()
+
+        def calls(*names):
+            return [{"tool": "Skill", "skill": "bb-writ:" + n} if not n[0].isupper() else {"tool": n, "skill": None} for n in names]
+        cases = {
+            "the entry as it is now": (calls("conduct", "playbook-feature", "playbook-parallel", "Bash"), True),
+            "the playbook skipped": (calls("conduct", "playbook-parallel", "Bash"), False),
+            "another tool before the playbook": (calls("conduct", "Bash", "playbook-feature"), False),
+            "the form before the entry was split": (calls("playbook-feature", "playbook-parallel", "Bash"), False),
+            "the entry called with the Skill tool": (calls("bb-writ", "conduct", "playbook-feature"), False),
+            "reversed": (calls("playbook-feature", "conduct"), False),
+            "Bash first": (calls("Bash", "playbook-feature"), False),
+            "the body only": (calls("conduct"), False),
+            "no calls": ([], False),
+            "the skill names on a tool that is not Skill": ([{"tool": "Bash", "skill": "bb-writ:conduct"},
+                                                             {"tool": "Read", "skill": "bb-writ:playbook-feature"}], False),
+        }
+        for name, (seq, passes) in cases.items():
+            with self.subTest(name):
+                problems = live.start_problems(seq)
+                self.assertEqual(problems == [], passes, problems)
+                if not passes:
+                    self.assertIn("bb-writ:conduct", problems[0])  # 何を期待したかが読める
+                    self.assertIn("bb-writ:playbook-feature", problems[0])
+
+    def test_live_parallel_session_command_gives_claude_the_bare_prompt_and_codex_the_launchers_command(self):
+        # 台本は CI で動かないので、launcher が Claude Code の子の依頼文の先頭に 1 行を置くようにした後も、利用者のセッションの代わりに
+        # その 1 行を付けたまま渡し、入口がスラッシュコマンドとして動かなかった（#86）。台本の session_command の戻り値を、同じ引数での
+        # launcher の本物の command() と比べる。名前空間と依頼文は手で組んだ最小の形（台本の名前空間そのものは
+        # test_live_checks_give_the_launcher_command_every_value_it_reads が見る）。
+        # 見ないもの: 台本が組む依頼文そのもの（/bb-writ:bb-writ で始めること）と、包む関数を通した後の台本の書き換え・実行
+        # （main() の中のつなぎは、実機で流して確かめる）
+        import uuid
+        from types import SimpleNamespace
+        from unittest import mock
+        live = self.load_parallel_live()
+        env = {"HOME": str(self.home), "PATH": f"{self.bin}:/usr/bin:/bin", "BB_WRIT_CONFIG_DIR": str(self.cfg), "BB_WRIT_STATE_DIR": str(self.state)}
+        write = "「w.txt を作り、内容を w の一行にする」。\n"
+        sessions = {
+            "claude write": (SimpleNamespace(host="claude", write=True, cwd=self.cwd, model="sonnet", effort="medium", resume=None,
+                                             session=str(uuid.uuid4())), "/bb-writ:bb-writ " + write),
+            "claude read-only": (SimpleNamespace(host="claude", write=False, cwd=self.cwd, model="sonnet", effort="medium", audit=False, resume=None,
+                                                 session=str(uuid.uuid4())), "/bb-writ:bb-writ README.md を読んで説明して。" + live.launcher.CONTRACT),
+            "codex write": (SimpleNamespace(host="codex", write=True, cwd=self.cwd, model="gpt-6-sol", effort="medium", resume=None, session=None),
+                            "bb-writ の入口と playbook-feature、playbook-parallel を読み、次の依頼を実行する。\n" + write),
+        }
+        for name, (a, prompt) in sessions.items():
+            with self.subTest(name), mock.patch.dict(os.environ, env):
+                launcher_cmd, _, why = live.launcher.command(a, prompt, self.state / "scratch")
+                self.assertIsNone(why)
+                cmd, _ = live.session_command(a, prompt, self.state / "scratch")
+                if a.host != "claude":
+                    self.assertEqual(cmd, launcher_cmd)  # Codex のコマンドは launcher が返したまま
+                    continue
+                i = cmd.index("-p") + 1
+                self.assertEqual(cmd[i], prompt)  # 依頼文そのもの（launcher の先頭の 1 行なし）
+                self.assertEqual(cmd[:i] + cmd[i + 1:], launcher_cmd[:i] + launcher_cmd[i + 1:])  # ほかの要素（--settings の中身など）は変えない
+
+    def test_live_parallel_session_command_stops_with_the_launchers_reason(self):
+        # 台本の session_command が launcher の理由（起動できない訳）を握りつぶすと、組めていないコマンドで CLI を起動しようとする。
+        # 専用ログインの .env を欠かして、launcher の本物の command() に理由を返させる
+        import uuid
+        from types import SimpleNamespace
+        from unittest import mock
+        live = self.load_parallel_live()
+        (self.cfg / ".env").unlink()
+        env = {"HOME": str(self.home), "PATH": f"{self.bin}:/usr/bin:/bin", "BB_WRIT_CONFIG_DIR": str(self.cfg), "BB_WRIT_STATE_DIR": str(self.state)}
+        a = SimpleNamespace(host="claude", write=True, cwd=self.cwd, model="sonnet", effort="medium", resume=None, session=str(uuid.uuid4()))
+        with mock.patch.dict(os.environ, env):
+            _, _, why = live.launcher.command(a, "x", self.state / "scratch")
+            self.assertTrue(why)
+            with self.assertRaises(RuntimeError) as raised:
+                live.session_command(a, "x", self.state / "scratch")
+        self.assertEqual(str(raised.exception), why)
+
+    def test_live_parallel_check_builds_every_command_through_its_wrapper(self):
+        # 上の 2 つのテストが見るのは包む関数（session_command）だけなので、台本が launcher.command() を直に呼ぶ形に戻ると、依頼文の先頭の 1 行が
+        # 残ったまま通る。launcher.command(...) の呼び出しが、包む関数の中にしか無いことを見る。
+        # 守らない範囲: 名前 launcher を通した呼び出しだけを見る（別名や、関数を変数に取ってから呼ぶ形は見ない）。包む関数を通した後の、
+        # 台本のコマンドの書き換え・実行は見ない。
+        # 台本の正当な書き換えでも落ちる形: session_command の中で launcher を別名で呼ぶ、launcher.command() の呼び出しを別の補助関数に出す。
+        import ast
+        tree = ast.parse((ROOT / "tests" / "verify_parallel_live.py").read_text())
+
+        def command_calls(node):
+            return {n.lineno for n in ast.walk(node) if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr == "command"
+                    and isinstance(n.func.value, ast.Name) and n.func.value.id == "launcher"}
+        wrappers = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "session_command"]
+        self.assertEqual(len(wrappers), 1, "台本の直下に session_command が無い（名前を変えたなら、このテストも直す）")
+        inside = command_calls(wrappers[0])
+        self.assertTrue(inside, "session_command が launcher.command() を呼ばない")
+        self.assertEqual(command_calls(tree) - inside, set(), "launcher.command() を、session_command を通さずに呼んでいる行")
+
     def test_skipping_unwritable_places_is_only_for_read_only_file_systems(self):
         from unittest import mock
         for code, skipped in ((errno.EROFS, True), (errno.EACCES, False), (errno.ENOSPC, False)):

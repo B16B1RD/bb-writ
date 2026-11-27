@@ -23,6 +23,48 @@ launcher = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(launcher)
 
 
+# 書くセッションの最初の 2 つのツール呼び出し。入口は fork した指揮者に本体を呼ばせ、本体は最初のツール呼び出しで手引きを 1 本呼ばせる
+# 台本の依頼（ファイルを 1 つ作る）は新しい振る舞いの依頼なので、本体の手引きの表では feature 手引き
+START = [{'tool': 'Skill', 'skill': 'bb-writ:conduct'}, {'tool': 'Skill', 'skill': 'bb-writ:playbook-feature'}]
+
+
+def tool_calls(stdout):
+    """stream-json の出力から、tool_use の道具の名前と Skill のスキル名だけを順に取る（本文は取らない）。
+    行は launcher.json_lines で割る（\\n だけ。CLI は文字列の中の U+2028・U+0085 をエスケープせずに出し、splitlines() はそこでも割る）。
+    空の行は飛ばす。message が dict でない event（system の permission_denied は文字列。result などは無い）も飛ばす。"""
+    calls = []
+    for line in launcher.json_lines(stdout):
+        if not line:
+            continue
+        message = json.loads(line).get('message')
+        content = message.get('content') if isinstance(message, dict) else None
+        for block in content if isinstance(content, list) else []:
+            if isinstance(block, dict) and block.get('type') == 'tool_use':
+                given = block.get('input')
+                skill = given.get('skill') if block.get('name') == 'Skill' and isinstance(given, dict) else None
+                calls.append({'tool': block.get('name'), 'skill': skill})
+    return calls
+
+
+def start_problems(calls):
+    """書くセッションの最初の 2 つの呼び出しが、本体と feature 手引きの順でなければ、その旨を返す（3 つ目より後は見ない）。"""
+    if calls[:2] == START:
+        return []
+    return [f'最初の 2 つのツール呼び出しが、Skill の bb-writ:conduct（本体）、Skill の bb-writ:playbook-feature（feature 手引き）の順でない: {calls[:2]}']
+
+
+def session_command(a, prompt, scratch):
+    """launcher.command() で組んだコマンドと環境を返す（台本が launcher.command() を呼ぶのはここだけ）。
+    Claude Code のコマンドは、-p の引数を依頼文そのもの（入口のスラッシュコマンド）に置き換える。launcher は子に入口を呼ばせないために
+    先頭に 1 行を置くが、このセッションは子でなく利用者のセッションの代わりなので外す。Codex のコマンドは launcher が返したまま。"""
+    cmd, env, why = launcher.command(a, prompt, scratch)
+    if why:
+        raise RuntimeError(why)
+    if a.host == 'claude':
+        cmd[cmd.index('-p') + 1] = prompt
+    return cmd, env
+
+
 def run(cmd, env=None, at=None):
     p = subprocess.run(list(map(str, cmd)), cwd=at, env=env, capture_output=True, text=True)
     if p.returncode:
@@ -80,14 +122,14 @@ work.py は {ROOT}/scripts/work.py。元の checkout は {repo}。
         else:
             prompt = instructions
         # launcher の main が起動の前に決める値も渡す（command が読む。Claude Code の session は起動の前に決める）
+        # sonnet は起動する Claude Code のセッションのモデルで、作業は入口が fork した指揮者が、入口の frontmatter の model のモデルで行う
         a = SimpleNamespace(host=host, write=True, cwd=repo,
                             model='sonnet' if host == 'claude' else 'gpt-6-sol', effort='medium',
                             resume=None, session=str(uuid.uuid4()) if host == 'claude' else None)
-        cmd, child_env, why = launcher.command(a, prompt, evidence / 'scratch')  # 読み取り専用の Codex にだけ使う一時ディレクトリ
-        if why:
-            raise RuntimeError(why)
+        cmd, child_env = session_command(a, prompt, evidence / 'scratch')  # 読み取り専用の Codex にだけ使う一時ディレクトリ
         # このセッションは子ではなく利用者の親セッションの代わり（自分で task start・commit する）なので、子に掛ける制限
-        # （作業場所の記録だけの付与、Claude Code の --restricted と sandbox）を外し、状態ディレクトリ全体を渡す。
+        # （作業場所の記録だけの付与、Claude Code の --restricted と sandbox）を外し、状態ディレクトリ全体を渡す
+        # （依頼文の先頭の 1 行は session_command が外す）。
         cmd[cmd.index('--add-dir') + 1] = str(evidence / 'state')
         for flag in ('--restricted',):
             if flag in cmd:
@@ -111,19 +153,13 @@ work.py は {ROOT}/scripts/work.py。元の checkout は {repo}。
         (evidence / (name + '.stderr')).write_text(stderr)
         got = launcher.parse_claude(stdout) if host == 'claude' else launcher.parse_codex(stdout)
         report, problems = launcher.check_report(got['text'], repo)
-        tool_calls = []
+        calls = []
         if host == 'claude':
-            for line in stdout.splitlines():
-                event = json.loads(line)
-                message = event.get('message') or {}
-                for block in message.get('content') or []:
-                    if isinstance(block, dict) and block.get('type') == 'tool_use':
-                        tool_calls.append({'tool': block.get('name'), 'skill': (block.get('input') or {}).get('skill')})
-            if not tool_calls or tool_calls[0] != {'tool': 'Skill', 'skill': 'bb-writ:playbook-feature'}:
-                problems.append('最初のツールで feature 手引きを使わなかった')
+            calls = tool_calls(stdout)
+            problems.extend(start_problems(calls))
         result = {'host': host, 'name': name, 'session': got['session'], 'exit_code': p.returncode,
                   'model_effective': got['model_effective'], 'problems': problems, 'report': report,
-                  'tool_calls': tool_calls}
+                  'tool_calls': calls}
         (evidence / (name + '.result.json')).write_text(json.dumps(result, ensure_ascii=False, indent=2))
         if p.returncode or problems:
             raise RuntimeError(f'{name}: exit={p.returncode}, problems={problems}')
@@ -167,10 +203,10 @@ work.py は {ROOT}/scripts/work.py。元の checkout は {repo}。
         # 読むだけの依頼では、専用 worktree を作らず investigation を使う。
         a = SimpleNamespace(host='claude', write=False, cwd=repo, model='sonnet', effort='medium',
                             audit=False, resume=None, session=str(uuid.uuid4()))
-        prompt = '/bb-writ:bb-writ README.md を読んで説明して。変更はしないで。委任も不要。'
-        cmd, child_env, why = launcher.command(a, prompt + launcher.CONTRACT, evidence / 'scratch')
-        if why:
-            raise RuntimeError(why)
+        prompt = '/bb-writ:bb-writ README.md を読んで説明して。変更はしないで。委任も不要。' + launcher.CONTRACT
+        # このセッションも利用者のセッションの代わりなので、依頼文は入口のスラッシュコマンドのまま渡す
+        # （読み取りの制限 --settings・--restricted・--tools は残す）
+        cmd, child_env = session_command(a, prompt, evidence / 'scratch')
         child_env['BB_WRIT_STATE_DIR'] = str(evidence / 'state')
         cmd[cmd.index('--output-format') + 1] = 'stream-json'
         cmd.extend(['--verbose', '--max-turns', '8'])
@@ -178,12 +214,7 @@ work.py は {ROOT}/scripts/work.py。元の checkout は {repo}。
                            capture_output=True, text=True, timeout=180)
         (evidence / 'read-only.jsonl').write_text(p.stdout)
         (evidence / 'read-only.stderr').write_text(p.stderr)
-        skills = []
-        for line in p.stdout.splitlines():
-            event = json.loads(line)
-            for block in (event.get('message') or {}).get('content') or []:
-                if isinstance(block, dict) and block.get('type') == 'tool_use' and block.get('name') == 'Skill':
-                    skills.append((block.get('input') or {}).get('skill'))
+        skills = [c['skill'] for c in tool_calls(p.stdout) if c['tool'] == 'Skill']
         assert p.returncode == 0, '読むだけの CLI セッションが失敗'
         assert 'bb-writ:playbook-investigation' in skills, f'調査の手引きが使われなかった: {skills}'
         assert not work('task', 'list', '--dir', str(repo))['tasks'], '読むだけの依頼でタスクが作成された'
