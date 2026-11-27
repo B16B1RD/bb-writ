@@ -117,7 +117,7 @@ class TestSkills(unittest.TestCase):
         self.assertEqual(entry.count(lead), 1)
         rules = entry[entry.index(lead) + len(lead):].strip()
         self.assertTrue(rules.startswith("- "), rules[:40])
-        # 要約で依頼がまるごと落ちたときに止める決まり（AGENTS.md の入口の項が頼る）。写しをそろえるだけだと、両方から消しても通る
+        # 要約で依頼がまるごと落ちたときに頼る決まり（AGENTS.md の入口の項）。写しをそろえるだけだと、両方から消しても通る
         self.assertIn("依頼が届いていなければ（何を頼まれたかが分からなければ）、進めずに、依頼の全文を求めて止まる。", rules)
         name = frontmatter(ROOT / "skills" / "bb-writ" / "SKILL.md")["agent"].partition(":")[2]
         [definition] = [p for p in sorted((ROOT / "agents").glob("*.md")) if frontmatter(p).get("name") == name]
@@ -125,7 +125,7 @@ class TestSkills(unittest.TestCase):
         self.assertIn(rules, body)
         self.assertIn("`bb-writ:conduct` を Skill ツールで呼び直して", body)
         # 定義だけが持つ 2 つ: 直接立てられたら止まる。要約に依頼と伝言の原文を残す（要約役が従わず落とすこともあり、
-        # 依頼がまるごと落ちたときだけ、写した決まりの「依頼が届いていなければ止まる」で止まる。一部だけの落ちは見分けない）
+        # 依頼がまるごと落ちたときは、写した決まりの「依頼が届いていなければ止まる」に頼る〔止まる場面は実物で確かめていない〕。一部だけの落ちは見分けない）
         self.assertIn("Agent ツールの依頼として始まったとき（会話のどこにも入口の本文が無く、会話の最初が要約でもない）は、何もせずに", body)
         self.assertIn("利用者の依頼の原文（入口に渡された引数と、伝言で届いた利用者の入力）と、作業の記録（note.md）の道筋を、要約に一字も変えずに残す", body)
 
