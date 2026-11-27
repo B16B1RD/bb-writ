@@ -117,6 +117,8 @@ class TestSkills(unittest.TestCase):
         self.assertEqual(entry.count(lead), 1)
         rules = entry[entry.index(lead) + len(lead):].strip()
         self.assertTrue(rules.startswith("- "), rules[:40])
+        # 要約で依頼がまるごと落ちたときに止める決まり（AGENTS.md の入口の項が頼る）。写しをそろえるだけだと、両方から消しても通る
+        self.assertIn("依頼が届いていなければ（何を頼まれたかが分からなければ）、進めずに、依頼の全文を求めて止まる。", rules)
         name = frontmatter(ROOT / "skills" / "bb-writ" / "SKILL.md")["agent"].partition(":")[2]
         [definition] = [p for p in sorted((ROOT / "agents").glob("*.md")) if frontmatter(p).get("name") == name]
         body = skill_body(self, definition.read_text(encoding="utf-8"), definition.name)
