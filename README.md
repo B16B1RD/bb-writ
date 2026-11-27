@@ -202,7 +202,7 @@ Claude Code では、変更を書く依頼の成果物を、入口（指揮者�
 - 原則：1 本ずつ別のスキル `principle-*`（18 本）。本体の「原則の索引」から、仕事の局面に当たるものだけを呼ぶ。
 - hook（Claude Code）：2 つある。Codex と Grok Build では、守りの hook は何も止めない（関門（push・PR の前の照合。`work.py op run`）を通さずに外へ出さないことは、入口のスキルの文が求める）。案内の hook は案内を足さない（この 2 つの CLI では入口が呼んだセッションの中で動くので、案内が要らない）。
   - 守りの hook：入口 `bb-writ` か本体 `conduct` を呼んだセッション（入口が立てた指揮者とその子孫を含み、指揮者が launcher で立てる子は含まない）で、関門を通さない普段の書き方の `git push`・`gh pr create`・`gh pr merge`・`gh release create` を拒否する。探索の入口 `unknowns` だけを呼んだセッションは、対象でない。範囲と止めない書き方は `scripts/push_guard.py` の docstring にある。
-  - 案内の hook（`scripts/conductor_hint.py`）：入口か探索の入口 `unknowns` を呼んだセッションで、子への返事と続きの依頼は利用者が子に直接打つよう、親のセッションに案内する。案内だけで入力は止めず、従うかは親のモデルしだい。入口の指揮者が失敗して終わったときの案内は [Claude Code で Fable を使えないとき](#claude-code-で-fable-を使えないとき)にあり、詳しくは [`delegate`](skills/delegate/SKILL.md) の「指揮者への返事（案内の hook）」にある。
+  - 案内の hook（`scripts/conductor_hint.py`）：入口か探索の入口 `unknowns` を呼んだセッションで、子への返事と続きの依頼は、親が自分で進めずに、印を付けた原文で SendMessage で子に渡すよう、親のセッションに案内する。案内だけで入力は止めず、従うかは親のモデルしだい。入口の指揮者が失敗して終わったときの案内は [Claude Code で Fable を使えないとき](#claude-code-で-fable-を使えないとき)にあり、詳しくは [`delegate`](skills/delegate/SKILL.md) の「指揮者への返事（案内の hook）」にある。
 
 ## 任意機能の準備
 
