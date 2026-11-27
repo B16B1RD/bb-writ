@@ -78,6 +78,24 @@ class TestSkills(unittest.TestCase):
                 self.assertNotIn("\ncontext:", body_head)
                 self.assertNotIn("\nmodel:", body_head)
 
+    def test_the_entry_conductor_definition_resolves_and_bounds_the_context(self):
+        """入口の指揮者は、入口の frontmatter の agent が指すエージェント定義で動き、その autoCompactWindow で要約される（#93）。
+        Claude Code は、agent の名前に当たる定義が無いと、黙って組み込みの general-purpose で動き、要約の窓も効かない
+        （接頭辞の無い名前で、文脈が要約されずに伸びた。2.1.332 の試作）。確かめるのは、名前が `bb-writ:<定義の name>` で、
+        定義が agents/ に在り、窓が整数で、Claude Code の下限 100000 以上、#86 の指揮者の文脈 543k より小さいことだけ
+        （要約が実際に起きるかは、実物の CLI で確かめる）。"""
+        head = (ROOT / "skills" / "bb-writ" / "SKILL.md").read_text(encoding="utf-8").split("---", 2)[1]
+        [agent] = re.findall(r"^agent: (.+)$", head, re.M)
+        plugin, _, name = agent.partition(":")
+        self.assertEqual(plugin, "bb-writ")
+        definition = ROOT / "agents" / f"{name}.md"
+        self.assertTrue(definition.is_file(), definition)
+        dhead = definition.read_text(encoding="utf-8").split("---", 2)[1]
+        self.assertIn(f"\nname: {name}\n", dhead)
+        [window] = re.findall(r"^autoCompactWindow: (\d+)$", dhead, re.M)  # 200k のような書き方は 200 と読まれる（公式の文書）
+        self.assertGreaterEqual(int(window), 100000)
+        self.assertLess(int(window), 543000)
+
     def test_entry_keeps_what_to_ask_and_review_rules_within_the_compaction_head(self):
         """Claude Code は要約の後、呼んだスキルを先頭 5,000 トークンまで戻す（合計の枠を超えた古いものは落ちる）。
         入口の本体（`conduct`。入口が呼び、進め方の全文を持つ）の聞く範囲・呼び直しの文・返答の形・検証の条件 (1)〜(6) の文が、それぞれ 1 つずつ戻る先頭にあることを確かめる。
