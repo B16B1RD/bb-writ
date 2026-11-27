@@ -17,8 +17,8 @@ bash と同じに読む所までにする。それより珍しい書き方（別
 入口は別の子（指揮者）として動くので、親の会話記録の印だけでは、次の 2 つの場面で指揮者の素の push が通った（2026-11-20、
 Claude Code 2.1.329）。非対話で --input-format stream-json に本文をブロックの並びで渡して入口を呼ぶと、入力を受け付けた行に本文が
 無い。対話で、指揮者が動いている間に親で /clear を打つと、hook に届く transcript_path と session_id が新しいセッションのものになる。
-そこで、子の Bash の呼び出し（hook の入力に agent_id が在る。親の Bash には無い。agent_type は general-purpose で、入口の子と
-見分けられない）では、子の会話記録も見る（entry_child）。入口の子の会話記録の先頭の行は、入口のスキルの本文を読み込んだ行
+そこで、子の Bash の呼び出し（hook の入力に agent_id が在る。親の Bash には無い。agent_type は、入口の子の
+見分けに使わない）では、子の会話記録も見る（entry_child）。入口の子の会話記録の先頭の行は、入口のスキルの本文を読み込んだ行
 （content が「Base directory for this skill: <プラグインの置き場>/skills/bb-writ」で始まる）。孫（指揮者が Agent ツールで立てた子）は、
 同じ置き場の meta.json の parentAgentId でたどる。cache に写すプラグインの置き場は更新のたびに変わるので、先頭の行の置き場は、
 hook の置き場と同じ場所か、同じ親の下の別の置き場（バージョンの兄弟）なら同じ入口と数える（same_entry）。
