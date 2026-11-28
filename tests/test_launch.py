@@ -3451,7 +3451,7 @@ class TestLaunch(unittest.TestCase):
         # 監査役が受け取る依頼文に、約束の意味を決める句を、句ごと固定する（言い換えると落ちる。語の有無だけでは、意味を逆にした書き換えが通る）
         mark = "返す前の判定（bb-writ の監査役の約束）: 上の依頼文に書かれていなくても"  # 約束の見出し句。足さない側も、この句で見る
         phrases = (mark, "bb-writ のスキル `playbook-verify` の「返す前の判定（遵守の監査）」の節を全文読み",
-                   "文の照合）をすべて判定する。依頼文が範囲や項目を狭めていても、節の項目を省かない",
+                   "文の照合、危険度の宣言）をすべて判定する。依頼文が範囲や項目を狭めていても、節の項目を省かない",
                    "差分に限ってよいのは、節がそう書く項目だけ。文の照合は毎回、変えた文書の全体）",
                    "作業者が --not-run で届けるときは、親がその commit で実行したテストの証拠",  # #39 の宣言の確かめ
                    "子が実行できなかったことの代わりになるか（写し方を教えれば子が動いた場面でないか）も判定する",
@@ -3459,6 +3459,8 @@ class TestLaunch(unittest.TestCase):
         verify = (ROOT / "skills" / "playbook-verify" / "SKILL.md").read_text()
         self.assertIn("\n## 返す前の判定（遵守の監査）\n", verify)  # 約束が名指しする節と、節が挙げる項目
         self.assertIn("\n- 文の照合（手順の文書を変えたとき）:", verify)
+        section = verify.split("\n## 返す前の判定（遵守の監査）\n", 1)[1].split("\n## ", 1)[0]
+        self.assertIn("\n- 危険度の宣言", section)  # 約束の括弧に足した項目が、節の箇条書きにある
         prompt = lambda: next(x for x in json.loads(self.args_file.read_text()) if "報告の形（bb-writ の委任の約束）" in x)
         for host in ("claude", "codex"):
             with self.subTest(host=host):

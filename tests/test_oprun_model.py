@@ -60,7 +60,7 @@ from model_tie import body, drift, fingerprint  # noqa: E402
 
 WORK = Path(__file__).resolve().parents[1] / "scripts" / "work.py"
 
-MODELED_AT = "53be7d3"
+MODELED_AT = "985661c"
 TLC_STATES = 84981  # TLC と照らした版の状態数（TLC_FIELDS に写した数）
 MODELED_STATES = 222085
 MODELED_MODEL = "0bad1c49061cf3a4"
@@ -69,7 +69,7 @@ MODELED = {
     "write": "00c93a6aa7ceb1e8",
     "locked": "0a22de1033650c4d",
     "ops": "19f01a5bc3cb84ad",
-    "op_step": "1550ba5e3d424b54",
+    "op_step": "23568dc8ba753e58",
     "run_lock": "fdd3edfffe9c0b10",
     "alive": "f1f9574a8ad75670",
     "check_token": "6297f65bcd57f11c",
