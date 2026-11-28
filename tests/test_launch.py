@@ -536,6 +536,12 @@ FAKE_CLAUDE = textwrap.dedent(r'''
         result = result.replace('"risk": "低", ', '')
     if mode == "risk-other":  # 危険度の段の値が 低・中・高 のどれでもない
         result = result.replace('"risk": "低"', '"risk": "low"')
+    if mode in ("risk-mid", "risk-not-run"):  # 監査役が中と判定した（risk-not-run は、テストを実行できなかった監査役）
+        result = result.replace('"risk": "低"', '"risk": "中"')
+        if mode == "risk-not-run":
+            result = result.replace('"completed": "yes"', '"completed": "no"')
+    if mode == "risk-high":  # 監査役が高と判定した
+        result = result.replace('"risk": "低"', '"risk": "高"')
     if mode in ("deliver-not-run", "deliver-no-not-run"):  # テストを実行できなかった監査役（判定は書いた）
         result = result.replace('"completed": "yes"', '"completed": "no"')
         if mode == "deliver-no-not-run":
@@ -3465,7 +3471,7 @@ class TestLaunch(unittest.TestCase):
         self.assertIn("\n## 返す前の判定（遵守の監査）\n", verify)  # 約束が名指しする節と、節が挙げる項目
         self.assertIn("\n- 文の照合（手順の文書を変えたとき）:", verify)
         section = verify.split("\n## 返す前の判定（遵守の監査）\n", 1)[1].split("\n## ", 1)[0]
-        # 約束の括弧に足した項目が、節の箇条書きにある。項目の中身（何のときに deliver を no にするか）と、
+        # 約束の括弧に足した項目が、節の箇条書きにある。項目の中身（段をどう判定し、risk に何を書くか）と、
         # 約束の括弧の前半の項目（遵守、残る範囲の閉じ方）が節にあるかは見ない
         self.assertIn("\n- 危険度の宣言", section)
         prompt = lambda: next(x for x in json.loads(self.args_file.read_text()) if "報告の形（bb-writ の委任の約束）" in x)
@@ -3509,10 +3515,11 @@ class TestLaunch(unittest.TestCase):
     def test_an_auditor_must_judge_the_risk_and_the_record_keeps_it(self):
         """監査役の報告は、届ける変更の全体の危険度の段 risk（低・中・高）を持つ。無いか値が違えば invalid-report（続きの起動でも）。
         値は記録（委任の記録の行と record.json の両方。work.py は両方を照らし、push・pr の --risk と比べる。比べは test_work の側で見る）に
-        残す。監査役でない子には risk を求めない。"""
+        残す（テストを実行できなかった not-run の監査役でも）。監査役でない子には risk を求めない。"""
         recorded = lambda rec: json.loads((Path(rec["out"]) / "record.json").read_text())
         line = lambda rec: next(json.loads(x) for x in (self.state / "delegations.jsonl").read_text().splitlines() if json.loads(x)["out"] == rec["out"])
-        for mode, status, risk in (("good", "ok", "低"), ("risk-missing", "invalid-report", None), ("risk-other", "invalid-report", None)):
+        for mode, status, risk in (("good", "ok", "低"), ("risk-mid", "ok", "中"), ("risk-high", "ok", "高"), ("risk-not-run", "not-run", "中"),
+                                   ("risk-missing", "invalid-report", None), ("risk-other", "invalid-report", None)):
             with self.subTest(mode=mode):
                 rc, rec = self.run_launch("claude", mode=mode, extra=["--audit"])
                 self.assertEqual((rec["status"], rec.get("risk"), recorded(rec).get("risk"), line(rec).get("risk")),

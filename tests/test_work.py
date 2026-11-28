@@ -1060,7 +1060,7 @@ class TestReviewedCommit(unittest.TestCase):
 
     def test_an_audit_without_a_matching_risk_judgement_does_not_open_the_push(self):
         # 監査役の記録の risk は、行と record.json の両方で同じ 低・中・高 のときだけ数える。risk の無い記録（更新前の launcher）・値の違う記録・
-        # 行と record.json で食い違う記録・差し戻し（deliver: no）の記録の risk では通さない。宣言以下の段の yes の監査が 1 件でもあれば通す（守らない）
+        # 行と record.json で食い違う記録・差し戻し（deliver: no）の記録の risk では通さない。yes の監査の段が割れたら、最も高い段と比べる
         self.launcher_audits = False
         tok = self.claim()
         self.commit("src/fix.py")
@@ -1077,8 +1077,13 @@ class TestReviewedCommit(unittest.TestCase):
         rc, r = self.publish(tok, "push:feat@1", "--reviewed", "none:文書だけ")
         self.assertEqual(rc, 6, r)
         self.assertIn("HEAD の監査役が判定した危険度（高）より低い", r["reason"])
-        self.review_record(self.head(), audit=True, risk="低")  # 段の判定が割れても、宣言以下の yes が 1 件あれば通る
-        self.assertEqual(self.publish(tok, "push:feat@1", "--reviewed", "none:文書だけ")[0], 0)
+        self.review_record(self.head(), audit=True, risk="低")  # 段の判定が割れたら上の段（宣言以下の yes が在っても通さない）
+        rc, r = self.publish(tok, "push:feat@1", "--reviewed", "none:文書だけ")
+        self.assertEqual(rc, 6, r)
+        self.assertIn("HEAD の監査役が判定した危険度（高）より低い", r["reason"])
+        self.review_record(self.head(), interrogate=True)  # 高の宣言に要る審査役（このテストの外の約束）
+        rc, r = self.publish(tok, "push:feat@1", "--reviewed", self.head(), "--risk", "高:外部操作")
+        self.assertEqual(rc, 0, r)
 
     def test_the_audit_that_opened_an_integration_also_opens_the_push_of_the_same_commit(self):
         # integrate の前に立てた監査役の記録は、統合した commit を後で push するときも、そのまま数える（関門は commit だけで探す。#97）
@@ -1570,6 +1575,18 @@ class TestNotRunDeclaration(unittest.TestCase):
         self.assertEqual((recs["push:feat@1"]["not_run"], recs["pr:feat"]["not_run"]), (self.WHY, self.WHY))  # 宣言は記録に残る
         self.assertEqual(len(recs["push:feat@1"]["reviews"]), 1)
         self.assertEqual(len(recs["push:feat@1"]["audits"]), 1)
+
+    def test_the_risk_an_auditor_that_could_not_run_judged_is_compared_with_the_declared_risk(self):
+        # --not-run の宣言で数える not-run の監査役の記録も、判定した危険度の段を --risk と比べる
+        tok = self.claim()
+        self.commit("src/page.js")
+        self.could_not_run(self.head(), interrogate=True)
+        self.could_not_run(self.head(), audit=True, risk="中")
+        rc, r = self.publish(tok, "push:feat@1", "--reviewed", self.head(), "--risk", "低:文だけ", "--not-run", self.WHY)
+        self.assertEqual(rc, 6, r)
+        self.assertIn("--risk の危険度（低）が、HEAD の監査役が判定した危険度（中）より低い", r["reason"])
+        rc, r = self.publish(tok, "push:feat@1", "--reviewed", self.head(), "--risk", "中:普通のコード", "--not-run", self.WHY)
+        self.assertEqual(rc, 0, r)
 
     def test_a_report_without_the_execution_field_is_not_counted_even_with_the_declaration(self):
         # 実行の欄の無い報告は、launcher が読んだだけとして not-run にしたもの。実行を試みたかが分からない

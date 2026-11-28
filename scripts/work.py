@@ -66,10 +66,11 @@ commit を書いたときは、launcher の委任の記録（delegations.jsonl�
 push・pr は、--reviewed（none: を含む）に関わらず、作業場所の HEAD を対象に launcher に --audit を付けて起動し ok で返った
 読み取り専用の監査役（返す前の判定）の記録が無ければ拒否する（6。integrate も、統合する commit で同じ記録を求める）。監査役の記録は審査の記録にも周の数にも数えない。
 監査役の記録は、判定の deliver が行と record.json の両方で yes（届けてよい）のものだけを数える。何を挙げたかは見ない。
-push・pr は、そのうち、監査役が判定した危険度 risk（低・中・高）が行と record.json の両方で同じで、その段が --risk の段以下（低 < 中 < 高）の
-記録が 1 件も無ければ拒否する（6。risk を持つ記録が 1 件も無い更新前の launcher の記録も。integrate は risk を見ない）。指揮者が自分で書く
-危険度の宣言を、独立に判定した段より低くさせないため（指示ファイルの追加と lint の除外の追加を、コードの変更が無いとして低で届けた。#90）。
-段の判定の正しさは見ない。同じ commit に、宣言以下の段を判定した yes の監査が 1 件でもあれば通す。
+push・pr は、そのうち、監査役が判定した危険度 risk（低・中・高）が行と record.json の両方で同じ記録の段のうち最も高い段（判定が割れたら
+上の段）より --risk の段が低ければ（低 < 中 < 高）拒否する（6。risk を持つ記録が 1 件も無い更新前の launcher の記録も。integrate は risk を見ない）。
+指揮者が自分で書く危険度の宣言を、独立に判定した段より低くさせないため（指示ファイルの追加と lint の除外の追加を、コードの変更が無いとして
+低で届けた。#90）。段の判定の正しさは見ない。HEAD が変わった後の立て直しの監査役が差分だけで段を判定しても見分けない（変更の全体で判定
+させるのは監査役の約束の文だけ）。手で書いた記録の、文字列でない risk は見分けない（例外で止まる）。
 push・pr に --not-run <理由>（子が sandbox のせいで対象のテスト・検査を実行できなかった理由）を付けると、その commit を対象に
 not-run で返り、子が実行の欄に実行できなかった（execution が no）と書いた記録も、審査役・--interrogate の審査役・監査役と審査の周に数える
 （ブラウザのテストなど、子を何回立てても ok の記録ができず、作業者が関門の外で出したため）。実行の欄の無い報告（launcher が読んだだけとして
@@ -240,7 +241,7 @@ def reviews_of(commit: str, cwd=None, not_run: bool = False, no_login: bool = Fa
     監査役は審査の記録（最初の値）に数えない（push ごとに立てるので、審査の代わりにも周の数にもしない）。監査役の記録は、
     判定の deliver が行と record.json の両方で yes のものだけを数える（本文で差し戻した監査を、status の ok で通さない）。
     同じ commit に yes の記録が 1 件でもあれば、その後の no の記録では止めない（守らない）。risk は、push・pr の関門が --risk と比べる
-    （op_step。integrate は見ない）。段の判定の正しさ（監査役が変更の中身を interrogate の 5 に照らしたか）は見ない。
+    （op_step。数えた記録の最も高い段と比べる。integrate は見ない）。段の判定の正しさ（監査役が変更の中身を interrogate の 5 に照らしたか）は見ない。
     head は launcher が、対象の作業ツリーが子の起動の前と終わりの両方で commit と同じとき（未 commit の変更が無いとき。Claude Code の sandbox の印は数えない。launch.py の clean_head）だけ書く。
     審査の中身（子が十分に攻めたか、何人か、依頼文が interrogate の観点を持っていたか）は見ない。手で書き足した記録も見分けない（忘れて飛ばすのを止める）。
     cwd を渡すと、その場所を --cwd にして立てた記録だけを数える（--delta の祖先の審査を、ほかの作業場所の審査で代えないため）。
@@ -1450,11 +1451,11 @@ def op_step(a, r: Path, live, now: float, action: str):
         if not judged:
             return ({"ok": False, "reason": f"作業場所の HEAD {head} の監査役の記録に危険度の判定（risk）が無い。この版の launcher で監査役を立て直す"
                         + (f"。{unread}" if unread else "")}, 6)
-        if all(RISK_ORDER[j] > RISK_ORDER[level] for j in judged):
-            lowest = min(judged, key=RISK_ORDER.get)
-            return ({"ok": False, "reason": f"--risk の危険度（{level}）が、HEAD の監査役が判定した危険度（{lowest}）より低い。"
-                        "危険度は変更の中身で決める（interrogate の 5）。--risk を監査役の判定以上にし、中・高なら --interrogate の審査役を通す。"
-                        "監査役の判定が誤りなら、理由を記録に書いて監査役を立て直す"}, 6)
+        highest = max(judged, key=RISK_ORDER.get)  # 判定が割れたら上の段（interrogate の 5 の「迷ったら上の段」）
+        if RISK_ORDER[highest] > RISK_ORDER[level]:
+            return ({"ok": False, "reason": f"--risk の危険度（{level}）が、HEAD の監査役が判定した危険度（{highest}）より低い。"
+                        "危険度は変更の中身で決める（interrogate の 5）。--risk を監査役の判定以上にし、"
+                        "中・高なら、interrogate の 5 の深さで --interrogate の審査役を通す"}, 6)
         audit = audits
         f = r / "note.md"
         gaps = note_gaps(note_body(f), True, review_rounds(Path(a.dir), bool(not_run)) if reviews else 0)

@@ -389,6 +389,16 @@ class TestParallel(unittest.TestCase):
         self.assertEqual(self.integrate(a, base, head, audit=False)['commit'], head)
         self.assertEqual(self.git(self.repo, 'rev-parse', 'main'), head)
 
+    def test_integrate_does_not_compare_the_risk_the_auditor_judged(self):
+        """integrate には --risk が無く、監査役が判定した危険度の段（記録の risk）を見ない。高と判定した deliver: yes の監査でも通る
+        （段を --risk と比べるのは push・pr の関門だけ。#90）。"""
+        a = self.start()
+        base = self.git(self.repo, 'rev-parse', 'main')
+        head = self.change(a, 'a')
+        self.audit(head, risk='高')
+        self.assertEqual(self.integrate(a, base, head, audit=False)['commit'], head)
+        self.assertEqual(self.git(self.repo, 'rev-parse', 'main'), head)
+
     def test_integrate_counts_an_audit_that_could_not_run_only_with_the_declaration(self):
         """監査役が sandbox のせいで対象のテストを実行できずに not-run で返り、実行の欄に no と書いた記録は、--not-run <理由> の宣言が
         あるときだけ数える（op run の --not-run と同じ）。宣言が無ければ、拒否の理由が宣言のしかたを示す。宣言は出力の not_run に残る。
