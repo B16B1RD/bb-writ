@@ -2,6 +2,7 @@
 
 import errno
 import json
+import math
 import threading
 import shutil
 import signal
@@ -115,6 +116,7 @@ FAKE_CODEX = textwrap.dedent(r'''
     _n = len(open(os.environ["FAKE_ARGS"] + ".calls").read().splitlines())  # FAKE_<名>_<n> は、n 回目の起動だけの FAKE_<名>
     os.environ.update({k[:-len(f"_{_n}")]: v for k, v in list(os.environ.items()) if k.startswith("FAKE_") and k.endswith(f"_{_n}")})
     mode = os.environ.get("FAKE_MODE", "good")
+    # LEASE
     if os.environ.get("FAKE_STDERR"):  # 作業の途中で出す行（利用枠の文言など）
         print(os.environ["FAKE_STDERR"], file=sys.stderr, flush=True)
     if mode == "home-ssh":  # 並行する Claude Code の子が作ったものを、この委任が見る
@@ -330,17 +332,7 @@ FAKE_CLAUDE = textwrap.dedent(r'''
     _n = (len(open(_calls).read().splitlines()) if os.path.exists(_calls) else 0) + 1
     os.environ.update({k[:-len(f"_{_n}")]: v for k, v in list(os.environ.items()) if k.startswith("FAKE_") and k.endswith(f"_{_n}")})
     mode = os.environ.get("FAKE_MODE")
-    if os.environ.get("FAKE_LEASE"):  # 実行中の対象の担当を work.py status で見て .lease に残す。drop は担当の記録を消し、retake は別の token に書き換える
-        _st = subprocess.run([sys.executable, "-B", os.environ["FAKE_WORK"], "status", "--dir", os.getcwd()], capture_output=True, text=True,
-                             env={**os.environ, "BB_WRIT_STATE_DIR": os.environ["FAKE_STATE"]})
-        open(os.environ["FAKE_ARGS"] + ".lease", "w").write(_st.stdout)
-        _lease = os.path.join(os.path.dirname(json.loads(_st.stdout)["note"]["path"]), "lease.json")
-        if os.environ["FAKE_LEASE"] == "drop":
-            os.unlink(_lease)
-        if os.environ["FAKE_LEASE"] == "retake":
-            _l = json.load(open(_lease))
-            _l.update(token="0" * 16, holder="someone else")
-            open(_lease, "w").write(json.dumps(_l))
+    # LEASE
     if mode == "home-claude-only":  # 空の .claude だけを作る
         os.makedirs(os.path.join(os.environ["HOME"], ".claude"))
     if mode == "home-cli-places":  # 2.1.327 の CLI が、テストを実行した子でホームに作った空のディレクトリ（名前は使った機能で変わる）
@@ -579,6 +571,7 @@ FAKE_GROK = textwrap.dedent(r'''
     open(os.environ["FAKE_ARGS"], "w").write(json.dumps(sys.argv[1:] + ["ENV=" + json.dumps(env, sort_keys=True)]))
     open(os.environ["FAKE_ARGS"] + ".calls", "a").write(json.dumps(sys.argv[1:]) + "\n")  # 起動ごとに 1 行
     mode = os.environ.get("FAKE_MODE", "good")
+    # LEASE
     if os.environ.get("FAKE_STDERR"):  # 作業の途中で出す行（利用枠の文言など）
         print(os.environ["FAKE_STDERR"], file=sys.stderr, flush=True)
     if mode == "home-ssh":  # 並行する Claude Code の子が作ったものを、この委任が見る
@@ -632,6 +625,23 @@ libc.syscall({'x86_64': 60, 'aarch64': 93}[platform.machine()], 0)  # SYS_exit: 
 """
 CHAIN = ("import os, signal, subprocess, sys; [signal.signal(s, signal.SIG_IGN) for s in signal.valid_signals() if s not in (signal.SIGKILL, signal.SIGSTOP, signal.SIGCHLD)]; d = int(sys.argv[1]); open(sys.argv[2], 'a').write(f'{os.getpid()} '); "
          "os.execv(sys.argv[3], [sys.argv[3], '600']) if d == 0 else subprocess.run([sys.executable, '-c', sys.argv[4], str(d - 1), *sys.argv[2:]])")
+# 偽の子の CLI が、実行中に対象の担当を work.py status で見て .lease に残す（起動ごとに .leases にも 1 行）。FAKE_LEASE_DIR が無ければ
+# 子の cwd を見る。drop は担当の記録を消し、retake は別の token・持ち主に書き換える
+LEASE_PEEK = textwrap.dedent(r'''
+    if os.environ.get("FAKE_LEASE"):
+        import subprocess as _sp
+        _st = _sp.run([sys.executable, "-B", os.environ["FAKE_WORK"], "status", "--dir", os.environ.get("FAKE_LEASE_DIR") or os.getcwd()],
+                      capture_output=True, text=True, env={**os.environ, "BB_WRIT_STATE_DIR": os.environ["FAKE_STATE"]})
+        open(os.environ["FAKE_ARGS"] + ".lease", "w").write(_st.stdout)
+        open(os.environ["FAKE_ARGS"] + ".leases", "a").write(json.dumps(json.loads(_st.stdout)) + "\n")
+        _lease = os.path.join(os.path.dirname(json.loads(_st.stdout)["note"]["path"]), "lease.json")
+        if os.environ["FAKE_LEASE"] == "drop":
+            os.unlink(_lease)
+        if os.environ["FAKE_LEASE"] == "retake":
+            _l = json.load(open(_lease))
+            _l.update(token="0" * 16, holder="someone else")
+            open(_lease, "w").write(json.dumps(_l))
+''')
 ORPHAN = textwrap.dedent(r'''
     open(os.environ["FAKE_ARGS"] + ".cli", "w").write(f"{os.getpid()} {os.getppid()}")  # 子の CLI（と dotenvx）
     if mode in ("orphan", "orphan-hang", "orphan-pipe"):
@@ -747,7 +757,7 @@ class TestLaunch(unittest.TestCase):
         (self.cfg / ".env").write_text("X=1\n")
         (self.cfg / ".env.keys").write_text("K=1\n")
         for name, body in (("codex", FAKE_CODEX), ("claude", FAKE_CLAUDE), ("grok", FAKE_GROK), ("dotenvx", FAKE_DOTENVX)):
-            (self.bin / name).write_text(body.replace("/usr/bin/env python3", sys.executable).replace("# ORPHAN\n", ORPHAN))
+            (self.bin / name).write_text(body.replace("/usr/bin/env python3", sys.executable).replace("# ORPHAN\n", ORPHAN).replace("# LEASE\n", LEASE_PEEK))
             (self.bin / name).chmod(0o755)
         self.prompt = t / "prompt.md"
         self.prompt.write_text("x を確かめて")
@@ -4095,12 +4105,28 @@ class TestLaunch(unittest.TestCase):
             self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
         return p.returncode, json.loads(p.stdout)
 
-    def lease_env(self, how="look"):
-        """偽の Claude Code の子が、実行中に対象の担当を見る（drop・retake は壊す）ための設定。"""
-        return {"FAKE_LEASE": how, "FAKE_WORK": str(ROOT / "scripts" / "work.py"), "FAKE_STATE": str(self.state)}
+    def lease_env(self, how="look", at=None):
+        """偽の子の CLI が、実行中に対象（at を渡せばその場所）の担当を見る（drop・retake は壊す）ための設定（LEASE_PEEK）。"""
+        for f in (".lease", ".leases"):
+            Path(str(self.args_file) + f).unlink(missing_ok=True)
+        return {"FAKE_LEASE": how, "FAKE_WORK": str(ROOT / "scripts" / "work.py"), "FAKE_STATE": str(self.state),
+                **({"FAKE_LEASE_DIR": str(at)} if at else {})}
 
     def seen_lease(self):
         return json.loads(Path(str(self.args_file) + ".lease").read_text())
+
+    def seen_leases(self):
+        return [json.loads(l) for l in Path(str(self.args_file) + ".leases").read_text().splitlines()]
+
+    def assert_launcher_held(self, seen, when):
+        self.assertTrue((seen["holder"] or "").startswith("launcher "), f"{when}、対象の担当が launcher に無い（holder: {seen['holder']!r}）")
+
+    def assert_no_lease(self, d, when):
+        holder = self.work("status", "--dir", str(d))[1]["holder"]
+        self.assertIsNone(holder, f"{when}、{d} に担当が残った（holder: {holder!r}）")
+
+    # 担当のテストの守らない範囲: launcher が claim・release の出力で照らす欄（終了コード・ok・token）は、本物の work.py では同じ意味なので、
+    # どれか 1 つの照合を外しても、ここのテストは落ちない（偽の work.py は置かない）
 
     def test_the_launcher_holds_the_lease_of_the_target_while_a_writer_runs(self):
         """書く子が書いている間、その作業場所の担当は launcher が持ち、終わったら返す（#88。子の claim が失敗した後も、子は担当なしで
@@ -4109,34 +4135,70 @@ class TestLaunch(unittest.TestCase):
         rc, rec = self.run_launch("claude", extra=["--write"], cwd=wt, env_extra=self.lease_env())
         self.assertEqual((rc, rec["status"]), (0, "ok"), rec)
         seen = self.seen_lease()
-        self.assertTrue((seen["holder"] or "").startswith("launcher "), seen)
-        self.assertEqual(rec["lease"], {"holder": seen["holder"], "released": True}, rec)
-        self.assertIsNone(self.work("status", "--dir", str(wt))[1]["holder"])
+        self.assert_launcher_held(seen, "書く子の実行中")
+        self.assertEqual(rec["lease"], {"holder": seen["holder"], "dir": str(wt.resolve()), "released": True}, rec)
+        self.assert_no_lease(wt, "書く子が返った後")
         rc, again = self.run_launch(None, extra=["--resume", rec["out"]], env_extra=self.lease_env())  # 続きも同じ
         self.assertEqual((rc, again["status"]), (0, "ok"), again)
-        self.assertTrue((self.seen_lease()["holder"] or "").startswith("launcher "), self.seen_lease())
-        self.assertIsNone(self.work("status", "--dir", str(wt))[1]["holder"])
+        self.assert_launcher_held(self.seen_lease(), "続きの書く子の実行中")
+        self.assert_no_lease(wt, "続きの書く子が返った後")
         for extra in ([], ["--audit"]):
             with self.subTest(extra=extra):
-                Path(str(self.args_file) + ".lease").unlink()
                 rc, rec = self.run_launch("claude", extra=extra, cwd=wt, env_extra=self.lease_env())
                 self.assertEqual((rc, rec["status"]), (0, "ok"), rec)
-                self.assertIsNone(self.seen_lease()["holder"])
+                self.assertIsNone(self.seen_lease()["holder"], f"読み取り専用の子 {extra} の実行中に担当が在る")
                 self.assertNotIn("lease", rec)
 
+    def test_the_lease_lasts_the_timeout_plus_the_grace_and_the_margin(self):
+        """担当の期限は、--timeout に片付けの猶予（STOP_GRACE）と LEASE_MARGIN を足して分に切り上げた長さ。"""
+        _, wt = self.worktree("lease-length")
+        launch = load_launch()
+        for timeout in (100, 1000):
+            with self.subTest(timeout=timeout):
+                rc, rec = self.run_launch("claude", extra=["--write", "--timeout", str(timeout)], cwd=wt, env_extra=self.lease_env())
+                self.assertEqual((rc, rec["status"]), (0, "ok"), rec)
+                want = math.ceil((timeout + launch.STOP_GRACE + launch.LEASE_MARGIN) / 60) * 60
+                left = self.seen_lease()["expires_in_s"]
+                self.assertTrue(want - 10 <= left <= want, f"子が見た担当の残り {left} 秒が、期待の {want} 秒に合わない")
+
     def test_a_writer_does_not_start_while_someone_else_holds_the_lease(self):
-        """生きた別の担当（親が release し忘れたなど）が在れば、書く子を起動せず、持ち主と、release してから立てることを返す。その担当は変えない。"""
+        """生きた別の担当（親が release し忘れたなど）が在れば、書く子を起動せず、持ち主と、release してから立てることを返す。その担当は変えない。
+        --cwd が作業ツリーの下の階層でも、根の担当を見る（下の階層の道筋で取ると、親が根で持つ担当を素通りした）。"""
         _, wt = self.worktree("held")
+        (wt / "sub").mkdir()
+        shutil.copy(wt / "a.txt", wt / "sub" / "a.txt")
         token = self.work("claim", "--dir", str(wt), "--holder", "claude conductor-x")[1]["token"]
+        for cwd in (wt, wt / "sub"):
+            with self.subTest(cwd=cwd):
+                self.args_file.unlink(missing_ok=True)
+                rc, rec = self.run_launch("claude", extra=["--write"], cwd=cwd, env_extra=self.lease_env())
+                self.assertEqual((rc, rec["status"]), (2, "unavailable"), rec)
+                self.assertFalse(self.args_file.exists(), "担当を取れなかったのに、子が走った")
+                self.assertNotIn("no_login", rec)
+                self.assertNotIn("lease", rec)
+                self.assertIn("claude conductor-x", rec["problems"][0])
+                self.assertIn("release してから立てる", rec["problems"][0])
+                self.assertIn("秒で切れる", rec["problems"][0])
+                self.assertIn("--resume で断られたら", rec["problems"][0])
+                self.assertEqual(self.work("status", "--dir", str(wt))[1]["holder"], "claude conductor-x")
+        self.work("renew", "--dir", str(wt), "--token", token)  # 担当の token は前のまま
+        self.work("release", "--dir", str(wt), "--token", token)
+        rc, rec = self.run_launch("claude", extra=["--write"], cwd=wt / "sub", env_extra=self.lease_env(at=wt))
+        self.assertEqual((rc, rec["status"], rec["lease"]["dir"]), (0, "ok", str(wt.resolve())), rec)
+        self.assert_launcher_held(self.seen_lease(), "下の階層の書く子の実行中、作業ツリーの根で")
+        self.assert_no_lease(wt, "下の階層の書く子が返った後")
+
+    def test_a_writer_does_not_start_when_the_lease_cannot_be_taken(self):
+        """work.py の claim が拒否でなく失敗した（記録の置き場の lease.json がディレクトリで、終了コード 2）ときも、書く子を起動しない。"""
+        _, wt = self.worktree("broken-lease")
+        record = Path(self.work("status", "--dir", str(wt))[1]["note"]["path"]).parent
+        (record / "lease.json").mkdir()
+        code, _ = self.work("claim", "--dir", str(wt), "--holder", "t", check=False)
+        self.assertEqual(code, 2)  # 場面の前提: 拒否（3）でなく失敗
         rc, rec = self.run_launch("claude", extra=["--write"], cwd=wt, env_extra=self.lease_env())
         self.assertEqual((rc, rec["status"]), (2, "unavailable"), rec)
-        self.assertFalse(self.args_file.exists())  # 子は走らなかった
-        self.assertNotIn("no_login", rec)
-        self.assertNotIn("lease", rec)
-        self.assertIn("claude conductor-x", rec["problems"][0])
-        self.assertIn("release", rec["problems"][0])
-        self.assertEqual(self.work("status", "--dir", str(wt))[1]["holder"], "claude conductor-x")
-        self.work("renew", "--dir", str(wt), "--token", token)  # 担当の token は前のまま
+        self.assertFalse(self.args_file.exists(), "担当を取れなかったのに、子が走った")
+        self.assertIn("担当を取れない", rec["problems"][0])
 
     def test_a_writer_whose_lease_was_lost_while_it_ran_does_not_return_ok(self):
         """書く子の実行中に担当が launcher の手を離れた（記録が消えた・別の token に書き換わった）ら、ok で返さない。"""
@@ -4146,27 +4208,48 @@ class TestLaunch(unittest.TestCase):
                 rc, rec = self.run_launch("claude", extra=["--write"], cwd=wt, env_extra=self.lease_env(how))
                 self.assertEqual((rc, rec["status"]), (2, "failed"), rec)
                 self.assertEqual(rec["lease"]["released"], False, rec)
-                self.assertTrue(any("担当" in p and "release" in p for p in rec["problems"]), rec)
+                self.assertTrue(any("担当が実行中に失われたか" in p for p in rec["problems"]), rec)
+
+    def test_the_launcher_holds_the_lease_through_the_fix_and_the_fallback(self):
+        """報告を直させる同じ session の続きと、Fable を使えずに立て直した子の実行中も、担当は launcher にある。"""
+        _, wt = self.worktree("lease-fix")
+        good = GOOD.encode().decode("unicode_escape")
+        rc, rec = self.run_launch("claude", extra=["--write"], cwd=wt,
+                                  env_extra={"FAKE_TEXT": "結論だけ", "FAKE_RESUMED_TEXT": good, **self.lease_env()})
+        self.assertEqual((rc, rec["status"], "report_fix" in rec), (0, "ok", True), rec)
+        seen = self.seen_leases()
+        self.assertEqual(len(seen), 2, seen)
+        for n, s in enumerate(seen, 1):
+            self.assert_launcher_held(s, f"{n} 回目（直させる続き）の書く子の実行中")
+        self.assert_no_lease(wt, "直させた書く子が返った後")
+        rc, rec = self.run_launch("claude", mode="fable-unavailable", extra=["--write", "--model", "fable", "--effort", "medium"], cwd=wt,
+                                  env_extra=self.lease_env())
+        self.assertEqual((rc, rec["status"], "model_fallback" in rec), (0, "ok", True), rec)
+        seen = self.seen_leases()
+        self.assertEqual(len(seen), 2, seen)
+        for n, s in enumerate(seen, 1):
+            self.assert_launcher_held(s, f"{n} 回目（立て直し）の書く子の実行中")
+        self.assert_no_lease(wt, "立て直した書く子が返った後")
 
     def test_the_launcher_returns_the_lease_when_the_writer_times_out_or_is_stopped(self):
         """時間切れでも、launcher が TERM で止められても、担当を返してから終わる（KILL されたときは期限まで残る）。"""
         _, wt = self.worktree("lease-timeout")
         rc, rec = self.run_launch("claude", extra=["--write", "--timeout", "2"], cwd=wt, env_extra={"FAKE_HANG": "1", **self.lease_env()})
         self.assertEqual((rc, rec["status"]), (2, "timeout"), rec)
-        self.assertTrue((self.seen_lease()["holder"] or "").startswith("launcher "), self.seen_lease())
-        self.assertIsNone(self.work("status", "--dir", str(wt))[1]["holder"])
+        self.assert_launcher_held(self.seen_lease(), "時間切れになる書く子の実行中")
+        self.assert_no_lease(wt, "時間切れの後")
         _, wt = self.worktree("lease-term")
         p = self.launch_in_background(["--host", "claude", "--cwd", str(wt), "--write", "--timeout", "60"], env_extra=self.lease_env())
-        self.assertTrue((self.seen_lease()["holder"] or "").startswith("launcher "), self.seen_lease())
+        self.assert_launcher_held(self.seen_lease(), "TERM で止める書く子の実行中")
         p.send_signal(signal.SIGTERM)
         out, _ = p.communicate(timeout=90)
         rec = json.loads(out)
         self.assertEqual((rec["status"], rec["stopped_by_signal"], rec["lease"]["released"]), ("failed", int(signal.SIGTERM), True), rec)
-        self.assertIsNone(self.work("status", "--dir", str(wt))[1]["holder"])
+        self.assert_no_lease(wt, "launcher が TERM で止められた後")
 
     def test_writers_are_told_the_launcher_holds_the_lease(self):
         """どのホストの書く子にも、担当は launcher が持ち、work.py の claim・release・renew を自分で呼ばないと伝える（続きでも）。
-        読み取り専用の子には伝えない。"""
+        Codex・Grok Build の書く子の実行中も、担当は launcher にある。読み取り専用の子には伝えない。"""
         said = "この作業場所の担当は launcher が持っている。`work.py` の `claim`・`release`・`renew` を自分で呼ばない"
 
         def given(host):
@@ -4174,9 +4257,12 @@ class TestLaunch(unittest.TestCase):
             return argv[-1] if host == "codex" else argv[argv.index("-p") + 1]
         for host in ("claude", "codex", "grok"):
             with self.subTest(host=host):
-                rc, rec = self.run_launch(host, extra=["--write"], cwd=self.worktree("told-" + host)[1])
+                wt = self.worktree("told-" + host)[1]
+                rc, rec = self.run_launch(host, extra=["--write"], cwd=wt, env_extra=self.lease_env())
                 self.assertEqual((rc, rec["status"]), (0, "ok"), rec)
                 self.assertIn(said, given(host))
+                self.assert_launcher_held(self.seen_lease(), f"{host} の書く子の実行中")
+                self.assert_no_lease(wt, f"{host} の書く子が返った後")
                 if host == "claude":
                     rc, again = self.run_launch(None, extra=["--resume", rec["out"]])
                     self.assertEqual((rc, again["status"]), (0, "ok"), again)
@@ -4190,6 +4276,8 @@ class TestLaunch(unittest.TestCase):
             cwd.mkdir(exist_ok=True)
             rc, rec = self.run_launch("claude", extra=["--write"], cwd=cwd)
             self.assertEqual(rec["status"], "unavailable", rec)
+            self.assertNotIn("lease", rec)
+            self.assert_no_lease(repo, "元の checkout で書く子を断った後")
         self.assertFalse(self.args_file.exists())  # 起動しない
 
     def clean_worktree(self, name):

@@ -1417,30 +1417,38 @@ def lease_call(*args: str) -> tuple:
     return p.returncode, res, (p.stderr.strip() or p.stdout.strip())[-300:]
 
 
-def take_lease(cwd: Path, holder: str, seconds: float) -> str:
-    """書く子の作業場所の担当を、子を起こす直前に launcher が取り、token を返す（#88。子に claim させると、子の claim が失敗しても、
-    子は担当なしで書いて commit し、launcher は ok で返した）。取れなければ LeaseRefused（理由・持ち主・親が持ったままなら release
-    してから立てること）。期限は、この起動の上限（--timeout。報告の直しの続きと立て直しは、その残りで動く）に片付けの猶予と
-    LEASE_MARGIN を足した分で、work.py の上限（MAX_LEASE_MIN）で切る。
-    守らない範囲: launcher が KILL された（受け手を置く前のシグナルで止められたときも）ら、担当は期限まで残る（切れれば誰でも取り直せる）。
-    期限が上限で切られた長い起動では、実行中に期限が切れ、ほかの者が取り直せる（取り直されたら、終わりの release が拒否され、failed）。"""
+def lease_place(cwd: Path) -> Path:
+    """書く子の担当を取る場所。--cwd が Git の作業ツリーの中ならその作業ツリーの根（親は根で担当を持つので、下の階層の道筋で取ると、
+    親の担当を素通りした）、そうでなければ --cwd。"""
+    return worktree_top(cwd) or cwd
+
+
+def take_lease(place: Path, holder: str, seconds: float) -> str:
+    """書く子の作業場所（lease_place）の担当を、子を起こす直前に launcher が取り、token を返す（#88。子に claim させると、子の claim が
+    失敗しても、子は担当なしで書いて commit し、launcher は ok で返した）。取れなければ LeaseRefused（理由・持ち主・親が持ったままなら
+    release してから立てること）。期限は、この起動の上限（--timeout。報告の直しの続きと立て直しは、その残りで動く）に片付けの猶予と
+    LEASE_MARGIN を足した分で、work.py の上限（MAX_LEASE_MIN）で切る。期限の切れた担当は、work.py の claim の約束どおり取り直す。
+    守らない範囲: launcher が KILL されたとき、受け手を置いていないシグナル（QUIT など）で止まったとき、work.py の claim・release が
+    LEASE_TIMEOUT で打ち切られたときは、担当が期限まで残る（切れれば誰でも取り直せる）。期限が上限で切られた長い起動では、実行中に
+    期限が切れ、ほかの者が取り直せる（取り直されたら、終わりの release が拒否され、failed）。"""
     minutes = min(max(math.ceil((seconds + STOP_GRACE + LEASE_MARGIN) / 60), 1), MAX_LEASE_MIN)
-    code, res, tail = lease_call("claim", "--dir", str(cwd), "--holder", holder, "--lease", str(minutes))
+    code, res, tail = lease_call("claim", "--dir", str(place), "--holder", holder, "--lease", str(minutes))
     if code == 0 and res.get("ok") is True and isinstance(res.get("token"), str) and res["token"]:
         return res["token"]
     why = res.get("reason") or f"work.py claim が失敗した（終了コード {code}）: {tail}"
-    raise LeaseRefused(f"作業場所の担当を取れないので、書く子を起動しない（{why}。持ち主: {res.get('holder') or '不明'}）。"
-                       f"親が担当を持ったままなら、release してから立てる: {cwd}"[:1000])
+    left = res.get("expires_in_s")
+    raise LeaseRefused((f"作業場所の担当を取れないので、書く子を起動しない（{why}。持ち主: {res.get('holder') or '不明'}"
+                        + (f"。あと {left} 秒で切れる" if isinstance(left, (int, float)) and not isinstance(left, bool) else "")
+                        + f"）。親が担当を持ったままなら、release してから立てる（--resume で断られたら、担当を返してから同じ記録でもう一度続ける）: {place}")[:1000])
 
 
 def give_back_lease(cwd: Path, token: str) -> str | None:
-    """take_lease で取った担当を返す。返せなければ（実行中に取り直された・記録が消えた・書き換わった・op run が動いている）、その理由の文。"""
+    """take_lease で取った担当を、取った場所で返す。返せなければ、work.py の理由を入れた文。"""
     code, res, tail = lease_call("release", "--dir", str(cwd), "--token", token)
     if code == 0 and res.get("ok") is True:
         return None
     return (f"launcher が作業場所の担当を release できない（{res.get('reason') or f'終了コード {code}: {tail}'}。今の持ち主: "
-            f"{res.get('holder') or 'なし'}）。書く子の実行中に担当が取り直されたか、記録が消えた・書き換わった。子は担当の外で書いた"
-            "かもしれない。work.py status で今の担当を、子の変更を確かめてから使う")[:1000]
+            f"{res.get('holder') or 'なし'}）。担当が実行中に失われたか、release を終えられなかった。work.py status で今の担当を確かめる")[:1000]
 
 
 def ask_to_stop(child: subprocess.Popen, stop: dict) -> None:
@@ -2089,9 +2097,9 @@ def main() -> int:
                 if signal.getsignal(s) is not signal.SIG_IGN:
                     signal.signal(s, forward)
             if a.write:  # 起動の前の確かめを通った後、子を起こす直前に（受け手を置いた後なので、取った後のシグナルでも返す）
-                holder = f"launcher {out_dir.name}"
-                lease = take_lease(a.cwd, holder, a.timeout)
-                rec["lease"] = {"holder": holder, "released": False}
+                holder, lease_at = f"launcher {out_dir.name}", lease_place(a.cwd)
+                lease = take_lease(lease_at, holder, a.timeout)
+                rec["lease"] = {"holder": holder, "dir": str(lease_at), "released": False}
             # 子が残した背景のプロセスが、終了後の照合の後に書き換えないよう、プロセスグループごと止める。子の CLI が新しいセッションに
             # 切り離した子孫（Claude Code の Bash）はグループの外なので、Linux では自分の下に来たものを残らなくなるまで止める
             fixing = None
@@ -2306,7 +2314,7 @@ def main() -> int:
                                                       "（空の ~/.bash_profile があると、ログインシェルが ~/.profile と ~/.bashrc を読まない）"]
                            + rec["home_residue"][:20] + rec.get("problems", []))
             if lease:  # 子の照合を終えてから返す（ok・直しの後・時間切れ・シグナル・失敗のどの道でも）
-                lost = give_back_lease(a.cwd, lease)
+                lost = give_back_lease(lease_at, lease)
                 rec["lease"]["released"] = not lost
                 if lost:
                     rec.update(status="failed", problems=rec.get("problems", []) + [lost])
