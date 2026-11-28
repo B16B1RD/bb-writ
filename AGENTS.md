@@ -29,7 +29,7 @@ bb-writ は、CLI ハーネス（Claude Code・Codex。Grok Build も同じ SKIL
 ## テスト
 
 - 単体: `python3 -B tests/run.py`（偽の CLI で launcher と work.py、配布の形。テストごとに別のプロセスで並べて回し、`-j N` で数を、引数でテストの名前を絞る。順に回すなら `python3 -B -m unittest discover -s tests -t .`）。`tests/test_properties.py` は Hypothesis（`tests/requirements.txt`、テストだけの依存）で入力の形の性質を見て、無ければ飛ばす。CI は入れて回す。
-- スキルの変更は、新しい CLI セッションで実物を確かめる（最初のツール呼び出しで使われるか、成果物）。比べるときは `skills/playbook-eval`。
+- スキルの変更は、新しい CLI セッションで実物を確かめる（最初のツール呼び出しで使われるか、成果物。スキル・指示ファイルの文が効くと書くときは `skills/playbook-verify` の「モデルの挙動に頼る主張」に従う）。比べるときは `skills/playbook-eval`。
 - GitHub に触れる確かめは、自分が管理するテスト用のリポジトリで行う。子の CLI の起動に、普段渡さない設定（`GH_CONFIG_DIR`・`GH_TOKEN`）を足さない。
 
 ## 規則と強制するもの
