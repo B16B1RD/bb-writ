@@ -232,7 +232,7 @@ def reviews_of(commit: str, cwd=None, not_run: bool = False, no_login: bool = Fa
     監査役は審査の記録（最初の値）に数えない（push ごとに立てるので、審査の代わりにも周の数にもしない）。監査役の記録は、
     判定の deliver が行と record.json の両方で yes のものだけを数える（本文で差し戻した監査を、status の ok で通さない）。
     同じ commit に yes の記録が 1 件でもあれば、その後の no の記録では止めない（守らない）。
-    head は launcher が、対象の作業ツリーが子の起動の前と終わりの両方で commit と同じとき（未 commit の変更が無いとき）だけ書く。
+    head は launcher が、対象の作業ツリーが子の起動の前と終わりの両方で commit と同じとき（未 commit の変更が無いとき。Claude Code の sandbox の印は数えない。launch.py の clean_head）だけ書く。
     審査の中身（子が十分に攻めたか、何人か、依頼文が interrogate の観点を持っていたか）は見ない。手で書き足した記録も見分けない（忘れて飛ばすのを止める）。
     cwd を渡すと、その場所を --cwd にして立てた記録だけを数える（--delta の祖先の審査を、ほかの作業場所の審査で代えないため）。
     not_run が真なら（作業者が --not-run で、子が sandbox のせいで実行できなかったと宣言した）、status が not-run で、子が実行の欄に
