@@ -1352,7 +1352,8 @@ def clean_head(cwd: Path) -> str | None:
     追跡外のファイルと、サブモジュールが別の commit を指す変更は、設定（status.showUntrackedFiles=no、diff.ignoreSubmodules・
     submodule.<名>.ignore）に関わらず数える。書く子の後の作業場所でも動くので、子が書けた設定の命令を走らせない形で見る（QUIET_GIT、
     --no-optional-locks。サブモジュールの中には入らず、中の未 commit の変更は数えない。#64）。
-    assume-unchanged・skip-worktree で隠した変更は見分けない。"""
+    assume-unchanged・skip-worktree で隠した変更は見分けない。
+    Claude Code の sandbox の印（sandbox_marks_only）は変更に数えない。"""
     try:
         local = subprocess.run(["git", "rev-parse", "--local-env-vars"], capture_output=True, text=True, errors="surrogateescape", timeout=GIT_TIMEOUT)
         env = {k: v for k, v in os.environ.items() if k not in local.stdout.split()}
@@ -1362,9 +1363,57 @@ def clean_head(cwd: Path) -> str | None:
                                 capture_output=True, timeout=GIT_TIMEOUT)
     except (OSError, subprocess.TimeoutExpired):
         return None
-    if local.returncode or head.returncode or status.returncode or status.stdout.strip():
+    if local.returncode or head.returncode or status.returncode or (status.stdout.strip() and not sandbox_marks_only(cwd, env)):
         return None
     return head.stdout.strip()
+
+
+SANDBOX_MARK_TRIES = 3
+
+
+def sandbox_marks_only(cwd: Path, env: dict) -> bool:
+    """cwd の作業ツリーの未 commit の変更が、Claude Code の sandbox の印だけか。印の形: 追跡外（??）で、作業ツリーの根からの道筋が
+    直下のドットで始まる名前 1 つか .claude/<名前> の 1 段で、symlink でない通常ファイル・0 バイト・書き込みビットが 1 つも無いもの。
+    同じ作業場所で Claude Code の書く子が Bash を動かす間だけ、sandbox が守る名前（.bashrc・.claude/settings.json など）を外から見て
+    この形で置き、終わると消す。読み取り専用の子の起動の前か終わりに当たると head が外れ、関門に数えられなかった（#81）。
+    名前は版で変わるので、一覧でなく形で見る。形から外れた行が 1 つでもあれば偽（head を外す側）。
+    status は -z と --untracked-files=all で取り直す（normal は .claude/ を 1 行に畳む）。道筋はバイトで受け、根から解く
+    （porcelain の道筋は --cwd が下の階層でも根からの相対）。判定の間に項目が消えたら取り直し、SANDBOX_MARK_TRIES 回で決まらなければ偽。
+    守らない範囲: 利用者が置いた同じ形の空の読み取り専用のドットファイルも数えない。根でない --cwd の書く子が自分の階層に置く印は
+    数えて head を外す。Linux・WSL2 の外（macOS の sandbox）で印の形を測っていない。"""
+    try:
+        top = subprocess.run([*QUIET_GIT, "rev-parse", "--show-toplevel"], cwd=cwd, env=env, capture_output=True, timeout=GIT_TIMEOUT)
+        if top.returncode or not top.stdout.strip():
+            return False
+        root = top.stdout.rstrip(b"\n")
+        for _ in range(SANDBOX_MARK_TRIES):
+            status = subprocess.run([*QUIET_GIT, "--no-optional-locks", "status", "--porcelain", "-z", "--untracked-files=all", "--ignore-submodules=dirty"],
+                                    cwd=cwd, env=env, capture_output=True, timeout=GIT_TIMEOUT)
+            if status.returncode:
+                return False
+            try:
+                return all(sandbox_mark(root, e) for e in status.stdout.split(b"\0") if e)
+            except FileNotFoundError:  # 判定の間に消えた（sandbox が片付けた）。status から取り直す
+                continue
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return False
+
+
+def sandbox_mark(root: bytes, entry: bytes) -> bool:
+    """status -z の 1 項目が sandbox_marks_only の印の形か。lstat で消えていたら FileNotFoundError を上げる。"""
+    if not entry.startswith(b"?? "):
+        return False
+    parts = entry[3:].split(b"/")
+    if not (len(parts) == 1 and parts[0].startswith(b".") or len(parts) == 2 and parts[0] == b".claude" and parts[1]):
+        return False
+    try:
+        st = os.lstat(root + b"/" + entry[3:])
+    except FileNotFoundError:
+        raise
+    except OSError:
+        return False
+    return stat.S_ISREG(st.st_mode) and st.st_size == 0 and st.st_mode & 0o222 == 0
 
 
 PR_SET_CHILD_SUBREAPER = 36
