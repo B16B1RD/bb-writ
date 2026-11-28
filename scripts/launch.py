@@ -2387,7 +2387,8 @@ def main() -> int:
         rec.update(head=None, head_lost=f"前の起動の head（{seen}）と違う。続きの子は前の起動で別のものを見た")
     if rec["status"] == "ok" and not a.write and rec["head"]:
         rec["next"] = ("審査の指摘なら、直す前に、作業の記録（claim の note.path）の「指摘の扱い」の欄に、指摘ごとに"
-                       "対応する・記録のみ・退ける と理由を書く（入口の条件 (6)。push・pr はこの欄が空なら拒否される）"
+                       "対応する・記録のみ・退ける と理由を書く（入口の条件 (6)。成果物の検証役・読者役の指摘は、playbook-verify の「成果物の検証」の"
+                       "仕分け（直す・範囲の外れは外す・直さない）で書く。push・pr はこの欄が空なら拒否される）"
                        + (("。監査役の判定は届けてよい（deliver: yes）。報告が挙げた整える点は、直して記録に書く（監査は立て直さない）"
                            if rec.get("deliver") == "yes" else
                            "。監査役の判定は差し戻し（deliver: no。push・pr と integrate の関門に数えない）。直して監査役を立て直すときは、前の監査の項目と、"
