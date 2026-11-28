@@ -2,7 +2,7 @@
 """別系統の CLI（Claude Code・Codex・Grok Build）を bb-writ 専用のログインで起動し、報告を回収して検査する（launcher）。
 
 使い方:
-  python3 launch.py --host codex|claude|grok --cwd <対象> --prompt-file <依頼> [--model M] [--effort E] [--write [--hardest] | --interrogate | --audit] [--out <dir>] [--timeout 秒]
+  python3 launch.py --host codex|claude|grok --cwd <対象> --prompt-file <依頼> [--model M] [--effort E] [--write [--hardest] | --interrogate | --audit [--no-reader 理由] | --reader] [--out <dir>] [--timeout 秒]
   python3 launch.py --resume <前の起動の out> --prompt-file <続きの依頼> [--out <dir>] [--timeout 秒]
 
 標準出力に 1 行の JSON を出す。status は ok / not-run / invalid-report / timeout / failed / quota / unavailable。ok のときだけ終了コード 0。
@@ -23,6 +23,8 @@ Linux の外では、プロセスグループを止めるだけ（stopped_after_
 push・pr でこれを求める）。依頼文の中身が審査だったかは見ない。
 --audit は、読み取り専用の子が返す前の判定（スキルの要求を守ったかの監査）の子だという宣言で、記録の audit に残す
 （work.py が、すべての push・pr と integrate で、HEAD を対象にしたこの記録を求める）。依頼文の中身が監査だったかは見ない。
+--reader は、読み取り専用の子が読者役だという宣言で、記録の reader に残す。task start の作業場所でスキル・指示ファイルを変えたのに
+読者役の記録が無ければ、--audit を起動しない（reader_missing。省くなら --no-reader <理由> を付け、記録の no_reader と監査役の依頼文に残す）。
 監査役の報告は判定 deliver（yes か no）と、届ける変更の全体の危険度の段 risk（低・中・高）を持ち、どちらかが無いか値が違えば invalid-report。
 値は記録の deliver・risk に残し、work.py は yes だけを関門に数え、push・pr では risk を --risk と比べる。
 専用ログインが無い（Claude Code の .env、Codex・Grok の auth.json が無い）せいで起動できなかった unavailable の記録には、no_login を真で残す
@@ -60,7 +62,7 @@ from pathlib import Path
 sys.dont_write_bytecode = True
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from work import root as work_record  # noqa: E402
-from work import claude_staging_only, field_texts, record_at, MAX_LEASE_MIN, REVISIT  # noqa: E402
+from work import checkout_or_none, claude_staging_only, field_texts, record_at, MAX_LEASE_MIN, REVISIT  # noqa: E402
 
 # 親が --model・--effort を省いたときの、役割ごとのモデルと effort（親が渡せば、それが勝つ）。表に無い組み合わせは --model と --effort を渡す。
 # 最も難しい依頼（設計、大きな移行・リファクタリング、長い無人実行）を任せる書く子（--hardest）は最上段。
@@ -107,6 +109,8 @@ AUDIT_CONTRACT = ("返す前の判定（bb-writ の監査役の約束）: 上の
                   "最後の JSON に \"deliver\": \"yes\" か \"no\" を書く（どちらにするかは、同じ節の基準に従う）。"
                   "最後の JSON に \"risk\": \"低\"・\"中\"・\"高\" のどれかを書く（届ける変更の全体が `interrogate` の 5 の基準でどの段に当たるかの、"
                   "自分の判定。作業者の宣言を写さない。どの段かは同じ節の「危険度の宣言」の項目に従う）。\n")
+# 監査役に --no-reader の宣言があれば、AUDIT_CONTRACT の後に足す（項目と deliver の基準は変えない。#94）
+NO_READER_CONTRACT = "読者役を省く宣言が在る: {}。この理由で、スキルの求める読者役を省けるかを、遵守の項目で判定する。\n"
 # Claude Code の書く子にだけ足す（続きでも）。Linux・WSL2 の sandbox は、書き込みを拒む場所のうち実在しないものに読み込み専用の印
 # （開けないキャラクタデバイス）を置く。子の中では作業場所の直下の印が git status に出て、git add -A・git add . が 128 で落ちる。
 # 名前を挙げた git add と git commit は通る。印は、子が終わった後の作業場所には残らない（時間切れで残った 0 バイトのファイルは cwd_residue）。
@@ -1351,6 +1355,72 @@ def unrevisited(cwd: Path) -> str:
     return ""
 
 
+READER_DOCS = ("SKILL.md", "AGENTS.md", "CLAUDE.md")  # 変えたら読者役が要る文書（basename。playbook-docs-skill の 5）
+
+
+def task_of(cwd: Path) -> tuple:
+    """cwd が task start の作業場所（元の checkout のタスクの一覧 tasks/*.json に dir があるもの）とその下なら (作業場所, 統合先)。
+    ほかは (None, None)。work.py の task_place と同じく、作業場所の task.json は書く子が書き換えうるので読まない。"""
+    c = checkout_or_none(cwd)
+    real = cwd.resolve()
+    for f in sorted((record_at(c) / "tasks").glob("*.json")) if c else []:
+        try:
+            t = json.loads(f.read_text(encoding="utf-8"))
+            place = Path(t["dir"]).resolve()
+        except (OSError, ValueError, KeyError, TypeError):
+            continue
+        if real == place or place in real.parents:
+            return place, t.get("target") if isinstance(t.get("target"), str) and t["target"] else None
+    return None, None
+
+
+def reader_missing(cwd: Path) -> str:
+    """task start の作業場所で、統合先から分かれた後の差分（統合先...HEAD。統合先を取り込んだだけの変更は数えない）に、basename が
+    READER_DOCS のファイルの追加・変更・削除・改名が在るのに、読者役の記録が 1 つも無ければ、その理由（監査役を起動しない）。
+    読者役の記録は、delegations.jsonl の行で、reader が真・write が偽・status が ok か not-run で、cwd がその作業場所の作業ツリーの中か、
+    その作業場所の記録の置き場（evidence の在る置き場）の下のもの。#94: SKILL.md を変えた仕事で読者役を並べ忘れ、監査を 1 周やり直した。
+    守らない範囲: task start でない作業場所・Git でない場所は見ない。タスクの一覧の読めないファイルは飛ばし、一致したタスクに統合先が
+    無ければ見ない。読者役が読んだのがどの文書か・どの commit か、報告の中身は見ない（前の commit で立てた読者役も数える）。
+    --no-reader の理由の真偽は見ず、監査役が判定する。basename が READER_DOCS でない手引き・規則の文書は見ない。差分は commit した
+    ものだけで、未 commit の変更は見ない。作業ツリーの中に置いた別の worktree を --cwd にした読者役も数える。"""
+    place, target = task_of(cwd)
+    if place is None or target is None:
+        return ""
+    try:
+        d = subprocess.run([*QUIET_GIT, "diff", "--name-only", "-z", "--no-renames", f"refs/heads/{target}...HEAD", "--"],
+                           cwd=place, capture_output=True, timeout=GIT_TIMEOUT)
+    except (OSError, subprocess.SubprocessError) as e:
+        d = subprocess.CompletedProcess([], 1, b"", repr(e).encode())
+    if d.returncode:
+        return (f"task start の作業場所 {place} で、統合先 {target} から分かれた後の差分を取れない"
+                f"（{d.stderr.decode(errors='replace').strip()[:200]}）。読者役の要否を決められないので、監査役を起動しない。"
+                "確かめて直すか、読者役を省くなら --audit に --no-reader <理由> を付ける（監査役がその理由を判定する）")
+    docs = [n for n in d.stdout.decode(errors="replace").split("\0") if n and Path(n).name in READER_DOCS]
+    if not docs:
+        return ""
+    keep = record_at(place).resolve()
+    try:
+        with open(state_dir() / "delegations.jsonl", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                try:
+                    e = json.loads(line)
+                except ValueError:
+                    continue
+                if not (isinstance(e, dict) and e.get("reader") is True and e.get("write") is False
+                        and e.get("status") in ("ok", "not-run") and isinstance(e.get("cwd"), str)):
+                    continue
+                c = Path(e["cwd"])
+                if c == place or place in c.parents or c == keep or keep in c.parents:
+                    return ""
+    except OSError:
+        pass
+    names = "・".join(docs[:3]) + (f" ほか {len(docs) - 3} 件" if len(docs) > 3 else "")
+    return (f"この作業場所 {place} の統合先 {target} からの差分に、スキル・指示ファイルの変更（{names}）が在るのに、読者役の記録"
+            "（--reader で立て、ok か not-run で返った読み取り専用の子）が無い。監査役を立てる前に、変えた文書を読者役に読ませる"
+            "（launch.py に --reader を付けて立てる。playbook-docs-skill の 5）。読者役を省くなら、--audit に --no-reader <理由> を付ける"
+            "（監査役がその理由を判定する）")
+
+
 def clean_head(cwd: Path) -> str | None:
     """対象の HEAD の commit。Git の作業ツリーでないか、未 commit の変更（staged・追跡外のファイルを含む。無視するものは除く）があれば None。
     子が見たものを commit に結び付け、work.py の --reviewed がこの記録と照らす（Issue #14）。
@@ -1958,10 +2028,12 @@ def main() -> int:
     ap.add_argument("--write", action="store_true", help="変更を許す（既定は読み取り専用）")
     ap.add_argument("--interrogate", action="store_true", help="読み取り専用の子が interrogate の審査役だと記録に残す")
     ap.add_argument("--audit", action="store_true", help="読み取り専用の子が返す前の判定（遵守の監査）の子だと記録に残す")
+    ap.add_argument("--reader", action="store_true", help="読み取り専用の子が読者役（playbook-docs-skill の 5）だと記録に残す")
+    ap.add_argument("--no-reader", metavar="理由", help="監査役（--audit）に付ける。スキル・指示ファイルを変えた仕事で読者役を省く宣言（監査役がその理由を判定する）")
     ap.add_argument("--hardest", action="store_true", help="最も難しい依頼（設計、大きな移行・リファクタリング、長い無人実行）を任せる書く子（--write と一緒に）。--model・--effort を省くと最上段で起こす")
     ap.add_argument("--out", type=Path)
     ap.add_argument("--timeout", type=int, help="秒。既定は 1800（--hardest は 3600）。0 は省いたのと同じ。負の値は確かめない")
-    ap.add_argument("--resume", type=Path, help="前の起動の out。同じ session・同じ権限で続きから起動する（host・cwd・model・effort・write・interrogate・audit と役割（hardest）は記録から取る）")
+    ap.add_argument("--resume", type=Path, help="前の起動の out。同じ session・同じ権限で続きから起動する（host・cwd・model・effort・write・interrogate・audit・reader・no-reader と役割（hardest）は記録から取る）")
     a = ap.parse_args()
     a.session, a.grok_home, a.codex_turns, a.prev_head, a.scratch, a.history = None, None, 0, None, None, []
     a.codex_plugin_add = None
@@ -1970,8 +2042,8 @@ def main() -> int:
             prev = obj(json.loads((a.resume / "record.json").read_text(encoding="utf-8")))
         except (OSError, ValueError) as e:
             ap.error(f"--resume の記録を読めない: {e!r}"[:300])
-        if a.host or a.cwd or a.model or a.effort or a.write or a.interrogate or a.audit or a.hardest:
-            ap.error("--resume は host・cwd・model・effort・write・interrogate・audit・hardest を前の記録から取る（違う権限で続けない）。一緒に渡さない")
+        if a.host or a.cwd or a.model or a.effort or a.write or a.interrogate or a.audit or a.reader or a.no_reader is not None or a.hardest:
+            ap.error("--resume は host・cwd・model・effort・write・interrogate・audit・reader・no-reader・hardest を前の記録から取る（違う権限で続けない）。一緒に渡さない")
         if not (prev.get("host") in ("claude", "codex", "grok") and all(isinstance(prev.get(k), str) and prev[k] for k in ("cwd", "model_requested", "effort_requested", "session"))
                 and isinstance(prev.get("write"), bool)):
             ap.error(f"--resume の記録に、続きから起動するのに要るもの（host・cwd・model・effort・write・session）が無い: {a.resume}")
@@ -2016,6 +2088,8 @@ def main() -> int:
         a.session, a.grok_home = prev["session"], prev.get("grok_home") and Path(prev["grok_home"])
         a.interrogate = prev.get("interrogate") is True
         a.audit = prev.get("audit") is True
+        a.reader = prev.get("reader") is True
+        a.no_reader = prev.get("no_reader") if isinstance(prev.get("no_reader"), str) else None
         a.revisit = prev.get("revisit") if isinstance(prev.get("revisit"), str) else None  # 続きの記録にも、次の周の関門が比べる印を残す
         a.role = prev.get("role") if prev.get("role") in CHOICES else None
         # 手で書き換えた記録の role が list・dict だと TypeError で止まる（launcher の書いた記録は文字列。守らない）
@@ -2024,6 +2098,12 @@ def main() -> int:
         ap.error("--interrogate は読み取り専用の審査役に付ける。--write と一緒に渡さない")
     elif a.audit and (a.write or a.interrogate):
         ap.error("--audit は読み取り専用の監査役に付ける。--write・--interrogate と一緒に渡さない（審査役と監査役は別の子）")
+    elif a.reader and (a.write or a.interrogate or a.audit):
+        ap.error("--reader は読み取り専用の読者役に付ける。--write・--interrogate・--audit と一緒に渡さない（読者役は別の子）")
+    elif a.no_reader is not None and not a.audit:
+        ap.error("--no-reader は監査役（--audit）にだけ付ける")
+    elif a.no_reader is not None and not a.no_reader.strip():
+        ap.error("--no-reader には、読者役を省く理由を書く（空にしない）")
     elif a.hardest and not a.write:
         ap.error("--hardest は書く子に付ける。--write と一緒に渡す")
     elif not (a.host and a.cwd):
@@ -2045,6 +2125,10 @@ def main() -> int:
         if why:
             ap.error(why)
         a.revisit = revisit_of(a.cwd)[0]
+    if a.audit and not a.resume and a.no_reader is None:
+        why = reader_missing(a.cwd)
+        if why:
+            ap.error(why)
     stamp = time.strftime("%Y%m%d-%H%M%S") + '-' + secrets.token_hex(8)
     # 読み取り専用の Codex の子が書ける一時ディレクトリは、--out でなく bb-writ の状態の置き場に置く（--out は呼び出し側が選ぶので、
     # その下に置くと、対象のリポジトリや Git の管理ディレクトリの中かを判定し続けることになり、判定の穴が尽きなかった）
@@ -2078,7 +2162,8 @@ def main() -> int:
         pass
     rec = {"host": a.host, "cwd": str(a.cwd), "model_requested": a.model, "effort_requested": a.effort,
            **({"role": a.role} if a.role else {}), **({"chosen_by": a.chosen_by} if not a.resume else {}), "timeout_s": a.timeout,
-           "write": a.write, "interrogate": a.interrogate, "audit": a.audit, **({"revisit": a.revisit} if getattr(a, "revisit", None) else {}), "out": str(out_dir), "session_asked": a.session, **({"resumed_from": str(a.resume.resolve())} if a.resume else {}),
+           "write": a.write, "interrogate": a.interrogate, "audit": a.audit, "reader": a.reader,
+           **({"no_reader": a.no_reader} if a.no_reader is not None else {}), **({"revisit": a.revisit} if getattr(a, "revisit", None) else {}), "out": str(out_dir), "session_asked": a.session, **({"resumed_from": str(a.resume.resolve())} if a.resume else {}),
            "load": {"cpus": os.cpu_count(), "start": load_now()},
            **({"swept": swept} if swept["removed"] or swept["problems"] else {})}
     blocked = []
@@ -2086,6 +2171,7 @@ def main() -> int:
 
     snapshot, why, prep, login = None, None, None, None
     contract = (CONTRACT + (WRITE_CONTRACT if a.write else READ_ONLY_CONTRACT) + (AUDIT_CONTRACT if a.audit else "")
+                + (NO_READER_CONTRACT.format(a.no_reader) if a.audit and a.no_reader is not None else "")
                 + (CLAUDE_WRITE_CONTRACT if a.host == "claude" and a.write else ""))
     try:
         if a.write:

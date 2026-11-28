@@ -1223,6 +1223,152 @@ class TestLaunch(unittest.TestCase):
         rc, rec = self.run_launch("claude", extra=["--interrogate"], cwd=outer)
         self.assertEqual((rc, rec["status"]), (0, "ok"), rec)
 
+    def reader_tasks(self):
+        """self.cwd を統合先 main の元の checkout にし、task start の作業場所を作る関数と、git を返す（読者役の関門のテスト）。
+        main には CLAUDE.md・docs/AGENTS.md が在る。作業場所には、偽の子の報告が証拠に指す a.txt が在る。"""
+        git = lambda *a, cwd=self.cwd: subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", *a], cwd=cwd, check=True,
+                                                      capture_output=True, text=True).stdout.strip()
+        git("init", "-q", "-b", "main")
+        (self.cwd / "docs").mkdir()
+        for f in ("CLAUDE.md", "docs/AGENTS.md"):
+            (self.cwd / f).write_text("x\n")
+        git("add", "a.txt", "CLAUDE.md", "docs")
+        git("commit", "-q", "-m", "1")
+
+        def start():
+            p = subprocess.run([sys.executable, "-B", str(ROOT / "scripts" / "work.py"), "task", "start", "--dir", str(self.cwd), "--holder", "t"],
+                               env=self.launch_env("good"), capture_output=True, text=True, check=True)
+            task = json.loads(p.stdout)
+            self.evidence[Path(task["dir"])] = Path(task["note"]["evidence_dir"])  # 作業場所の記録の置き場（作業の記録・証拠）
+            return Path(task["dir"])
+        self.evidence = {}
+        return start, git
+
+    def refused(self, extra, cwd, words=(), host="claude"):
+        """launcher の起動が理由付きで拒まれ、子を起動せず、記録も作らなかった。"""
+        self.args_file.unlink(missing_ok=True)
+        jsonl = self.state / "delegations.jsonl"
+        before = jsonl.read_text() if jsonl.exists() else ""
+        p = self.run_launch(host, extra=extra, cwd=cwd, raw=True)
+        self.assertEqual(p.returncode, 2, p.stdout)
+        self.assertNotIn("Traceback", p.stderr)
+        for w in words:
+            self.assertIn(w, p.stderr)
+        self.assertFalse(self.args_file.exists(), "子を起動した")
+        self.assertEqual(jsonl.read_text() if jsonl.exists() else "", before, "記録を作った")
+        return p.stderr
+
+    def test_an_auditor_does_not_start_where_skills_or_instructions_changed_without_a_reader(self):
+        """task start の作業場所で、統合先から分かれた後に SKILL.md・AGENTS.md・CLAUDE.md を足す・変える・消す・改名したのに、その作業場所の
+        読者役（--reader で立て、ok か not-run で返った子）の記録が無ければ、監査役を起動しない（#94）。理由は、変わったファイル（3 つまで）、
+        無い読者役、立て方と省き方を名指す。--reader の無い読み取り専用の子、失敗した読者役、別の場所の読者役は数えない。その作業場所の
+        記録の置き場（evidence）を --cwd にした読者役は数える。対象の文書を変えていない差分、統合先に入っただけの変更、task start でない場所は止めない。"""
+        start, git = self.reader_tasks()
+        skills = start()
+        for n in ("a", "b", "c", "d"):
+            (skills / "skills" / n).mkdir(parents=True)
+            (skills / "skills" / n / "SKILL.md").write_text("x\n")
+        git("add", "skills", cwd=skills)
+        git("commit", "-q", "-m", "skills", cwd=skills)
+        why = self.refused(["--audit"], skills, ("skills/a/SKILL.md", "skills/c/SKILL.md", "ほか 1 件", "読者役", "--reader", "--no-reader",
+                                                 "playbook-docs-skill の 5"))
+        self.assertNotIn("skills/d/SKILL.md", why)  # 3 つまで
+        self.refused(["--audit"], skills / "skills", ("skills/a/SKILL.md",))  # 下の階層を --cwd にしても抜けない
+        agents = start()
+        (agents / "docs" / "AGENTS.md").write_text("y\n")  # 変更
+        git("commit", "-q", "-am", "agents", cwd=agents)
+        self.refused(["--audit"], agents, ("docs/AGENTS.md",))
+        claude = start()
+        git("mv", "CLAUDE.md", "OLD.md", cwd=claude)  # 改名（消えた側の名前で見る）
+        git("commit", "-q", "-m", "claude", cwd=claude)
+        self.refused(["--audit"], claude, ("CLAUDE.md",))
+        rc, rec = self.run_launch("claude", cwd=skills)  # --reader の無い読み取り専用の子（成果物の検証役など）は数えない
+        self.assertEqual((rc, rec["status"]), (0, "ok"), rec)
+        rc, rec = self.run_launch("claude", extra=["--reader"], cwd=skills, env_extra={"FAKE_TEXT": "報告の JSON が無い"})  # 失敗した読者役も
+        self.assertEqual(rec["status"], "invalid-report", rec)
+        rc, rec = self.run_launch("claude", extra=["--reader"], cwd=agents)  # 別の作業場所の読者役も
+        self.assertEqual((rc, rec["status"]), (0, "ok"), rec)
+        self.refused(["--audit"], skills, ("skills/a/SKILL.md",))
+        rc, rec = self.run_launch("claude", extra=["--audit"], cwd=agents)  # 読者役の在る作業場所は起動する
+        self.assertEqual((rc, rec["status"], rec["audit"]), (0, "ok", True), rec)
+        self.assertTrue(self.args_file.exists())
+        rc, rec = self.run_launch("claude", extra=["--reader"], cwd=skills)  # 読者役を立てれば起動する
+        self.assertEqual((rc, rec["status"]), (0, "ok"), rec)
+        rc, rec = self.run_launch("claude", extra=["--audit"], cwd=skills)
+        self.assertEqual((rc, rec["status"]), (0, "ok"), rec)
+        evidence = self.evidence[claude]  # その作業場所の記録の置き場（evidence）で読者役を立てても数える
+        self.assertTrue(evidence.is_dir(), evidence)
+        shutil.copy(claude / "a.txt", evidence / "a.txt")
+        rc, rec = self.run_launch("claude", extra=["--reader"], cwd=evidence)
+        self.assertEqual((rc, rec["status"]), (0, "ok"), rec)
+        rc, rec = self.run_launch("claude", extra=["--audit"], cwd=claude)
+        self.assertEqual((rc, rec["status"]), (0, "ok"), rec)
+        code = start()  # 対象の文書を変えていない差分は止めない
+        (code / "skills").mkdir()
+        (code / "skills" / "SKILL.txt").write_text("x\n")
+        (code / "README.md").write_text("x\n")
+        git("add", "skills", "README.md", cwd=code)
+        git("commit", "-q", "-m", "code", cwd=code)
+        rc, rec = self.run_launch("claude", extra=["--audit"], cwd=code)
+        self.assertEqual((rc, rec["status"]), (0, "ok"), rec)
+        (self.cwd / "SKILL.md").write_text("x\n")  # 統合先が後から SKILL.md を足しても、その作業場所の変更に数えない
+        git("add", "SKILL.md")
+        git("commit", "-q", "-m", "main skill")
+        rc, rec = self.run_launch("claude", extra=["--audit"], cwd=code)
+        self.assertEqual((rc, rec["status"]), (0, "ok"), rec)
+        git("merge", "-q", "--no-edit", "main", cwd=code)  # 統合先を取り込んだだけでも
+        rc, rec = self.run_launch("claude", extra=["--audit"], cwd=code)
+        self.assertEqual((rc, rec["status"]), (0, "ok"), rec)
+        rc, rec = self.run_launch("claude", extra=["--audit"])  # task start でない元の checkout は見ない
+        self.assertEqual((rc, rec["status"]), (0, "ok"), rec)
+        git("update-ref", "-d", "refs/heads/main")  # 統合先が消えて差分を取れなければ、黙って通さない
+        self.refused(["--audit"], code, ("差分を取れない", "--no-reader"))
+
+    def test_a_declared_reason_to_skip_the_reader_reaches_the_record_and_the_auditor(self):
+        """--no-reader <理由> を付けた監査役は、読者役の記録が無くても起動し、理由を記録（record.json・delegations.jsonl）と、監査役が受け取る
+        依頼文（続きでも）に残す。--audit の無い --no-reader と、空白だけの理由は、引数の誤り（子を起動しない）。"""
+        start, git = self.reader_tasks()
+        at = start()
+        (at / "SKILL.md").write_text("x\n")
+        git("add", "SKILL.md", cwd=at)
+        git("commit", "-q", "-m", "skill", cwd=at)
+        self.refused(["--audit", "--no-reader", " \t"], at, ("理由",))
+        self.refused(["--no-reader", "文だけ"], at, ("--no-reader",))
+        self.refused(["--reader", "--no-reader", "文だけ"], at, ("--no-reader",))
+        reason = "誤字の 1 字だけの直しで、手順は変えていない"
+        rc, rec = self.run_launch("claude", extra=["--audit", "--no-reader", reason], cwd=at)
+        self.assertEqual((rc, rec["status"]), (0, "ok"), rec)
+        line = next(json.loads(x) for x in (self.state / "delegations.jsonl").read_text().splitlines() if json.loads(x)["out"] == rec["out"])
+        self.assertEqual((json.loads((Path(rec["out"]) / "record.json").read_text()).get("no_reader"), line.get("no_reader")), (reason, reason))
+        prompt = lambda: next(x for x in json.loads(self.args_file.read_text()) if "報告の形（bb-writ の委任の約束）" in x)
+        said = f"読者役を省く宣言が在る: {reason}。この理由で、スキルの求める読者役を省けるかを、遵守の項目で判定する。"
+        self.assertIn(said, prompt())
+        self.assertIn("返す前の判定（bb-writ の監査役の約束）", prompt())  # 監査役の約束はそのまま
+        rc, cont = self.run_launch(None, extra=["--resume", rec["out"]])
+        self.assertEqual((rc, cont["status"], cont.get("no_reader")), (0, "ok", reason), cont)
+        self.assertIn(said, prompt())
+        rc, rec = self.run_launch("claude", extra=["--audit"])  # 宣言の無い監査役には足さない
+        self.assertEqual((rc, rec["status"]), (0, "ok"), rec)
+        self.assertNotIn("読者役を省く宣言", prompt())
+        self.assertNotIn("no_reader", rec)
+
+    def test_a_reader_is_kept_in_the_record_and_is_its_own_role(self):
+        """--reader の子は、記録（record.json・delegations.jsonl）の reader を真にし（ほかの子は偽）、続きの起動も引き継ぐ。モデルの段は
+        読み取り専用のまま。--write・--interrogate・--audit と一緒に渡すと引数の誤り（子を起動しない）。"""
+        line = lambda rec: next(json.loads(x) for x in (self.state / "delegations.jsonl").read_text().splitlines() if json.loads(x)["out"] == rec["out"])
+        rc, rec = self.run_launch("claude", extra=["--reader"])
+        self.assertEqual((rc, rec["status"], rec.get("role")), (0, "ok", "read"), rec)
+        self.assertEqual((json.loads((Path(rec["out"]) / "record.json").read_text()).get("reader"), line(rec).get("reader")), (True, True))
+        rc, cont = self.run_launch(None, extra=["--resume", rec["out"]])
+        self.assertEqual((rc, cont.get("reader"), line(cont).get("reader")), (0, True, True), cont)
+        self.refused(["--resume", rec["out"], "--reader"], None, ("--resume",), host=None)
+        for extra in ([], ["--audit"], ["--interrogate"]):
+            rc, rec = self.run_launch("claude", extra=extra)
+            self.assertEqual((rc, rec.get("reader"), line(rec).get("reader")), (0, False, False), rec)
+        for other in ("--write", "--interrogate", "--audit"):
+            with self.subTest(other=other):
+                self.refused(["--reader", other], None, ("--reader",))
+
     def test_launch_leaves_no_bytecode_in_the_plugin(self):
         subprocess.run(["rm", "-rf", str(ROOT / "scripts" / "__pycache__")], check=True)
         self.run_launch("codex")  # テストの外と同じく -B なしで起動する
