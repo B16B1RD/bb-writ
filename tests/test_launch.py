@@ -1347,10 +1347,12 @@ class TestLaunch(unittest.TestCase):
 
     def test_the_marks_of_the_claude_sandbox_do_not_cost_the_head(self):
         """同じ作業場所で Claude Code の書く子が Bash を動かす間、sandbox が置く印（直下のドットの名前と .claude/ の下の 1 段の、
-        0 バイト・書き込みビットの無い通常ファイル）は、未 commit の変更に数えない（#81）。形から外れたものは今までどおり head を外す。"""
+        追跡外の、0 バイト・書き込みビットの無い通常ファイル）は、未 commit の変更に数えない（#81）。形から外れたもの・確かめられない
+        ものは今までどおり head を外す。"""
         git = self.repo_git()
         git("init", "-q")
-        git("add", "a.txt")
+        (self.cwd / ".gitignore").write_text(".claude/settings.local.json\n")
+        git("add", "a.txt", ".gitignore")
         git("commit", "-q", "-m", "a")
         (self.cwd / "sub").mkdir()
         (self.cwd / "sub" / "a.txt").write_text("x\n")  # 下の階層を --cwd にした子の報告が証拠に指すファイル
@@ -1365,45 +1367,96 @@ class TestLaunch(unittest.TestCase):
             p.chmod(mode)
             return p
 
-        def clear():
+        def clear():  # 場合ごとに、commit した形（HEAD・index・作業ツリー）へ戻す
             for p in sorted(self.cwd.iterdir()):
-                if p.name not in (".git", "a.txt", "sub"):
+                if p.name not in (".git", ".gitignore", "a.txt", "sub"):
                     subprocess.run(["rm", "-rf", str(p)], check=True)
+            git("reset", "-q", "--hard", head)
 
-        for rel in (".bashrc", ".gitconfig", ".idea", ".claude/settings.json", ".claude/agents"):  # 起動の前から在る
-            mark(rel)
-        for cwd in (self.cwd, self.cwd / "sub"):  # 下の階層の --cwd でも、status の道筋は作業ツリーの根から解く
-            with self.subTest(before=True, cwd=cwd):
-                rc, rec = self.run_launch("claude", cwd=cwd)
-                self.assertEqual((rc, rec["status"], rec["head"]), (0, "ok", head), rec)
-        clear()
-        rc, rec = self.run_launch("claude", mode="sandbox-marks")  # 子の実行の間に出て、終わりに残っている
-        self.assertEqual(((self.cwd / ".zshrc").is_file(), (self.cwd / ".claude" / "hooks").is_file()), (True, True))
-        self.assertEqual((rc, rec["status"], rec["head"]), (0, "ok", head), rec)
-        clear()
+        def lstat_of_the_mark(kind):  # launcher が印（バイトの道筋の .bashrc）を lstat すると、once: 最初の 1 回だけ消えている、gone: 消え続ける、denied: 拒まれる
+            return self.launcher_site(f"""
+                real_lstat, hits = os.lstat, []
+                def lstat(p, *a, **k):
+                    if isinstance(p, bytes) and p.endswith(b"/repo/.bashrc"):
+                        hits.append(p)
+                        if {kind!r} == "denied":
+                            raise PermissionError(13, "拒まれた", p)
+                        if {kind!r} == "gone" or len(hits) == 1:
+                            raise FileNotFoundError(2, "消えた", p)
+                    return real_lstat(p, *a, **k)
+                os.lstat = lstat
+            """)
+
+        def second_git(which, how):  # 印を見分けるために取り直す git（top: rev-parse --show-toplevel、status: -z の status）だけを、失敗か時間切れにする
+            return self.launcher_site(f"""
+                import subprocess
+                real_run = subprocess.run
+                def run(args, *a, **k):
+                    hit = ("--show-toplevel" in args and not k.get("text")) if {which!r} == "top" else ("status" in args and "-z" in args)
+                    if not hit:
+                        return real_run(args, *a, **k)
+                    if {how!r} == "timeout":
+                        raise subprocess.TimeoutExpired(args, 1)
+                    p = real_run(args, *a, **k)  # 出力はそのままで、終了コードだけが 0 でない
+                    return subprocess.CompletedProcess(p.args, 1, p.stdout, p.stderr)
+                subprocess.run = run
+            """)
+
+        def before():  # 起動の前から在る印。.gitignore で無視される印は、取り直した status にも出ない
+            for rel in (".bashrc", ".gitconfig", ".idea", ".claude/settings.json", ".claude/agents", ".claude/settings.local.json"):
+                mark(rel)
+
         outside = Path(self.tmp.name) / "mark-like"
         outside.write_bytes(b"")
         outside.chmod(0o444)
-        regressions = {"R1 0 バイト・644 のドットファイル": lambda: mark(".x", mode=0o644),
-                       "R2 中身のある 444 のドットファイル": lambda: mark(".x", b"x"),
-                       "R3 0 バイト 444 のドットで始まらない名前": lambda: mark("plain"),
-                       "R4 ドットの名前の symlink": lambda: os.symlink(outside, self.cwd / ".x"),
-                       "R5 .claude/ の下の中身のあるファイル": lambda: mark(".claude/x", b"x"),
-                       "R6 .claude/ の 2 段下": lambda: mark(".claude/a/b"),
-                       "R7 .claude でないドットのディレクトリの下": lambda: mark(".hidden/x"),
-                       "R9 印と普通の追跡外のファイル": lambda: (mark(".bashrc"), (self.cwd / "new.txt").write_text("x\n"))}
-        for name, make in regressions.items():
+        # 印でも head が付く場合: 名前 → (起動の前に作るもの, 偽の CLI の mode, --cwd, launcher の差し替え)
+        kept = {"起動の前から在る印で head が付く（根の --cwd）": (before, "good", self.cwd, {}),
+                "起動の前から在る印で head が付く（下の階層の --cwd。status の道筋は根から解く）": (before, "good", self.cwd / "sub", {}),
+                "子の実行の間に出て、終わりに残る印で head が付く": (lambda: None, "sandbox-marks", self.cwd, {}),
+                "判定の間に印が 1 回だけ消えても、取り直して head が付く": (lambda: mark(".bashrc"), "good", self.cwd, lstat_of_the_mark("once"))}
+        for name, (make, mode, cwd, site) in kept.items():
             with self.subTest(name):
-                make()
-                rc, rec = self.run_launch("claude")
-                self.assertEqual((rc, rec["head"]), (0, None), rec)
-                clear()
-        with self.subTest("R10 印が在り、子の実行の間に HEAD が動いた"):
-            mark(".bashrc")
-            mark(".claude/settings.json")
-            rc, rec = self.run_launch("claude", mode="own-commit")
-            self.assertEqual((rc, rec["head"]), (0, None), rec)
-            self.assertIn("変わった", rec["head_lost"])
+                try:
+                    make()
+                    rc, rec = self.run_launch("claude", mode=mode, cwd=cwd, env_extra=site)
+                    if mode == "sandbox-marks":
+                        self.assertEqual(((self.cwd / ".zshrc").is_file(), (self.cwd / ".claude" / "hooks").is_file()), (True, True))
+                    self.assertEqual((rc, rec["status"], rec["head"]), (0, "ok", head), rec)
+                finally:
+                    clear()
+        # head が外れる場合: 名前 → (起動の前に作るもの, 偽の CLI の mode, launcher の差し替え)。
+        # R8（追跡ファイルの変更・staged・普通の追跡外）は test_the_record_names_the_commit_the_child_saw_only_when_the_tree_matches_it が見る
+        bashrc = lambda: mark(".bashrc")
+        lost = {"R1 0 バイト・644 のドットファイルは印でない": (lambda: mark(".x", mode=0o644), "good", {}),
+                "R2 中身のある 444 のドットファイルは印でない": (lambda: mark(".x", b"x"), "good", {}),
+                "R3 ドットで始まらない名前は印でない": (lambda: mark("plain"), "good", {}),
+                "R4 ドットの名前の symlink は印に数えない": (lambda: os.symlink(outside, self.cwd / ".x"), "good", {}),
+                "R5 .claude/ の下の中身のあるファイルは印でない": (lambda: mark(".claude/x", b"x"), "good", {}),
+                "R6 .claude/ の 2 段下は印でない": (lambda: mark(".claude/a/b"), "good", {}),
+                "R7 .claude でないドットのディレクトリの下は印でない": (lambda: mark(".hidden/x"), "good", {}),
+                "R9 印と普通の追跡外のファイルが混じれば head を外す": (lambda: (bashrc(), (self.cwd / "new.txt").write_text("x\n")), "good", {}),
+                "R10 印が在っても、子の実行の間に HEAD が動けば head を外す": (lambda: (bashrc(), mark(".claude/settings.json")), "own-commit", {}),
+                "R11 印の形でも staged なら印でない": (lambda: (mark(".x"), git("add", "-f", ".x")), "good", {}),
+                "R12 グループだけ書ける（464）0 バイトのドットファイルは印でない": (lambda: mark(".x", mode=0o464), "good", {}),
+                "R13 ドットが先頭でない名前（a.b）は印でない": (lambda: mark("a.b"), "good", {}),
+                "R14 .claude で始まる別のディレクトリ（.claude-x/）の下は印でない": (lambda: mark(".claude-x/y"), "good", {}),
+                "R15 .claude でないドットのディレクトリの下のドットの名前は印でない": (lambda: mark(".hidden/.x"), "good", {}),
+                "R16 判定の間に印が消え続ければ、取り直しの上限で head を外す": (bashrc, "good", lstat_of_the_mark("gone")),
+                "R17 印を lstat できなければ head を外す": (bashrc, "good", lstat_of_the_mark("denied")),
+                "R18 作業ツリーの根を引く git が失敗すれば head を外す": (bashrc, "good", second_git("top", "fail")),
+                "R19 作業ツリーの根を引く git が時間切れなら head を外す": (bashrc, "good", second_git("top", "timeout")),
+                "R20 取り直した status が失敗すれば head を外す": (bashrc, "good", second_git("status", "fail")),
+                "R21 取り直した status が時間切れなら head を外す": (bashrc, "good", second_git("status", "timeout"))}
+        for name, (make, mode, site) in lost.items():
+            with self.subTest(name):
+                try:
+                    make()
+                    rc, rec = self.run_launch("claude", mode=mode, env_extra=site)
+                    self.assertEqual((rc, rec["head"]), (0, None), rec)
+                    if mode == "own-commit":
+                        self.assertIn("変わった", rec["head_lost"])
+                finally:
+                    clear()
 
     def test_reports_with_unicode_line_separators_are_read(self):
         text = GOOD.encode().decode("unicode_escape").replace('"conclusion": "', '"conclusion": "\u2028\x85\u2029')

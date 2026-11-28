@@ -1379,8 +1379,10 @@ def sandbox_marks_only(cwd: Path, env: dict) -> bool:
     名前は版で変わるので、一覧でなく形で見る。形から外れた行が 1 つでもあれば偽（head を外す側）。
     status は -z と --untracked-files=all で取り直す（normal は .claude/ を 1 行に畳む）。道筋はバイトで受け、根から解く
     （porcelain の道筋は --cwd が下の階層でも根からの相対）。判定の間に項目が消えたら取り直し、SANDBOX_MARK_TRIES 回で決まらなければ偽。
-    守らない範囲: 利用者が置いた同じ形の空の読み取り専用のドットファイルも数えない。根でない --cwd の書く子が自分の階層に置く印は
-    数えて head を外す。Linux・WSL2 の外（macOS の sandbox）で印の形を測っていない。"""
+    守らない範囲: 誰が置いたかは見ず、利用者が置いた同じ形の空の読み取り専用のドットファイルも数えない。根でない --cwd の書く子が
+    自分の階層に置く印は数えて head を外す。印の形を測ったのは、Linux・WSL2 の Claude Code の書く子が Bash を動かす間だけ
+    （macOS、Codex・Grok Build の書く子、Bash 以外の道具の間は測っていない）。作っている途中に別の形（書き込みビットを持つなど）で
+    見える瞬間が在れば、その時刻に確かめた head は外れる（1 秒ごとの見張りでは、作っている途中に見えたものも全部 444 だった）。"""
     try:
         top = subprocess.run([*QUIET_GIT, "rev-parse", "--show-toplevel"], cwd=cwd, env=env, capture_output=True, timeout=GIT_TIMEOUT)
         if top.returncode or not top.stdout.strip():
@@ -1405,6 +1407,8 @@ def sandbox_mark(root: bytes, entry: bytes) -> bool:
     if not entry.startswith(b"?? "):
         return False
     parts = entry[3:].split(b"/")
+    # and parts[1] と下の S_ISREG は二重の守り: これらが外すもの（入れ子のリポジトリの .claude/、ディレクトリ、symlink）は、Linux で測った
+    # 範囲では大きさか書き込みビットの条件でも外れ、テストで見分ける入力が無い（条件は消さない）
     if not (len(parts) == 1 and parts[0].startswith(b".") or len(parts) == 2 and parts[0] == b".claude" and parts[1]):
         return False
     try:
