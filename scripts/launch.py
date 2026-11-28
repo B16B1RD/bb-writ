@@ -110,7 +110,7 @@ AUDIT_CONTRACT = ("返す前の判定（bb-writ の監査役の約束）: 上の
                   "最後の JSON に \"risk\": \"低\"・\"中\"・\"高\" のどれかを書く（届ける変更の全体が `interrogate` の 5 の基準でどの段に当たるかの、"
                   "自分の判定。作業者の宣言を写さない。どの段かは同じ節の「危険度の宣言」の項目に従う）。\n")
 # 監査役に --no-reader の宣言があれば、AUDIT_CONTRACT の後に足す（項目と deliver の基準は変えない。#94）
-NO_READER_CONTRACT = "読者役を省く宣言が在る: {}。この理由で、スキルの求める読者役を省けるかを、遵守の項目で判定する。\n"
+NO_READER_CONTRACT = "遵守の項目では、作業者の読者役を省く宣言（理由: {}）を、スキルの求める読者役を省いた、記録に在る理由として扱い、その理由で省けるかを判定する。\n"
 # Claude Code の書く子にだけ足す（続きでも）。Linux・WSL2 の sandbox は、書き込みを拒む場所のうち実在しないものに読み込み専用の印
 # （開けないキャラクタデバイス）を置く。子の中では作業場所の直下の印が git status に出て、git add -A・git add . が 128 で落ちる。
 # 名前を挙げた git add と git commit は通る。印は、子が終わった後の作業場所には残らない（時間切れで残った 0 バイトのファイルは cwd_residue）。
@@ -1377,12 +1377,14 @@ def task_of(cwd: Path) -> tuple:
 def reader_missing(cwd: Path) -> str:
     """task start の作業場所で、統合先から分かれた後の差分（統合先...HEAD。統合先を取り込んだだけの変更は数えない）に、basename が
     READER_DOCS のファイルの追加・変更・削除・改名が在るのに、読者役の記録が 1 つも無ければ、その理由（監査役を起動しない）。
-    読者役の記録は、delegations.jsonl の行で、reader が真・write が偽・status が ok か not-run で、cwd がその作業場所の作業ツリーの中か、
+    読者役の記録は、delegations.jsonl の行で、reader が真・status が ok か not-run（専用ログインが無いせいで起動できなかった unavailable で
+    no_login が真のものも。work.py の integrate が監査役で数えるのと同じ）で、cwd がその作業場所の作業ツリーの中か、
     その作業場所の記録の置き場（evidence の在る置き場）の下のもの。#94: SKILL.md を変えた仕事で読者役を並べ忘れ、監査を 1 周やり直した。
     守らない範囲: task start でない作業場所・Git でない場所は見ない。タスクの一覧の読めないファイルは飛ばし、一致したタスクに統合先が
     無ければ見ない。読者役が読んだのがどの文書か・どの commit か、報告の中身は見ない（前の commit で立てた読者役も数える）。
     --no-reader の理由の真偽は見ず、監査役が判定する。basename が READER_DOCS でない手引き・規則の文書は見ない。差分は commit した
-    ものだけで、未 commit の変更は見ない。作業ツリーの中に置いた別の worktree を --cwd にした読者役も数える。"""
+    ものだけで、未 commit の変更は見ない。統合先のブランチでない ref（リモート追跡のブランチなど）を取り込んだ変更は、分かれた後の
+    変更に数える。作業ツリーの中に置いた別の worktree を --cwd にした読者役も数える。"""
     place, target = task_of(cwd)
     if place is None or target is None:
         return ""
@@ -1406,8 +1408,8 @@ def reader_missing(cwd: Path) -> str:
                     e = json.loads(line)
                 except ValueError:
                     continue
-                if not (isinstance(e, dict) and e.get("reader") is True and e.get("write") is False
-                        and e.get("status") in ("ok", "not-run") and isinstance(e.get("cwd"), str)):
+                if not (isinstance(e, dict) and e.get("reader") is True and isinstance(e.get("cwd"), str)
+                        and (e.get("status") in ("ok", "not-run") or (e.get("status") == "unavailable" and e.get("no_login") is True))):
                     continue
                 c = Path(e["cwd"])
                 if c == place or place in c.parents or c == keep or keep in c.parents:
@@ -1417,7 +1419,8 @@ def reader_missing(cwd: Path) -> str:
     names = "・".join(docs[:3]) + (f" ほか {len(docs) - 3} 件" if len(docs) > 3 else "")
     return (f"この作業場所 {place} の統合先 {target} からの差分に、スキル・指示ファイルの変更（{names}）が在るのに、読者役の記録"
             "（--reader で立て、ok か not-run で返った読み取り専用の子）が無い。監査役を立てる前に、変えた文書を読者役に読ませる"
-            "（launch.py に --reader を付けて立てる。playbook-docs-skill の 5）。読者役を省くなら、--audit に --no-reader <理由> を付ける"
+            f"（launch.py に --reader を付けて立てる。--cwd は、この作業場所かその下、または作業の記録の証拠の置き場 {record_at(place) / 'evidence'} の下にする。"
+            "playbook-docs-skill の 5）。読者役を省くなら、--audit に --no-reader <理由> を付ける"
             "（監査役がその理由を判定する）")
 
 
