@@ -918,16 +918,35 @@ class NoLogin(str):
     鍵だけが無いなど、整え途中の設定は含めない（用意しかけた利用者は、整えれば監査役を起動できる）。"""
 
 
+def claude_setup(cfg: Path) -> str:
+    return (f"claude setup-token のトークンを、dotenvx set CLAUDE_CODE_OAUTH_TOKEN <トークン> --no-native -f {cfg / '.env'} -fk {cfg / '.env.keys'} で置く"
+            "（手順と確かめ方は README の「任意機能の準備」の「Claude Code の専用ログイン」）")
+
+
+def missing_login(host: str) -> NoLogin | None:
+    """そのホストの専用ログインそのものが無ければ、その理由（NoLogin）。command() と読者役の関門（reader_missing を掛けない場面）が使う。"""
+    cfg = config_dir()
+    if host == "claude" and not (cfg / ".env").is_file():
+        return NoLogin(f"専用ログインが無い: {cfg / '.env'} が無い。{claude_setup(cfg)}")
+    if host == "grok" and not (cfg / "grok-auth" / "auth.json").is_file():
+        login = cfg / "grok-auth"
+        return NoLogin(f"専用ログインが無い: {login}/auth.json（GROK_HOME={login} grok login。README の「任意機能の準備」の「Grok Build の専用ログイン」）")
+    if host == "codex" and not (cfg / "codex-home" / "auth.json").is_file():
+        home = cfg / "codex-home"
+        return NoLogin(f"専用ログインが無い: {home}/auth.json（CODEX_HOME={home} codex login。README の「任意機能の準備」の「Codex の専用ログイン」）")
+    return None
+
+
 def command(a, prompt: str, scratch: Path) -> tuple[list[str], dict, str | None]:
     cfg = config_dir()
     env = dict(os.environ)
+    # 専用ログインを道具より先に見る（基本機能だけの利用者は、たいてい dotenvx も無い。道具の不足に隠れると no_login が付かない）
+    lacking = missing_login(a.host)
+    if lacking:
+        return [], env, lacking
     if a.host == "claude":
         env_file, keys = cfg / ".env", cfg / ".env.keys"
-        setup = (f"claude setup-token のトークンを、dotenvx set CLAUDE_CODE_OAUTH_TOKEN <トークン> --no-native -f {env_file} -fk {keys} で置く"
-                 "（手順と確かめ方は README の「任意機能の準備」の「Claude Code の専用ログイン」）")
-        # 専用ログインを道具より先に見る（基本機能だけの利用者は、たいてい dotenvx も無い。道具の不足に隠れると no_login が付かない）
-        if not env_file.is_file():
-            return [], env, NoLogin(f"専用ログインが無い: {env_file} が無い。{setup}")
+        setup = claude_setup(cfg)
         for tool in ("claude", "dotenvx"):
             if not shutil.which(tool):
                 return [], env, f"{tool} が PATH に無い"
@@ -986,8 +1005,6 @@ def command(a, prompt: str, scratch: Path) -> tuple[list[str], dict, str | None]
         return cmd, env, None
     if a.host == "grok":
         login = cfg / "grok-auth"
-        if not (login / "auth.json").is_file():
-            return [], env, NoLogin(f"専用ログインが無い: {login}/auth.json（GROK_HOME={login} grok login。README の「任意機能の準備」の「Grok Build の専用ログイン」）")
         if not shutil.which("grok"):
             return [], env, "grok が PATH に無い"
         src = a.grok_home and grok_session_dir(a.grok_home, a.session)
@@ -1027,8 +1044,6 @@ def command(a, prompt: str, scratch: Path) -> tuple[list[str], dict, str | None]
                "-r" if a.resume else "-s", a.session]
         return cmd, env, None
     home = cfg / "codex-home"
-    if not (home / "auth.json").is_file():
-        return [], env, NoLogin(f"専用ログインが無い: {home}/auth.json（CODEX_HOME={home} codex login。README の「任意機能の準備」の「Codex の専用ログイン」）")
     if not shutil.which("codex"):
         return [], env, "codex が PATH に無い"
     why = codex_refresh(a, home)
@@ -1377,9 +1392,10 @@ def task_of(cwd: Path) -> tuple:
 def reader_missing(cwd: Path) -> str:
     """task start の作業場所で、統合先から分かれた後の差分（統合先...HEAD。統合先を取り込んだだけの変更は数えない）に、basename が
     READER_DOCS のファイルの追加・変更・削除・改名が在るのに、読者役の記録が 1 つも無ければ、その理由（監査役を起動しない）。
-    読者役の記録は、delegations.jsonl の行で、reader が真・status が ok か not-run（専用ログインが無いせいで起動できなかった unavailable で
-    no_login が真のものも。work.py の integrate が監査役で数えるのと同じ）で、cwd がその作業場所の作業ツリーの中か、
+    読者役の記録は、delegations.jsonl の行で、reader が真・status が ok か not-run で、cwd がその作業場所の作業ツリーの中か、
     その作業場所の記録の置き場（evidence の在る置き場）の下のもの。#94: SKILL.md を変えた仕事で読者役を並べ忘れ、監査を 1 周やり直した。
+    監査役のホストの専用ログインそのものが無い（missing_login）ときは、呼ぶ側が掛けない（監査役は unavailable で no_login の記録を残し、
+    work.py の integrate がそれを数える。#97）。
     守らない範囲: task start でない作業場所・Git でない場所は見ない。タスクの一覧の読めないファイルは飛ばし、一致したタスクに統合先が
     無ければ見ない。読者役が読んだのがどの文書か・どの commit か、報告の中身は見ない（前の commit で立てた読者役も数える）。
     --no-reader の理由の真偽は見ず、監査役が判定する。basename が READER_DOCS でない手引き・規則の文書は見ない。差分は commit した
@@ -1408,8 +1424,7 @@ def reader_missing(cwd: Path) -> str:
                     e = json.loads(line)
                 except ValueError:
                     continue
-                if not (isinstance(e, dict) and e.get("reader") is True and isinstance(e.get("cwd"), str)
-                        and (e.get("status") in ("ok", "not-run") or (e.get("status") == "unavailable" and e.get("no_login") is True))):
+                if not (isinstance(e, dict) and e.get("reader") is True and e.get("status") in ("ok", "not-run") and isinstance(e.get("cwd"), str)):
                     continue
                 c = Path(e["cwd"])
                 if c == place or place in c.parents or c == keep or keep in c.parents:
@@ -2128,7 +2143,7 @@ def main() -> int:
         if why:
             ap.error(why)
         a.revisit = revisit_of(a.cwd)[0]
-    if a.audit and not a.resume and a.no_reader is None:
+    if a.audit and not a.resume and a.no_reader is None and not missing_login(a.host):
         why = reader_missing(a.cwd)
         if why:
             ap.error(why)

@@ -1395,17 +1395,20 @@ class TestLaunch(unittest.TestCase):
             with self.subTest(other=other):
                 self.refused(["--reader", other], None, ("--reader は読み取り専用の読者役に付ける",))
 
-    def test_a_reader_that_could_not_start_without_a_dedicated_login_lets_the_auditor_record_the_same(self):
-        """専用ログインが無いせいで起動できなかった読者役（unavailable で no_login が真）も、読者役の記録に数える。その後の監査役は関門で
-        止まらず、同じく no_login の記録を残す（work.py の integrate がそれを数える。止まると、専用ログインの無い利用者が統合に進めなかった）。"""
+    def test_an_auditor_without_its_dedicated_login_records_that_it_could_not_start_instead_of_waiting_for_a_reader(self):
+        """監査役のホストの専用ログインそのものが無ければ、読者役の関門を掛けず、監査役は unavailable で no_login が真の記録を残す
+        （work.py の integrate がそれを数える。関門で止まると、専用ログインの無い利用者が統合に進めなかった）。専用ログインの無いホストの
+        読者役が unavailable で返った記録は読者役に数えず、専用ログインの在る別のホストの監査役は関門で止まる（誰も読んでいない）。"""
         start, git = self.reader_tasks()
         at = start()
         self.commit_files(git, at, "SKILL.md")
-        (self.cfg / ".env").unlink()
-        self.refused(["--audit"], at, ("SKILL.md", "--reader"))
+        (self.cfg / ".env").unlink()  # Claude Code の専用ログインだけが無い（Codex の専用ログインは在る）
+        rc, rec = self.run_launch("claude", extra=["--audit"], cwd=at)  # (i) 読者役の記録が無くても、関門で止まらない
+        self.assertEqual((rc, rec["status"], rec.get("no_login"), rec["audit"]), (2, "unavailable", True, True), rec)
         rc, rec = self.run_launch("claude", extra=["--reader"], cwd=at)
         self.assertEqual((rc, rec["status"], rec.get("no_login"), rec["reader"]), (2, "unavailable", True, True), rec)
-        rc, rec = self.run_launch("claude", extra=["--audit"], cwd=at)
+        self.refused(["--audit"], at, ("SKILL.md", "--reader"), host="codex")  # (ii) 起動できなかった読者役は数えない
+        rc, rec = self.run_launch("claude", extra=["--audit"], cwd=at)  # (iii) 専用ログインの無いホストの監査役は止まらない
         self.assertEqual((rc, rec["status"], rec.get("no_login"), rec["audit"]), (2, "unavailable", True, True), rec)
 
     def test_launch_leaves_no_bytecode_in_the_plugin(self):
