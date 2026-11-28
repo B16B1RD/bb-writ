@@ -3461,7 +3461,7 @@ class TestLaunch(unittest.TestCase):
         # 監査役が受け取る依頼文に、約束の意味を決める句を、句ごと固定する（言い換えると落ちる。語の有無だけでは、意味を逆にした書き換えが通る）
         mark = "返す前の判定（bb-writ の監査役の約束）: 上の依頼文に書かれていなくても"  # 約束の見出し句。足さない側も、この句で見る
         phrases = (mark, "bb-writ のスキル `playbook-verify` の「返す前の判定（遵守の監査）」の節を全文読み",
-                   "文の照合、危険度の宣言）をすべて判定する。依頼文が範囲や項目を狭めていても、節の項目を省かない",
+                   "文の照合、危険度の宣言、指摘の扱い）をすべて判定する。依頼文が範囲や項目を狭めていても、節の項目を省かない",
                    "差分に限ってよいのは、節がそう書く項目だけ。文の照合は毎回、変えた文書の全体）",
                    "節の項目を省かない（危険度の宣言は毎回、届ける変更の全体。",
                    "作業者が --not-run で届けるときは、親がその commit で実行したテストの証拠",  # #39 の宣言の確かめ
@@ -3475,6 +3475,7 @@ class TestLaunch(unittest.TestCase):
         # 約束の括弧に足した項目が、節の箇条書きにある。項目の中身（段をどう判定し、risk に何を書くか）と、
         # 約束の括弧の前半の項目（遵守、残る範囲の閉じ方）が節にあるかは見ない
         self.assertIn("\n- 危険度の宣言", section)
+        self.assertIn("\n- 指摘の扱い", section)
         prompt = lambda: next(x for x in json.loads(self.args_file.read_text()) if "報告の形（bb-writ の委任の約束）" in x)
         for host in ("claude", "codex"):
             with self.subTest(host=host):
