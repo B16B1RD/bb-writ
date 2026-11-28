@@ -29,7 +29,7 @@ bb-writ は、CLI ハーネス（Claude Code・Codex。Grok Build も同じ SKIL
 ## テスト
 
 - 単体: `python3 -B tests/run.py`（偽の CLI で launcher と work.py、配布の形。テストごとに別のプロセスで並べて回し、`-j N` で数を、引数でテストの名前を絞る。順に回すなら `python3 -B -m unittest discover -s tests -t .`）。`tests/test_properties.py` は Hypothesis（`tests/requirements.txt`、テストだけの依存）で入力の形の性質を見て、無ければ飛ばす。CI は入れて回す。
-- スキルの変更は、新しい CLI セッションで実物を確かめる（最初のツール呼び出しで使われるか、成果物。スキル・指示ファイルの文が効くと書くときは `skills/playbook-verify` の「モデルの挙動に頼る主張」に従う）。比べるときは `skills/playbook-eval`。
+- スキルの変更は、新しい CLI セッションで実物を確かめる（最初のツール呼び出しで使われるか、成果物。スキル・指示ファイルの文を読んだモデルがどう動くかを主張に書くときは `skills/playbook-verify` の「モデルの挙動に頼る主張」に従う）。比べるときは `skills/playbook-eval`。
 - GitHub に触れる確かめは、自分が管理するテスト用のリポジトリで行う。子の CLI の起動に、普段渡さない設定（`GH_CONFIG_DIR`・`GH_TOKEN`）を足さない。
 
 ## 規則と強制するもの
@@ -88,6 +88,7 @@ bb-writ は、CLI ハーネス（Claude Code・Codex。Grok Build も同じ SKIL
 | 成果物の検証役・読者役の指摘は、`playbook-verify` の「成果物の検証」の仕分けの 3 つで閉じ、直しも外しもせず、「直さない」の種類の理由も無いまま閉じた行（「記録のみ（この変更が決めていない）」など）があれば、監査役が差し戻す。PR のレビュアーが「この PR で直さなくてよい」と書いた指摘と同じものを除く（検証役と読者役の指摘を「記録のみ（この PR が決めていないこと）」で閉じて届け、監査役も通し、同じ指摘が人のレビューに出た。#91） | `scripts/launch.py` の `AUDIT_CONTRACT`。`test_an_auditor_is_told_to_judge_every_item_of_the_skill_whatever_the_prompt`（約束と節の項目が在ることだけ。判定の正しさは監査役しだい） |
 | スキル・指示ファイル（`SKILL.md`・`AGENTS.md`・`CLAUDE.md`）を変えた task start の作業場所では、読者役（`--reader`）の記録か、`--no-reader <理由>` の宣言が無ければ、監査役を立てない（SKILL.md を変えた仕事で読者役を並べ忘れ、監査を 1 周やり直した。#94） | `scripts/launch.py` の `reader_missing`（守らない範囲は docstring）。`test_an_auditor_does_not_start_where_skills_or_instructions_changed_without_a_reader`・`test_a_declared_reason_to_skip_the_reader_reaches_the_record_and_the_auditor`・`test_a_reader_is_kept_in_the_record_and_is_its_own_role` |
 | 規則を決める変更（差分の外の箇所も従うべき決まりを足す・変える変更。表記・用語の基準、使わない語の行、検査のルールの採否、指示ファイル・スキルの決まり）は、主審・審査役・成果物の検証役が、規則ごとに、既存の同じ種類の箇所・同じ種類の項目を守る検査・その規則に関わる指摘を出すツールの設定に当てはめて確かめる（審査が差分と主審の書いた範囲だけを攻め、禁止語のテスト・既存の本文・前からある lint の設定との食い違いが、人のレビューで出た。#89） | 無い（`interrogate`・`playbook-verify` の文だけ） |
+| モデルの挙動に頼る主張（指示ファイル・スキルの文を読んだモデルがどう動くか）は、1 つのモデルの 1 回の実行で確かめたことにせず、2 つ以上のモデル・各 3 回以上で流してモデルごとの回数を添えるか、流した範囲に狭めて書く（足した文でスキルがファイルを読むことを 1 つのモデルの 1 回で確かめて PR に書き、レビュアーの別のモデルでは読まなかった。#92） | 無い（`playbook-verify`・`playbook-docs-skill` の文だけ） |
 | この表の行は、短い規則（根拠の経緯は括弧で短く）と、強制するコード・テストの名前だけにする。実測の記録・確かめた回数・守らない範囲の細部は書かず、守らない範囲はそのコードの docstring とテストに置く（1 行が 8,000 字を超え、実装を変えるたびに文の照合の直しが続いた） | `test_rules_table_rows_stay_short`・`test_tests_named_in_the_rules_table_exist`（行の長さと、名指ししたテストの実在だけを見る。実測を書いたかは見ない） |
 
 ## commit
