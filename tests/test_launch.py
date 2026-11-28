@@ -1398,7 +1398,8 @@ class TestLaunch(unittest.TestCase):
     def test_an_auditor_without_its_dedicated_login_records_that_it_could_not_start_instead_of_waiting_for_a_reader(self):
         """監査役のホストの専用ログインそのものが無ければ、読者役の関門を掛けず、監査役は unavailable で no_login が真の記録を残す
         （work.py の integrate がそれを数える。関門で止まると、専用ログインの無い利用者が統合に進めなかった）。専用ログインの無いホストの
-        読者役が unavailable で返った記録は読者役に数えず、専用ログインの在る別のホストの監査役は関門で止まる（誰も読んでいない）。"""
+        読者役が unavailable で返った記録は読者役に数えず、専用ログインの在る別のホストの監査役は関門で止まる（誰も読んでいない）。
+        専用ログインの無い監査役として起動するのは Claude Code だけ（Codex・Grok Build の監査役では確かめない）。"""
         start, git = self.reader_tasks()
         at = start()
         self.commit_files(git, at, "SKILL.md")
