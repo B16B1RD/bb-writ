@@ -1381,7 +1381,8 @@ def sandbox_marks_only(cwd: Path, env: dict) -> bool:
     （porcelain の道筋は --cwd が下の階層でも根からの相対）。判定の間に項目が消えたら取り直し、SANDBOX_MARK_TRIES 回で決まらなければ偽。
     守らない範囲: 誰が置いたかは見ず、利用者が置いた同じ形の空の読み取り専用のドットファイルも数えない。根でない --cwd の書く子が
     自分の階層に置く印は数えて head を外す。印の形を測ったのは、Linux・WSL2 の Claude Code の書く子が Bash を動かす間だけ
-    （macOS、Codex・Grok Build の書く子、Bash 以外の道具の間は測っていない）。作っている途中に別の形（書き込みビットを持つなど）で
+    （同じ環境で、Codex の書く子が置いたのは空のディレクトリだけ、Grok Build の書く子は何も置かず、どちらも status に出なかった。
+    macOS と、Bash 以外の道具の間は測っていない）。作っている途中に別の形（書き込みビットを持つなど）で
     見える瞬間が在れば、その時刻に確かめた head は外れる（1 秒ごとの見張りでは、作っている途中に見えたものも全部 444 だった）。"""
     try:
         top = subprocess.run([*QUIET_GIT, "rev-parse", "--show-toplevel"], cwd=cwd, env=env, capture_output=True, timeout=GIT_TIMEOUT)
