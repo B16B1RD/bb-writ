@@ -503,7 +503,7 @@ class TestAccountCheck(unittest.TestCase):
         state = Path(self.env["BB_WRIT_STATE_DIR"])
         out = state / "delegations" / f"r{len(list((state / 'delegations').glob('*'))) if (state / 'delegations').is_dir() else 0}"
         rec = {"host": "claude", "cwd": str(self.wt), "write": False, "out": str(out), "head": p.stdout.strip(), "status": "ok",
-               **({"deliver": "yes"} if over.get("audit") is True else {}), **over}
+               **({"deliver": "yes", "risk": "低"} if over.get("audit") is True else {}), **over}
         rec = {k: v for k, v in rec.items() if v is not ...}  # ... はその欄を書かない
         out.mkdir(parents=True)
         (out / "record.json").write_text(json.dumps({**rec, **(record or {})}, indent=1), encoding="utf-8")
@@ -1036,6 +1036,48 @@ class TestReviewedCommit(unittest.TestCase):
         self.assertIn("監査役", r["reason"])
         self.assertIn("deliver: yes", r["reason"])  # 断る理由に、deliver: yes の記録が要ることを書く
         self.review_record(self.head(), audit=True)
+        self.assertEqual(self.publish(tok, "push:feat@1", "--reviewed", "none:文書だけ")[0], 0)
+
+    def test_push_and_pr_are_refused_when_the_risk_is_below_what_the_auditor_judged(self):
+        # 指揮者が書く --risk を、HEAD の監査役が変更の全体で判定した段（記録の risk）より低くさせない（指示ファイルの追加と lint の除外の
+        # 追加を、コードの変更が無いとして低で届けた。#90）。段の順は 低 < 中 < 高。push と pr の両方で、宣言と判定の 9 つの組を見る
+        self.launcher_audits = self.auto_risk = False
+        tok = self.claim()
+        order, n = ("低", "中", "高"), 0
+        for judged in order:
+            self.commit(f"src/{judged}.py")
+            self.review_record(self.head(), interrogate=True)  # 中・高の宣言に要る審査役（このテストの外の約束）
+            self.review_record(self.head(), audit=True, risk=judged)
+            for declared in order:
+                for kind in ("push", "pr"):
+                    n += 1
+                    rc, r = self.publish(tok, f"{kind}:feat{n}", "--reviewed", self.head(), "--risk", f"{declared}:x")
+                    if order.index(declared) >= order.index(judged):
+                        self.assertEqual(rc, 0, (kind, declared, judged, r))
+                    else:
+                        self.assertEqual(rc, 6, (kind, declared, judged, r))
+                        self.assertIn(f"--risk の危険度（{declared}）が、HEAD の監査役が判定した危険度（{judged}）より低い", r["reason"])
+
+    def test_an_audit_without_a_matching_risk_judgement_does_not_open_the_push(self):
+        # 監査役の記録の risk は、行と record.json の両方で同じ 低・中・高 のときだけ数える。risk の無い記録（更新前の launcher）・値の違う記録・
+        # 行と record.json で食い違う記録・差し戻し（deliver: no）の記録の risk では通さない。宣言以下の段の yes の監査が 1 件でもあれば通す（守らない）
+        self.launcher_audits = False
+        tok = self.claim()
+        self.commit("src/fix.py")
+        self.review_record(self.head(), audit=True, risk=...)
+        self.review_record(self.head(), audit=True, risk="low")
+        self.review_record(self.head(), audit=True, risk="低", record={"risk": "中"})
+        self.review_record(self.head(), audit=True, risk="中", record={"risk": "低"})
+        for key in ("push:feat@1", "pr:feat"):
+            rc, r = self.publish(tok, key, "--reviewed", "none:文書だけ")
+            self.assertEqual(rc, 6, (key, r))
+            self.assertIn("監査役の記録に危険度の判定（risk）が無い。この版の launcher で監査役を立て直す", r["reason"])
+        self.review_record(self.head(), audit=True, deliver="no", risk="低")
+        self.review_record(self.head(), audit=True, risk="高")
+        rc, r = self.publish(tok, "push:feat@1", "--reviewed", "none:文書だけ")
+        self.assertEqual(rc, 6, r)
+        self.assertIn("HEAD の監査役が判定した危険度（高）より低い", r["reason"])
+        self.review_record(self.head(), audit=True, risk="低")  # 段の判定が割れても、宣言以下の yes が 1 件あれば通る
         self.assertEqual(self.publish(tok, "push:feat@1", "--reviewed", "none:文書だけ")[0], 0)
 
     def test_the_audit_that_opened_an_integration_also_opens_the_push_of_the_same_commit(self):

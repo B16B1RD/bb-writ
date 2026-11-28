@@ -23,7 +23,8 @@ Linux の外では、プロセスグループを止めるだけ（stopped_after_
 push・pr でこれを求める）。依頼文の中身が審査だったかは見ない。
 --audit は、読み取り専用の子が返す前の判定（スキルの要求を守ったかの監査）の子だという宣言で、記録の audit に残す
 （work.py が、すべての push・pr と integrate で、HEAD を対象にしたこの記録を求める）。依頼文の中身が監査だったかは見ない。
-監査役の報告は判定 deliver（yes か no）を持ち、無いか値が違えば invalid-report。値は記録の deliver に残し、work.py は yes だけを関門に数える。
+監査役の報告は判定 deliver（yes か no）と、届ける変更の全体の危険度の段 risk（低・中・高）を持ち、どちらかが無いか値が違えば invalid-report。
+値は記録の deliver・risk に残し、work.py は yes だけを関門に数え、push・pr では risk を --risk と比べる。
 専用ログインが無い（Claude Code の .env、Codex・Grok の auth.json が無い）せいで起動できなかった unavailable の記録には、no_login を真で残す
 （NoLogin。道具が PATH に無くても、ログインの無さを先に見る）。work.py は、--audit のこの記録を integrate にだけ数え、push・pr には数えない。
 Codex の子は専用ログインに入った bb-writ の写しを読むので、写しが launcher と中身で違えば、入れ直せるときだけ入れ直し、
@@ -102,7 +103,9 @@ AUDIT_CONTRACT = ("返す前の判定（bb-writ の監査役の約束）: 上の
                   "差分に限ってよいのは、節がそう書く項目だけ。文の照合は毎回、変えた文書の全体）。子が sandbox のせいで対象のテストを"
                   "実行できず、作業者が --not-run で届けるときは、親がその commit で実行したテストの証拠（コマンド・終了コード・出力）が"
                   "作業の記録にあり、子が実行できなかったことの代わりになるか（写し方を教えれば子が動いた場面でないか）も判定する。"
-                  "最後の JSON に \"deliver\": \"yes\" か \"no\" を書く（どちらにするかは、同じ節の基準に従う）。\n")
+                  "最後の JSON に \"deliver\": \"yes\" か \"no\" を書く（どちらにするかは、同じ節の基準に従う）。"
+                  "最後の JSON に \"risk\": \"低\"・\"中\"・\"高\" のどれかを書く（届ける変更の全体が `interrogate` の 5 の基準でどの段に当たるかの、"
+                  "自分の判定。作業者の宣言を写さない。どの段かは同じ節の「危険度の宣言」の項目に従う）。\n")
 # Claude Code の書く子にだけ足す（続きでも）。Linux・WSL2 の sandbox は、書き込みを拒む場所のうち実在しないものに読み込み専用の印
 # （開けないキャラクタデバイス）を置く。子の中では作業場所の直下の印が git status に出て、git add -A・git add . が 128 で落ちる。
 # 名前を挙げた git add と git commit は通る。印は、子が終わった後の作業場所には残らない（時間切れで残った 0 バイトのファイルは cwd_residue）。
@@ -1248,6 +1251,8 @@ def check_report(text: str, cwd: Path, audit: bool = False) -> tuple[dict | None
     problems += check_execution(r)[1]
     if audit and r.get("deliver") not in ("yes", "no"):
         problems.append("deliver が yes / no のどちらでもない（監査役の判定）")
+    if audit and r.get("risk") not in ("低", "中", "高"):
+        problems.append("risk が 低 / 中 / 高 のどれでもない（監査役の危険度の判定）")
     return r, problems
 
 
@@ -2188,7 +2193,7 @@ def main() -> int:
                         for name in ("report.md", "stdout.jsonl", "stderr.log"):
                             (out_dir / name).replace(out_dir / name.replace(".", "-before-fix.", 1))
                         (out_dir / "fix-prompt.md").write_text(fixing, encoding="utf-8", errors="backslashreplace")
-                        first = {k: rec.pop(k) for k in ("report", "execution", "deliver", "exit_code", "model_effective", "usage") if k in rec}
+                        first = {k: rec.pop(k) for k in ("report", "execution", "deliver", "risk", "exit_code", "model_effective", "usage") if k in rec}
                         rec["report_fix"] = {"asked": rec["problems"], "prompt": str(out_dir / "fix-prompt.md"), "usage": first.get("usage")}
                         if a.host == "grok":
                             rec["grok_home"] = env["GROK_HOME"]
@@ -2280,7 +2285,7 @@ def main() -> int:
                     ran = check_execution(report)[0] if report is not None else None
                     rec.update(status="invalid-report" if problems else "ok", report=report, problems=problems, execution=ran)
                     if a.audit and not problems:
-                        rec["deliver"] = report["deliver"]
+                        rec["deliver"], rec["risk"] = report["deliver"], report["risk"]
                     if not problems and ran in (None, "no") and not a.write:
                         rec.update(status="not-run", problems=["対象のテスト・検査を実行できなかった（読んだだけの報告）" if ran == "no"
                                                                else "報告に実行の欄（execution）が無い（読んだだけの報告として扱う）"])
@@ -2385,7 +2390,7 @@ def main() -> int:
                        + (("。監査役の判定は届けてよい（deliver: yes）。報告が挙げた整える点は、直して記録に書く（監査は立て直さない）"
                            if rec.get("deliver") == "yes" else
                            "。監査役の判定は差し戻し（deliver: no。push・pr と integrate の関門に数えない）。直して監査役を立て直すときは、前の監査の項目と、"
-                           "前の監査の commit から HEAD までの差分だけを判定させる（手順の文書の文の照合だけは、毎回、変えた文書の全体）")
+                           "前の監査の commit から HEAD までの差分だけを判定させる（手順の文書の文の照合は毎回、変えた文書の全体。危険度の宣言は毎回、届ける変更の全体）")
                           if a.audit else
                           "。直した後、次の審査役の前に「直しの見直し」の欄へ、同じ性質の箇所・直しが前提を変えた箇所・変えた節の全体の矛盾を"
                           "探した方法と結果を書き足す（interrogate の 5）"

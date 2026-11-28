@@ -66,6 +66,10 @@ commit を書いたときは、launcher の委任の記録（delegations.jsonl�
 push・pr は、--reviewed（none: を含む）に関わらず、作業場所の HEAD を対象に launcher に --audit を付けて起動し ok で返った
 読み取り専用の監査役（返す前の判定）の記録が無ければ拒否する（6。integrate も、統合する commit で同じ記録を求める）。監査役の記録は審査の記録にも周の数にも数えない。
 監査役の記録は、判定の deliver が行と record.json の両方で yes（届けてよい）のものだけを数える。何を挙げたかは見ない。
+push・pr は、そのうち、監査役が判定した危険度 risk（低・中・高）が行と record.json の両方で同じで、その段が --risk の段以下（低 < 中 < 高）の
+記録が 1 件も無ければ拒否する（6。risk を持つ記録が 1 件も無い更新前の launcher の記録も。integrate は risk を見ない）。指揮者が自分で書く
+危険度の宣言を、独立に判定した段より低くさせないため（指示ファイルの追加と lint の除外の追加を、コードの変更が無いとして低で届けた。#90）。
+段の判定の正しさは見ない。同じ commit に、宣言以下の段を判定した yes の監査が 1 件でもあれば通す。
 push・pr に --not-run <理由>（子が sandbox のせいで対象のテスト・検査を実行できなかった理由）を付けると、その commit を対象に
 not-run で返り、子が実行の欄に実行できなかった（execution が no）と書いた記録も、審査役・--interrogate の審査役・監査役と審査の周に数える
 （ブラウザのテストなど、子を何回立てても ok の記録ができず、作業者が関門の外で出したため）。実行の欄の無い報告（launcher が読んだだけとして
@@ -225,13 +229,18 @@ def read_regular(f: Path) -> bytes:
         return h.read()
 
 
+RISK_ORDER = {"低": 0, "中": 1, "高": 2}  # 危険度の段の順（--risk と、監査役が判定した risk を比べる）
+
+
 def reviews_of(commit: str, cwd=None, not_run: bool = False, no_login: bool = False) -> tuple:
     """launcher の委任の記録（delegations.jsonl）のうち、その commit を対象に起動して ok で返った読み取り専用の子の記録の out と、
-    そのうち --interrogate を付けて立てた審査役の out と、--audit を付けて立てた監査役（返す前の判定）の out と、読めないものの説明（無ければ空）。
+    そのうち --interrogate を付けて立てた審査役の out と、--audit を付けて立てた監査役（返す前の判定）の out と、読めないものの説明（無ければ空）と、
+    数えた監査役の out ごとの危険度の判定 risk（行と record.json の両方で同じ 低・中・高 のときだけその値。ほかは None）。
     行と、out の record.json の両方で head・status・write が合い、status・execution が行と record.json で同じものだけを数え、interrogate・audit も両方で真のものだけをその役に数える。
     監査役は審査の記録（最初の値）に数えない（push ごとに立てるので、審査の代わりにも周の数にもしない）。監査役の記録は、
     判定の deliver が行と record.json の両方で yes のものだけを数える（本文で差し戻した監査を、status の ok で通さない）。
-    同じ commit に yes の記録が 1 件でもあれば、その後の no の記録では止めない（守らない）。
+    同じ commit に yes の記録が 1 件でもあれば、その後の no の記録では止めない（守らない）。risk は、push・pr の関門が --risk と比べる
+    （op_step。integrate は見ない）。段の判定の正しさ（監査役が変更の中身を interrogate の 5 に照らしたか）は見ない。
     head は launcher が、対象の作業ツリーが子の起動の前と終わりの両方で commit と同じとき（未 commit の変更が無いとき。Claude Code の sandbox の印は数えない。launch.py の clean_head）だけ書く。
     審査の中身（子が十分に攻めたか、何人か、依頼文が interrogate の観点を持っていたか）は見ない。手で書き足した記録も見分けない（忘れて飛ばすのを止める）。
     cwd を渡すと、その場所を --cwd にして立てた記録だけを数える（--delta の祖先の審査を、ほかの作業場所の審査で代えないため）。
@@ -246,16 +255,16 @@ def reviews_of(commit: str, cwd=None, not_run: bool = False, no_login: bool = Fa
                        and isinstance(e.get("out"), str) and os.path.isabs(e["out"])
                        and (here is None or (isinstance(e.get("cwd"), str) and os.path.isabs(e["cwd"]) and str(Path(e["cwd"]).resolve()) == here)))
     f = state_dir() / "delegations.jsonl"
-    found, judges, audits, broken = [], [], [], 0
+    found, judges, audits, risks, broken = [], [], [], {}, 0
     try:
         rows = read_regular(f).split(b"\n")
     except FileNotFoundError:
         if not f.is_symlink():
             rows = []
         else:
-            return [], [], [], f"委任の記録 {f} を読めない: 行き先が無い"
+            return [], [], [], f"委任の記録 {f} を読めない: 行き先が無い", {}
     except OSError as x:
-        return [], [], [], f"委任の記録 {f} を読めない: {x}"
+        return [], [], [], f"委任の記録 {f} を読めない: {x}", {}
     for line in rows:
         if not line.strip():
             continue
@@ -275,11 +284,12 @@ def reviews_of(commit: str, cwd=None, not_run: bool = False, no_login: bool = Fa
             if e.get("audit") is True or rec.get("audit") is True:
                 if e.get("audit") is True and rec.get("audit") is True and (e.get("deliver") == rec.get("deliver") == "yes" or e["status"] == "unavailable"):
                     audits.append(e["out"])
+                    risks[e["out"]] = e.get("risk") if e.get("risk") in RISK_ORDER and e.get("risk") == rec.get("risk") else None
                 continue
             found.append(e["out"])
             if e.get("interrogate") is True and rec.get("interrogate") is True:
                 judges.append(e["out"])
-    return found, judges, audits, (f"委任の記録 {f} に、読めない行か、out の record.json を読めない行が {broken} 行ある" if broken else "")
+    return found, judges, audits, (f"委任の記録 {f} に、読めない行か、out の record.json を読めない行が {broken} 行ある" if broken else ""), risks
 
 
 def not_run_hint(commit: str, cwd=None, role: int = 0, then: str = "op run") -> str:
@@ -1286,10 +1296,10 @@ def integrate(a):
             raise ValueError('作業場所か統合先に未 commit の変更がある。変更は保持する')
         if sh(['git', 'merge-base', '--is-ancestor', target, head], repo)[0]:
             raise ValueError('統合先が作業場所に入っていない。最新の統合先を取り込み、再検証する')
-        _, _, audits, unread = reviews_of(head, not_run=bool(not_run))
+        _, _, audits, unread, _ = reviews_of(head, not_run=bool(not_run))
         unlogged = []  # 専用ログインが無いせいで起動できなかった監査役の記録。integrate だけが数える（基本機能だけの利用者が手元へ統合できるように）
         if not audits:
-            _, _, unlogged, unread = reviews_of(head, not_run=bool(not_run), no_login=True)
+            _, _, unlogged, unread, _ = reviews_of(head, not_run=bool(not_run), no_login=True)
         if not audits and not unlogged:
             return out({'ok': False, 'reason': f"統合する commit {head} を対象にした監査役（返す前の判定）の記録が無い。push・PR をしない統合でも要る。"
                         "launcher（launch.py）に --audit を付け、この commit を checkout した未 commit の変更が無い場所を --cwd にして、"
@@ -1403,7 +1413,7 @@ def op_step(a, r: Path, live, now: float, action: str):
                     return ({"ok": False, "reason": f"審査を通した commit {reviewed} は、このタスクの基点 {base} より後と確かめられない"
                                 "（基点か、その前か、別の系統）。基点の審査はタスクの変更を見ていないので、HEAD で審査を通してから出す"}, 6)
                 delta = "低: " + d.group(2).strip()
-            found, judges, _, unread = reviews_of(reviewed, a.dir if delta else None, bool(not_run))
+            found, judges, _, unread, _ = reviews_of(reviewed, a.dir if delta else None, bool(not_run))
             if not found:
                 return ({"ok": False, "reason": f"commit {reviewed} を対象にした審査役の記録が無い"
                             + ("（--delta では、この作業場所を --cwd にして立てたものだけを数える）" if delta else "")
@@ -1424,8 +1434,8 @@ def op_step(a, r: Path, live, now: float, action: str):
                         "launcher に --interrogate を付けて立てた審査役のものが無い（条件 (5) の子の記録は代わりにならない）。"
                         "interrogate の 3 の依頼文で、この commit の審査役を --interrogate を付けて立てる"
                         + not_run_hint(reviewed, a.dir if delta else None, 1)}, 6)
-        risk = risk.group(1) + ": " + risk.group(2).strip()
-        _, _, audits, unread = reviews_of(head, not_run=bool(not_run))
+        level, risk = risk.group(1), risk.group(1) + ": " + risk.group(2).strip()
+        _, _, audits, unread, judged = reviews_of(head, not_run=bool(not_run))
         if not audits:
             return ({"ok": False, "reason": f"作業場所の HEAD {head} を対象にした監査役（返す前の判定）の記録が無い。--reviewed none: でも要る"
                         "（none: は interrogate を省く宣言で、子を省く宣言でない）。launcher（launch.py）に --audit を付け、この commit を "
@@ -1436,6 +1446,15 @@ def op_step(a, r: Path, live, now: float, action: str):
                         "bb-writ の README の「任意機能の準備」で専用ログインを用意する"
                         + not_run_hint(head, role=2)
                         + (f"。{unread}" if unread else "")}, 6)
+        judged = [judged[o] for o in audits if judged.get(o)]
+        if not judged:
+            return ({"ok": False, "reason": f"作業場所の HEAD {head} の監査役の記録に危険度の判定（risk）が無い。この版の launcher で監査役を立て直す"
+                        + (f"。{unread}" if unread else "")}, 6)
+        if all(RISK_ORDER[j] > RISK_ORDER[level] for j in judged):
+            lowest = min(judged, key=RISK_ORDER.get)
+            return ({"ok": False, "reason": f"--risk の危険度（{level}）が、HEAD の監査役が判定した危険度（{lowest}）より低い。"
+                        "危険度は変更の中身で決める（interrogate の 5）。--risk を監査役の判定以上にし、中・高なら --interrogate の審査役を通す。"
+                        "監査役の判定が誤りなら、理由を記録に書いて監査役を立て直す"}, 6)
         audit = audits
         f = r / "note.md"
         gaps = note_gaps(note_body(f), True, review_rounds(Path(a.dir), bool(not_run)) if reviews else 0)
@@ -1883,7 +1902,7 @@ def main() -> int:
     o.add_argument("--not-run", dest="not_run", help="子が sandbox のせいで対象のテスト・検査を実行できなかった理由（push・pr だけ。付けると、"
                    "その commit を対象に not-run で返り、実行の欄に実行できなかった（no）と書いた子の記録も、審査役・--interrogate の審査役・監査役と審査の周に数える。"
                    "実行の欄の無い報告は数えない。親が HEAD で実行したテストの証拠を作業の記録に書き、監査役に判定させる）")
-    o.add_argument("--risk", help="変更の危険度と理由 低|中|高:<理由>（push・pr で必須。中・高は --reviewed none: と一緒に使えない）")
+    o.add_argument("--risk", help="変更の危険度と理由 低|中|高:<理由>（push・pr で必須。中・高は --reviewed none: と一緒に使えない。HEAD の監査役が判定した段（記録の risk）より低ければ拒否）")
     c = sub.add_parser("check")
     c.add_argument("--dir", type=Path, required=True)
     c.add_argument("--from", dest="frm", type=Path, required=True)

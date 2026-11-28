@@ -18,7 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent)); import process_limit  
 
 ROOT = Path(__file__).resolve().parents[1]
 LAUNCH = ROOT / "scripts" / "launch.py"
-GOOD = ('ok.\\n```json\\n{"conclusion": "x は正しい", "deliver": "yes", "evidence": [{"what": "読んだ", "where": "a.txt:1"}], "unknowns": [], '
+GOOD = ('ok.\\n```json\\n{"conclusion": "x は正しい", "deliver": "yes", "risk": "\\u4f4e", "evidence": [{"what": "読んだ", "where": "a.txt:1"}], "unknowns": [], '
         '"execution": {"completed": "yes", "commands": [{"command": "python3 -m unittest", "exit": 0}]}}\\n```')
 
 FAKE_CODEX = textwrap.dedent(r'''
@@ -532,6 +532,10 @@ FAKE_CLAUDE = textwrap.dedent(r'''
         result = result.replace('"deliver": "yes", ', '')
     if mode == "deliver-upper":  # 判定の値の形が違う
         result = result.replace('"deliver": "yes"', '"deliver": "YES"')
+    if mode == "risk-missing":  # 監査役が危険度の段を書かなかった
+        result = result.replace('"risk": "低", ', '')
+    if mode == "risk-other":  # 危険度の段の値が 低・中・高 のどれでもない
+        result = result.replace('"risk": "低"', '"risk": "low"')
     if mode in ("deliver-not-run", "deliver-no-not-run"):  # テストを実行できなかった監査役（判定は書いた）
         result = result.replace('"completed": "yes"', '"completed": "no"')
         if mode == "deliver-no-not-run":
@@ -3455,7 +3459,8 @@ class TestLaunch(unittest.TestCase):
                    "差分に限ってよいのは、節がそう書く項目だけ。文の照合は毎回、変えた文書の全体）",
                    "作業者が --not-run で届けるときは、親がその commit で実行したテストの証拠",  # #39 の宣言の確かめ
                    "子が実行できなかったことの代わりになるか（写し方を教えれば子が動いた場面でないか）も判定する",
-                   '最後の JSON に "deliver": "yes" か "no" を書く')
+                   '最後の JSON に "deliver": "yes" か "no" を書く',
+                   '最後の JSON に "risk": "低"・"中"・"高" のどれかを書く（届ける変更の全体が `interrogate` の 5 の基準でどの段に当たるかの、自分の判定。作業者の宣言を写さない')
         verify = (ROOT / "skills" / "playbook-verify" / "SKILL.md").read_text()
         self.assertIn("\n## 返す前の判定（遵守の監査）\n", verify)  # 約束が名指しする節と、節が挙げる項目
         self.assertIn("\n- 文の照合（手順の文書を変えたとき）:", verify)
@@ -3500,6 +3505,25 @@ class TestLaunch(unittest.TestCase):
         self.assertEqual((again["audit"], again["status"], again.get("deliver")), (True, "invalid-report", None), again)
         rc, rec = self.run_launch("claude", mode="deliver-missing")
         self.assertEqual((rec["status"], "deliver" in rec), ("ok", False), rec)
+
+    def test_an_auditor_must_judge_the_risk_and_the_record_keeps_it(self):
+        """監査役の報告は、届ける変更の全体の危険度の段 risk（低・中・高）を持つ。無いか値が違えば invalid-report（続きの起動でも）。
+        値は記録（委任の記録の行と record.json の両方。work.py は両方を照らし、push・pr の --risk と比べる。比べは test_work の側で見る）に
+        残す。監査役でない子には risk を求めない。"""
+        recorded = lambda rec: json.loads((Path(rec["out"]) / "record.json").read_text())
+        line = lambda rec: next(json.loads(x) for x in (self.state / "delegations.jsonl").read_text().splitlines() if json.loads(x)["out"] == rec["out"])
+        for mode, status, risk in (("good", "ok", "低"), ("risk-missing", "invalid-report", None), ("risk-other", "invalid-report", None)):
+            with self.subTest(mode=mode):
+                rc, rec = self.run_launch("claude", mode=mode, extra=["--audit"])
+                self.assertEqual((rec["status"], rec.get("risk"), recorded(rec).get("risk"), line(rec).get("risk")),
+                                 (status, risk, risk, risk), rec)
+                if status == "invalid-report":
+                    self.assertIn("risk が 低 / 中 / 高 のどれでもない（監査役の危険度の判定）", rec["problems"], rec)
+        rc, first = self.run_launch("claude", extra=["--audit"])
+        rc, again = self.run_launch(None, mode="risk-missing", extra=["--resume", first["out"]])  # 続きの監査役も段を求める
+        self.assertEqual((again["audit"], again["status"], again.get("risk")), (True, "invalid-report", None), again)
+        rc, rec = self.run_launch("claude", mode="risk-missing")
+        self.assertEqual((rec["status"], "risk" in rec), ("ok", False), rec)
 
     def test_a_fable_child_that_cannot_start_is_restarted_once_on_the_fallback_tier(self):
         """Fable を頼んだ Claude Code の子が、費用が 0 のまま（作業を始める前に） API のエラーで終わったら、同じ起動の中で Opus high で 1 回だけ
@@ -5291,7 +5315,7 @@ launch.claude_reads = claude_reads
         rc, rec = self.run_launch("claude", env_extra={"FAKE_TEXT": bad, "FAKE_EXIT_2": "1", "FAKE_ERROR_2": "boom"})
         out = Path(rec["out"])
         self.assertEqual((rc, rec["status"], rec["report_fix"]["asked"]), (2, "failed", ["証拠のファイルが無い: other/a.txt"]), rec)
-        self.assertEqual([k for k in ("report", "execution", "deliver") if k in rec], [], rec)
+        self.assertEqual([k for k in ("report", "execution", "deliver", "risk") if k in rec], [], rec)
         self.assertFalse((out / "report.md").exists())
         self.assertEqual((out / "report-before-fix.md").read_text(encoding="utf-8"), bad)
 
