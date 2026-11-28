@@ -1072,7 +1072,10 @@ class TestReviewedCommit(unittest.TestCase):
             rc, r = self.publish(tok, key, "--reviewed", "none:文書だけ")
             self.assertEqual(rc, 6, (key, r))
             self.assertIn("監査役の記録に危険度の判定（risk）が無い。この版の launcher で監査役を立て直す", r["reason"])
-        self.review_record(self.head(), audit=True, deliver="no", risk="低")
+        self.review_record(self.head(), audit=True, deliver="no", risk="低")  # 差し戻しの記録の risk は数えない
+        rc, r = self.publish(tok, "push:feat@1", "--reviewed", "none:文書だけ")
+        self.assertEqual(rc, 6, r)
+        self.assertIn("監査役の記録に危険度の判定（risk）が無い", r["reason"])
         self.review_record(self.head(), audit=True, risk="高")
         rc, r = self.publish(tok, "push:feat@1", "--reviewed", "none:文書だけ")
         self.assertEqual(rc, 6, r)
@@ -1084,6 +1087,12 @@ class TestReviewedCommit(unittest.TestCase):
         self.review_record(self.head(), interrogate=True)  # 高の宣言に要る審査役（このテストの外の約束）
         rc, r = self.publish(tok, "push:feat@1", "--reviewed", self.head(), "--risk", "高:外部操作")
         self.assertEqual(rc, 0, r)
+        self.commit("src/next.py")  # 低 → 中 の順に置いても、最も高い中と比べる（記録の順・文字の順で選ばない）
+        self.review_record(self.head(), audit=True, risk="低")
+        self.review_record(self.head(), audit=True, risk="中")
+        rc, r = self.publish(tok, "push:feat@2", "--reviewed", "none:文書だけ")
+        self.assertEqual(rc, 6, r)
+        self.assertIn("HEAD の監査役が判定した危険度（中）より低い", r["reason"])
 
     def test_the_audit_that_opened_an_integration_also_opens_the_push_of_the_same_commit(self):
         # integrate の前に立てた監査役の記録は、統合した commit を後で push するときも、そのまま数える（関門は commit だけで探す。#97）

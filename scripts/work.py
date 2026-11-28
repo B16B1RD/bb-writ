@@ -51,7 +51,7 @@ task と integrate の照合拒否は終了コード 6、担当の拒否は 3、
 push・pr には --reviewed も要る（初回の push も）。届ける前の審査（入口の条件 (5)・(6)）を通した commit の ID（16 進）か、
 要らない理由を none:<理由> で書く。無い・形が違う・commit が見つからない・ID でなく参照に解決されたら拒否し（2）、作業場所の HEAD と違えば拒否する（6）。
 HEAD と違っても、その commit が HEAD の祖先で、--delta 低:<理由>（審査の後の差分の危険度。文とテストだけで、振る舞い・主張を変えない
-直し）を付ければ通す（その commit の、この作業場所を --cwd にした審査の記録と、HEAD の監査役は同じく求める。task start の作業場所（下の階層も同じ場所）では、
+直し。エージェントの動きを決める文の、動きを変える直しは除く）を付ければ通す（その commit の、この作業場所を --cwd にした審査の記録と、HEAD の監査役は同じく求める。task start の作業場所（下の階層も同じ場所）では、
 基点より後と確かめられない commit の審査は数えない。差分の中身と宣言の真偽は見ず、
 監査役が確かめる）。--delta が中・高・形が違う・none: と並ぶ・HEAD そのものの審査と並ぶなら 2、祖先でないか基点より後と確かめられないなら（置き換え・grafts・commit-graph は外して見る）6。
 push・pr には --risk 低|中|高:<理由> も要る（変更の危険度。中・高は interrogate を通すので、none: と一緒なら拒否する（2）。理由の真偽は確かめない）。
@@ -70,7 +70,9 @@ push・pr は、そのうち、監査役が判定した危険度 risk（低・�
 上の段）より --risk の段が低ければ（低 < 中 < 高）拒否する（6。risk を持つ記録が 1 件も無い更新前の launcher の記録も。integrate は risk を見ない）。
 指揮者が自分で書く危険度の宣言を、独立に判定した段より低くさせないため（指示ファイルの追加と lint の除外の追加を、コードの変更が無いとして
 低で届けた。#90）。段の判定の正しさは見ない。HEAD が変わった後の立て直しの監査役が差分だけで段を判定しても見分けない（変更の全体で判定
-させるのは監査役の約束の文だけ）。手で書いた記録の、文字列でない risk は見分けない（例外で止まる）。
+させるのは監査役の約束の文だけ）。前の HEAD の監査の判定は、新しい HEAD に引き継がない（見るのは HEAD を対象にした記録だけで、中身が同じ
+commit に作り直されても。tree_twin が引き継ぐのは審査の位置だけ）。手で書いた記録の risk が list・dict なら、TypeError で止まる
+（数・None・真偽は、risk の無い記録として扱う）。
 push・pr に --not-run <理由>（子が sandbox のせいで対象のテスト・検査を実行できなかった理由）を付けると、その commit を対象に
 not-run で返り、子が実行の欄に実行できなかった（execution が no）と書いた記録も、審査役・--interrogate の審査役・監査役と審査の周に数える
 （ブラウザのテストなど、子を何回立てても ok の記録ができず、作業者が関門の外で出したため）。実行の欄の無い報告（launcher が読んだだけとして
@@ -1396,7 +1398,7 @@ def op_step(a, r: Path, live, now: float, action: str):
                 if a.delta is None:
                     return ({"ok": False, "reason": f"審査を通した commit {reviewed} と作業場所の HEAD {head} が違う。"
                                 f"審査の後に変えた。直した commit で審査を通し直してから出すか、審査の後の差分の危険度が低（文とテストだけで、"
-                                f"振る舞い・主張を変えない）なら --delta 低:<理由> を付ける（宣言は HEAD の監査役が確かめる。"
+                                f"振る舞い・主張を変えない。エージェントの動きを決める文の、動きを変える直しは除く）なら --delta 低:<理由> を付ける（宣言は HEAD の監査役が確かめる。"
                                 f"`interrogate` の 5）。審査の後に変えたファイル: {after}"}, 6)
                 d = re.fullmatch(r"(低|中|高):(.*)", a.delta, re.S)
                 if not d or not d.group(2).strip():
@@ -1899,11 +1901,11 @@ def main() -> int:
     o.add_argument("--from", dest="frm", type=Path, help="外部操作を実行する場所（push・pr・comment・merge・release・issue で必須）")
     o.add_argument("--verified", help="検証した commit（push・pr・merge・release で必須。作業場所の HEAD と一致させる）")
     o.add_argument("--reviewed", help="届ける前の審査を通した commit か none:<理由>（push・pr で必須。commit は作業場所の HEAD と一致させるか、HEAD の祖先にして --delta を付け、その commit を対象に launcher で ok で返った読み取り専用の子（審査役・確かめ役など。監査役は除く）の記録が要る。--risk が中・高なら --interrogate を付けた審査役の記録。どちらでも、HEAD を対象に --audit を付けて立て、届けてよい（deliver: yes）と判定した監査役の記録も要る）")
-    o.add_argument("--delta", help="審査を通した commit（--reviewed）から HEAD までの差分の危険度と理由 低:<理由>（push・pr で、--reviewed の commit が HEAD の祖先のときだけ。中・高なら HEAD で審査を通す）")
+    o.add_argument("--delta", help="審査を通した commit（--reviewed）から HEAD までの差分の危険度と理由 低:<理由>（push・pr で、--reviewed の commit が HEAD の祖先のときだけ。エージェントの動きを決める文の、動きを変える直しは低に数えない。中・高なら HEAD で審査を通す）")
     o.add_argument("--not-run", dest="not_run", help="子が sandbox のせいで対象のテスト・検査を実行できなかった理由（push・pr だけ。付けると、"
                    "その commit を対象に not-run で返り、実行の欄に実行できなかった（no）と書いた子の記録も、審査役・--interrogate の審査役・監査役と審査の周に数える。"
                    "実行の欄の無い報告は数えない。親が HEAD で実行したテストの証拠を作業の記録に書き、監査役に判定させる）")
-    o.add_argument("--risk", help="変更の危険度と理由 低|中|高:<理由>（push・pr で必須。中・高は --reviewed none: と一緒に使えない。HEAD の監査役が判定した段（記録の risk）より低ければ拒否）")
+    o.add_argument("--risk", help="変更の危険度と理由 低|中|高:<理由>（push・pr で必須。中・高は --reviewed none: と一緒に使えない。HEAD の監査役が判定した段（記録の risk。割れたら最も高い段）より低ければ拒否）")
     c = sub.add_parser("check")
     c.add_argument("--dir", type=Path, required=True)
     c.add_argument("--from", dest="frm", type=Path, required=True)
