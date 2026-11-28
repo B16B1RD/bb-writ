@@ -453,6 +453,9 @@ FAKE_CLAUDE = textwrap.dedent(r'''
             import time; time.sleep(60)
     if os.environ.get("FAKE_MODE") == "wrote":
         open(".claude/.cc-writes/x", "w").write("x")
+    if mode == "sandbox-marks":  # Claude Code の sandbox が書く子の Bash の間だけ置く印の形（外から見て 0 バイト・444 の通常ファイル。#81）
+        for p in (".zshrc", ".claude/hooks"):
+            open(p, "w").close(); os.chmod(p, 0o444)
     if os.environ.get("FAKE_MODE") == "checkout":  # worktree の子は、元の checkout にも作る
         import subprocess
         common = subprocess.run(["git", "rev-parse", "--path-format=absolute", "--git-common-dir"], capture_output=True, text=True).stdout.strip()
@@ -1341,6 +1344,66 @@ class TestLaunch(unittest.TestCase):
         git("commit", "-q", "-m", "x", cwd=self.cwd / "s")  # サブモジュールが別の commit を指すと、無視する設定があっても数える
         rc, rec = self.run_launch("claude", env_extra={"GIT_CONFIG_GLOBAL": str(ignore)})
         self.assertEqual((rc, rec["head"]), (0, None), rec)
+
+    def test_the_marks_of_the_claude_sandbox_do_not_cost_the_head(self):
+        """同じ作業場所で Claude Code の書く子が Bash を動かす間、sandbox が置く印（直下のドットの名前と .claude/ の下の 1 段の、
+        0 バイト・書き込みビットの無い通常ファイル）は、未 commit の変更に数えない（#81）。形から外れたものは今までどおり head を外す。"""
+        git = self.repo_git()
+        git("init", "-q")
+        git("add", "a.txt")
+        git("commit", "-q", "-m", "a")
+        (self.cwd / "sub").mkdir()
+        (self.cwd / "sub" / "a.txt").write_text("x\n")  # 下の階層を --cwd にした子の報告が証拠に指すファイル
+        git("add", "sub/a.txt")
+        git("commit", "-q", "-m", "sub")
+        head = git("rev-parse", "HEAD").strip()
+
+        def mark(rel, body=b"", mode=0o444):
+            p = self.cwd / rel
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_bytes(body)
+            p.chmod(mode)
+            return p
+
+        def clear():
+            for p in sorted(self.cwd.iterdir()):
+                if p.name not in (".git", "a.txt", "sub"):
+                    subprocess.run(["rm", "-rf", str(p)], check=True)
+
+        for rel in (".bashrc", ".gitconfig", ".idea", ".claude/settings.json", ".claude/agents"):  # 起動の前から在る
+            mark(rel)
+        for cwd in (self.cwd, self.cwd / "sub"):  # 下の階層の --cwd でも、status の道筋は作業ツリーの根から解く
+            with self.subTest(before=True, cwd=cwd):
+                rc, rec = self.run_launch("claude", cwd=cwd)
+                self.assertEqual((rc, rec["status"], rec["head"]), (0, "ok", head), rec)
+        clear()
+        rc, rec = self.run_launch("claude", mode="sandbox-marks")  # 子の実行の間に出て、終わりに残っている
+        self.assertEqual(((self.cwd / ".zshrc").is_file(), (self.cwd / ".claude" / "hooks").is_file()), (True, True))
+        self.assertEqual((rc, rec["status"], rec["head"]), (0, "ok", head), rec)
+        clear()
+        outside = Path(self.tmp.name) / "mark-like"
+        outside.write_bytes(b"")
+        outside.chmod(0o444)
+        regressions = {"R1 0 バイト・644 のドットファイル": lambda: mark(".x", mode=0o644),
+                       "R2 中身のある 444 のドットファイル": lambda: mark(".x", b"x"),
+                       "R3 0 バイト 444 のドットで始まらない名前": lambda: mark("plain"),
+                       "R4 ドットの名前の symlink": lambda: os.symlink(outside, self.cwd / ".x"),
+                       "R5 .claude/ の下の中身のあるファイル": lambda: mark(".claude/x", b"x"),
+                       "R6 .claude/ の 2 段下": lambda: mark(".claude/a/b"),
+                       "R7 .claude でないドットのディレクトリの下": lambda: mark(".hidden/x"),
+                       "R9 印と普通の追跡外のファイル": lambda: (mark(".bashrc"), (self.cwd / "new.txt").write_text("x\n"))}
+        for name, make in regressions.items():
+            with self.subTest(name):
+                make()
+                rc, rec = self.run_launch("claude")
+                self.assertEqual((rc, rec["head"]), (0, None), rec)
+                clear()
+        with self.subTest("R10 印が在り、子の実行の間に HEAD が動いた"):
+            mark(".bashrc")
+            mark(".claude/settings.json")
+            rc, rec = self.run_launch("claude", mode="own-commit")
+            self.assertEqual((rc, rec["head"]), (0, None), rec)
+            self.assertIn("変わった", rec["head_lost"])
 
     def test_reports_with_unicode_line_separators_are_read(self):
         text = GOOD.encode().decode("unicode_escape").replace('"conclusion": "', '"conclusion": "\u2028\x85\u2029')
