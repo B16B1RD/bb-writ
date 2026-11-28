@@ -3460,7 +3460,9 @@ class TestLaunch(unittest.TestCase):
         self.assertIn("\n## 返す前の判定（遵守の監査）\n", verify)  # 約束が名指しする節と、節が挙げる項目
         self.assertIn("\n- 文の照合（手順の文書を変えたとき）:", verify)
         section = verify.split("\n## 返す前の判定（遵守の監査）\n", 1)[1].split("\n## ", 1)[0]
-        self.assertIn("\n- 危険度の宣言", section)  # 約束の括弧に足した項目が、節の箇条書きにある
+        # 約束の括弧に足した項目が、節の箇条書きにある。項目の中身（何のときに deliver を no にするか）と、
+        # 約束の括弧の前半の項目（遵守、残る範囲の閉じ方）が節にあるかは見ない
+        self.assertIn("\n- 危険度の宣言", section)
         prompt = lambda: next(x for x in json.loads(self.args_file.read_text()) if "報告の形（bb-writ の委任の約束）" in x)
         for host in ("claude", "codex"):
             with self.subTest(host=host):

@@ -1415,9 +1415,8 @@ def op_step(a, r: Path, live, now: float, action: str):
             reviews = found
         risk = re.fullmatch(r"(低|中|高):(.*)", a.risk or "", re.S)
         if not risk or not risk.group(2).strip():
-            return ({"ok": False, "reason": "push・pr には --risk 低|中|高:<理由> が要る。危険度は書いた人でなく変更の中身で決める（interrogate の 5）。"
-                        "人が読む文書の文言だけ・テストだけ・小さな追加・既存の形に沿ったコードは低、判定の作り・処理の順序・設計が争点の変更と、"
-                        "指示ファイル・スキルと検査の対象を決める設定の変更（コードを変えなくても）は中、認証・課金・外部操作・データの削除・皆が使う土台は高"}, 2)
+            return ({"ok": False, "reason": "push・pr には --risk 低|中|高:<理由> が要る。危険度は書いた人でなく変更の中身で決める（分け方は interrogate の 5。"
+                        "指示ファイル・スキルと検査の対象を決める設定の変更は、コードを変えていなくても低の理由にならない）"}, 2)
         if risk.group(1) != "低" and reviewed.startswith("none:"):
             return ({"ok": False, "reason": f"危険度が{risk.group(1)}の変更は interrogate を通す（入口の条件 (6)）。--reviewed に、審査を通した commit を書く"}, 2)
         if risk.group(1) != "低" and not judges:
