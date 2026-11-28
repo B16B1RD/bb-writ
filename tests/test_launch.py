@@ -4149,6 +4149,15 @@ class TestLaunch(unittest.TestCase):
                 self.assertIsNone(self.seen_lease()["holder"], f"読み取り専用の子 {extra} の実行中に担当が在る")
                 self.assertNotIn("lease", rec)
 
+    def test_the_launcher_holds_the_lease_of_a_target_outside_git(self):
+        """Git でない対象では、担当は --cwd の道筋で取って返す（作業ツリーの根が無いので）。"""
+        self.assertFalse((self.cwd / ".git").exists())  # 場面の前提: Git でない対象
+        rc, rec = self.run_launch("claude", extra=["--write"], env_extra=self.lease_env())
+        self.assertEqual((rc, rec["status"]), (0, "ok"), rec)
+        self.assert_launcher_held(self.seen_lease(), "Git でない対象の書く子の実行中、その --cwd で")
+        self.assertEqual(rec["lease"]["dir"], str(self.cwd.resolve()), rec)
+        self.assert_no_lease(self.cwd, "Git でない対象の書く子が返った後")
+
     def test_the_lease_lasts_the_timeout_plus_the_grace_and_the_margin(self):
         """担当の期限は、--timeout に片付けの猶予（STOP_GRACE）と LEASE_MARGIN を足して分に切り上げた長さ。"""
         _, wt = self.worktree("lease-length")
@@ -4159,6 +4168,7 @@ class TestLaunch(unittest.TestCase):
                 self.assertEqual((rc, rec["status"]), (0, "ok"), rec)
                 want = math.ceil((timeout + launch.STOP_GRACE + launch.LEASE_MARGIN) / 60) * 60
                 left = self.seen_lease()["expires_in_s"]
+                self.assertIsNotNone(left, "書く子の実行中に担当が無く、残り時間（expires_in_s）が無い")
                 self.assertTrue(want - 10 <= left <= want, f"子が見た担当の残り {left} 秒が、期待の {want} 秒に合わない")
 
     def test_a_writer_does_not_start_while_someone_else_holds_the_lease(self):

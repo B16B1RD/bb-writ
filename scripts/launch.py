@@ -1430,7 +1430,8 @@ def take_lease(place: Path, holder: str, seconds: float) -> str:
     LEASE_MARGIN を足した分で、work.py の上限（MAX_LEASE_MIN）で切る。期限の切れた担当は、work.py の claim の約束どおり取り直す。
     守らない範囲: launcher が KILL されたとき、受け手を置いていないシグナル（QUIT など）で止まったとき、work.py の claim・release が
     LEASE_TIMEOUT で打ち切られたときは、担当が期限まで残る（切れれば誰でも取り直せる）。期限が上限で切られた長い起動では、実行中に
-    期限が切れ、ほかの者が取り直せる（取り直されたら、終わりの release が拒否され、failed）。"""
+    期限が切れ、ほかの者が取り直せる（取り直されたら、終わりの release が拒否され、failed）。Git の外の対象では、担当は --cwd の
+    道筋ごとなので、親が上の階層で持つ担当は見ない。"""
     minutes = min(max(math.ceil((seconds + STOP_GRACE + LEASE_MARGIN) / 60), 1), MAX_LEASE_MIN)
     code, res, tail = lease_call("claim", "--dir", str(place), "--holder", holder, "--lease", str(minutes))
     if code == 0 and res.get("ok") is True and isinstance(res.get("token"), str) and res["token"]:
